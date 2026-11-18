@@ -13,6 +13,7 @@ use windows::Win32::{
     UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId},
 };
 
+use crate::gpu::FrameTimings;
 use crate::Res;
 
 /// An interval longer than this counts as a gap.
@@ -143,18 +144,29 @@ pub struct Log {
     changes: usize,
     last_change: Option<ForegroundInfo>,
     totals: Totals,
+    /// Names of the GPU timing segments, one `gpu_<name>_ms` column each (after `gpu_frame_ms`).
+    gpu_names: Vec<&'static str>,
+}
+
+/// The columns before the GPU timings; their order never changes (readers index them by position).
+const BASE_HEADER: &str = "t_s,capture_fps,cap_min_ms,cap_max_ms,cap_p99_ms,cap_gaps_50ms,render_fps,render_min_ms,\
+                           render_max_ms,render_p99_ms,render_gaps_50ms,fg_changes,fg_pid,fg_title,fg_is_source";
+
+/// The CSV header: the fixed columns, then `gpu_frame_ms` and one `gpu_<segment>_ms` per GPU timing
+/// segment (T-21), appended so that the earlier columns keep their position.
+pub fn csv_header(gpu_names: &[&str]) -> String {
+    format!("{BASE_HEADER}{}", crate::gpu::csv_columns(gpu_names))
 }
 
 impl Log {
-    pub fn create(path: &str, source: HWND) -> Res<Self> {
+    /// `gpu_names` are the GPU timing segments ([`crate::gpu::Renderer::timing_names`]), the columns
+    /// appended to the fixed ones.
+    pub fn create(path: &str, source: HWND, gpu_names: Vec<&'static str>) -> Res<Self> {
         let mut out = BufWriter::new(File::create(path).map_err(|e| format!("cannot create log {path}: {e}"))?);
-        writeln!(
-            out,
-            "t_s,capture_fps,cap_min_ms,cap_max_ms,cap_p99_ms,cap_gaps_50ms,render_fps,render_min_ms,render_max_ms,\
-             render_p99_ms,render_gaps_50ms,fg_changes,fg_pid,fg_title,fg_is_source"
-        )?;
+        writeln!(out, "{}", csv_header(&gpu_names))?;
         let now = Instant::now();
         Ok(Self {
+            gpu_names,
             out,
             start: now,
             fg: Foreground::new(source),
@@ -197,8 +209,9 @@ impl Log {
         }
     }
 
-    /// Call once per second with the capture frames and render count of that second and its length.
-    pub fn second(&mut self, captured_frames: u64, renders: u32, secs: f64) -> Res<()> {
+    /// Call once per second with the capture frames and render count of that second and its length, and
+    /// the mean GPU timings of that second (empty columns when there are none).
+    pub fn second(&mut self, captured_frames: u64, renders: u32, secs: f64, gpu: Option<&FrameTimings>) -> Res<()> {
         let c = self.capture.stats();
         let r = self.render.stats();
         let cap_fps = captured_frames as f64 / secs;
@@ -212,7 +225,7 @@ impl Log {
         let is_source = self.fg.is_source();
         writeln!(
             self.out,
-            "{:.1},{:.1},{:.2},{:.2},{:.2},{},{:.1},{:.2},{:.2},{:.2},{},{},{},{},{}",
+            "{:.1},{:.1},{:.2},{:.2},{:.2},{},{:.1},{:.2},{:.2},{:.2},{},{},{},{},{}{}",
             self.start.elapsed().as_secs_f64(),
             cap_fps,
             c.min_ms,
@@ -227,7 +240,8 @@ impl Log {
             self.changes,
             pid,
             title,
-            u8::from(is_source)
+            u8::from(is_source),
+            FrameTimings::csv_values(gpu, &self.gpu_names)
         )?;
         self.out.flush()?;
         let t = &mut self.totals;
@@ -316,6 +330,48 @@ mod tests {
         assert_eq!(i.stats().gaps, 1);
         i.clear();
         assert_eq!(i.stats(), IntervalStats::default());
+    }
+
+    #[test]
+    fn header_keeps_the_fixed_columns_first_and_appends_the_gpu_ones() {
+        let fixed: Vec<&str> = BASE_HEADER.split(',').collect();
+        assert_eq!(fixed.len(), 15);
+        assert_eq!(&fixed[..3], ["t_s", "capture_fps", "cap_min_ms"]);
+        assert_eq!(&fixed[11..], ["fg_changes", "fg_pid", "fg_title", "fg_is_source"]);
+        let h = csv_header(&["upload", "decode", "encode"]);
+        let cols: Vec<&str> = h.split(',').collect();
+        assert_eq!(&cols[..15], &fixed[..]);
+        assert_eq!(
+            &cols[15..],
+            ["gpu_frame_ms", "gpu_upload_ms", "gpu_decode_ms", "gpu_encode_ms"]
+        );
+        // With no timing segments only the frame column is added.
+        assert_eq!(csv_header(&[]), format!("{BASE_HEADER},gpu_frame_ms"));
+    }
+
+    #[test]
+    fn a_row_has_one_value_per_header_column() {
+        // The fixed part of a row holds 15 fields (the title is quoted, here empty).
+        let names = ["upload", "decode", "encode"];
+        let t = FrameTimings {
+            frames: 60,
+            frame_ms: 0.5,
+            stages: names
+                .iter()
+                .map(|&name| crate::gpu::StageTiming {
+                    name,
+                    ms: (name != "upload").then_some(0.25),
+                    bypassed: false,
+                })
+                .collect(),
+        };
+        let fixed_row = "1.0,60.0,16.60,16.70,16.70,0,60.0,16.60,16.70,16.70,0,0,,,1";
+        for gpu in [Some(&t), None] {
+            let row = format!("{fixed_row}{}", FrameTimings::csv_values(gpu, &names));
+            assert_eq!(row.split(',').count(), csv_header(&names).split(',').count());
+        }
+        let row = format!("{fixed_row}{}", FrameTimings::csv_values(Some(&t), &names));
+        assert!(row.ends_with(",1,0.500,,0.250,0.250"), "{row}");
     }
 
     #[test]

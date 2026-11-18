@@ -9,6 +9,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Added
 - Output transform (`encode` stage): tube primaries and white to sRGB colour matrix (`output_match_srgb`), soft shoulder (`output_knee`), clip counters (`Renderer::clip_counts`), and a final 1 LSB dither (`output_dither`: off, ordered, noise). `crt-model::output` is the f64 oracle; `crt-model` is now a regular dependency of `ultimatecrt`.
+- GPU timestamps per stage (T-21): Vulkan timestamp queries (one pool per frame in flight, read without stalling when the slot is reused, `timestampPeriod` and `timestampValidBits` honoured) around `upload`, `decode`, every chain slot, `encode` and the whole frame. `--stats` prints a per-stage GPU line, the `--log` CSV gets `gpu_frame_ms` and `gpu_<segment>_ms` columns appended after the existing ones, and `Renderer` and `Headless` expose `FrameTimings` (latest frame, per-second mean). A device without timestamp support turns it off with a message.
 - `scripts/poll-foreground.ps1`: polls the foreground window every 100 ms and logs each change to a CSV (title, pid, executable, is-source), with a summary and a `-SelfTest` switch.
 - `--log <file.csv>`: per-second diagnostics (capture and render fps, min/max/p99 intervals, gaps over 50 ms, foreground-window changes, "foreground is the source" flag) and a summary at exit.
 - `pixel-demo`: demo source window with a procedural NES-style scene, a test card and optional PNG display, at any source resolution and integer scale.

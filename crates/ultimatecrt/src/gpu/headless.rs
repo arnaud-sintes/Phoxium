@@ -8,6 +8,7 @@
 //! render loop.
 
 use super::pipeline::{full_copy, FrameConstants, ImgRef, Pipeline, Settings, Target, INJECT_FORMAT};
+use super::timing::FrameTimings;
 use super::*;
 use crate::params::Params;
 
@@ -165,6 +166,7 @@ impl Headless {
         unsafe {
             let out = self.run(&mut s, frames, settings, params, target, format);
             let _ = self.ctx.device.device_wait_idle();
+            self.pipeline.collect_all(&self.ctx);
             s.destroy(&self.ctx.device);
             out
         }
@@ -228,6 +230,7 @@ impl Headless {
         unsafe {
             let out = self.run_stages(&mut s, run, target);
             let _ = self.ctx.device.device_wait_idle();
+            self.pipeline.collect_all(&self.ctx);
             s.destroy(&self.ctx.device);
             out
         }
@@ -437,6 +440,28 @@ impl Headless {
             stages,
             clip,
         })
+    }
+
+    /// GPU timings (T-21) of the last frame rendered, readback copies included in `frame_ms` only. Every
+    /// render call reads the timestamps of its frames after the device idle, so after a call this is
+    /// that call's last frame. `None` before any render or without timestamp support.
+    pub fn last_timings(&self) -> Option<&FrameTimings> {
+        self.pipeline.timings()
+    }
+
+    /// Mean GPU timings of the frames rendered since the previous call, then restarts the average.
+    pub fn take_timing_average(&mut self) -> Option<FrameTimings> {
+        self.pipeline.take_timing_average()
+    }
+
+    /// Why GPU timestamps are off, `None` when they work.
+    pub fn timing_unavailable(&self) -> Option<&str> {
+        self.pipeline.timing_unavailable()
+    }
+
+    /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`.
+    pub fn timing_names(&self) -> Vec<&'static str> {
+        self.pipeline.timing_names()
     }
 
     /// Names of the chain slots, in order (`signal`, `amp`, `gun`, `screen`, `phosphor`, `optics`).

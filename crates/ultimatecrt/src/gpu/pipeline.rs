@@ -31,6 +31,7 @@ use super::barrier;
 use super::context::Context;
 use super::headless::{GpuImage, HostBuffer, ImageF32};
 use super::stages::{self, decode, decode::Decode, encode, encode::Encode, ComputePass, Domain, Registration, Stage};
+use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
 use crate::params::{Params, PARAMS_STD140_SIZE};
 use crate::scaling::View;
 use crate::Res;
@@ -460,6 +461,12 @@ pub struct Pipeline {
     /// The recorded frame copies a staged frame to `src`: [`Pipeline::submit`] then marks `src` valid
     /// and the slot's staging buffer consumed.
     uploads: bool,
+    /// GPU timestamps per stage (T-21, `gpu/timing.rs`).
+    timer: GpuTimer,
+    /// Timings of the latest frame whose results were read.
+    timings: Option<FrameTimings>,
+    /// Mean of the timings read since [`Pipeline::take_timing_average`].
+    average: TimingAverager,
 }
 
 /// What [`Pipeline::plan_frame`] decided for a frame.
@@ -540,6 +547,9 @@ impl Pipeline {
             saved: Vec::with_capacity(chain.len() + 3),
             recorded: false,
             uploads: false,
+            timer: GpuTimer::new(chain.iter().map(|r| r.name)),
+            timings: None,
+            average: TimingAverager::default(),
         };
         match p.create(ctx) {
             Ok(()) => Ok(p),
@@ -554,6 +564,7 @@ impl Pipeline {
     /// As [`Pipeline::new`]; `self` holds no Vulkan object yet.
     unsafe fn create(&mut self, ctx: &Context) -> Res<()> {
         let d = &ctx.device;
+        self.timer.create(ctx)?;
         self.decode.create(d)?;
         self.encode.create(d)?;
         self.resample.create(d, RESAMPLE_SPV, 0)?;
@@ -757,7 +768,52 @@ impl Pipeline {
     pub(super) unsafe fn wait_slot(&mut self, ctx: &Context) -> Res<()> {
         let fence = self.slots[self.current].fence;
         ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        // The slot's previous frame finished: read its timestamps (no extra wait).
+        self.collect(ctx, self.current);
         Ok(())
+    }
+
+    /// Reads the timestamps of the last submission of frame slot `slot` into the latest timings and the
+    /// running average.
+    ///
+    /// # Safety
+    /// That submission has completed (fence waited or device idle).
+    unsafe fn collect(&mut self, ctx: &Context, slot: usize) {
+        if let Some(t) = self.timer.harvest(&ctx.device, slot) {
+            self.average.push(&t);
+            self.timings = Some(t);
+        }
+    }
+
+    /// Reads the timestamps of every submitted frame not read yet, oldest first.
+    ///
+    /// # Safety
+    /// The device is idle.
+    pub(super) unsafe fn collect_all(&mut self, ctx: &Context) {
+        for k in 0..FRAMES_IN_FLIGHT {
+            self.collect(ctx, (self.current + k) % FRAMES_IN_FLIGHT);
+        }
+    }
+
+    /// GPU timings of the latest frame whose results were read (the frame N-k at most
+    /// [`FRAMES_IN_FLIGHT`] frames behind the CPU). `None` before any, or without timestamp support.
+    pub(super) fn timings(&self) -> Option<&FrameTimings> {
+        self.timings.as_ref()
+    }
+
+    /// Mean GPU timings of the frames read since the last call, then restarts the average.
+    pub(super) fn take_timing_average(&mut self) -> Option<FrameTimings> {
+        self.average.take()
+    }
+
+    /// Why GPU timestamps are off (device or queue without support), `None` when they work.
+    pub(super) fn timing_unavailable(&self) -> Option<&str> {
+        self.timer.unavailable()
+    }
+
+    /// Segment names of the timings in order: `upload`, `decode`, the chain slots, `encode`.
+    pub(super) fn timing_names(&self) -> Vec<&'static str> {
+        self.timer.names().to_vec()
     }
 
     /// Copies a captured BGRA8 frame of `width` x `height` into the current slot's staging buffer; the
@@ -1179,6 +1235,7 @@ impl Pipeline {
             cb,
             &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         )?;
+        self.timer.begin(d, cb, cur);
 
         // From here nothing fails, but the frame only counts once submitted: save the access state of
         // every image so that an unsubmitted frame can be rolled back ([`Pipeline::abandon`]).
@@ -1222,6 +1279,9 @@ impl Pipeline {
                 &[full_copy(self.inject.size)],
             );
         }
+        if staged || inject_at.is_some() {
+            self.timer.mark(d, cb, cur, timing::UPLOAD, false);
+        }
 
         if have_source {
             if inject_at.is_none() {
@@ -1236,6 +1296,7 @@ impl Pipeline {
                 self.native.use_for_storage_write(d, cb);
                 self.decode
                     .record(d, cb, self.slots[cur].decode_set, view, settings.source);
+                self.timer.mark(d, cb, cur, timing::DECODE, false);
             }
             for k in 0..self.plan.len() {
                 let (i, mode, inp) = self.plan[k];
@@ -1251,6 +1312,7 @@ impl Pipeline {
                 } else {
                     self.resample.dispatch(d, cb, ls.bypass, &[], size);
                 }
+                self.timer.mark(d, cb, cur, timing::chain(i), mode == Mode::Resample);
             }
             self.img(input).use_for_shader_read(d, cb);
         }
@@ -1280,6 +1342,7 @@ impl Pipeline {
             params,
             target.format,
         );
+        self.timer.mark(d, cb, cur, self.timer.encode(), false);
         Ok(cb)
     }
 
@@ -1329,6 +1392,9 @@ impl Pipeline {
         let d = &ctx.device;
         let cur = self.current;
         let (cmd, fence) = (self.slots[cur].cmd, self.slots[cur].fence);
+        if self.recorded {
+            self.timer.finish(d, cmd, cur);
+        }
         if let Err(e) = d.end_command_buffer(cmd) {
             self.abandon();
             return Err(e.into());
@@ -1365,6 +1431,7 @@ impl Pipeline {
             self.src_valid = true;
         }
         self.recorded = false;
+        self.timer.submitted(cur);
         self.current = (self.current + 1) % FRAMES_IN_FLIGHT;
         self.frame_index = self.frame_index.wrapping_add(1);
         Ok(fence)
@@ -1421,6 +1488,7 @@ impl Pipeline {
         d.destroy_descriptor_pool(self.desc_pool, None);
         d.destroy_command_pool(self.pool, None);
         d.destroy_sampler(self.sampler, None);
+        self.timer.destroy(d);
         self.resample.destroy(d);
         self.encode.destroy(d);
         self.decode.destroy(d);
