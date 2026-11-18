@@ -448,6 +448,136 @@ fn fit_trail(r: &[f64]) -> ([f64; 4], [f64; 4]) {
     (kappa.map(|k| (-1.0 / k).exp()), c)
 }
 
+// ---------------------------------------------------------------------------------------------------
+// Saturation (T-40)
+// ---------------------------------------------------------------------------------------------------
+
+/// Default saturation strengths s of red, green and blue (per unit of white light), used when the
+/// saturation is switched on: sulfides (blue ZnS:Ag, green ZnS:Cu,Al) saturate more than the oxysulfide
+/// red (CRT.md "Saturation and ageing"). The values are estimates sized for "a few percent" of warm shift
+/// of a white highlight (white 1 gives 0.990, 0.971, 0.943, blue / red 0.953). [E]
+pub const SATURATION_DEFAULT: [f64; 3] = [0.01, 0.03, 0.06];
+
+/// Light output of a phosphor of saturation strength `s` for the light `light` it would emit without
+/// saturation (linear light, 1 = the reference white drive of that channel):
+///
+/// L = f(I) = I / (1 + s I)
+///
+/// the efficiency droop at high current density written as a single-parameter rational curve (an [E]
+/// choice: CRT.md gives the effect qualitatively, no measured curve). Properties: f(0) = 0, f'(0) = 1
+/// (the small-signal gain is 1, so dark and mid tones are unchanged to first order), f' = 1 / (1 + s I)^2
+/// is positive (strictly monotonic), f is below 1 / s and tends to 1 / s for large I (a finite maximum
+/// light). The relative loss is 1 - f / I = s I / (1 + s I): 1 % at s I = 0.0101. s = 0 is the exact identity. [D]
+///
+/// The model applies it per phosphor element to the light of the instantaneous beam current; the
+/// renderer applies it to the area-averaged light per tube pixel (see `shaders/phosphor.comp`).
+///
+/// # Panics
+/// If `s` is negative or not finite, or `light` is negative or not finite.
+pub fn saturate(light: f64, s: f64) -> f64 {
+    assert!(s.is_finite() && s >= 0.0, "saturation strength {s}");
+    assert!(light.is_finite() && light >= 0.0, "light {light}");
+    light / (1.0 + s * light)
+}
+
+/// Derivative f'(I) = 1 / (1 + s I)^2 of [`saturate`]. [D]
+///
+/// # Panics
+/// As [`saturate`].
+pub fn saturate_gain(light: f64, s: f64) -> f64 {
+    assert!(s.is_finite() && s >= 0.0, "saturation strength {s}");
+    assert!(light.is_finite() && light >= 0.0, "light {light}");
+    1.0 / ((1.0 + s * light) * (1.0 + s * light))
+}
+
+/// Saturation of the three channels of a light triple. [D]
+///
+/// # Panics
+/// As [`saturate`].
+pub fn saturate_rgb(light: [f64; 3], s: [f64; 3]) -> [f64; 3] {
+    std::array::from_fn(|c| saturate(light[c], s[c]))
+}
+
+#[cfg(test)]
+mod saturation_tests {
+    use super::*;
+    use crate::close;
+
+    /// Values derived by hand. s = 0.25: f(1) = 1 / 1.25 = 0.8, f(2) = 2 / 1.5 = 4/3, f(4) = 4 / 2 = 2,
+    /// f(0.5) = 0.5 / 1.125 = 4/9. s = 0.5: f(1) = 2/3, f(2) = 1, f(4) = 4/3, f(0.5) = 0.5 / 1.25 = 0.4.
+    /// s = 1: f(1) = 1/2, f(2) = 2/3, f(4) = 4/5, f(0.5) = 0.5 / 1.5 = 1/3.
+    #[test]
+    fn hand_derived_values() {
+        let table = [
+            // (s, [(I, f)])
+            (0.25, [(0.5, 4.0 / 9.0), (1.0, 0.8), (2.0, 4.0 / 3.0), (4.0, 2.0)]),
+            (0.5, [(0.5, 0.4), (1.0, 2.0 / 3.0), (2.0, 1.0), (4.0, 4.0 / 3.0)]),
+            (1.0, [(0.5, 1.0 / 3.0), (1.0, 0.5), (2.0, 2.0 / 3.0), (4.0, 0.8)]),
+        ];
+        for (s, rows) in table {
+            for (i, f) in rows {
+                assert!(close(saturate(i, s), f, 1e-15), "s {s} I {i}");
+            }
+        }
+        // The default white: 1 / 1.01, 1 / 1.03, 1 / 1.06.
+        let w = saturate_rgb([1.0; 3], SATURATION_DEFAULT);
+        assert!(close(w[0], 0.990_099_009_9, 1e-9));
+        assert!(close(w[1], 0.970_873_786_4, 1e-9));
+        assert!(close(w[2], 0.943_396_226_4, 1e-9));
+        // Blue relative to red: 1.01 / 1.06 = 0.952830..., a 4.717 % warm shift.
+        assert!(close(w[2] / w[0], 1.01 / 1.06, 1e-12));
+    }
+
+    /// f(0) = 0, f'(0) = 1 (analytic and by a central difference of f), s = 0 is the identity, f is
+    /// strictly increasing and bounded by 1 / s.
+    #[test]
+    fn small_signal_gain_monotonic_bounded() {
+        for s in [0.0, 0.01, 0.06, 0.5, 1.0] {
+            assert_eq!(saturate(0.0, s), 0.0);
+            assert_eq!(saturate_gain(0.0, s), 1.0);
+            let h = 1e-6;
+            let numeric = (saturate(h, s) - saturate(0.0, s)) / h;
+            assert!(close(numeric, 1.0, 2.0 * s * h + 1e-9), "s {s}: {numeric}");
+            let mut prev = 0.0;
+            for k in 1..=2000 {
+                let i = f64::from(k) * 0.05;
+                let f = saturate(i, s);
+                assert!(f > prev, "s {s} I {i}");
+                if s > 0.0 {
+                    assert!(f < 1.0 / s, "bounded by 1 / s");
+                }
+                // The analytic gain agrees with a central difference.
+                let d = (saturate(i + 1e-5, s) - saturate(i - 1e-5, s)) / 2e-5;
+                assert!(close(d, saturate_gain(i, s), 1e-8), "s {s} I {i}");
+                prev = f;
+            }
+            assert_eq!(saturate(3.7, 0.0), 3.7);
+        }
+    }
+
+    /// Blue loses more than green, green more than red, at the same light above zero.
+    #[test]
+    fn default_strengths_order_the_channels() {
+        let [r, g, b] = SATURATION_DEFAULT;
+        assert!(r < g && g < b);
+        for i in [0.5, 1.0, 2.0, 10.0] {
+            assert!(saturate(i, b) < saturate(i, g) && saturate(i, g) < saturate(i, r));
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "saturation strength")]
+    fn negative_strength_panics() {
+        let _ = saturate(1.0, -0.1);
+    }
+
+    #[test]
+    #[should_panic(expected = "light")]
+    fn negative_light_panics() {
+        let _ = saturate(-1.0, 0.1);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

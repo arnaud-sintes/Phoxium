@@ -25,7 +25,20 @@
 //! transition after an allocation, otherwise a compute-to-compute memory barrier that orders this
 //! frame's read-modify-write after the previous frame's, across frames in flight (one queue).
 //!
-//! `phosphor_persistence` off (the default): the pass is the exact copy of `resample.comp` (same size,
+//! Saturation (T-40, `phosphor_saturation`, `phosphor_saturation_rgb`; CRT.md "Saturation and ageing"):
+//! L = I / (1 + s I) per channel on the light of each tube pixel, BEFORE the persistence history. The
+//! efficiency droop depends on the instantaneous beam current, so the frame's light is compressed first;
+//! the history then holds light that was already emitted, which decays without saturating again. With the
+//! recurrence of gain 1 the steady state of a static picture is exactly f(x), and a single excitation
+//! keeps the persistence ratios E_k / E_0 whatever its level. The saturation sits in this slot (after
+//! `screen`, not inside it) because the persistence stage is the only one that is not memoryless, and the
+//! order within it matters. Approximation, stated: with the area-averaged mask the light of a tube pixel
+//! is the mean over several phosphor elements that are individually brighter (by 1 / fill factor), so
+//! s is a per-pixel effective strength, not the strength of one element. Saturation on, persistence
+//! off: `shaders/saturation.comp`; both on: `shaders/phosphor.comp` (same function, one pass); a change of
+//! `phosphor_saturation` restarts the persistence history. Both off (the defaults): the copy pass below.
+//!
+//! `phosphor_persistence` and `phosphor_saturation` off (the defaults): the pass is the exact copy of `resample.comp` (same size,
 //! FP16 texels copied without arithmetic), so the chain stays bit exact; the slot's enable flag off
 //! skips it as before.
 
@@ -41,6 +54,8 @@ use crate::Res;
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/phosphor.comp.spv"));
 /// The exact copy used while persistence is off (`shaders/resample.comp`, same-size input and output).
 const COPY_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/resample.comp.spv"));
+/// Saturation alone (`shaders/saturation.comp`), used while persistence is off and saturation is on.
+const SATURATION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/saturation.comp.spv"));
 
 /// Format of the history images.
 pub(in crate::gpu) const HISTORY_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
@@ -101,6 +116,8 @@ pub(in crate::gpu) fn weights(rate_hz: f32, tail: [f32; 3]) -> Push {
 struct Phosphor {
     /// The copy pass (persistence off); its set layout is the standard set 0 of both pipelines.
     pass: ComputePass,
+    /// Saturation without persistence (the same standard set layout as `pass`).
+    saturation_pass: ComputePass,
     /// Set 1 of the persistence pipeline: the three history images.
     history_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
@@ -115,8 +132,11 @@ struct Phosphor {
     /// Push constants of the current weights and the inputs they were computed from.
     weights: Push,
     weights_key: Option<(u32, [u32; 3])>,
-    /// Decided by `prepare` for the frame being recorded.
+    /// Decided by `prepare` for the frame being recorded: persistence on, saturation on.
     on: bool,
+    saturate: bool,
+    /// Saturation of the previous frame (a change restarts the history, which holds saturated light).
+    saturate_before: bool,
     push: Push,
     /// The history images are new (layout `UNDEFINED`): the next record transitions them.
     fresh: bool,
@@ -178,6 +198,7 @@ impl Stage for Phosphor {
 
     unsafe fn create(&mut self, d: &ash::Device) -> Res<()> {
         self.pass.create(d, COPY_SPV, 0)?;
+        self.saturation_pass.create(d, SATURATION_SPV, 0)?;
         let s = vk::ShaderStageFlags::COMPUTE;
         let bindings: Vec<_> = (0..HISTORY_IMAGES as u32)
             .map(|b| binding(b, vk::DescriptorType::STORAGE_IMAGE, s))
@@ -217,6 +238,12 @@ impl Stage for Phosphor {
     unsafe fn prepare(&mut self, ctx: &Context, fc: &FrameConstants, params: &Params, runs: bool) -> Res<()> {
         let d = &ctx.device;
         self.on = runs && params.phosphor_persistence;
+        self.saturate = runs && params.phosphor_saturation;
+        if self.saturate != self.saturate_before {
+            // The history holds the light as it was saturated (or not): start it again.
+            self.reset = true;
+            self.saturate_before = self.saturate;
+        }
         self.transition = false;
         if !self.on {
             // The history no longer follows the picture.
@@ -254,7 +281,12 @@ impl Stage for Phosphor {
 
     unsafe fn record(&self, d: &ash::Device, cb: vk::CommandBuffer, set: vk::DescriptorSet, size: (u32, u32)) {
         if !self.on {
-            self.pass.dispatch(d, cb, set, &[], size);
+            let pass = if self.saturate {
+                &self.saturation_pass
+            } else {
+                &self.pass
+            };
+            pass.dispatch(d, cb, set, &[], size);
             return;
         }
         let compute = vk::PipelineStageFlags2::COMPUTE_SHADER;
@@ -301,6 +333,7 @@ impl Stage for Phosphor {
         d.destroy_pipeline(self.pipeline, None);
         d.destroy_pipeline_layout(self.layout, None);
         d.destroy_descriptor_set_layout(self.history_layout, None);
+        self.saturation_pass.destroy(d);
         self.pass.destroy(d);
         *self = Self::default();
     }
