@@ -2,6 +2,8 @@
 //!
 //! Bindings: 0 `Params`, 1 `FrameConstants`, 2 the captured frame (combined image sampler, read with
 //! `texelFetch` at block centres from the [`View`]), 3 the native raster (storage image, written).
+//! The source interpretation (`source_eotf`, T-30) is read from `Params`; the contract of the drive voltage
+//! V in [0, 1] is documented in `shaders/decode.comp`.
 
 use ash::vk;
 

@@ -127,9 +127,9 @@ pub struct FrameConstants {
     pub native_size: [i32; 2],
     /// Output target size.
     pub target_size: [i32; 2],
-    /// Host pixels per tube millimetre; 0 until the tube is placed (T-30).
+    /// Host pixels per tube millimetre; 0 in the unplaced defaults ([`FrameConstants::new`]).
     pub px_per_mm: f32,
-    /// Scanline pitch in tube millimetres; 0 until the tube is placed (T-30).
+    /// Scanline pitch in tube millimetres; 0 in the unplaced defaults ([`FrameConstants::new`]).
     pub line_pitch_mm: f32,
     /// Frames submitted since the pipeline was created.
     pub frame_index: u32,
@@ -823,10 +823,11 @@ impl Pipeline {
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
         let now = Instant::now();
-        let mut fc = FrameConstants::new(
+        let mut fc = FrameConstants::placed(
             view.native,
             (target.extent.width, target.extent.height),
             settings.integer_scale,
+            params,
         );
         fc.frame_index = self.frame_index;
         fc.frame_time_ms = self

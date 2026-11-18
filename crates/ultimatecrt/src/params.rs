@@ -128,6 +128,19 @@ mod tests {
     }
 
     #[test]
+    fn source_and_tube_entries_have_the_t30_defaults() {
+        let p = Params::default();
+        assert_eq!(p.source_eotf, SOURCE_EOTF_DRIVE_VOLTAGE);
+        assert_eq!(meta("source_eotf").unwrap().values, ["drive_voltage", "srgb"]);
+        assert_eq!(p.raster_aspect, RASTER_ASPECT_PAR);
+        assert_eq!((p.source_par, p.line_multiplier), (1.0, 1));
+        assert_eq!((p.tube_visible_height_mm, p.tube_height_fraction), (290.0, 1.0));
+        assert!((p.tube_aspect - 4.0 / 3.0).abs() < 1e-6);
+        assert_eq!(meta("tube_aspect").unwrap().file, "params/tube.toml");
+        assert_eq!(meta("line_multiplier").unwrap().file, "params/source.toml");
+    }
+
+    #[test]
     fn colour_entries_are_contiguous_vec2() {
         // Four vec2 (size 8, alignment 8) in a row pack without padding, wherever colour.toml lands.
         let base = meta("tube_red_xy").unwrap().offset;

@@ -20,6 +20,7 @@ pub mod geometry;
 pub mod mask;
 pub mod optics;
 pub mod phosphor;
+pub mod tube;
 pub mod units;
 
 /// Absolute-tolerance comparison used by the tests.
