@@ -22,7 +22,9 @@ Usage: ultimatecrt [options]
   --integer            integer scale only (letterboxed)
   --validation         enable the Vulkan validation layer (needs the Vulkan SDK)
   --stats              print capture and render rates every second
-  --save-capture <png> save the first captured frame and exit
+  --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
+                       gaps over 50 ms, foreground window changes) and a summary at exit
+  --save-capture <png>save the first captured frame and exit
   --exit-after <secs>  quit after some seconds (for automated tests)
   --version            print the version and exit
   --help               print this text
@@ -47,6 +49,7 @@ pub struct Args {
     pub stats: bool,
     pub save_capture: Option<String>,
     pub exit_after: Option<f64>,
+    pub log: Option<String>,
 }
 
 fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Res<T> {
@@ -75,6 +78,7 @@ pub fn parse_args() -> Res<Args> {
             "--stats" => a.stats = true,
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
             "--exit-after" => a.exit_after = Some(number("--exit-after", &value("--exit-after")?)?),
+            "--log" => a.log = Some(value("--log")?),
             "--version" => {
                 println!("ultimatecrt {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);

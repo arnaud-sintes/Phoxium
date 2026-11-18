@@ -8,6 +8,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 ## [Unreleased]
 
 ### Added
+- `--log <file.csv>`: per-second diagnostics (capture and render fps, min/max/p99 intervals, gaps over 50 ms, foreground-window changes, "foreground is the source" flag) and a summary at exit.
 - `pixel-demo`: demo source window with a procedural NES-style scene, a test card and optional PNG display, at any source resolution and integer scale.
 - `ultimatecrt`: window capture (Windows.Graphics.Capture, client area only, CPU copy) and Vulkan 1.3 output through a passthrough GLSL pass, in a windowed or fullscreen non-activating window. Ctrl+Alt+Q always quits.
 - Source integer scaling: `--crop`, `--divisor` and automatic detection (x1 detected as native). Flat frames (a black boot screen) are not counted by the detector.

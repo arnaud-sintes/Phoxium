@@ -7,7 +7,7 @@ use windows::Win32::{
     UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
 };
 
-use crate::{capture, cli, gpu, output, scaling, sources, Res};
+use crate::{capture, cli, diag, gpu, output, scaling, sources, Res};
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
@@ -111,6 +111,11 @@ pub fn run() -> Res<()> {
         }
     );
 
+    let mut log = args
+        .log
+        .as_deref()
+        .map(|p| diag::Log::create(p, source.hwnd))
+        .transpose()?;
     let start = Instant::now();
     let mut stat_time = Instant::now();
     let (mut renders, mut last_captured) = (0u32, 0u64);
@@ -167,10 +172,16 @@ pub fn run() -> Res<()> {
         renderer.render(upload, view, output::client_size(win.hwnd))?;
         fresh = false;
         renders += 1;
+        if let Some(l) = log.as_mut() {
+            l.tick(capture.frames_captured());
+        }
 
         if stat_time.elapsed() >= Duration::from_secs(1) {
             let captured = capture.frames_captured();
             let secs = stat_time.elapsed().as_secs_f64();
+            if let Some(l) = log.as_mut() {
+                l.second(captured - last_captured, renders, secs)?;
+            }
             output::set_title(
                 win.hwnd,
                 &format!(
@@ -201,6 +212,9 @@ pub fn run() -> Res<()> {
             renders = 0;
             last_captured = captured;
         }
+    }
+    if let Some(l) = log.as_mut() {
+        l.summary();
     }
     drop(renderer);
     drop(capture);
