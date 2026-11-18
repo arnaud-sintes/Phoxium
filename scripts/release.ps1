@@ -54,10 +54,10 @@ $upstream = (Invoke-Native 'git rev-parse' { git rev-parse '@{u}' }).Trim()
 if ($head -ne $upstream) { throw 'HEAD is not pushed (or differs from its upstream): push first.' }
 
 foreach ($f in $zip, $sha, $commitFile) {
-    if (-not (Test-Path $f)) { throw "Missing $f: run scripts/package.ps1 on the committed tree." }
+    if (-not (Test-Path $f)) { throw "Missing ${f}: run scripts/package.ps1 on the committed tree." }
 }
 $built = (Get-Content $commitFile -Raw).Trim()
-if ($built -ne $head) { throw "The zip was built from $built, HEAD is $head: run scripts/package.ps1 again." }
+if ($built -ne $head) { throw "The zip was built from $built, HEAD is ${head}: run scripts/package.ps1 again." }
 $expected = ((Get-Content $sha -Raw).Trim() -split '\s+')[0]
 if ((Get-FileHash $zip -Algorithm SHA256).Hash.ToLower() -ne $expected) { throw "$zip does not match its checksum file." }
 
