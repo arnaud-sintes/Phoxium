@@ -1,0 +1,14 @@
+﻿# Rust
+/target/
+**/*.rs.bk
+
+# Editors and OS
+.vs/
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+
+# Generated captures and local state
+/captures/
+/tube-state/

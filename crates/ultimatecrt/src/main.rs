@@ -1,0 +1,272 @@
+//! ultimatecrt: captures a window, runs it through a (for now passthrough) pipeline and presents
+//! it in a separate output window.
+//!
+//! Usage: ultimatecrt [options]
+//!   --window <text>      capture the first window whose title contains <text> (default "pixel-demo")
+//!   --list-windows       list capturable windows and exit
+//!   --list-gpus          list Vulkan devices and exit
+//!   --gpu <index>        Vulkan device to use (default: NVIDIA discrete, else any discrete)
+//!   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
+//!   --monitor <index>    monitor to cover with --fullscreen (default: the source window's monitor)
+//!   --no-activate        windowed output that never takes focus
+//!   --no-crop            capture the whole window instead of its client area
+//!   --crop <x,y,w,h>     part of the captured client area that is the source (default: all of it)
+//!   --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
+//!                        1 means native. Default: detected automatically from the first frames
+//!   --integer            integer scale only (letterboxed)
+//!   --validation         enable the Vulkan validation layer
+//!   --stats              print capture and render rates every second
+//!   --save-capture <png> save the first captured frame and exit
+//!   --exit-after <secs>  quit after some seconds (for automated tests)
+//! Ctrl+Alt+Q always quits (fullscreen output cannot take keyboard focus).
+
+mod capture;
+mod gpu;
+mod output;
+mod scaling;
+mod sources;
+
+use std::{env, error::Error, time::{Duration, Instant}};
+
+use windows::Win32::{
+    System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED},
+    UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
+};
+
+type Res<T> = Result<T, Box<dyn Error>>;
+
+#[derive(Default)]
+struct Args {
+    window: Option<String>,
+    list_windows: bool,
+    list_gpus: bool,
+    gpu: Option<usize>,
+    fullscreen: bool,
+    monitor: Option<usize>,
+    no_activate: bool,
+    no_crop: bool,
+    crop: Option<scaling::Rect>,
+    divisor: Option<(u32, u32)>,
+    integer: bool,
+    validation: bool,
+    stats: bool,
+    save_capture: Option<String>,
+    exit_after: Option<f64>,
+}
+
+fn parse_args() -> Res<Args> {
+    let mut a = Args::default();
+    let mut it = env::args().skip(1);
+    while let Some(arg) = it.next() {
+        let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} expects a value"));
+        match arg.as_str() {
+            "--window" => a.window = Some(value("--window")?),
+            "--list-windows" => a.list_windows = true,
+            "--list-gpus" => a.list_gpus = true,
+            "--gpu" => a.gpu = Some(value("--gpu")?.parse()?),
+            "--fullscreen" => a.fullscreen = true,
+            "--monitor" => a.monitor = Some(value("--monitor")?.parse()?),
+            "--no-activate" => a.no_activate = true,
+            "--no-crop" => a.no_crop = true,
+            "--crop" => a.crop = Some(value("--crop")?.parse()?),
+            "--divisor" => a.divisor = Some(scaling::parse_divisor(&value("--divisor")?)?),
+            "--integer" => a.integer = true,
+            "--validation" => a.validation = true,
+            "--stats" => a.stats = true,
+            "--save-capture" => a.save_capture = Some(value("--save-capture")?),
+            "--exit-after" => a.exit_after = Some(value("--exit-after")?.parse()?),
+            "-h" | "--help" => {
+                println!("see the header of crates/ultimatecrt/src/main.rs for the options");
+                std::process::exit(0);
+            }
+            other => return Err(format!("unknown argument {other}").into()),
+        }
+    }
+    Ok(a)
+}
+
+fn main() {
+    if let Err(e) = run() {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+}
+
+fn run() -> Res<()> {
+    let args = parse_args()?;
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+        RoInitialize(RO_INIT_MULTITHREADED)?;
+    }
+
+    if args.list_gpus {
+        for g in gpu::list_gpus()? {
+            println!(
+                "[{}] {} (vendor 0x{:04X}, {:?}, Vulkan {}.{})",
+                g.index,
+                g.name,
+                g.vendor_id,
+                g.kind,
+                ash::vk::api_version_major(g.api_version),
+                ash::vk::api_version_minor(g.api_version)
+            );
+        }
+        return Ok(());
+    }
+    if args.list_windows {
+        for w in sources::list_windows() {
+            println!("{:>10}  {:>5}x{:<5} {:<28} {}", w.hwnd.0 as usize, w.width, w.height, w.class, w.title);
+        }
+        for (i, r) in output::monitor_rects().iter().enumerate() {
+            println!("monitor {i}: {}x{} at ({}, {})", r.right - r.left, r.bottom - r.top, r.left, r.top);
+        }
+        return Ok(());
+    }
+
+    let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
+    let source = sources::find_by_title(&needle)
+        .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
+    println!("source: \"{}\" ({}x{}, class {})", source.title, source.width, source.height, source.class);
+
+    let capture = capture::Capture::start(source.hwnd, !args.no_crop)?;
+    println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
+
+    let mut frame = capture::Frame::default();
+
+    if let Some(path) = &args.save_capture {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !capture.take_frame(&mut frame) {
+            if Instant::now() > deadline {
+                return Err("no frame captured within 5 seconds".into());
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        save_png(path, &frame)?;
+        println!("saved {}x{} capture to {path}", frame.width, frame.height);
+        return Ok(());
+    }
+
+    // Wait for the first frame to size the window.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !capture.take_frame(&mut frame) {
+        if Instant::now() > deadline {
+            return Err("no frame captured within 5 seconds".into());
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    let scale = (900 / frame.height.max(1)).max(1) as i32;
+    let win = output::create(&output::Options {
+        fullscreen: args.fullscreen,
+        no_activate: args.no_activate,
+        monitor: args.monitor,
+        follow: source.hwnd,
+        client_size: (frame.width as i32 * scale, frame.height as i32 * scale),
+    })?;
+    let mut renderer = gpu::Renderer::new(win.hwnd.0 as isize, win.hinstance, args.gpu, args.validation, args.integer)?;
+    println!("render: Vulkan on {}", renderer.gpu_name);
+    println!("quit: Ctrl+Alt+Q{}", if args.fullscreen { "" } else { " or Esc in the output window" });
+
+    let start = Instant::now();
+    let mut stat_time = Instant::now();
+    let (mut renders, mut last_captured) = (0u32, 0u64);
+    let mut fresh = true; // upload the first frame
+    let mut detector = scaling::Detector::default();
+    let mut detect_key = (0u32, 0u32, None);
+    let mut view = scaling::View::full(frame.width, frame.height);
+    loop {
+        if !output::pump() || capture.is_closed() {
+            break;
+        }
+        if args.exit_after.is_some_and(|s| start.elapsed().as_secs_f64() > s) {
+            break;
+        }
+        if capture.take_frame(&mut frame) {
+            fresh = true;
+            let full = scaling::Rect { x: 0, y: 0, w: frame.width, h: frame.height };
+            let region = args.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
+            let key = (frame.width, frame.height, args.crop);
+            if key != detect_key {
+                detect_key = key;
+                detector.reset();
+            }
+            let div = match args.divisor {
+                Some(d) => d,
+                None => {
+                    let was_locked = detector.is_locked();
+                    detector.feed(&frame.data, frame.width, region);
+                    if detector.is_locked() && !was_locked {
+                        let d = detector.divisor();
+                        if d == (1, 1) {
+                            println!("source scaling: native (x1), {}x{}", region.w, region.h);
+                        } else {
+                            println!(
+                                "source scaling: detected x{}/x{}, native {}x{}",
+                                d.0,
+                                d.1,
+                                region.w / d.0,
+                                region.h / d.1
+                            );
+                        }
+                    }
+                    detector.divisor()
+                }
+            };
+            view = scaling::View::new(region, div);
+        }
+        let upload = fresh.then_some((frame.width, frame.height, frame.data.as_slice()));
+        renderer.render(upload, view, output::client_size(win.hwnd))?;
+        fresh = false;
+        renders += 1;
+
+        if stat_time.elapsed() >= Duration::from_secs(1) {
+            let captured = capture.frames_captured();
+            let secs = stat_time.elapsed().as_secs_f64();
+            output::set_title(
+                win.hwnd,
+                &format!(
+                    "ultimatecrt | capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}",
+                    (captured - last_captured) as f64 / secs,
+                    renders as f64 / secs,
+                    view.native.0,
+                    view.native.1,
+                    view.div.0,
+                    view.div.1,
+                    renderer.gpu_name
+                ),
+            );
+            if args.stats {
+                println!(
+                    "capture {:.0} fps | render {:.0} fps | frame {}x{} | native {}x{} (div {}x{})",
+                    (captured - last_captured) as f64 / secs,
+                    renders as f64 / secs,
+                    frame.width,
+                    frame.height,
+                    view.native.0,
+                    view.native.1,
+                    view.div.0,
+                    view.div.1
+                );
+            }
+            stat_time = Instant::now();
+            renders = 0;
+            last_captured = captured;
+        }
+    }
+    drop(renderer);
+    drop(capture);
+    Ok(())
+}
+
+fn save_png(path: &str, frame: &capture::Frame) -> Res<()> {
+    let file = std::io::BufWriter::new(std::fs::File::create(path)?);
+    let mut enc = png::Encoder::new(file, frame.width, frame.height);
+    enc.set_color(png::ColorType::Rgba);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut writer = enc.write_header()?;
+    let mut rgba = Vec::with_capacity(frame.data.len());
+    for px in frame.data.chunks_exact(4) {
+        rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
+    }
+    writer.write_image_data(&rgba)?;
+    Ok(())
+}
