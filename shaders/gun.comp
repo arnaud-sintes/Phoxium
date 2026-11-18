@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `gun` (ARCHITECTURE 3.7, image contract): amp domain -> amp domain, drive voltage V to beam
+// current I per channel. Placeholder (T-20b): exact copy. T-34 writes the gun law here; until T-30 the
+// tube gamma is still applied by `decode`.
+//
+// Reads the amp output (binding 2) and writes its own image (binding 3), both amp_size(): no in-place
+// update (every chain stage writes a new image).
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D current_out;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(current_out)))) {
+        return;
+    }
+    imageStore(current_out, p, texelFetch(drive_in, p, 0));
+}

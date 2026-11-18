@@ -7,7 +7,7 @@
 //! returns the pixels. It allocates its targets and readback buffers per call, which is fine off the
 //! render loop.
 
-use super::pipeline::{full_copy, Pipeline, Settings, Target};
+use super::pipeline::{full_copy, FrameConstants, ImgRef, Pipeline, Settings, Target, INJECT_FORMAT};
 use super::*;
 use crate::params::Params;
 
@@ -62,8 +62,19 @@ impl ImageF32 {
 pub struct Rendered {
     /// The output target, as written by `encode`.
     pub output: ImageF32,
-    /// The native raster written by `decode` (RGBA16F, converted exactly to `f32`).
+    /// The native raster written by `decode` (RGBA16F, converted exactly to `f32`); empty when `decode`
+    /// did not run (no source, or an injected image).
     pub native: ImageF32,
+    /// Every chain slot that ran or was bypassed in the frame, in order, with the image it left for the
+    /// next one (a bypassed same-domain slot shows its input). Slots before an injected image are absent.
+    pub stages: Vec<(&'static str, ImageF32)>,
+}
+
+impl Rendered {
+    /// The image left by the chain slot `name`, if it was part of the frame.
+    pub fn stage(&self, name: &str) -> Option<&ImageF32> {
+        self.stages.iter().find(|(n, _)| *n == name).map(|(_, i)| i)
+    }
 }
 
 /// Offscreen renderer on a surface-less [`Context`].
@@ -171,13 +182,10 @@ impl Headless {
         format: TargetFormat,
     ) -> Res<Rendered> {
         let ctx = &self.ctx;
-        let d = &ctx.device;
         let extent = vk::Extent2D {
             width: target.0,
             height: target.1,
         };
-        let out_bytes = target.0 as usize * target.1 as usize * format.bytes_per_pixel();
-        s.readback = HostBuffer::create(ctx, out_bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
 
         // Every frame but the last: recorded and submitted without waiting for the GPU.
         let (last, earlier) = frames.split_last().expect("frames is not empty");
@@ -198,6 +206,90 @@ impl Headless {
             self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
         }
         let cb = self.pipeline.record(ctx, *view, settings, params, &t)?;
+        self.read_back(s, cb, &t, format)
+    }
+
+    /// Stage-test helper (T-20b): renders one frame through the chain with the given input, the
+    /// injected `FrameConstants` of `run` (image sizes follow them, see [`FrameConstants::domain_size`])
+    /// and the current enable flags ([`Headless::set_stage_enabled`], [`Headless::enable_only`]), into
+    /// a target of `run.frame.target_size`, and reads back the target and every chain image.
+    pub fn render_stages(&mut self, run: &StageRun<'_>) -> Res<Rendered> {
+        let target = (
+            run.frame.target_size[0].max(0) as u32,
+            run.frame.target_size[1].max(0) as u32,
+        );
+        if target.0 == 0 || target.1 == 0 {
+            return Err("headless render: empty target".into());
+        }
+        let mut s = Scratch::default();
+        // SAFETY: as in `render_burst`: the device is idled before `s` is destroyed.
+        unsafe {
+            let out = self.run_stages(&mut s, run, target);
+            let _ = self.ctx.device.device_wait_idle();
+            s.destroy(&self.ctx.device);
+            out
+        }
+    }
+
+    /// Body of [`Headless::render_stages`].
+    ///
+    /// # Safety
+    /// As [`Headless::run`].
+    unsafe fn run_stages(&mut self, s: &mut Scratch, run: &StageRun<'_>, target: (u32, u32)) -> Res<Rendered> {
+        let ctx = &self.ctx;
+        let extent = vk::Extent2D {
+            width: target.0,
+            height: target.1,
+        };
+        let t = self.next_target(s, extent, run.format)?;
+        self.pipeline.wait_slot(ctx)?;
+        let view = match run.input {
+            StageInput::Source { frame, view } => {
+                self.pipeline.stage_source(ctx, frame.width, frame.height, frame.bgra)?;
+                view
+            }
+            StageInput::Image { after, image } => {
+                let at = if after == "decode" {
+                    0
+                } else {
+                    let names = self.pipeline.stage_names();
+                    names
+                        .iter()
+                        .position(|n| *n == after)
+                        .ok_or_else(|| format!("no stage slot named `{after}`"))?
+                        + 1
+                };
+                self.pipeline.stage_injected(ctx, at, image)?;
+                let n = (
+                    run.frame.native_size[0].max(0) as u32,
+                    run.frame.native_size[1].max(0) as u32,
+                );
+                View::full(n.0, n.1)
+            }
+        };
+        let cb = self
+            .pipeline
+            .record_with(ctx, view, run.frame, run.settings, run.params, &t)?;
+        self.read_back(s, cb, &t, run.format)
+    }
+
+    /// Records the readback of the target and of every image routed in the frame just recorded into
+    /// `cb`, submits, waits and converts them.
+    ///
+    /// # Safety
+    /// `cb` was returned by the pipeline's last `record`, still recording, into `t`; `s` holds `t`.
+    unsafe fn read_back(
+        &mut self,
+        s: &mut Scratch,
+        cb: vk::CommandBuffer,
+        t: &Target,
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        let ctx = &self.ctx;
+        let d = &ctx.device;
+        let target = (t.extent.width, t.extent.height);
+        let out_bytes = target.0 as usize * target.1 as usize * format.bytes_per_pixel();
+        s.readback = HostBuffer::create(ctx, out_bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
         let dst = t.image;
 
         // Read back the target: -> transfer source, copy to a host-visible buffer.
@@ -219,32 +311,29 @@ impl Headless {
             s.readback.buffer,
             &[full_copy(target)],
         );
-        // Read back the native raster too (the next frame's decode discards it after this copy).
-        let native = self.pipeline.native_image();
-        if let Some((image, size)) = native {
-            s.native_readback = HostBuffer::create(
+        // Read back every image the frame routed (decode output and chain images), each once; the
+        // pipeline records the barriers from its tracked state.
+        let routed: Vec<(&'static str, ImgRef)> = self.pipeline.routed().to_vec();
+        let mut images: Vec<(ImgRef, (u32, u32), vk::Format)> = Vec::new();
+        for &(_, r) in &routed {
+            if images.iter().any(|(o, _, _)| *o == r) {
+                continue;
+            }
+            let (image, size, fmt) = self.pipeline.prepare_readback(d, cb, r);
+            let buf = HostBuffer::create(
                 ctx,
-                size.0 as usize * size.1 as usize * 8,
+                size.0 as usize * size.1 as usize * texel_bytes(fmt),
                 vk::BufferUsageFlags::TRANSFER_DST,
             )?;
-            barrier(
-                d,
-                cb,
-                image,
-                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                vk::PipelineStageFlags2::FRAGMENT_SHADER,
-                vk::AccessFlags2::NONE,
-                vk::PipelineStageFlags2::COPY,
-                vk::AccessFlags2::TRANSFER_READ,
-            );
             d.cmd_copy_image_to_buffer(
                 cb,
                 image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
-                s.native_readback.buffer,
+                buf.buffer,
                 &[full_copy(size)],
             );
+            s.image_readbacks.push(buf);
+            images.push((r, size, fmt));
         }
         let to_host = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
@@ -279,23 +368,118 @@ impl Headless {
             height: target.1,
             rgba,
         };
-        let native = match native {
-            Some((_, (w, h))) => ImageF32 {
-                width: w,
-                height: h,
-                rgba: half_to_f32(std::slice::from_raw_parts(
-                    s.native_readback.mapped as *const u8,
-                    w as usize * h as usize * 8,
-                )),
-            },
-            None => ImageF32 {
+        let read: Vec<(ImgRef, ImageF32)> = images
+            .iter()
+            .zip(&s.image_readbacks)
+            .map(|(&(r, (w, h), fmt), buf)| {
+                let bytes =
+                    std::slice::from_raw_parts(buf.mapped as *const u8, w as usize * h as usize * texel_bytes(fmt));
+                let rgba = if fmt == INJECT_FORMAT {
+                    bytes
+                        .as_chunks::<4>()
+                        .0
+                        .iter()
+                        .map(|&b| f32::from_le_bytes(b))
+                        .collect()
+                } else {
+                    half_to_f32(bytes)
+                };
+                (
+                    r,
+                    ImageF32 {
+                        width: w,
+                        height: h,
+                        rgba,
+                    },
+                )
+            })
+            .collect();
+        let get = |r: ImgRef| read.iter().find(|(o, _)| *o == r).map(|(_, i)| i.clone());
+        let native = routed
+            .iter()
+            .find(|(n, _)| *n == "decode")
+            .and_then(|&(_, r)| get(r))
+            .unwrap_or(ImageF32 {
                 width: 0,
                 height: 0,
                 rgba: Vec::new(),
-            },
-        };
-        Ok(Rendered { output, native })
+            });
+        let stages = routed
+            .iter()
+            .filter(|(n, _)| *n != "decode")
+            .filter_map(|&(n, r)| get(r).map(|i| (n, i)))
+            .collect();
+        Ok(Rendered { output, native, stages })
     }
+
+    /// Names of the chain slots, in order (`signal`, `amp`, `gun`, `screen`, `phosphor`, `optics`).
+    pub fn stage_names(&self) -> Vec<&'static str> {
+        self.pipeline.stage_names()
+    }
+
+    /// Turns the chain slot `name` on or off (off: bypassed, exact identity).
+    pub fn set_stage_enabled(&mut self, name: &str, on: bool) -> Res<()> {
+        self.pipeline.set_enabled(name, on)
+    }
+
+    /// The enable flag of the chain slot `name`.
+    pub fn stage_enabled(&self, name: &str) -> Option<bool> {
+        self.pipeline.is_enabled(name)
+    }
+
+    /// Enables exactly the chain slots of `names` (the stage subset under test), every other slot off.
+    pub fn enable_only(&mut self, names: &[&str]) -> Res<()> {
+        for n in names {
+            if self.pipeline.is_enabled(n).is_none() {
+                return Err(format!("no stage slot named `{n}`").into());
+            }
+        }
+        for n in self.pipeline.stage_names() {
+            self.pipeline.set_enabled(n, names.contains(&n))?;
+        }
+        Ok(())
+    }
+
+    /// A headless renderer whose pipeline runs `chain` instead of [`super::stages::CHAIN`].
+    #[cfg(test)]
+    pub(super) fn with_chain(validation: bool, chain: &'static [super::stages::Registration]) -> Res<Self> {
+        let ctx = Context::new_headless(validation)?;
+        // SAFETY: as in `new`.
+        let pipeline = unsafe { Pipeline::with_chain(&ctx, chain)? };
+        Ok(Self { pipeline, ctx })
+    }
+}
+
+/// Bytes per texel of the images read back.
+fn texel_bytes(format: vk::Format) -> usize {
+    if format == INJECT_FORMAT {
+        16
+    } else {
+        8
+    }
+}
+
+/// Where a stage test's input enters the chain ([`Headless::render_stages`]).
+#[derive(Clone, Copy, Debug)]
+pub enum StageInput<'a> {
+    /// A captured BGRA8 frame, uploaded and decoded over the native raster of `view`.
+    Source { frame: SourceFrame<'a>, view: View },
+    /// A float image (FP32 on the GPU) that replaces the output of `after`: `"decode"` (native domain)
+    /// or a chain slot name (that slot's output domain). Its size must be the domain size of the
+    /// injected `FrameConstants`; `decode` and the slots up to `after` do not run.
+    Image { after: &'a str, image: &'a ImageF32 },
+}
+
+/// One stage-test frame ([`Headless::render_stages`]).
+#[derive(Clone, Copy, Debug)]
+pub struct StageRun<'a> {
+    pub input: StageInput<'a>,
+    /// The injected constants, used as given (start from [`FrameConstants::new`]); the target is
+    /// `frame.target_size`.
+    pub frame: FrameConstants,
+    pub settings: &'a Settings,
+    pub params: &'a Params,
+    pub format: TargetFormat,
 }
 
 /// A captured frame handed to [`Headless::render`]: BGRA8, rows top to bottom, tightly packed.
@@ -356,14 +540,18 @@ struct Scratch {
     /// One target image per frame (frames in flight never share a target).
     targets: Vec<GpuImage>,
     readback: HostBuffer,
-    native_readback: HostBuffer,
+    /// One buffer per routed image read back.
+    image_readbacks: Vec<HostBuffer>,
 }
 
 impl Scratch {
     /// # Safety
     /// The GPU must have finished every use of the objects (device idle).
     unsafe fn destroy(&mut self, d: &ash::Device) {
-        self.native_readback.destroy(d);
+        for b in &mut self.image_readbacks {
+            b.destroy(d);
+        }
+        self.image_readbacks.clear();
         self.readback.destroy(d);
         for t in &mut self.targets {
             t.destroy(d);

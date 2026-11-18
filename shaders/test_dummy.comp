@@ -1,0 +1,22 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Test-only stage (`gpu/stages/dummy.rs`, T-20b): tube -> tube, rgb = 1 - rgb, alpha kept. Proves that a
+// new stage needs only its own files plus one registration line.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(q, frame.tube_size))) {
+        return;
+    }
+    vec4 v = texelFetch(light_in, q, 0);
+    imageStore(light_out, q, vec4(1.0 - v.rgb, v.a));
+}

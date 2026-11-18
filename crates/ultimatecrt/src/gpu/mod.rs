@@ -23,8 +23,10 @@ mod stages;
 pub use context::{gpu_required, validation_layer_available, ValidationCounter};
 pub use context::{list_gpus, Context, GpuInfo};
 pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
+pub use headless::{StageInput, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
 pub use present::Presenter;
+pub use stages::{Domain, AMP_K};
 
 use pipeline::{Pipeline, Target};
 
@@ -131,6 +133,14 @@ impl Renderer {
             self.presenter.present(&self.ctx, index, client)?;
         }
         Ok(())
+    }
+
+    /// Turns the chain slot `name` on or off (off: bypassed, exact identity; A11 enable flags).
+    pub fn set_stage_enabled(&mut self, name: &str, on: bool) -> Res<()> {
+        self.pipeline
+            .as_mut()
+            .expect("pipeline created in new")
+            .set_enabled(name, on)
     }
 }
 

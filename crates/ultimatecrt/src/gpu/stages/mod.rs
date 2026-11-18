@@ -6,12 +6,35 @@
 //! - set 0, binding 0: `Params` uniform buffer (`params.glsl`, T-10), per frame in flight;
 //! - set 0, binding 1: `FrameConstants` uniform buffer (`shaders/include/common.glsl`), per frame in flight;
 //! - set 0, bindings 2 and up: the stage's input images (combined image sampler, read with `texelFetch`)
-//!   then its output (storage image for compute stages);
+//!   then its output (write-only storage image for compute stages). No stage updates an image in place:
+//!   a stage that maps a domain to itself (`gun`) reads the previous image and writes its own (a
+//!   ping-pong by construction); a stage that needs its previous output (persistence, T-41) owns its
+//!   history images;
 //! - stage settings that are not yet parameters go in a small push-constant block declared in the shader
 //!   and mirrored by a `#[repr(C)]` struct in the module.
 //!
-//! Stages today: `decode` (compute, captured frame -> native raster) and `encode` (fragment, linear
-//! light -> output target). T-20b inserts the remaining slots between them.
+//! Stages: `decode` (compute, captured frame -> native raster) and `encode` (fragment, linear light ->
+//! output target) are owned by the pipeline directly; between them runs the fixed ordered chain of
+//! slots [`CHAIN`] (T-20b, A11, TEC-6), in physical order: `signal`, `amp`, `gun`, `screen`,
+//! `phosphor`, `optics`.
+//!
+//! # Chain slots (T-20b)
+//!
+//! A slot is a [`Registration`]: a name, the [`Domain`] of the image it reads and of the image it
+//! writes, and a constructor of its [`Stage`]. A chain stage is a compute pass with the standard
+//! bindings 0 `Params`, 1 `FrameConstants`, 2 its input (combined image sampler, `texelFetch`), 3 its
+//! output (storage image `rgba16f`, the size of its output domain). The pipeline owns the images, the
+//! descriptor sets, the routing and every barrier; a stage only records its dispatch.
+//!
+//! A slot is bypassed when its enable flag is off or when its stage is a placeholder (no pass yet).
+//! A bypassed slot is an exact identity: a slot whose input and output domains are equal is skipped
+//! (the next slot reads the same image); a slot that changes domain (`amp`: native -> amp, `screen`:
+//! amp -> tube) runs the pipeline's nearest-neighbour resample (`shaders/resample.comp`), which copies
+//! FP16 values without arithmetic.
+//!
+//! Filling a slot (T-30, T-33, T-34, ...): replace the placeholder in the slot's own module by a type
+//! implementing [`Stage`] (usually a [`ComputePass`] plus its shader). Adding a slot: a new module with
+//! its `SLOT` constant, its `mod` line and one line in [`CHAIN`].
 
 use std::io::Cursor;
 
@@ -21,6 +44,178 @@ use crate::Res;
 
 pub(super) mod decode;
 pub(super) mod encode;
+
+pub(super) mod amp;
+pub(super) mod gun;
+pub(super) mod optics;
+pub(super) mod phosphor;
+pub(super) mod screen;
+pub(super) mod signal;
+
+#[cfg(test)]
+pub(super) mod dummy;
+
+/// The fixed ordered chain between `decode` and `encode` (A11, TEC-6): one registration line per slot,
+/// in physical order (`CRT.md`, "Suggested physical pipeline order").
+pub(super) const CHAIN: &[Registration] = &[
+    signal::SLOT,
+    amp::SLOT,
+    gun::SLOT,
+    screen::SLOT,
+    phosphor::SLOT,
+    optics::SLOT,
+];
+
+/// The image domains of the chain (image contract, ARCHITECTURE 3.7). Every chain image is
+/// `R16G16B16A16_SFLOAT`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Domain {
+    /// `native_size`: one texel per native source pixel (decode output, voltage domain).
+    Native,
+    /// `amp_size` = (`native_size.x * amp_k`, `native_size.y`): native rows supersampled horizontally by
+    /// K (`FrameConstants::amp_k`, default [`AMP_K`]); drive voltage before `gun`, beam current after.
+    Amp,
+    /// `tube_size`: one texel per host pixel of the tube rectangle, linear light.
+    Tube,
+}
+
+/// Default horizontal supersampling factor K of the `amp` output (image contract, T-33).
+pub const AMP_K: u32 = 4;
+
+/// A slot of the chain.
+pub(super) struct Registration {
+    /// Unique slot name (enable flags, test helpers, timings).
+    pub name: &'static str,
+    /// Domain of the image the slot reads (the previous slot's output domain).
+    pub input: Domain,
+    /// Domain of the image the slot writes.
+    pub output: Domain,
+    /// Creates the slot's stage (objects are created later by [`Stage::create`]).
+    pub new: fn() -> Box<dyn Stage>,
+}
+
+/// A chain stage. The pipeline calls `create` once, `record` when the slot runs, `destroy` once.
+pub(super) trait Stage {
+    /// The compute pass, or `None` for a placeholder (the slot is then bypassed as an identity).
+    fn pass(&self) -> Option<&ComputePass>;
+
+    /// Creates the Vulkan objects; on error what was created stays for [`Stage::destroy`].
+    ///
+    /// # Safety
+    /// `d` must be a live device.
+    unsafe fn create(&mut self, d: &ash::Device) -> Res<()>;
+
+    /// Records the stage over an output image of `size`. Default: the pass without push constants.
+    ///
+    /// # Safety
+    /// `cb` is recording on `d`; `set` is a set of the pass's layout with every binding written and the
+    /// images in the layouts of the contract (input `SHADER_READ_ONLY_OPTIMAL`, output `GENERAL`).
+    unsafe fn record(&self, d: &ash::Device, cb: vk::CommandBuffer, set: vk::DescriptorSet, size: (u32, u32)) {
+        if let Some(p) = self.pass() {
+            p.dispatch(d, cb, set, &[], size);
+        }
+    }
+
+    /// Destroys the objects (null ones are no-ops).
+    ///
+    /// # Safety
+    /// The GPU must have finished every use of them.
+    unsafe fn destroy(&mut self, d: &ash::Device);
+}
+
+/// A slot whose stage is not written yet: always bypassed (exact identity).
+#[derive(Default)]
+pub(super) struct Placeholder;
+
+impl Stage for Placeholder {
+    fn pass(&self) -> Option<&ComputePass> {
+        None
+    }
+    unsafe fn create(&mut self, _d: &ash::Device) -> Res<()> {
+        Ok(())
+    }
+    unsafe fn destroy(&mut self, _d: &ash::Device) {}
+}
+
+/// Binding of a chain stage's input image (combined image sampler).
+pub(super) const BINDING_INPUT: u32 = 2;
+/// Binding of a chain stage's output image (storage image).
+pub(super) const BINDING_OUTPUT: u32 = 3;
+/// Workgroup size of the chain compute shaders (`local_size_x`, `local_size_y`).
+pub(super) const GROUP: u32 = 8;
+
+/// A compute pass with the standard chain bindings and an optional push-constant block.
+#[derive(Default)]
+pub(super) struct ComputePass {
+    pub set_layout: vk::DescriptorSetLayout,
+    layout: vk::PipelineLayout,
+    pipeline: vk::Pipeline,
+    push_size: u32,
+}
+
+impl ComputePass {
+    /// Creates the standard set layout, the pipeline layout (`push_size` bytes of push constants, 0 for
+    /// none) and the pipeline from `spv`. On error, what was created stays for [`ComputePass::destroy`].
+    ///
+    /// # Safety
+    /// `d` must be a live device and `self` empty.
+    pub unsafe fn create(&mut self, d: &ash::Device, spv: &[u8], push_size: u32) -> Res<()> {
+        self.set_layout = standard_set_layout(d)?;
+        self.layout = pipeline_layout(d, self.set_layout, vk::ShaderStageFlags::COMPUTE, push_size)?;
+        self.push_size = push_size;
+        self.pipeline = compute_pipeline(d, self.layout, spv)?;
+        Ok(())
+    }
+
+    /// Records the dispatch over an output of `size` (8x8 groups), with `push` as push constants
+    /// (its length must equal the `push_size` of [`ComputePass::create`]).
+    ///
+    /// # Safety
+    /// As [`Stage::record`].
+    pub unsafe fn dispatch(
+        &self,
+        d: &ash::Device,
+        cb: vk::CommandBuffer,
+        set: vk::DescriptorSet,
+        push: &[u8],
+        size: (u32, u32),
+    ) {
+        debug_assert_eq!(push.len() as u32, self.push_size);
+        d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
+        d.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
+        if !push.is_empty() {
+            d.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
+        }
+        d.cmd_dispatch(cb, size.0.div_ceil(GROUP), size.1.div_ceil(GROUP), 1);
+    }
+
+    /// Destroys the objects (null ones are no-ops) and resets them to null.
+    ///
+    /// # Safety
+    /// The GPU must have finished every use of them.
+    pub unsafe fn destroy(&mut self, d: &ash::Device) {
+        d.destroy_pipeline(self.pipeline, None);
+        d.destroy_pipeline_layout(self.layout, None);
+        d.destroy_descriptor_set_layout(self.set_layout, None);
+        *self = Self::default();
+    }
+}
+
+/// The standard set layout of a chain stage: 0 `Params`, 1 `FrameConstants`, 2 input, 3 output.
+///
+/// # Safety
+/// `d` must be a live device; the caller destroys the result.
+pub(super) unsafe fn standard_set_layout(d: &ash::Device) -> Res<vk::DescriptorSetLayout> {
+    let s = vk::ShaderStageFlags::COMPUTE;
+    let [p, f] = common_bindings(s);
+    let bindings = [
+        p,
+        f,
+        binding(BINDING_INPUT, vk::DescriptorType::COMBINED_IMAGE_SAMPLER, s),
+        binding(BINDING_OUTPUT, vk::DescriptorType::STORAGE_IMAGE, s),
+    ];
+    Ok(d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?)
+}
 
 /// Descriptor binding of the `Params` uniform buffer in every stage.
 pub(super) const BINDING_PARAMS: u32 = 0;
@@ -66,10 +261,12 @@ pub(super) unsafe fn pipeline_layout(
         .stage_flags(stages)
         .offset(0)
         .size(push_size)];
+    // A push-constant range of size 0 is invalid: `push_size` 0 means no range.
+    let ranges = if push_size == 0 { &[][..] } else { &push[..] };
     Ok(d.create_pipeline_layout(
         &vk::PipelineLayoutCreateInfo::default()
             .set_layouts(&set_layouts)
-            .push_constant_ranges(&push),
+            .push_constant_ranges(ranges),
         None,
     )?)
 }

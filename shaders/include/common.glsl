@@ -11,7 +11,7 @@
 #endif
 
 // Per-frame constants, written by the CPU once per frame in flight (src/gpu/pipeline.rs,
-// `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 48 bytes.
+// `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 60 bytes.
 layout(std140, set = 0, binding = UCRT_FRAME_BINDING) uniform FrameConstants {
     // Tube rectangle in target pixels: x0, y0, x1, y1 (x1, y1 exclusive). Outside it: black surround.
     layout(offset = 0) vec4 tube_rect_px;
@@ -25,7 +25,17 @@ layout(std140, set = 0, binding = UCRT_FRAME_BINDING) uniform FrameConstants {
     // Frames rendered since the pipeline was created, and the time since the previous frame in ms.
     layout(offset = 40) uint frame_index;
     layout(offset = 44) float frame_time_ms;
+    // Image contract (T-20b, ARCHITECTURE 3.7). Size of the tube-domain images (screen and later):
+    // one texel per host pixel of the tube rectangle, whose corners are whole pixels.
+    layout(offset = 48) ivec2 tube_size;
+    // Horizontal supersampling factor K of the amp-domain images: amp size = native size * (K, 1).
+    layout(offset = 56) int amp_k;
 } frame;
+
+// Size of the amp-domain images (amp and gun outputs).
+ivec2 amp_size() {
+    return frame.native_size * ivec2(frame.amp_k, 1);
+}
 
 // Transfer functions, selected by the TRANSFER_* constants (src/gpu/pipeline.rs, `Transfer`).
 const uint TRANSFER_IDENTITY = 0u; // value unchanged

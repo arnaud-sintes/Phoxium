@@ -3,9 +3,10 @@
 
 // Stage `encode` (ARCHITECTURE 3.7): linear light -> output target (swapchain or headless image).
 //
-// Inside the tube rectangle: the linear value of the native pixel under the fragment (nearest, T-20a has
-// no screen stage yet), times `exposure`, clipped to [0, 1] (panel white) and encoded with the inverse of
-// the host display EOTF chosen by the push constants. Outside: black surround. No dither (T-46).
+// Inside the tube rectangle: the linear value of the tube-domain texel under the fragment (the last
+// chain image, one texel per host pixel of the tube rectangle, T-20b), times `exposure`, clipped to
+// [0, 1] (panel white) and encoded with the inverse of the host display EOTF chosen by the push
+// constants. Outside: black surround. No dither (T-46).
 
 #include "params.glsl"
 #include "common.glsl"
@@ -26,8 +27,7 @@ void main() {
         out_color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    vec2 uv = (f - r.xy) / (r.zw - r.xy);
-    ivec2 p = min(ivec2(uv * vec2(frame.native_size)), frame.native_size - 1);
-    vec3 l = texelFetch(linear_in, p, 0).rgb * params.exposure;
+    ivec2 q = clamp(ivec2(floor(f) - floor(r.xy)), ivec2(0), frame.tube_size - 1);
+    vec3 l = texelFetch(linear_in, q, 0).rgb * params.exposure;
     out_color = vec4(transfer_from_linear(clamp(l, 0.0, 1.0), pc.transfer, pc.gamma), 1.0);
 }
