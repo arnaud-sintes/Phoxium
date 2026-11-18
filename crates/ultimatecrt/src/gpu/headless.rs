@@ -206,7 +206,7 @@ impl Headless {
             self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
         }
         let cb = self.pipeline.record(ctx, *view, settings, params, &t)?;
-        self.read_back(s, cb, &t, format)
+        self.read_back_or_abandon(s, cb, &t, format)
     }
 
     /// Stage-test helper (T-20b): renders one frame through the chain with the given input, the
@@ -270,7 +270,26 @@ impl Headless {
         let cb = self
             .pipeline
             .record_with(ctx, view, run.frame, run.settings, run.params, &t)?;
-        self.read_back(s, cb, &t, run.format)
+        self.read_back_or_abandon(s, cb, &t, run.format)
+    }
+
+    /// [`Headless::read_back`], giving the recorded frame up when it fails before the submission (the
+    /// pipeline then keeps its staged frame and image states as if the frame had not been recorded).
+    ///
+    /// # Safety
+    /// As [`Headless::read_back`].
+    unsafe fn read_back_or_abandon(
+        &mut self,
+        s: &mut Scratch,
+        cb: vk::CommandBuffer,
+        t: &Target,
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        let r = self.read_back(s, cb, t, format);
+        if r.is_err() {
+            self.pipeline.abandon();
+        }
+        r
     }
 
     /// Records the readback of the target and of every image routed in the frame just recorded into
@@ -753,6 +772,62 @@ mod tests {
         assert!(f16_to_f32(0x7e00).is_nan());
         // 1/3 rounds to 0x3555 = 1365/4096.
         assert_eq!(f16_to_f32(0x3555), 1365.0 / 4096.0);
+    }
+
+    /// A frame that is recorded but never submitted (a failure between `record` and `submit`) must not
+    /// consume the staged upload nor leave the tracked image states ahead of the GPU: the next frame,
+    /// without any new upload, decodes the staged frame, with zero validation messages. Needs the
+    /// validation layer and a device; skipped without them unless `UCRT_REQUIRE_GPU=1`.
+    #[test]
+    fn a_recorded_frame_that_is_never_submitted_is_abandoned_cleanly() {
+        let require = crate::gpu::gpu_required();
+        let validation = crate::gpu::validation_layer_available();
+        assert!(
+            validation || !require,
+            "UCRT_REQUIRE_GPU=1 but the validation layer is not installed"
+        );
+        let mut gpu = match Headless::new(validation) {
+            Ok(g) => g,
+            Err(e) => {
+                assert!(!require, "UCRT_REQUIRE_GPU=1 but no headless Vulkan device: {e}");
+                eprintln!("abandoned frame test skipped: {e}");
+                return;
+            }
+        };
+        let counter = gpu.validation_counter();
+        let (w, h) = (3u32, 2u32);
+        let bgra: Vec<u8> = (0..w * h)
+            .flat_map(|i| [i as u8 * 40 + 3, i as u8 * 30 + 7, i as u8 * 20 + 11, 255])
+            .collect();
+        let (view, settings, params) = (View::full(w, h), Settings::identity(), Params::default());
+        // SAFETY: the scratch objects are destroyed after the device is idle; the pipeline and the
+        // context are the ones of `gpu`.
+        unsafe {
+            let ctx = &gpu.ctx;
+            let mut s = Scratch::default();
+            let extent = vk::Extent2D { width: w, height: h };
+            let t = gpu
+                .next_target(&mut s, extent, TargetFormat::Bgra8Unorm)
+                .expect("target");
+            gpu.pipeline.wait_slot(ctx).expect("wait");
+            gpu.pipeline.stage_source(ctx, w, h, &bgra).expect("stage");
+            gpu.pipeline.record(ctx, view, &settings, &params, &t).expect("record");
+            // The frame is dropped here, as after a failed submission.
+            gpu.pipeline.abandon();
+            let _ = ctx.device.device_wait_idle();
+            s.destroy(&ctx.device);
+        }
+        let r = gpu
+            .render(None, view, &settings, &params, (w, h), TargetFormat::Bgra8Unorm)
+            .expect("render without new upload");
+        for i in 0..w * h {
+            let p = r.output.pixel(i % w, i / w);
+            let got = [p[0], p[1], p[2]].map(|v| (v * 255.0).round() as u8);
+            let k = i as u8;
+            assert_eq!(got, [k * 20 + 11, k * 30 + 7, k * 40 + 3], "pixel {i}");
+        }
+        drop(gpu);
+        assert_eq!(counter.count(), 0, "validation messages");
     }
 
     #[test]

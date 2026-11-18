@@ -39,9 +39,20 @@ pub fn gpu_or_skip(test: &str) -> Option<Headless> {
         assert!(
             !gpu_required(),
             "UCRT_REQUIRE_GPU is set but synchronization validation is off (the validation layer lacks \
-             VK_EXT_validation_features or VK_EXT_layer_settings): update the Vulkan SDK"
+             VK_EXT_validation_features): update the Vulkan SDK"
         );
         eprintln!("{test}: WARNING synchronization validation is off, synchronization errors are not checked");
+    } else if validation && !ctx.shader_accesses_enabled() {
+        assert!(
+            !gpu_required(),
+            "UCRT_REQUIRE_GPU is set but synchronization validation ignores shader accesses (the validation \
+             layer lacks VK_EXT_layer_settings or the syncval_shader_accesses_heuristic setting): update the \
+             Vulkan SDK"
+        );
+        eprintln!(
+            "{test}: WARNING synchronization validation ignores shader accesses, missing barriers between \
+             shader stages are not checked"
+        );
     }
     Some(Headless::from_context(ctx).expect("device exists but creating the headless renderer failed"))
 }

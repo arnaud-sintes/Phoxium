@@ -82,10 +82,11 @@ impl Renderer {
 
     /// Renders one frame. `frame` is a newly captured BGRA8 image, if any. `client` is the current
     /// client size of the output window.
+    ///
+    /// A given frame is always staged for upload, also when the window is minimised or the swapchain
+    /// is out of date (the frame is then not drawn but kept for the next call), so the caller may
+    /// consider it consumed once this returns `Ok`.
     pub fn render(&mut self, frame: Option<(u32, u32, &[u8])>, view: View, client: (u32, u32)) -> Res<()> {
-        if client.0 == 0 || client.1 == 0 {
-            return Ok(()); // minimised
-        }
         let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
         // SAFETY: every handle used below belongs to `self.ctx`. `wait_slot` guarantees the slot's
         // previous submission finished, so its command buffer, staging and uniform buffers and its
@@ -95,46 +96,90 @@ impl Renderer {
             if let Some((w, h, data)) = frame {
                 pipeline.stage_source(&self.ctx, w, h, data)?;
             }
+            if client.0 == 0 || client.1 == 0 {
+                return Ok(()); // minimised
+            }
 
             let extent = self.presenter.extent();
             if (extent.width, extent.height) != client {
                 self.ctx.device.device_wait_idle()?;
                 self.presenter.resize(&self.ctx, client)?;
             }
+            // Everything that can fail for a reason other than the device or the surface (settings,
+            // pipeline creation, image allocation) is done before the acquire.
+            pipeline.prepare(
+                &self.ctx,
+                view,
+                &self.settings,
+                self.presenter.extent(),
+                self.presenter.format(),
+            )?;
 
-            let acquired = self.image_available[pipeline.slot()];
+            let slot = pipeline.slot();
+            let acquired = self.image_available[slot];
             let Some(index) = self.presenter.acquire(&self.ctx, client, acquired)? else {
                 return Ok(());
             };
-            let target = Target {
-                image: self.presenter.image(index),
-                view: self.presenter.view(index),
-                extent: self.presenter.extent(),
-                format: self.presenter.format(),
-            };
-            let cb = pipeline.record(&self.ctx, view, &self.settings, &self.params, &target)?;
-            barrier(
-                &self.ctx.device,
-                cb,
-                target.image,
-                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-                vk::ImageLayout::PRESENT_SRC_KHR,
-                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-                vk::PipelineStageFlags2::NONE,
-                vk::AccessFlags2::NONE,
-            );
-            pipeline.submit(
-                &self.ctx,
-                &[acquired],
-                &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
-                &[self.presenter.render_done(index)],
-            )?;
-            self.presenter.present(&self.ctx, index, client)?;
+            if let Err(e) = self.draw(index, acquired, view, client) {
+                self.recover_after_acquire(slot, client);
+                return Err(e);
+            }
         }
         Ok(())
     }
 
+    /// Records, submits and presents the frame into the acquired image `index`.
+    ///
+    /// # Safety
+    /// As [`Renderer::render`]; `index` was acquired with `acquired` as its semaphore.
+    unsafe fn draw(&mut self, index: u32, acquired: vk::Semaphore, view: View, client: (u32, u32)) -> Res<()> {
+        let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
+        let target = Target {
+            image: self.presenter.image(index),
+            view: self.presenter.view(index),
+            extent: self.presenter.extent(),
+            format: self.presenter.format(),
+        };
+        let cb = pipeline.record(&self.ctx, view, &self.settings, &self.params, &target)?;
+        barrier(
+            &self.ctx.device,
+            cb,
+            target.image,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::PRESENT_SRC_KHR,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags2::NONE,
+            vk::AccessFlags2::NONE,
+        );
+        pipeline.submit(
+            &self.ctx,
+            &[acquired],
+            &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
+            &[self.presenter.render_done(index)],
+        )?;
+        self.presenter.present(&self.ctx, index, client)
+    }
+
+    /// Error path after a successful acquire: the image is acquired and will not be presented, and its
+    /// semaphore may still be signalled. Waits for the device, rolls back the unsubmitted frame,
+    /// replaces the semaphore and recreates the swapchain (which discards the acquired image), so the
+    /// next frame starts clean. Best effort: a failure here is dropped, the caller reports the first error.
+    ///
+    /// # Safety
+    /// As [`Renderer::render`].
+    unsafe fn recover_after_acquire(&mut self, slot: usize, client: (u32, u32)) {
+        let d = &self.ctx.device;
+        let _ = d.device_wait_idle();
+        if let Some(p) = self.pipeline.as_mut() {
+            p.abandon();
+        }
+        if let Ok(fresh) = d.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) {
+            d.destroy_semaphore(self.image_available[slot], None);
+            self.image_available[slot] = fresh;
+        }
+        let _ = self.presenter.resize(&self.ctx, client);
+    }
     /// Turns the chain slot `name` on or off (off: bypassed, exact identity; A11 enable flags).
     pub fn set_stage_enabled(&mut self, name: &str, on: bool) -> Res<()> {
         self.pipeline
