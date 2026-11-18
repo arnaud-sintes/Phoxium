@@ -237,6 +237,31 @@ pub fn gaussian_amp_step(t_ns: f64, bandwidth_mhz: f64) -> f64 {
     0.5 * (1.0 + erf(t_ns / (s * 2.0_f64.sqrt())))
 }
 
+/// Tail integral of the Gaussian step, T(z) = integral over [z, inf) of (1 - Phi(t)) dt =
+/// phi(z) - z (1 - Phi(z)), for z >= 0 (T(0) = 1 / sqrt(2 pi), T decreases to 0). [D]
+fn gaussian_step_tail(z: f64) -> f64 {
+    let phi = (-0.5 * z * z).exp() / (2.0 * PI).sqrt();
+    let q = 0.5 * (1.0 - erf(z / 2.0_f64.sqrt()));
+    (phi - z * q).max(0.0)
+}
+
+/// Mean over [`a`, `b`) (a < b, any length unit) of the Gaussian step response Phi(u / `sigma`): the
+/// box integral of a smoothed edge (T-33 sub-sample integral). With J(z) = z Phi(z) + phi(z) the
+/// antiderivative is sigma J(u / sigma), and J(z) = max(z, 0) + T(|z|) with the tail integral T, so
+/// the mean is (max(b, 0) - max(a, 0) + sigma (T(|b| / sigma) - T(|a| / sigma))) / (b - a), a form
+/// without cancellation on either side of the edge. [D]
+///
+/// # Panics
+/// Unless `sigma` > 0 and a < b (all finite).
+pub fn gaussian_step_box_mean(a: f64, b: f64, sigma: f64) -> f64 {
+    assert!(
+        sigma.is_finite() && sigma > 0.0 && a.is_finite() && b.is_finite() && a < b,
+        "gaussian_step_box_mean: sigma = {sigma}, [{a}, {b})"
+    );
+    let ramp = b.max(0.0) - a.max(0.0);
+    (ramp + sigma * (gaussian_step_tail(b.abs() / sigma) - gaussian_step_tail(a.abs() / sigma))) / (b - a)
+}
+
 /// 10-90 % rise time of the Gaussian amplifier, found numerically on the step
 /// response (bisection), so it checks the closed form 0.3396 / B. [D]
 pub fn gaussian_amp_rise_ns(bandwidth_mhz: f64) -> f64 {
@@ -585,6 +610,39 @@ mod tests {
             assert!(close(rise * b / 1000.0, 0.3396, 0.0001), "B {b}: {rise} ns");
         }
         assert!(close(gaussian_amp_step(0.0, 10.0), 0.5, 1e-15));
+    }
+
+    /// Box mean of the Gaussian step: hand values (sigma 1 on [0, 1): 1 + T(1) - T(0) = 1 + 0.0833155 -
+    /// 0.3989423 = 0.6843732; sigma 0.3 on [0.2, 0.7): 0.9113199), symmetry (0.5 on [-c, c)), the far
+    /// sides (0 and 1, as limits), and a midpoint-rule quadrature of the step response.
+    #[test]
+    fn gaussian_step_box_mean_values() {
+        assert!(close(gaussian_step_box_mean(0.0, 1.0, 1.0), 0.684_373_2, 1e-7));
+        assert!(close(gaussian_step_box_mean(0.2, 0.7, 0.3), 0.911_319_9, 1e-7));
+        assert!(close(gaussian_step_box_mean(-0.5, 0.5, 0.3), 0.5, 1e-15));
+        assert_eq!(gaussian_step_box_mean(8.0, 8.25, 0.1), 1.0);
+        assert_eq!(gaussian_step_box_mean(-8.25, -8.0, 0.1), 0.0);
+        for (a, b, s) in [
+            (-0.3, -0.05, 0.14),
+            (-0.1, 0.15, 0.09),
+            (0.0, 0.25, 0.02),
+            (1.0, 1.5, 0.6),
+        ] {
+            let n = 20_000;
+            let h = (b - a) / f64::from(n);
+            let quad: f64 = (0..n)
+                .map(|i| 0.5 * (1.0 + erf((a + (f64::from(i) + 0.5) * h) / (s * 2.0_f64.sqrt()))))
+                .sum::<f64>()
+                / f64::from(n);
+            let got = gaussian_step_box_mean(a, b, s);
+            assert!(close(got, quad, 1e-8), "[{a}, {b}) sigma {s}: {got} vs {quad}");
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "gaussian_step_box_mean")]
+    fn gaussian_step_box_mean_empty_interval_panics() {
+        gaussian_step_box_mean(0.5, 0.5, 1.0);
     }
 
     /// CRT.md rise-time table with 0.35 / B: consumer 4 to 8 MHz 44 to 88 ns

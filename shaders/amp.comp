@@ -7,7 +7,9 @@
 // Model, per channel and per native row (CRT.md "Signal path", RGB path):
 // - The source is a zero-order hold at the pixel clock f (`amp_pixel_clock_mhz`): native pixel j holds its
 //   drive voltage V_j over [j, j + 1) source px. Outside the active line the signal is at black (blanking,
-//   V = 0).
+//   V = 0): the first and last columns meet black through the amplifier's own edges, so at low bandwidth
+//   they lose some light, and the slow-fall tail past the right end of the line is cut at the image edge.
+//   Right for a full active line; slightly spurious for a crop (the real neighbours are not black).
 // - The amplifier is a Gaussian low-pass of -3 dB bandwidth B (`amp_bandwidth_mhz`): time sigma
 //   sqrt(ln 2) / (2 pi B) ~ 0.1325 / B [D], so the 10-90 % rise is 2.563 sigma = 0.3396 / B. In source px:
 //   sigma_px = sigma_t * f = 0.1325 f / B.
@@ -28,13 +30,33 @@
 //   `amp_peaking_gain`. Every edge response becomes (1 + g) Phi(u / sigma_e) - g Phi(u / sigma_c) with
 //   sigma_c = sqrt(sigma_e^2 + sigma_p^2), sigma_p = 0.1325 f / f_p px: an overshoot after (and before)
 //   each edge, a flat field and the pulse areas unchanged (both terms are steps of unit height).
-// - Output: K samples per native pixel (K = `frame.amp_k`), point samples of v at the sample centres
-//   x = (q + 0.5) / K, so the beam sees a continuous signal. Alpha is the held pixel's alpha.
+// - Output: K sub-samples per native pixel (K = `frame.amp_k`). Sub-sample q carries the exact mean of v
+//   over its interval [q / K, (q + 1) / K) source px (box integral, closed form below), not a point
+//   sample: a transition narrower than a sub-sample still moves its light correctly (point samples miss
+//   it, and lose the line dimming above about 5 MHz at K = 4). The sum of the sub-samples is the exact
+//   voltage-time integral of the line. Alpha is the held pixel's alpha.
+//   Box mean of Phi(u / s) over [a, b), b - a = w: with J(z) = z Phi(z) + phi(z) (antiderivative
+//   s J(u / s)) and J(z) = max(z, 0) + T(|z|), T(z) = phi(z) - z (1 - Phi(z)) (tail integral, >= 0),
+//   mean = (clamp(b, 0, w) + s (T(|b| / s) - T(|a| / s))) / w; exactly 1 (0) for an interval far right
+//   (left) of the edge. Peaking: (1 + g) mean(s) - g mean(s_c). Delays shift a and b.
+// - Range clamp (slew limiter): the independent superposition of asymmetric edges is only a model: in a
+//   1-0-1 pattern with a slow fall the fast rise starts before the fall has finished and the sum
+//   overshoots full drive (1.09 at B = 3 MHz, r = 3, f = 5.37 MHz), and the mirror pattern dips below
+//   black. A real slew-limited amplifier moves between the levels it is given and never leaves their range,
+//   so each sub-sample is clamped to [lo, hi], the min and max of the input levels (blanking included)
+//   within the kernel reach of its pixel (wider than [0, 1]: it also keeps a 0.2-0.6 pattern within
+//   0.2-0.6, and a flat field exact). With peaking the overshoot is intended: the range is widened by
+//   g (hi - lo), the largest overshoot of a single peaked edge of that height. The clamp applies to the
+//   sub-sample mean (the box integral of an unclamped overshoot), an approximation that is exact
+//   whenever no clamp is needed.
+// - Ideal amplifier: when every edge's sigma is at most SIGMA_IDEAL source px and peaking is off, the
+//   output is the zero-order hold exactly (bit for bit; the defaults: 100 MHz at 5.37 MHz is
+//   0.0071 px). The exact box integral of such a narrow edge would still move s / sqrt(2 pi) of a
+//   pixel's voltage-time across the edge (under 1.6 % of a sub-sample at K = 4, area conserved), and
+//   below 1.4 % of an isolated line's luminance after the gun law, invisible behind the beam spot.
 //
 // Support: edges within 6 sigma_max + delay + 1 px of the sample (6 sigma: Phi < 1e-9), at most
 // MAX_REACH px.
-// When every edge lies beyond about 6 sigma of the sample (very high bandwidth, such as the defaults), the
-// step responses are exactly 0 or 1 in fp32 and the output is the zero-order hold bit for bit.
 
 #include "params.glsl"
 #include "common.glsl"
@@ -54,30 +76,32 @@ const float Z10 = 1.2815516;
 // Largest reach of the kernel in source px (cost bound; reached only for sigma_px above about 8 px, far
 // outside the soft ranges).
 const int MAX_REACH = 64;
+// Edge sigma (source px) at or below which the amplifier is ideal (exact hold, see the model above).
+const float SIGMA_IDEAL = 0.01;
+const float INV_SQRT_2PI = 0.3989422804014327;
 
-// erf(x) for x >= 0, Abramowitz and Stegun 7.1.26, |error| <= 1.5e-7 [K]. Exactly 1.0 in fp32 for
-// x above about 4 (the correction underflows below half an ulp of 1).
-float erf_pos(float x) {
-    float t = 1.0 / (1.0 + 0.3275911 * x);
-    float poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
-    return 1.0 - poly * exp(-x * x);
+// Tail integral of the Gaussian step, T(z) = phi(z) - z (1 - Phi(z)) for z >= 0, per channel. 1 - Phi(z)
+// = erfc(z / sqrt 2) / 2 with Abramowitz and Stegun 7.1.26 (erfc(x) = poly(t) exp(-x^2), |error| <=
+// 1.5e-7) [K]; both terms share exp(-z^2 / 2), so T is exactly 0 where it underflows.
+vec3 step_tail(vec3 z) {
+    vec3 t = 1.0 / (1.0 + 0.3275911 * 0.70710678118654752 * z);
+    vec3 poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    return max(exp(-0.5 * z * z) * (INV_SQRT_2PI - 0.5 * z * poly), 0.0);
 }
 
-// Gaussian step response Phi(u) = (1 + erf(u / sqrt 2)) / 2, per channel, u in units of sigma.
-vec3 step_response(vec3 u) {
-    vec3 a = abs(u) * 0.70710678118654752;
-    vec3 e = vec3(erf_pos(a.x), erf_pos(a.y), erf_pos(a.z));
-    return 0.5 + 0.5 * sign(u) * e;
+// Mean of Phi(u / sigma) over [b - w, b) (u in source px), per channel (closed form above).
+vec3 step_box_mean(vec3 b, float w, vec3 sigma) {
+    vec3 a = b - w;
+    return (clamp(b, 0.0, w) + sigma * (step_tail(abs(b) / sigma) - step_tail(abs(a) / sigma))) / w;
 }
 
-// Response of an edge at offset u (source px, after the edge's delay), per channel, with the edge's sigma
-// and the peaking of gain `gain` (sigma_peak_sq = sigma_p^2); without peaking (gain 0) exactly
-// step_response(u / sigma).
-vec3 edge_response(vec3 u, vec3 sigma, float gain, float sigma_peak_sq) {
-    vec3 s = step_response(u / sigma);
+// Box mean of the response of an edge, the interval ending at offset b (source px, after the edge's
+// delay), per channel, with the edge's sigma and the peaking of gain `gain` (sigma_peak_sq = sigma_p^2).
+vec3 edge_mean(vec3 b, float w, vec3 sigma, float gain, float sigma_peak_sq) {
+    vec3 s = step_box_mean(b, w, sigma);
     if (gain != 0.0) {
         vec3 sigma_c = sqrt(sigma * sigma + sigma_peak_sq);
-        s = (1.0 + gain) * s - gain * step_response(u / sigma_c);
+        s = (1.0 + gain) * s - gain * step_box_mean(b, w, sigma_c);
     }
     return s;
 }
@@ -98,8 +122,9 @@ void main() {
     int k = max(frame.amp_k, 1);
     int width = textureSize(drive_in, 0).x;
     int y = q.y;
-    int p = q.x / k; // native pixel under the sample (zero-order hold)
-    float x = (float(q.x) + 0.5) / float(k);
+    int p = q.x / k; // native pixel under the sub-sample (zero-order hold)
+    float w = 1.0 / float(k);
+    float x1 = float(q.x + 1) / float(k); // right end of the sub-sample interval
 
     // Non-positive values would give an infinite or NaN sigma: clamp to a tiny positive value.
     float bandwidth = max(params.amp_bandwidth_mhz, 1e-3);
@@ -110,33 +135,43 @@ void main() {
     float sigma_fast = min(sigma_rise, sigma_fall);
     float delay_rise = Z10 * (sigma_rise - sigma_fast);
     float delay_fall = Z10 * (sigma_fall - sigma_fast);
-    float gain = params.amp_peaking_gain;
+    float gain = max(params.amp_peaking_gain, 0.0);
     float sigma_peak = SIGMA_TIMES_BANDWIDTH * clock / max(params.amp_peaking_mhz, 1e-3);
     float sigma_peak_sq = sigma_peak * sigma_peak;
     float sigma_max = max(sigma_rise, sigma_fall);
+    if (gain == 0.0 && sigma_max <= SIGMA_IDEAL) {
+        imageStore(drive_out, q, drive(p, y, width)); // ideal amplifier: exact hold
+        return;
+    }
     if (gain != 0.0) {
         sigma_max = sqrt(sigma_max * sigma_max + sigma_peak_sq);
     }
     int reach = min(int(ceil(6.0 * sigma_max + max(delay_rise, delay_fall))) + 1, MAX_REACH);
 
     // Walk the pixels p - reach .. p + reach; each pixel contributes V_j (S_left - S_right), the left edge's
-    // response carried over from the previous pixel's right edge.
+    // mean carried over from the previous pixel's right edge. lo and hi track the input range.
     vec4 prev = drive(p - reach - 1, y, width);
     vec4 cur = drive(p - reach, y, width);
     bvec3 falling = lessThan(cur.rgb - prev.rgb, vec3(0.0));
     vec3 sigma = mix(vec3(sigma_rise), vec3(sigma_fall), falling);
     vec3 delay = mix(vec3(delay_rise), vec3(delay_fall), falling);
-    vec3 s_left = edge_response(x - float(p - reach) - delay, sigma, gain, sigma_peak_sq);
+    vec3 s_left = edge_mean(x1 - float(p - reach) - delay, w, sigma, gain, sigma_peak_sq);
     vec3 v = vec3(0.0);
+    vec3 lo = cur.rgb;
+    vec3 hi = cur.rgb;
     for (int j = p - reach; j <= p + reach; ++j) {
         vec4 next = drive(j + 1, y, width);
         falling = lessThan(next.rgb - cur.rgb, vec3(0.0));
         sigma = mix(vec3(sigma_rise), vec3(sigma_fall), falling);
         delay = mix(vec3(delay_rise), vec3(delay_fall), falling);
-        vec3 s_right = edge_response(x - float(j + 1) - delay, sigma, gain, sigma_peak_sq);
+        vec3 s_right = edge_mean(x1 - float(j + 1) - delay, w, sigma, gain, sigma_peak_sq);
         v += cur.rgb * (s_left - s_right);
+        lo = min(lo, cur.rgb);
+        hi = max(hi, cur.rgb);
         s_left = s_right;
         cur = next;
     }
+    vec3 margin = gain * (hi - lo);
+    v = clamp(v, lo - margin, hi + margin);
     imageStore(drive_out, q, vec4(v, drive(p, y, width).a));
 }
