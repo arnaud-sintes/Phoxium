@@ -128,7 +128,7 @@ float mask_damper_row(int qy) {
     float w = max(params.mask_damper_width_mm, 0.0) * frame.px_per_mm;
     float s = clamp(params.mask_damper_edge_mm * frame.px_per_mm, 0.0, w);
     float visible = params.tube_visible_height_mm * frame.px_per_mm;
-    float top = 0.5 * (visible - float(frame.tube_size.y));
+    float top = 0.5 * (visible - float(frame.tube_size.y - 2 * frame.raster_margin.y)); // raster rows (T-37)
     float shadow = 0.0;
     for (int k = 0; k < n; k++) {
         float f = n == 1 ? 2.0 / 3.0 : float(k + 1) / float(n + 1);
@@ -386,14 +386,16 @@ vec3 mask_eval(ivec2 q) {
     if (!params.mask_enabled || !(frame.px_per_mm > 0.0)) {
         return vec3(1.0);
     }
+    // T-37: the mask grid starts at the raster's top-left corner, inside the tube image's margin.
+    ivec2 r = q - frame.raster_margin;
     switch (params.mask_type) {
     case MASK_TYPE_SLOT_MASK:
-        return mask_slot(q);
+        return mask_slot(r);
     case MASK_TYPE_DELTA:
-        return mask_delta(q);
+        return mask_delta(r);
     case MASK_TYPE_APERTURE_GRILLE:
     default:
-        return mask_grille(q);
+        return mask_grille(r);
     }
 }
 
