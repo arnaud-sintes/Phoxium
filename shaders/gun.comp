@@ -1,9 +1,20 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
 
-// Slot `gun` (ARCHITECTURE 3.7, image contract): amp domain -> amp domain, drive voltage V to beam
-// current I per channel. Placeholder (T-20b): exact copy. T-34 writes the gun law here; until T-30 the
-// tube gamma is still applied by `decode`.
+// Slot `gun` (ARCHITECTURE 3.7, image contract; T-34, QUESTIONS PHY-6 and COL-2): amp domain -> amp
+// domain, drive voltage V in [0, 1] (the output contract of `decode`, through `signal` and `amp`) to beam
+// current I per channel. I is relative: 1 at full drive for the power, BT.1886 and Annex 1 laws.
+//
+// Laws, `params.gun_law` (CRT.md "Gun law"):
+// - power:         I = V^gamma.
+// - gog:           I = drive_c * max(gain V + offset + cutoff_c, 0)^gamma (Berns, Motta and Gorzynski 1993).
+// - bt1886:        I = L / Lw, L = a max(V + b, 0)^2.4, a = (Lw^(1/2.4) - Lb^(1/2.4))^2.4,
+//                  b = Lb^(1/2.4) / (Lw^(1/2.4) - Lb^(1/2.4)); a (V + b)^2.4 = (d (V + b))^2.4 with
+//                  d = Lw^(1/2.4) - Lb^(1/2.4), which is what is computed.
+// - bt1886_annex1: I = L / Lw with k = 1 / (1 + b)^2.6 and L = k (V + b)^2.6 for V >= 0.35,
+//                  L = k (0.35 + b)^-0.4 (V + b)^3.0 below.
+// Every law is multiplied by `frame.white_gain` (white balance, COL-2; (1, 1, 1) when off).
+// A power law with gamma exactly 1 returns V unchanged (no pow, so the identity is bit exact).
 //
 // Reads the amp output (binding 2) and writes its own image (binding 3), both amp_size(): no in-place
 // update (every chain stage writes a new image).
@@ -16,10 +27,58 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 2) uniform sampler2D drive_in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D current_out;
 
+const float ANNEX1_VC = 0.35;
+const float ANNEX1_A1 = 2.6;
+const float ANNEX1_A2 = 3.0;
+
+float power_law(float v, float gamma) {
+    v = max(v, 0.0);
+    return gamma == 1.0 ? v : pow(v, gamma);
+}
+
+float bt1886(float v) {
+    // Domain: 0 <= Lb < Lw. Out of range values are clamped (Lb to 0.999 Lw) instead of giving NaN.
+    float lw = max(params.gun_bt1886_white, 1e-6);
+    float lb = clamp(params.gun_bt1886_black, 0.0, 0.999 * lw);
+    float d = pow(lw, 1.0 / 2.4) - pow(lb, 1.0 / 2.4);
+    float b = pow(lb, 1.0 / 2.4) / d;
+    return pow(d * max(v + b, 0.0), 2.4) / lw;
+}
+
+float bt1886_annex1(float v) {
+    // The knee term (0.35 + b)^-0.4 needs b > -0.35.
+    float b = max(params.gun_annex1_lift, -0.349);
+    float k = 1.0 / pow(1.0 + b, ANNEX1_A1);
+    float x = max(v + b, 0.0);
+    if (v >= ANNEX1_VC) {
+        return k * pow(x, ANNEX1_A1);
+    }
+    return k * pow(ANNEX1_VC + b, ANNEX1_A1 - ANNEX1_A2) * pow(x, ANNEX1_A2);
+}
+
+// Beam current of the three guns for the drive voltages `v`.
+vec3 gun_current(vec3 v) {
+    vec3 i;
+    if (params.gun_law == GUN_LAW_GOG) {
+        vec3 u = params.gun_gain * v + params.gun_offset + params.gun_cutoff_rgb;
+        i = vec3(power_law(u.r, params.gun_gamma), power_law(u.g, params.gun_gamma),
+                 power_law(u.b, params.gun_gamma)) * params.gun_drive_rgb;
+    } else if (params.gun_law == GUN_LAW_BT1886) {
+        i = vec3(bt1886(v.r), bt1886(v.g), bt1886(v.b));
+    } else if (params.gun_law == GUN_LAW_BT1886_ANNEX1) {
+        i = vec3(bt1886_annex1(v.r), bt1886_annex1(v.g), bt1886_annex1(v.b));
+    } else {
+        i = vec3(power_law(v.r, params.gun_gamma), power_law(v.g, params.gun_gamma),
+                 power_law(v.b, params.gun_gamma));
+    }
+    return i * frame.white_gain;
+}
+
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, imageSize(current_out)))) {
         return;
     }
-    imageStore(current_out, p, texelFetch(drive_in, p, 0));
+    vec4 drive = texelFetch(drive_in, p, 0);
+    imageStore(current_out, p, vec4(gun_current(drive.rgb), drive.a));
 }

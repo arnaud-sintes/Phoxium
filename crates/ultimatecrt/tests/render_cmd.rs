@@ -2,7 +2,8 @@
 //! equal the in-process headless result exactly, and the PNG matches the pipeline formula.
 //!
 //! Pipeline with the defaults of the live path (T-20a, `Settings::default`, `Params::default`): the
-//! source codes c are decoded to linear light L = (c / 255)^2.4 (tube gamma), stored in FP16, and
+//! source codes c are decoded to drive voltages V = c / 255 (FP16), the `gun` slot (T-34, default pure
+//! power 2.4) makes the linear light L = (c / 255)^2.4, stored in FP16, and
 //! `encode` writes V = L^(1 / 2.2) (host pure 2.2), so the expected code is
 //! round(255 * (c / 255)^(2.4 / 2.2)). The FP16 intermediate shifts it by well under one code; the
 //! test allows 1.

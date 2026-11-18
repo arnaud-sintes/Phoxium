@@ -17,6 +17,7 @@
 pub mod beam;
 pub mod colour;
 pub mod geometry;
+pub mod gun;
 pub mod mask;
 pub mod optics;
 pub mod output;

@@ -6,14 +6,15 @@
 //!
 //! # Decode (SRC-5)
 //!
-//! The native raster holds T(V) with T the `source` transfer that stands in for the gun law until T-34, and
-//! V the drive voltage (contract of `decode.comp`, in [0, 1]):
-//! - `drive_voltage`: V = code / 255. With T = identity the raster holds V: exact to FP16 precision. The
-//!   NVIDIA driver truncates to FP16, so the relative error is below 2^-10 = 9.8e-4 (see `gpu_identity.rs`).
-//! - `srgb`: V = srgb_eotf(code / 255)^(1 / gamma), so T(V) = srgb_eotf(code / 255): the raster holds the
-//!   sRGB linear light. Code 20 at gamma 2.4: u = (20 / 255 + 0.055) / 1.055 = 0.126475, L = u^2.4 = 0.006995
-//!   (the plan's value, +-2 %), V = u = 0.126475. The pure 2.4 law on the code itself would give 0.00222.
-//!   The FP16 relative error 2^-10 on L is divided by gamma on V (4e-4).
+//! The native raster holds V, the drive voltage (contract of `decode.comp`, in [0, 1]); since T-34 the gun
+//! law is applied by the `gun` slot, whose image holds the beam current T(V) (default: pure power 2.4):
+//! - `drive_voltage`: V = code / 255, exact to FP16 precision. The NVIDIA driver truncates to FP16, so
+//!   the relative error is below 2^-10 = 9.8e-4 (see `gpu_identity.rs`); the `gun` image V^2.4 has the
+//!   error of V amplified by 2.4 plus its own truncation, (2.4 + 1) 2^-10 = 3.3e-3.
+//! - `srgb`: V = srgb_eotf(code / 255)^(1 / gun_gamma), so the pure power gun gives T(V) =
+//!   srgb_eotf(code / 255): the `gun` image holds the sRGB linear light. Code 20 at gamma 2.4:
+//!   u = (20 / 255 + 0.055) / 1.055 = 0.126475, L = u^2.4 = 0.006995 (the plan's value, +-2 %),
+//!   V = u = 0.126475. The pure 2.4 law on the code itself would give 0.00222.
 //!
 //! # Placement (OUT-7, PHY-3)
 //!
@@ -27,7 +28,7 @@ mod common;
 use crt_model::colour::srgb_eotf;
 use crt_model::geometry::{px_per_triad, triads_across, triads_per_source_px};
 use crt_model::tube;
-use ultimatecrt::gpu::{FrameConstants, Headless, Rendered, Settings, SourceFrame, TargetFormat, Transfer};
+use ultimatecrt::gpu::{FrameConstants, Headless, Rendered, Settings, SourceFrame, TargetFormat, Transfer, AMP_K};
 use ultimatecrt::params::{ParamValue, Params, RASTER_ASPECT_FILL_TUBE, SOURCE_EOTF_SRGB};
 use ultimatecrt::placement::{place, PlacementInput, RasterAspect};
 use ultimatecrt::scaling::View;
@@ -67,7 +68,7 @@ fn render(
     target: (u32, u32),
 ) -> Rendered {
     let settings = Settings {
-        source: t,
+        source: Transfer::Identity,
         host: t,
         integer_scale: false,
     };
@@ -105,14 +106,41 @@ fn assert_native(r: &Rendered, what: &str, expect: impl Fn(f64) -> f64) {
     }
 }
 
+/// Asserts that every texel of the `gun` image (beam current) equals `expect(code)` within the error of the
+/// drive voltage amplified by the exponent `gamma` plus the FP16 truncation: (gamma + 1) 2^-10 relative.
+fn assert_gun(r: &Rendered, what: &str, gamma: f64, expect: impl Fn(f64) -> f64) {
+    let gun = r.stage("gun").expect("gun slot ran");
+    assert_eq!((gun.width, gun.height), (W * AMP_K, H), "{what}: gun size");
+    for y in 0..H {
+        for x in 0..W * AMP_K {
+            let p = gun.pixel(x, y);
+            for (c, &texel) in p.iter().take(3).enumerate() {
+                let k = code(c, x / AMP_K, y);
+                let want = expect(f64::from(k));
+                let got = f64::from(texel);
+                assert!(
+                    (got - want).abs() <= want * (gamma + 1.0) * FP16_REL + FP16_SUBNORMAL_STEP,
+                    "{what}: gun ({x}, {y}) channel {c} code {k}: {got} vs {want}"
+                );
+            }
+        }
+    }
+}
+
+fn identity_srgb_params() -> Params {
+    let mut p = srgb_params();
+    assert!(p.set("gun_gamma", ParamValue::F32(1.0)));
+    p
+}
+
 fn srgb_params() -> Params {
     let mut p = Params::default();
     assert!(p.set("source_eotf", ParamValue::Enum(SOURCE_EOTF_SRGB)));
     p
 }
 
-/// `drive_voltage` (the default): the raster holds V = code / 255 for all 256 codes of every channel when
-/// the stand-in transfer is the identity.
+/// `drive_voltage` (the default): the native raster holds V = code / 255 for all 256 codes of every
+/// channel, and the `gun` image holds the default law V^2.4.
 #[test]
 fn drive_voltage_mode_holds_code_over_255() {
     let test = "stage_source drive_voltage";
@@ -129,22 +157,15 @@ fn drive_voltage_mode_holds_code_over_255() {
         (W, H),
     );
     assert_native(&r, test, tube::drive_voltage_from_code);
-    // And through the stand-in gun law: V^2.4 (the default of the live picture).
-    let r = render(
-        &mut gpu,
-        &ramp(W, H),
-        (W, H),
-        Transfer::Power(2.4),
-        &Params::default(),
-        (W, H),
-    );
-    assert_native(&r, test, |c| tube::drive_voltage_from_code(c).powf(2.4));
+    // And through the gun law: V^2.4 (the default of the live picture).
+    assert_gun(&r, test, 2.4, |c| tube::drive_voltage_from_code(c).powf(2.4));
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
 
-/// `srgb` with gun gamma 2.4: every channel holds the sRGB linear light of its code, code 20 holds
-/// 0.006995 +-2 %, and the drive voltage L^(1/2.4) matches the oracle (V in [0, 1] contract).
+/// `srgb` with gun gamma 2.4: the `gun` image holds the sRGB linear light of every code, code 20 holds
+/// 0.006995 +-2 %, and the drive voltage in the native raster, L^(1/2.4), matches the oracle (V in
+/// [0, 1] contract).
 #[test]
 fn srgb_mode_gives_srgb_luminance_through_the_gun_gamma() {
     let test = "stage_source srgb";
@@ -160,14 +181,13 @@ fn srgb_mode_gives_srgb_luminance_through_the_gun_gamma() {
         &srgb_params(),
         (W, H),
     );
-    assert_native(&r, test, |c| srgb_eotf(c / 255.0));
-    // Code 20 is the red channel of pixel x = 20 (the plan's acceptance number).
-    let l20 = f64::from(r.native.pixel(20, 0)[0]);
+    assert_gun(&r, test, 2.4, |c| srgb_eotf(c / 255.0));
+    // Code 20 is the red channel of pixel x = 20 (the plan's acceptance number): beam current.
+    let l20 = f64::from(r.stage("gun").unwrap().pixel(20 * AMP_K, 0)[0]);
     assert!((l20 - 0.006995).abs() <= 0.006995 * 0.02, "code 20: beam current {l20}");
-    // The drive voltage behind it: V = L^(1/gamma), within [0, 1], equal to the oracle's.
+    // The drive voltage behind it, in the native raster: within [0, 1], equal to the oracle's.
     for x in 0..W {
-        let l = f64::from(r.native.pixel(x, 0)[0]);
-        let v = l.powf(1.0 / 2.4);
+        let v = f64::from(r.native.pixel(x, 0)[0]);
         let want = tube::drive_voltage_from_srgb(f64::from(code(0, x, 0)), 2.4);
         assert!((0.0..=1.0 + 1e-3).contains(&v), "code {x}: V {v}");
         assert!(
@@ -184,14 +204,15 @@ fn srgb_mode_gives_srgb_luminance_through_the_gun_gamma() {
         &Params::default(),
         (W, H),
     );
-    let darker = f64::from(d.native.pixel(20, 0)[0]);
+    let darker = f64::from(d.stage("gun").unwrap().pixel(20 * AMP_K, 0)[0]);
     assert!((darker - 0.00222).abs() <= 0.00222 * 0.01, "{darker}");
     assert!(l20 > 3.0 * darker);
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
 
-/// `srgb` with an identity tube law (gamma 1): V = L, the raster holds the linear light.
+/// `srgb` with an identity gun law (gun gamma 1): V = L, the native raster and the `gun` image hold the
+/// linear light.
 #[test]
 fn srgb_mode_with_identity_tube_is_linear_light() {
     let test = "stage_source srgb identity";
@@ -204,10 +225,11 @@ fn srgb_mode_with_identity_tube_is_linear_light() {
         &ramp(W, H),
         (W, H),
         Transfer::Identity,
-        &srgb_params(),
+        &identity_srgb_params(),
         (W, H),
     );
     assert_native(&r, test, |c| srgb_eotf(c / 255.0));
+    assert_gun(&r, test, 1.0, |c| srgb_eotf(c / 255.0));
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

@@ -91,7 +91,7 @@ mod tests {
                 }),
                 View::full(w, h),
                 &Settings::identity(),
-                &Params::default(),
+                &Params::identity_gun(),
                 (w, h),
                 TargetFormat::Bgra8Unorm,
             )

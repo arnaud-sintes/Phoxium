@@ -122,7 +122,7 @@ impl Headless {
             Some(frame),
             View::full(width, height),
             &Settings::identity(),
-            &Params::default(),
+            &Params::identity_gun(),
             (width, height),
             format,
         )?;
@@ -823,6 +823,8 @@ mod tests {
             }
         };
         let counter = gpu.validation_counter();
+        // The test is about frame state, not the physics: bypass every chain slot (exact identity).
+        gpu.enable_only(&[]).expect("bypass every slot");
         let (w, h) = (3u32, 2u32);
         let bgra: Vec<u8> = (0..w * h)
             .flat_map(|i| [i as u8 * 40 + 3, i as u8 * 30 + 7, i as u8 * 20 + 11, 255])

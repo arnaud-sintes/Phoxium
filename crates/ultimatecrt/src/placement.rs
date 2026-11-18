@@ -145,6 +145,7 @@ impl FrameConstants {
             ],
             px_per_mm: p.px_per_mm as f32,
             line_pitch_mm: p.line_pitch_mm as f32,
+            white_gain: crate::white::white_gains(params),
             ..Self::new(native, target, integer)
         }
     }
