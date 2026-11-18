@@ -40,3 +40,32 @@ tag = "E"
 source = "CRT.md Research pass T-63, preset values item 1: 0.07 to 1 times the power-law term follows the Sony patent Ni-killer residual ratios (0.072 / 0.966, US 5,825,124); applying the ratio to the power-law term alone is an assumption"
 description = "Strength of the long power-law afterglow tail per channel (red, green, blue), relative to the measured P22 tail (1). Low values model Ni-killed sulfide phosphors with a shorter trail. Red has no power-law tail, so its value has no effect."
 group = "Phosphor"
+
+# T-40: phosphor saturation (efficiency droop at high current density; CRT.md "Saturation and ageing"; QUESTIONS
+# PHY-14, saturation item). Applied to the light of each tube pixel BEFORE the persistence history (the trail is
+# the decay of light already emitted, it does not saturate again): L = I / (1 + s I) per channel, small-signal
+# gain 1, maximum light 1 / s. Oracle crates/crt-model/src/phosphor.rs (`saturate`).
+
+[[param]]
+id = "phosphor_saturation"
+stage = "phosphor"
+type = "bool"
+unit = "1"
+default = false
+tag = "E"
+source = "CRT.md Saturation and ageing: sulfide phosphors (blue ZnS:Ag, green ZnS:Cu,Al) saturate at high current density, oxysulfide red is more linear, extreme highlights shift toward yellow-red (a few percent or a few hundred K in direct-view tubes) [S][E]; the curve form is an estimate [E]"
+description = "Phosphor saturation on or off. On: the light of every pixel is compressed per channel (blue and green more than red), so bright highlights lose output and shift toward yellow-red; dark and mid tones are almost unchanged. Off: the picture passes unchanged."
+group = "Phosphor"
+
+[[param]]
+id = "phosphor_saturation_rgb"
+stage = "phosphor"
+type = "vec3"
+unit = "1"
+default = [0.01, 0.03, 0.06]
+min = 0.0
+max = 1.0
+tag = "E"
+source = "CRT.md Saturation and ageing (qualitative: blue and green sulfides saturate more than red; no measured curve in the research, T-63 found none); defaults sized so that a white highlight (light 1) gives 0.990, 0.971, 0.943 (blue relative to red -4.7 %, 'a few percent' of warm shift) [E]; per unit of the white light of the channel, applied to the area-averaged light of the tube pixel [E]"
+description = "Saturation strength s per channel (red, green, blue): the light I of a pixel (1 = white) comes out as I / (1 + s I). 0 is linear; the output never exceeds 1 / s. At light 1 the loss is s / (1 + s) (1, 3, 6 % by default); small values change nothing (the relative loss at light I is about s I). Used only while Phosphor saturation is on."
+group = "Phosphor"

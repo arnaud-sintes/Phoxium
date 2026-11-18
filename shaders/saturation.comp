@@ -1,0 +1,25 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `phosphor`, saturation without persistence (T-40; src/gpu/stages/phosphor.rs): tube domain -> tube
+// domain, linear light, L = I / (1 + s I) per channel (shaders/include/saturation.glsl). Used while
+// params.phosphor_saturation is on and params.phosphor_persistence is off; with both on, phosphor.comp
+// applies the same function to its input before the persistence history. The alpha is copied.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "saturation.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(light_out)))) {
+        return;
+    }
+    vec4 x = texelFetch(light_in, p, 0);
+    imageStore(light_out, p, vec4(phosphor_saturate(x.rgb), x.a));
+}

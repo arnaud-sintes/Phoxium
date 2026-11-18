@@ -4,7 +4,9 @@
 // Slot `phosphor` (ARCHITECTURE 3.7, image contract; T-41, CRT.md rule 8 and "Decay and persistence",
 // QUESTIONS PHY-12): tube domain -> tube domain, linear light. Persistence as a frame feedback at the output
 // frame rate: the input x is the light a frame would emit without persistence (frame-integrated), the
-// output adds the afterglow of the previous frames.
+// output adds the afterglow of the previous frames. With params.phosphor_saturation on (T-40), x is first
+// compressed per channel, x <- x / (1 + s x), so the history, and a static picture's steady state, hold
+// the saturated light: the persistence stage itself has gain 1.
 //
 // Per channel, four geometric terms j with per-frame ratio rho_j and amplitude c_j (computed on the CPU by
 // crt_model::phosphor::DecayFit::frame_feedback, see src/gpu/stages/phosphor.rs), history S_j:
@@ -21,6 +23,7 @@
 
 #include "params.glsl"
 #include "common.glsl"
+#include "saturation.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -46,6 +49,11 @@ void main() {
         return;
     }
     vec4 x = texelFetch(light_in, p, 0);
+    if (params.phosphor_saturation) {
+        // T-40: the light of the frame saturates first (instantaneous drive); the history below only
+        // holds light already emitted, which decays without saturating again.
+        x.rgb = phosphor_saturate(x.rgb);
+    }
     vec4 h0 = vec4(0.0);
     vec4 h1 = vec4(0.0);
     vec4 h2 = vec4(0.0);
