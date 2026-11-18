@@ -1,0 +1,40 @@
+schema = 1
+id = "tv-13in"
+name = "13 in consumer TV (GE class)"
+label = "based on published data for a 13 in GE television (pitch measured by a third party)"
+notes = """
+Small consumer set with a coarse slot mask. Pitch 0.60 mm is measured by Goldwasser (CRT.md); about 440 triads across. Everything else is a consumer-TV class estimate.
+No CRT.md data for this set, so these keep their table defaults: tube primaries and white (SMPTE-C, D65), slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma, ABL (off: no value for a 13 in set), raster breathing, source clock. The visible size is derived from the triad count (440 x 0.60 = 264 mm wide), the same size as the 14 in BVM.
+Spot: CRT.md gives no row for this set; the consumer TV class (mid 0.7 to 1.5 mm, peak 1.5 to 2 mm) is used with 0.75 -> 1.5 mm, n = 0.42 (ratio 2.0 stays under the zero-floor bound 2.01).
+Amplifier: 5 MHz (cheap consumer RGB 4 to 8 MHz, K = 4 is enough up to 5 MHz). Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
+Output: tube-faithful, dithered. D65 does not clip at exposure 1.
+Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness (10 mm estimate), halation.
+"""
+
+[params]
+tube_visible_height_mm = 198.0
+tube_aspect = 1.3333334
+mask_type = "slot_mask"
+mask_pitch_mm = 0.60
+beam_fwhm_mid_mm = 0.75
+beam_fwhm_peak_mm = 1.5
+beam_growth_exponent = 0.42
+amp_bandwidth_mhz = 5.0
+amp_fall_rise_ratio = 0.8
+exposure = 1.0
+output_match_srgb = false
+output_dither = "noise"
+
+[provenance]
+tube_visible_height_mm = "D: CRT.md Consumer TVs table, about 440 triads x 0.60 mm = 264 mm wide, 4:3"
+tube_aspect = "S: CRT.md Reference scales, 4:3"
+mask_type = "S: CRT.md Consumer TVs table, 13 in GE TV slot"
+mask_pitch_mm = "S: CRT.md Consumer TVs table, 13 in GE TV 0.60 mm (Goldwasser)"
+beam_fwhm_mid_mm = "E: CRT.md Measured and estimated spot sizes, consumer TV class 0.7 to 1.5 mm"
+beam_fwhm_peak_mm = "E: CRT.md Measured and estimated spot sizes, consumer TV class peak 1.5 to 2 mm"
+beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42, floor non-negative for 0.75 -> 1.5"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, cheap consumer TV RGB 4 to 8 MHz"
+amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
+exposure = "D: D65 white, no clip"
+output_match_srgb = "E: COL-2, tube-faithful presets"
+output_dither = "E: COL-4, noise dither for presets"

@@ -1,0 +1,49 @@
+schema = 1
+id = "vga-15in"
+name = "15 in VGA monitor (delta dot)"
+label = "based on published data for 15 in delta-dot VGA monitors (class values, no single model)"
+notes = """
+DOS and PC games of the 1990s. Entry-level 14 to 15 in class: 0.28 mm diagonal dot pitch (about 0.242 mm horizontal), sourced class values; spot sizes are estimates.
+Parameters not listed keep their table defaults: dot fill (0.45), edge softness, beam tail, gun law and gamma (power 2.4, inside the CRT.md range 2.35 to 2.5), ABL (off), source clock (a VGA source profile sets the pixel clock and the double scan).
+Pitch is the diagonal dot pitch P (the horizontal triad pitch is 0.866 P).
+White: 9300 K default as the tube white (D93), P22 primaries (about SMPTE-C). D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or white clips.
+Spot growth: 0.3 -> 0.45 mm, n = 0.27 keeps a non-negative floor (ratio 1.5, bound 1.567).
+Amplifier: 100 MHz (PC monitor class, lower end for a 15 in VGA tube): amp_k = 16 recommended above 5 MHz. Ratio 1.0.
+Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 10 mm (estimate, no value below 400 mm diagonal), halation (10 mm / 2 %).
+"""
+
+[params]
+tube_visible_height_mm = 213.0
+tube_aspect = 1.3333334
+mask_type = "delta"
+mask_pitch_mm = 0.28
+tube_red_xy = [0.635, 0.340]
+tube_green_xy = [0.305, 0.595]
+tube_blue_xy = [0.155, 0.070]
+tube_white_xy = [0.2831, 0.2971]
+beam_fwhm_mid_mm = 0.3
+beam_fwhm_peak_mm = 0.45
+beam_growth_exponent = 0.27
+amp_bandwidth_mhz = 100.0
+amp_fall_rise_ratio = 1.0
+exposure = 0.74
+output_match_srgb = false
+output_dither = "noise"
+
+[provenance]
+tube_visible_height_mm = "D: CRT.md Reference scales, 15 in VGA monitor 284 x 213 mm"
+tube_aspect = "S: CRT.md Reference scales, 4:3"
+mask_type = "S: CRT.md PC monitors table, entry-level 14 to 15 in dot"
+mask_pitch_mm = "S: CRT.md PC monitors table, 0.28 mm diagonal (0.24 to 0.25 horizontal)"
+tube_red_xy = "S: CRT.md Chromaticity, measured P22 (Starting presets: P22, about SMPTE-C)"
+tube_green_xy = "S: CRT.md Chromaticity, measured P22"
+tube_blue_xy = "S: CRT.md Chromaticity, measured P22"
+tube_white_xy = "S: CRT.md White point, 9300 K + 8 MPCD (D93), Starting presets 9300 K default"
+beam_fwhm_mid_mm = "E: CRT.md Starting presets, 15 in VGA 0.3 mm mid"
+beam_fwhm_peak_mm = "E: CRT.md Starting presets, 15 in VGA 0.45 mm at peak"
+beam_growth_exponent = "S: CRT.md T-63 item 7, monitor-class about 0.27 (Hitachi 51 cm, US 5,814,930)"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, PC monitor 100 to 400 MHz (lower end)"
+amp_fall_rise_ratio = "E: symmetric, amplifier not the limit"
+exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
+output_match_srgb = "E: COL-2, tube-faithful presets"
+output_dither = "E: COL-4, noise dither for presets"

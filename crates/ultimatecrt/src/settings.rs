@@ -197,7 +197,7 @@ impl Settings {
     }
 }
 
-fn to_value(v: ParamValue) -> toml::Value {
+pub(crate) fn to_value(v: ParamValue) -> toml::Value {
     use toml::Value as V;
     let arr = |a: &[f32]| V::Array(a.iter().map(|x| V::Float(*x as f64)).collect());
     match v {
@@ -223,7 +223,7 @@ fn floats<const N: usize>(v: &toml::Value) -> Option<[f32; N]> {
     Some(out)
 }
 
-fn from_value(ty: ParamType, v: &toml::Value) -> Option<ParamValue> {
+pub(crate) fn from_value(ty: ParamType, v: &toml::Value) -> Option<ParamValue> {
     Some(match ty {
         ParamType::F32 => ParamValue::F32(v.as_float().or_else(|| v.as_integer().map(|i| i as f64))? as f32),
         ParamType::I32 => ParamValue::I32(i32::try_from(v.as_integer()?).ok()?),

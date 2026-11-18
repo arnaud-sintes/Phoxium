@@ -18,17 +18,20 @@ use std::path::Path;
 use crate::{
     gpu::{Headless, ImageF32, Settings, SourceFrame, TargetFormat},
     params::{self, ParamType, ParamValue, Params},
-    patterns, scaling,
+    patterns,
+    presets::{self, Library, Origin, Preset},
+    scaling, settings,
     source::Source,
     Res,
 };
 
 pub const USAGE: &str =
     "Usage: ultimatecrt render (--pattern <name[:args]> [--pattern-size <WxH>] | --image <file.png>)
-                         [--set <id=value>]... [--size <WxH>] --out <file.png|file.pfm>
+                         [--preset <id|file.toml>] [--set <id=value>]... [--size <WxH>] --out <file.png|file.pfm>
                          [--validation]
   Renders one frame offline through the GPU pipeline (no window) and writes an 8-bit PNG, or a float
   PFM when the file name ends in .pfm. --size is the output size (default: the source size).
+  --preset applies a tube preset (shipped or user id, or a preset file) before --set.
   --set overrides a parameter by id; vectors are comma separated, booleans are true/false, enums
   take the value name.";
 
@@ -38,6 +41,8 @@ pub struct RenderArgs {
     pub pattern: Option<String>,
     pub pattern_size: Option<(u32, u32)>,
     pub image: Option<String>,
+    /// Tube preset id or file, applied before `--set`.
+    pub preset: Option<String>,
     pub sets: Vec<(String, String)>,
     pub size: Option<(u32, u32)>,
     pub out: Option<String>,
@@ -56,6 +61,7 @@ pub fn parse(args: &[String]) -> Res<RenderArgs> {
             "--image" => a.image = Some(value("--image")?),
             "--size" => a.size = Some(patterns::parse_size(&value("--size")?)?),
             "--out" => a.out = Some(value("--out")?),
+            "--preset" => a.preset = Some(value("--preset")?),
             "--validation" => a.validation = true,
             "--set" => {
                 let v = value("--set")?;
@@ -136,6 +142,21 @@ pub fn render_source(
         .output)
 }
 
+/// A preset by file path (when `spec` names a file) or by id among the shipped and user presets.
+pub fn resolve_preset(spec: &str) -> Res<Preset> {
+    let path = Path::new(spec);
+    if path.is_file() {
+        let text = std::fs::read_to_string(path)?;
+        return Ok(Preset::parse(spec, &text, Origin::User(path.to_path_buf()))?);
+    }
+    let dir = settings::default_dir().map(|d| presets::user_dir(&d));
+    let lib = Library::load(dir.as_deref());
+    lib.find(spec).cloned().ok_or_else(|| {
+        let ids: Vec<&str> = lib.list().iter().map(|p| p.id.as_str()).collect();
+        format!("--preset: no preset or file \"{spec}\" (presets: {})", ids.join(", ")).into()
+    })
+}
+
 /// Runs the `render` command with the arguments after `render`.
 pub fn run(args: &[String]) -> Res<()> {
     let a = parse(args)?;
@@ -151,6 +172,9 @@ pub fn run(args: &[String]) -> Res<()> {
     };
     let source = Source::choose(a.pattern.as_deref(), a.pattern_size, a.image.as_deref())?;
     let mut p = Params::default();
+    if let Some(preset) = &a.preset {
+        p = resolve_preset(preset)?.params();
+    }
     for (id, v) in &a.sets {
         set_param(&mut p, id, v)?;
     }

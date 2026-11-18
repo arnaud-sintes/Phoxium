@@ -10,6 +10,7 @@ pub mod output;
 pub mod params;
 pub mod patterns;
 pub mod placement;
+pub mod presets;
 pub mod render_cmd;
 pub mod scaling;
 pub mod settings;
