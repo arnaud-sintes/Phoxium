@@ -7,7 +7,7 @@ use windows::Win32::{
     UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
 };
 
-use crate::{capture, cli, gpu, output, scaling, sources, Res};
+use crate::{capture, cli, gpu, output, scaling, source, sources, Res};
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
@@ -52,22 +52,42 @@ pub fn run() -> Res<()> {
         return Ok(());
     }
 
-    let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
-    let source = sources::find_by_title(&needle)
-        .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
-    println!(
-        "source: \"{}\" ({}x{}, class {})",
-        source.title, source.width, source.height, source.class
-    );
-
-    let capture = capture::Capture::start(source.hwnd, !args.no_crop)?;
-    println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
-
+    let kind = source::Source::choose(args.pattern.as_deref(), args.pattern_size, args.image.as_deref())?;
+    let synthetic = !matches!(kind, source::Source::Capture);
+    let mut synthetic_n = 0u64;
+    let (capture, follow) = if synthetic {
+        (None, windows::Win32::Foundation::HWND::default())
+    } else {
+        let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
+        let source = sources::find_by_title(&needle)
+            .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
+        println!(
+            "source: \"{}\" ({}x{}, class {})",
+            source.title, source.width, source.height, source.class
+        );
+        let capture = capture::Capture::start(source.hwnd, !args.no_crop)?;
+        println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
+        (Some(capture), source.hwnd)
+    };
+    // Next frame of the source: the capture, or a pattern or image (static ones only once).
+    let mut poll = |frame: &mut capture::Frame| -> Res<bool> {
+        match &capture {
+            Some(c) => Ok(c.take_frame(frame)),
+            None if synthetic_n == 0 || kind.is_animated() => {
+                if let Some(f) = kind.frame(synthetic_n)? {
+                    *frame = f;
+                }
+                synthetic_n += 1;
+                Ok(true)
+            }
+            None => Ok(false),
+        }
+    };
     let mut frame = capture::Frame::default();
 
     if let Some(path) = &args.save_capture {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !capture.take_frame(&mut frame) {
+        while !poll(&mut frame)? {
             if Instant::now() > deadline {
                 return Err(NO_FRAME.into());
             }
@@ -80,7 +100,7 @@ pub fn run() -> Res<()> {
 
     // Wait for the first frame to size the window.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !capture.take_frame(&mut frame) {
+    while !poll(&mut frame)? {
         if Instant::now() > deadline {
             return Err(NO_FRAME.into());
         }
@@ -91,7 +111,7 @@ pub fn run() -> Res<()> {
         fullscreen: args.fullscreen,
         no_activate: args.no_activate,
         monitor: args.monitor,
-        follow: source.hwnd,
+        follow,
         client_size: (frame.width as i32 * scale, frame.height as i32 * scale),
     })?;
     let mut renderer = gpu::Renderer::new(
@@ -119,13 +139,13 @@ pub fn run() -> Res<()> {
     let mut detect_key = (0u32, 0u32, None);
     let mut view = scaling::View::full(frame.width, frame.height);
     loop {
-        if !output::pump() || capture.is_closed() {
+        if !output::pump() || capture.as_ref().is_some_and(|c| c.is_closed()) {
             break;
         }
         if args.exit_after.is_some_and(|s| start.elapsed().as_secs_f64() > s) {
             break;
         }
-        if capture.take_frame(&mut frame) {
+        if poll(&mut frame)? {
             fresh = true;
             let full = scaling::Rect {
                 x: 0,
@@ -139,7 +159,7 @@ pub fn run() -> Res<()> {
                 detect_key = key;
                 detector.reset();
             }
-            let div = match args.divisor {
+            let div = match args.divisor.or(synthetic.then_some((1, 1))) {
                 Some(d) => d,
                 None => {
                     let was_locked = detector.is_locked();
@@ -169,7 +189,7 @@ pub fn run() -> Res<()> {
         renders += 1;
 
         if stat_time.elapsed() >= Duration::from_secs(1) {
-            let captured = capture.frames_captured();
+            let captured = capture.as_ref().map_or(0, |c| c.frames_captured());
             let secs = stat_time.elapsed().as_secs_f64();
             output::set_title(
                 win.hwnd,
