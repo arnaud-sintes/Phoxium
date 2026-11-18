@@ -1343,6 +1343,9 @@ impl Pipeline {
             target.format,
         );
         self.timer.mark(d, cb, cur, self.timer.encode(), false);
+        // A fence wait does not make device writes visible to the host: the clip counters `encode`
+        // wrote are read on the CPU after the frame (windowed `Renderer::render` and headless alike).
+        barrier_to_host(d, cb, false);
         Ok(cb)
     }
 
@@ -1542,6 +1545,26 @@ pub(super) fn full_copy(size: (u32, u32)) -> vk::BufferImageCopy {
         })
 }
 
+/// Records the barrier that makes the shader storage writes (the clip counters of `encode`), and with
+/// `copies` the transfer writes (readbacks), visible to the host reads that follow the frame's fence
+/// wait. Shared by the windowed and the headless paths.
+///
+/// # Safety
+/// `cb` is a command buffer in the recording state of `d`.
+pub(super) unsafe fn barrier_to_host(d: &ash::Device, cb: vk::CommandBuffer, copies: bool) {
+    let mut src_stage = vk::PipelineStageFlags2::FRAGMENT_SHADER;
+    let mut src_access = vk::AccessFlags2::SHADER_STORAGE_WRITE;
+    if copies {
+        src_stage |= vk::PipelineStageFlags2::COPY;
+        src_access |= vk::AccessFlags2::TRANSFER_WRITE;
+    }
+    let to_host = [vk::MemoryBarrier2::default()
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(vk::PipelineStageFlags2::HOST)
+        .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+    d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&to_host));
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -19,7 +19,7 @@
 //!
 //! PVM-20M4U class tube, 290 mm high, 4:3 (386.667 mm wide), 2560 x 1440 output, raster filling the tube:
 //! 1440 / 290 = 4.9655 px/mm; 1920 px wide; 240 lines at 290 / 240 = 1.2083 mm = 6.000 px; 0.31 mm triads
-//! 1.5393 px (CRT.md quotes 1.54 = 1920 / 1245 with the rounded 386 mm width); 1247.31 triads over 256 source
+//! 1.5393 px (derived from CRT.md's 1245 triads (rounded 386 mm width) = 1.542; exact value 1.5393 for 4:3 on 290 mm); 1247.31 triads over 256 source
 //! columns = 4.872 triads per source pixel.
 
 mod common;
@@ -304,7 +304,7 @@ fn pvm_20m4u_scale_on_2560_by_1440() {
         ..pvm_input((256, 240), RasterAspect::FillTube)
     });
     assert!((two.line_pitch_mm - p.line_pitch_mm / 2.0).abs() < 1e-12);
-    // Triads: 386.667 / 0.31 = 1247.31 across, 1920 px wide, 1.539 px per triad (CRT.md: 1.54), and
+    // Triads: 386.667 / 0.31 = 1247.31 across, 1920 px wide, 1.539 px per triad (derived from CRT.md's 1245 triads = 1.542), and
     // 4.872 per 256-column source pixel.
     let width_px = f64::from(p.rect_px[2] - p.rect_px[0]);
     assert_eq!(width_px, 1920.0);
@@ -315,7 +315,7 @@ fn pvm_20m4u_scale_on_2560_by_1440() {
     assert!((per_triad - p.px_per_mm * 0.31).abs() < 1e-9);
     assert!(
         (per_triad - 1.542).abs() / 1.542 < 2e-3,
-        "against CRT.md 1.54: {per_triad}"
+        "against the 1.542 derived from CRT.md's 1245 triads: {per_triad}"
     );
     assert!((triads_per_source_px(across, 256.0) - 4.872).abs() < 1e-3);
 }

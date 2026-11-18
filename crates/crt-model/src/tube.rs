@@ -91,8 +91,8 @@ mod tests {
         assert!(close(scanline_pitch_mm(290.0, 240.0, 2.0), 0.604_167, 1e-6));
         // Host pixels per scanline: 6.000 (1.20833 x 4.9655).
         assert!(close(px_per_triad_at(s, 1.208_333_333), 6.0, 1e-6));
-        // 0.31 mm triads: 4.9655 x 0.31 = 1.5393 px per triad. CRT.md's 1.54 (1920 / 1245) uses the
-        // rounded 386 mm width: 0.2 % apart.
+        // 0.31 mm triads: 4.9655 x 0.31 = 1.5393 px per triad. Derived from CRT.md's 1245 triads (rounded 386 mm width) = 1.542;
+        // exact value 1.5393 for 4:3 on 290 mm: 0.2 % apart.
         let per_triad = px_per_triad_at(s, 0.31);
         assert!(close(per_triad, 1.539_31, 1e-5), "{per_triad}");
         let crt_md = px_per_triad(1920.0, triads_across(386.0, 0.31));
