@@ -255,11 +255,13 @@ Reference scales for 4:3 sources, viewable diagonal = nominal − 1 in:
 | 20 in BVM-20F1U | 386 × 290 | 320 × 240 | 1.21 | 0.30 | 1287 | 4.0 |
 | 20 in PVM-20M4U | 386 × 290 | 320 × 240 | 1.21 | 0.31 | 1245 | 3.9 |
 | 20 in consumer TV | 386 × 290 | 320 × 240 | 1.21 | 0.65 | 594 | 1.9 |
-| 26 in viewable consumer TV | 528 × 396 | 320 × 240 | 1.65 | 0.80 | 660 | 2.0 |
-| 15 in VGA monitor | 280 × 210 | 640 × 480 | 0.44 | 0.242 horizontal | 1157 | 1.8 |
-| 15 in VGA, 320 × 200 doubled | 280 × 210 | 320 × 200 | 0.53 per scanline | 0.242 horizontal | 1157 | 3.6 |
+| 26 in viewable consumer TV | 528 × 396 | 320 × 240 | 1.65 | 0.80 | 660 | 2.1 [D] |
+| 15 in VGA monitor | 284 × 213 [D] | 640 × 480 | 0.44 | 0.242 horizontal | 1176 [D] | 1.8 |
+| 15 in VGA, 320 × 200 doubled | 284 × 213 [D] | 320 × 200 | 0.53 per scanline | 0.242 horizontal | 1176 [D] | 3.7 [D] |
 | 17 in monitor | 325 × 244 | 1024 × 768 | 0.32 | 0.25 | 1300 | 1.27 |
-| 21 in monitor | 402 × 302 | 1600 × 1200 | 0.25 | 0.22 | 1827 | 1.14 |
+| 21 in monitor | 406 × 305 [D] | 1600 × 1200 | 0.25 | 0.22 | 1847 [D] | 1.15 [D] |
+
+- [D] T-14 follow-up: the 15 in and 21 in rows now follow the stated rule (14 in: 284.5 × 213.4 mm, 284.5 / 0.242 = 1176; 20 in: 406.4 × 304.8 mm, 406.4 / 0.22 = 1847, 1847 / 1600 = 1.15; 1176 / 320 = 3.7). The 26 in row: 660 / 320 = 2.06, rounded 2.1.
 
 For a 256-wide source, multiply triads per source pixel by 1.25.
 Line pitch at 480 lines is half the 240-line value.
@@ -707,11 +709,12 @@ k = Lw / (1 + b)^2.6
 
 | Device class | RGB video bandwidth | Rise time | At 256 to 320 px lines |
 |---|---|---|---|
-| Cheap consumer TV RGB/SCART | 4 to 8 MHz | 58 to 88 ns | 0.4 to 0.6 px of edge softness |
+| Cheap consumer TV RGB/SCART | 4 to 8 MHz | 44 to 88 ns [D] | 0.2 to 0.55 px of edge softness [D] |
 | PVM-xxM2U class | 8 to 15 MHz | 23 to 44 ns | 0.1 to 0.25 px |
 | PVM/BVM high-res | 20 to 30 MHz | 12 to 18 ns | very sharp |
 | PC monitor | 100 to 400 MHz | 1 to 3 ns | amplifier not the limit; spot is |
 
+- Consumer row corrected (T-14 follow-up): 0.35 / 8 MHz = 44 ns (58 ns is 6 MHz). Edge softness = rise time over the pixel period of a 52.6 µs active line: 44 / 205 = 0.21 px (256 px, 205 ns per pixel) to 88 / 164 = 0.54 px (320 px, 164 ns per pixel). [D]
 - At 1600×1200@85 Hz the pixel clock is 229.5 MHz, so even PC amplifier bandwidth is near its limit. [D]
 - **Adjacent-pixel nonlinearity** (Mulligan and Stone 1989; Klein, Hu and Carney 1996; Pelli 1997): the cathode drive amplifier slews differently up and down, so an isolated bright pixel is dimmer than a pixel in a run. [S]
   - A one-pixel vertical line is dimmer than a one-pixel horizontal line, by more than 50 % in bad cases.
