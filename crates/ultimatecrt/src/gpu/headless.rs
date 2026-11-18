@@ -68,6 +68,8 @@ pub struct Rendered {
     /// Every chain slot that ran or was bypassed in the frame, in order, with the image it left for the
     /// next one (a bypassed same-domain slot shows its input). Slots before an injected image are absent.
     pub stages: Vec<(&'static str, ImageF32)>,
+    /// Pixels the output transform clipped in this frame (T-46).
+    pub clip: ClipCounts,
 }
 
 impl Rendered {
@@ -336,8 +338,8 @@ impl Headless {
             images.push((r, size, fmt));
         }
         let to_host = [vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .src_stage_mask(vk::PipelineStageFlags2::COPY | vk::PipelineStageFlags2::FRAGMENT_SHADER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_STORAGE_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::HOST)
             .dst_access_mask(vk::AccessFlags2::HOST_READ)];
         d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&to_host));
@@ -409,7 +411,13 @@ impl Headless {
             .filter(|(n, _)| *n != "decode")
             .filter_map(|&(n, r)| get(r).map(|i| (n, i)))
             .collect();
-        Ok(Rendered { output, native, stages })
+        let clip = self.pipeline.last_clip_counts();
+        Ok(Rendered {
+            output,
+            native,
+            stages,
+            clip,
+        })
     }
 
     /// Names of the chain slots, in order (`signal`, `amp`, `gun`, `screen`, `phosphor`, `optics`).

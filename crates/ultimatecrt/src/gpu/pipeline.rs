@@ -378,6 +378,8 @@ struct Slot {
     decode_set: vk::DescriptorSet,
     encode_set: vk::DescriptorSet,
     encode_bound: vk::ImageView,
+    /// Clip counters written by `encode` (`encode::CLIP_BYTES` bytes), cleared by the CPU at record time.
+    clip_buf: HostBuffer,
     links: Vec<LinkSets>,
 }
 
@@ -533,6 +535,9 @@ impl Pipeline {
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
                 .descriptor_count(n),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::STORAGE_BUFFER)
+                .descriptor_count(n),
         ];
         self.desc_pool = d.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default().max_sets(n).pool_sizes(&sizes),
@@ -556,6 +561,7 @@ impl Pipeline {
                 s.frame_ubo =
                     HostBuffer::create(ctx, size_of::<FrameConstants>(), vk::BufferUsageFlags::UNIFORM_BUFFER)?;
                 s.params_ubo = HostBuffer::create(ctx, PARAMS_STD140_SIZE, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
+                s.clip_buf = HostBuffer::create(ctx, encode::CLIP_BYTES, vk::BufferUsageFlags::STORAGE_BUFFER)?;
                 let sets = d.allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(self.desc_pool)
@@ -612,9 +618,51 @@ impl Pipeline {
                         .buffer_info(&frame),
                 );
             }
+            // The clip counters of the slot, in its `encode` set.
+            let clip = [vk::DescriptorBufferInfo::default()
+                .buffer(s.clip_buf.buffer)
+                .range(encode::CLIP_BYTES as u64)];
+            writes.push(
+                vk::WriteDescriptorSet::default()
+                    .dst_set(s.encode_set)
+                    .dst_binding(encode::BINDING_CLIP)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&clip),
+            );
             d.update_descriptor_sets(&writes, &[]);
         }
         Ok(())
+    }
+
+    /// Clip counters of the frame slot `slot` (T-46), as `encode` left them.
+    ///
+    /// # Safety
+    /// The slot's last submission must have finished (its fence waited), and `slot` is in
+    /// `0..FRAMES_IN_FLIGHT`.
+    unsafe fn clip_counts_of(&self, slot: usize) -> encode::ClipCounts {
+        let p = self.slots[slot].clip_buf.mapped.cast::<u32>();
+        encode::ClipCounts {
+            over_white: p.read(),
+            out_of_gamut: p.add(1).read(),
+        }
+    }
+
+    /// Clip counters of the frame slot that [`Pipeline::wait_slot`] just freed, that is of the frame
+    /// submitted [`FRAMES_IN_FLIGHT`] frames ago (all zero before it ran): the non-blocking read of the
+    /// window renderer.
+    ///
+    /// # Safety
+    /// [`Pipeline::wait_slot`] was called for the current slot and the slot is not yet recorded again.
+    pub(super) unsafe fn clip_counts(&self) -> encode::ClipCounts {
+        self.clip_counts_of(self.current)
+    }
+
+    /// Clip counters of the frame submitted last, for readbacks that waited for its fence.
+    ///
+    /// # Safety
+    /// The fence of the last submission was waited.
+    pub(super) unsafe fn last_clip_counts(&self) -> encode::ClipCounts {
+        self.clip_counts_of((self.current + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT)
     }
 
     /// Names of the chain slots, in order.
@@ -1056,6 +1104,8 @@ impl Pipeline {
             vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
         );
         let s = &self.slots[cur];
+        // The slot's previous frame is done (`wait_slot`): clear the counters `encode` increments.
+        std::ptr::write_bytes(s.clip_buf.mapped, 0, encode::CLIP_BYTES);
         self.encode.record(
             d,
             cb,
@@ -1064,6 +1114,8 @@ impl Pipeline {
             target.view,
             target.extent,
             settings.host,
+            params,
+            target.format,
         );
         Ok(cb)
     }
@@ -1151,6 +1203,7 @@ impl Pipeline {
         }
         for mut s in self.slots.drain(..) {
             s.params_ubo.destroy(d);
+            s.clip_buf.destroy(d);
             s.frame_ubo.destroy(d);
             s.staging.destroy(d);
             s.inject_staging.destroy(d);

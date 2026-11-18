@@ -306,6 +306,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Default:** None until measured.
 
 ### CAP-9 Capture pixel format and precision
+- **TESTED (2026-11-18, T-46):** dark-ramp banding check (	ests/stage_output.rs, dark_ramp_banding_with_and_without_dither): source codes 0 to 31, gamma 2.4, exposure 0.5, pure 2.2 host. Without dither the band error is up to 0.55 code (rounding plus the RTX A2000's ROP fuzz of 0.05); with dither no pixel is more than 0.98 code from the exact value and band means are within 0.01 (ordered, noise). The 8-bit source codes themselves are not enough to avoid banding on their own: the dither only removes the output quantisation.
 - **Q:** Is 8-bit BGRA capture enough, or is an FP16 path needed (HDR sources)? Does 8-bit quantisation of dark codes before the tube gamma cause visible banding?
 - **Why:** Gamma 2.4 and rolling accumulation expose banding in dark tones.
 - **Who:** SPIKE.
@@ -519,6 +520,7 @@ Each has a recommended default so you can reply with exceptions only.
 ## Colour and HDR
 
 ### COL-1 HDR requirement and SDR behaviour
+- **IMPLEMENTED (2026-11-18, T-46):** exposure, soft shoulder (output_knee, 1 = hard clip) and the clip counters (ClipCounts: over white, out of gamut) are in the encode stage; no hidden normalisation of a non-D65 tube white (its blue can exceed panel white, the counter shows it). See ARCHITECTURE 3.7.
 - **DECISION (2026-11-18):** the owner does not want HDR output or HDR colour, and left the internal precision to the assistant. Chosen:
   - **Output:** SDR only (sRGB host, 8-bit, or 10-bit when available, with final dither). HDR output is out of scope. The present stage is kept behind an interface so an HDR path could be added later.
   - **Internal computation:** linear-light FP16 (FP32 where banding shows), with the tube's white at 1.0 and no clamp inside the pipeline. Reason: the gun power law, mask sampling (a lit element is 4 to 6 times brighter than the area average), halation and glow sums, and afterglow accumulation all need unclamped linear values, and 8-bit intermediates band in the dark tones.
@@ -531,18 +533,21 @@ Each has a recommended default so you can reply with exceptions only.
 - **Default:** HDR recommended, not required. Reference CRT white configurable (default 100 cd/m²). SDR renders physically with a global exposure slider the user sets knowingly, clipping shown. Format chosen after SP-4. HDR is the first major milestone after the first usable version.
 
 ### COL-2 Colour fidelity target
+- **IMPLEMENTED (2026-11-18, T-46):** the 3x3 matrix from the tube primaries and white to sRGB with D65 (crt_model::output::tube_to_display) and the output_match_srgb toggle (identity). Open for the owner or T-50: the toggle defaults to on (identity) so that the default chain stays an exact identity; COL-2's tube-faithful default is reached by presets that turn it off.
 - **Q:** Does the output reproduce the tube's own primaries and white (so game reds look less saturated and D93 looks bluish) or colour-manage to what the artist saw on sRGB? Which primaries and white points ship (SMPTE-C, EBU, measured Trinitron, P22 average, custom xy; D65 or D93 default)? What happens to out-of-gamut colours?
 - **Why:** A faithful 9300 K picture looks blue next to a D65 desktop. Console art was authored on real tubes, PC art on sRGB monitors. A real CRT does not colour-convert, and a white-point change is a per-channel gain, not a chromatic adaptation.
 - **Who:** USER plus DATA (do you calibrate your display).
 - **Default:** Tube-faithful and absolute, tube white selectable per preset (D65 for professional presets, 9300 K for consumer and PC presets), one-click "match sRGB colours" toggle. Linear 3×3 conversion from tube to host primaries, clip in linear light with a warning, proper gamut mapping later.
 
 ### COL-3 Absolute or relative luminance and host EOTF
+- **IMPLEMENTED (2026-11-18, T-46):** host EOTF inverse in encode: pure power (default 2.2) or piecewise sRGB, from Settings.host; checked against the oracle for all 256 codes (20/255: pure 2.2 host gives code 20 for gamma 2.2 light and 16 for gamma 2.4 light; sRGB host 12 and 7). Still open: moving the host EOTF into the parameter table (settings tasks) and the calibration pattern.
 - **Q:** Does the model work in cd/m² (a 100 cd/m² tube white shown at 100 cd/m²) or relative units? Which EOTF is assumed for the host in SDR (piecewise sRGB, pure 2.2, 2.4, calibrated), and is there a calibration step?
 - **Why:** Absolute units make ABL, glare and ambient parameters physical but need a characterised host. A host-EOTF mismatch (2.2 versus sRGB) shifts dark levels exactly where the CRT model is sensitive.
 - **Who:** USER plus DATA.
 - **Default:** Internal absolute units with an output exposure factor so an uncharacterised SDR host still works. A host-gamma parameter (default pure 2.2) and a calibration pattern.
 
 ### COL-4 Precision, banding and dithering
+- **IMPLEMENTED (2026-11-18, T-46):** final dither of 1 LSB in encode (off, ordered 8x8 Bayer, interleaved gradient noise seeded by the frame index), off by default, never on float targets. Blue noise proper (a texture) is not implemented; the noise mode is blue-noise-like. The presenter records whether a 10-bit SDR surface format is offered (Presenter::ten_bit_offered); the swapchain stays 8-bit, and the dither already scales to 1023 levels.
 - **Q:** Which working precision (FP16, FP32 for accumulation) and which output bit depth (8-bit SDR, 10-bit SDR, 10-bit PQ, FP16 scRGB)? Is dithering applied?
 - **Why:** Gamma 2.4, a mask that dims 4 to 6×, and a decay tail at 0.5 % (about code 16 of 255) band in 8 bits. Dithering can create moiré, none creates banding. Rolling scan needs exact linear sums across sub-frames. Cross-vendor bit-exactness is not achievable.
 - **Who:** SPIKE.

@@ -6,6 +6,9 @@ publish.workspace = true
 description = "Captures a window, runs it through a virtual CRT tube and presents it in a separate output window"
 
 [dependencies]
+# The f64 reference model: the app takes the output colour matrix from it (T-46), the GPU tests use it as the
+# analytic oracle (TEC-7); workspace crate, no third-party dependency.
+crt-model = { path = "../crt-model" }
 ash = "0.38"
 png = "0.18"
 serde = { version = "1", features = ["derive"] }
@@ -34,7 +37,3 @@ windows = { version = "0.62", features = [
 
 [build-dependencies]
 paramgen = { path = "../paramgen" }
-
-[dev-dependencies]
-# The analytic oracle of the GPU tests (TEC-7); workspace crate, no third-party dependency.
-crt-model = { path = "../crt-model" }

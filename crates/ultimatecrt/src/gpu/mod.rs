@@ -26,6 +26,7 @@ pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
 pub use headless::{StageInput, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
 pub use present::Presenter;
+pub use stages::encode::{output_matrix, ClipCounts};
 pub use stages::{Domain, AMP_K};
 
 use pipeline::{Pipeline, Target};
@@ -42,6 +43,8 @@ pub struct Renderer {
     image_available: [vk::Semaphore; FRAMES_IN_FLIGHT],
     settings: Settings,
     params: Params,
+    /// Clip counters of the last frame that finished (T-46), refreshed by `render`.
+    clip: ClipCounts,
     /// Destroyed last: `Drop for Renderer` releases every child object above first, then the
     /// field drop of `ctx` destroys the device and the instance.
     ctx: Context,
@@ -67,6 +70,7 @@ impl Renderer {
                     ..Settings::default()
                 },
                 params: Params::default(),
+                clip: ClipCounts::default(),
                 ctx,
             };
             for s in &mut r.image_available {
@@ -92,6 +96,7 @@ impl Renderer {
         // image-available semaphore are free.
         unsafe {
             pipeline.wait_slot(&self.ctx)?;
+            self.clip = pipeline.clip_counts();
             if let Some((w, h, data)) = frame {
                 pipeline.stage_source(&self.ctx, w, h, data)?;
             }
@@ -133,6 +138,13 @@ impl Renderer {
             self.presenter.present(&self.ctx, index, client)?;
         }
         Ok(())
+    }
+
+    /// Pixels clipped by the output transform in the last frame the GPU finished (COL-1 clip indicator
+    /// for the UI): over panel white, and outside the panel gamut. Not the frame just submitted, but
+    /// the one `FRAMES_IN_FLIGHT` frames earlier, so that reading never waits for the GPU.
+    pub fn clip_counts(&self) -> ClipCounts {
+        self.clip
     }
 
     /// Turns the chain slot `name` on or off (off: bypassed, exact identity; A11 enable flags).
