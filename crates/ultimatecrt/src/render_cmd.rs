@@ -143,18 +143,81 @@ pub fn render_source(
 }
 
 /// A preset by file path (when `spec` names a file) or by id among the shipped and user presets.
+///
+/// The problems met on the way (a broken or duplicated user preset file, a value outside its soft range) are
+/// written to stderr.
 pub fn resolve_preset(spec: &str) -> Res<Preset> {
+    let dir = settings::default_dir().map(|d| presets::user_dir(&d));
+    let (preset, warnings) = resolve_preset_in(spec, dir.as_deref())?;
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok(preset)
+}
+
+/// [`resolve_preset`] with the user preset directory given; returns the preset and the warnings instead of
+/// printing them.
+pub fn resolve_preset_in(spec: &str, user_dir: Option<&Path>) -> Res<(Preset, Vec<String>)> {
     let path = Path::new(spec);
     if path.is_file() {
         let text = std::fs::read_to_string(path)?;
-        return Ok(Preset::parse(spec, &text, Origin::User(path.to_path_buf()))?);
+        let preset = Preset::parse(spec, &text, Origin::User(path.to_path_buf()))?;
+        let warnings = preset.warnings.clone();
+        return Ok((preset, warnings));
     }
-    let dir = settings::default_dir().map(|d| presets::user_dir(&d));
-    let lib = Library::load(dir.as_deref());
-    lib.find(spec).cloned().ok_or_else(|| {
-        let ids: Vec<&str> = lib.list().iter().map(|p| p.id.as_str()).collect();
-        format!("--preset: no preset or file \"{spec}\" (presets: {})", ids.join(", ")).into()
-    })
+    let lib = Library::load(user_dir);
+    let found = lib.find(spec).cloned();
+    match found {
+        Some(p) => Ok((p, lib.warnings)),
+        None => {
+            let ids: Vec<&str> = lib.list().iter().map(|p| p.id.as_str()).collect();
+            let mut msg = format!("--preset: no preset or file \"{spec}\" (presets: {})", ids.join(", "));
+            for w in &lib.warnings {
+                msg.push_str(&format!("\n  warning: {w}"));
+            }
+            Err(msg.into())
+        }
+    }
+}
+
+/// [`startup_params`] for the live app: the settings of `%APPDATA%\ultimateCRT`, the warnings on stderr.
+pub fn live_params(preset_arg: Option<&str>) -> Res<Params> {
+    let dir = settings::default_dir();
+    let (params, warnings) = startup_params(preset_arg, dir.as_deref())?;
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
+    Ok(params)
+}
+
+/// The parameters the live app starts with: the preset of `--preset` (`preset_arg`, an id or a file), else the
+/// one of `settings.global.preset` (missing or empty: the table defaults; an unknown name is a warning), then
+/// the `settings.global.overrides` of `dir\settings.toml` on top (T-51: the overrides are the ids that differ
+/// from the preset). Returns the parameters and the warnings to show; an unknown `--preset` is an error.
+pub fn startup_params(preset_arg: Option<&str>, dir: Option<&Path>) -> Res<(Params, Vec<String>)> {
+    let mut warnings = Vec::new();
+    let loaded = dir.map(settings::load);
+    if let Some(w) = loaded.as_ref().and_then(|l| l.warning.clone()) {
+        warnings.push(w);
+    }
+    let stored = loaded.map(|l| l.settings.global).unwrap_or_default();
+    let user = dir.map(presets::user_dir);
+    let mut params = Params::default();
+    if let Some(spec) = preset_arg {
+        let (preset, w) = resolve_preset_in(spec, user.as_deref())?;
+        warnings.extend(w);
+        params = preset.params();
+    } else if !stored.preset.is_empty() {
+        match resolve_preset_in(&stored.preset, user.as_deref()) {
+            Ok((preset, w)) => {
+                warnings.extend(w);
+                params = preset.params();
+            }
+            Err(e) => warnings.push(format!("settings preset \"{}\" not used: {e}", stored.preset)),
+        }
+    }
+    warnings.extend(settings::apply_overrides(&mut params, &stored.overrides));
+    Ok((params, warnings))
 }
 
 /// Runs the `render` command with the arguments after `render`.
@@ -292,6 +355,82 @@ mod tests {
         assert_eq!(a.sets, [("exposure".to_string(), "0.5".to_string())]);
         assert!(parse(&s(&["--bogus"])).is_err());
         assert!(parse(&s(&["--set", "novalue"])).is_err());
+    }
+
+    fn temp(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ucrt-startup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// `--preset` (an id), the settings preset when it is absent, and the settings overrides on top.
+    #[test]
+    fn startup_params_apply_the_preset_then_the_overrides() {
+        let dir = temp("a");
+        // No settings file, no preset: the table defaults.
+        let (p, w) = startup_params(None, Some(&dir)).unwrap();
+        assert_eq!(p, Params::default());
+        assert!(w.is_empty(), "{w:?}");
+        // --preset by id.
+        let (p, w) = startup_params(Some("gdm-f520"), Some(&dir)).unwrap();
+        assert_eq!(p, resolve_preset_in("gdm-f520", None).unwrap().0.params());
+        assert!(w.is_empty(), "{w:?}");
+        // The settings preset and overrides.
+        let mut st = settings::Settings::default();
+        st.global.preset = "bvm-20f1u".into();
+        st.global.overrides.insert("exposure".into(), toml::Value::Float(0.5));
+        st.global.overrides.insert("no_such".into(), toml::Value::Integer(1));
+        settings::save(&dir, &st).unwrap();
+        let (p, w) = startup_params(None, Some(&dir)).unwrap();
+        let mut want = resolve_preset_in("bvm-20f1u", None).unwrap().0.params();
+        want.exposure = 0.5;
+        assert_eq!(p, want);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("no_such"));
+        // --preset wins over the settings preset; the overrides still apply on top.
+        let (p, _) = startup_params(Some("gdm-f520"), Some(&dir)).unwrap();
+        let mut want = resolve_preset_in("gdm-f520", None).unwrap().0.params();
+        want.exposure = 0.5;
+        assert_eq!(p, want);
+        // An unknown --preset is an error naming the presets; an unknown settings preset is a warning.
+        let e = startup_params(Some("nope"), Some(&dir)).unwrap_err().to_string();
+        assert!(e.contains("nope") && e.contains("pvm-20m4u"), "{e}");
+        st.global.preset = "gone".into();
+        settings::save(&dir, &st).unwrap();
+        let (p, w) = startup_params(None, Some(&dir)).unwrap();
+        assert_eq!(p.exposure, 0.5);
+        assert!(w.iter().any(|m| m.contains("gone")), "{w:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A preset file by path, a user preset by id, and the warnings that used to be dropped.
+    #[test]
+    fn resolve_preset_surfaces_library_and_parse_warnings() {
+        let dir = temp("b");
+        let user = presets::user_dir(&dir);
+        std::fs::create_dir_all(&user).unwrap();
+        let text = "schema = 1\nid = \"mine\"\nname = \"M\"\nlabel = \"l\"\n[params]\nexposure = 50.0\n[provenance]\nexposure = \"E: t\"\n";
+        std::fs::write(user.join("a.toml"), text).unwrap();
+        std::fs::write(user.join("b.toml"), text).unwrap();
+        std::fs::write(user.join("bad.toml"), "schema = 2\n").unwrap();
+        // By id: the duplicate id, the soft range and the broken file are all reported.
+        let (p, w) = resolve_preset_in("mine", Some(&user)).unwrap();
+        assert_eq!(p.params().exposure, 50.0);
+        let all = w.join("\n");
+        assert!(
+            all.contains("already defined") && all.contains("soft range") && all.contains("bad.toml"),
+            "{all}"
+        );
+        // By file path: the soft range warning of that file.
+        let path = user.join("a.toml");
+        let (_, w) = resolve_preset_in(&path.display().to_string(), None).unwrap();
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("soft range"));
+        // An unknown id carries the library warnings in the error.
+        let e = resolve_preset_in("nope", Some(&user)).unwrap_err().to_string();
+        assert!(e.contains("bad.toml"), "{e}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

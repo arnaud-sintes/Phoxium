@@ -7,7 +7,9 @@ Generic living-room set, brick-pattern mask. Pitch 0.82 mm is the RCA A66ABU10X 
 Parameters not listed keep their table defaults: mask stripe fill, edge softness, bridge height (0.15), beam tail, gun law and gamma (power 2.4, CRT.md says 2.4 to 2.5), raster breathing (0), ABL full-white current, ratio and time constant (table defaults), source clock.
 White: RCA ColorTrak (0.301, 0.308), about 7500 to 8000 K, a US consumer white inside the 7500 to 9300 K range of Starting presets. Its linear sRGB blue is 1.192 at Y = 1, so exposure is 0.83 (<= 0.838) or white clips.
 Spot growth: 1.0 -> 1.7 mm with n = 0.42 (Panasonic 76 cm TV) keeps a non-negative floor.
-Amplifier: 6 MHz (consumer RGB 4 to 8 MHz): amp_k = 16 recommended above 5 MHz. Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light (CRT.md adjacent-pixel nonlinearity); the opposite direction would brighten them and is not chosen.
+Amplifier: 6 MHz (consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 / 6 = 0.119 source px, so amp_samples = 16. Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light (CRT.md adjacent-pixel nonlinearity); the opposite direction would brighten them and is not chosen.
+Slot period: mask_slot_period 1.6 is the parameter maximum, and CRT.md contradicts itself: the Mask section says the vertical period is 2 to 3 times the stripe spacing p/3 (0.67 to 1.0 p), the starting-preset row says about 1.6 p. The value follows the starting-preset row; open owner/research point (QUESTIONS PHY-4).
+Host (PHY-2 option D): 2.98 px per triad on 2560 x 1440, between the option D threshold 2.8 and the tier B threshold 3, where mask_tier = auto would still average the mask away; mask_tier = integrated draws it (ripple possible).
 ABL on: threshold 1.4 mA, steady state about 0.5 s (RCA patents).
 Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 12 mm, glass transmission 0.85, halation (12 mm / 3 %).
 """
@@ -18,6 +20,7 @@ tube_aspect = 1.3333334
 mask_type = "slot_mask"
 mask_pitch_mm = 0.82
 mask_slot_period = 1.6
+mask_tier = "integrated"
 tube_red_xy = [0.6235, 0.3440]
 tube_green_xy = [0.3123, 0.5903]
 tube_blue_xy = [0.1536, 0.0645]
@@ -27,6 +30,7 @@ beam_fwhm_peak_mm = 1.7
 beam_growth_exponent = 0.42
 amp_bandwidth_mhz = 6.0
 amp_fall_rise_ratio = 0.8
+amp_samples = 16
 abl_enable = true
 abl_threshold_ma = 1.4
 abl_tau_s = 0.1667
@@ -39,7 +43,8 @@ tube_visible_height_mm = "D: CRT.md Reference scales, 26 in viewable consumer TV
 tube_aspect = "S: CRT.md Reference scales, 4:3"
 mask_type = "S: CRT.md Starting presets, consumer 26 in viewable TV slot"
 mask_pitch_mm = "S: CRT.md Consumer TVs table, RCA A66ABU10X 26V 0.82 mm (T-63 item 2: 0.82 to 0.84)"
-mask_slot_period = "E: CRT.md Starting presets, vertical period about 1.6 p"
+mask_slot_period = "E: CRT.md Starting presets, vertical period about 1.6 p; contradicts the Mask section (2 to 3 x p/3 = 0.67 to 1.0 p); 1.6 is the parameter maximum, open point"
+mask_tier = "D: PHY-2 option D: 2.98 px per triad on 2560 x 1440, below the tier B threshold 3, so auto would prefilter the mask; integrated draws it, ripple possible"
 tube_red_xy = "S: CRT.md Chromaticity, RCA ColorTrak E13169GM (hobbyist measurement)"
 tube_green_xy = "S: CRT.md Chromaticity, RCA ColorTrak E13169GM"
 tube_blue_xy = "S: CRT.md Chromaticity, RCA ColorTrak E13169GM"
@@ -49,6 +54,7 @@ beam_fwhm_peak_mm = "E: CRT.md Starting presets, consumer 26 in TV 1.7 mm at pea
 beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42 (Panasonic 76 cm), floor non-negative for 1.0 -> 1.7"
 amp_bandwidth_mhz = "E: CRT.md RGB path table, cheap consumer TV RGB 4 to 8 MHz"
 amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
+amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 6 MHz = 0.119 source px, above 0.02 so K = 16"
 abl_enable = "E: CRT.md ABL, consumer TVs limit; T-63 item 2"
 abl_threshold_ma = "S: CRT.md T-63, RCA/Thomson average limiter 1.4 mA"
 abl_tau_s = "D: CRT.md T-63, steady state about 0.5 s (RCA US 4,330,792), tau = 0.5 / 3 s"

@@ -134,7 +134,8 @@ pub fn place(i: &PlacementInput) -> Placement {
 
 impl FrameConstants {
     /// The constants of a `native` raster placed into `target` by the tube parameters ([`place`]): tube
-    /// rectangle and size, `px_per_mm` and `line_pitch_mm` filled; K = the default, frame index and time 0.
+    /// rectangle and size, `px_per_mm` and `line_pitch_mm` filled; K = `amp_samples` (default 4), frame index
+    /// and time 0.
     pub fn placed(native: (u32, u32), target: (u32, u32), integer: bool, params: &Params) -> Self {
         let p = place(&PlacementInput::from_params(params, native, target, integer));
         Self {
@@ -146,6 +147,8 @@ impl FrameConstants {
             px_per_mm: p.px_per_mm as f32,
             line_pitch_mm: p.line_pitch_mm as f32,
             white_gain: crate::white::white_gains(params),
+            // `amp_samples` (a preset sets it from its bandwidth, `presets::recommended_amp_k`).
+            amp_k: params.amp_samples.max(1),
             ..Self::new(native, target, integer)
         }
     }
@@ -303,6 +306,19 @@ mod tests {
         assert!((fc.line_pitch_mm - 1.2083).abs() < 1e-3);
         assert_eq!(fc.native_size, [256, 240]);
         assert_eq!(fc.amp_k, FrameConstants::new((256, 240), (2560, 1440), false).amp_k);
+        assert_eq!(fc.amp_k, 4, "amp_samples defaults to the pipeline K");
+        assert!(params.set("amp_samples", ParamValue::I32(16)));
+        assert_eq!(
+            FrameConstants::placed((256, 240), (2560, 1440), false, &params).amp_k,
+            16
+        );
+        assert!(params.set("amp_samples", ParamValue::I32(0)));
+        assert_eq!(
+            FrameConstants::placed((256, 240), (2560, 1440), false, &params).amp_k,
+            1,
+            "never below 1"
+        );
+        assert!(params.set("amp_samples", ParamValue::I32(4)));
         assert!(params.set("raster_aspect", ParamValue::Enum(RASTER_ASPECT_FILL_TUBE)));
         assert!(params.set("line_multiplier", ParamValue::I32(2)));
         assert!(params.set("source_par", ParamValue::F32(8.0 / 7.0)));

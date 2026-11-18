@@ -4,10 +4,10 @@ name = "17 in good delta-dot monitor"
 label = "based on published data for good 17 to 19 in delta-dot monitors (class values, no single model)"
 notes = """
 Good-quality delta-dot PC monitor class: 0.26 mm diagonal dot pitch (0.22 mm horizontal), sourced class values. CRT.md has no spot, colour or white row for this class.
-Parameters not listed keep their table defaults and CRT.md lacks a value for them: tube primaries and white (SMPTE-C, D65), dot fill, edge softness, beam tail, gun law and gamma, ABL (off), source clock.
+Parameters not listed keep their table defaults and CRT.md lacks a value for them: dot fill, edge softness, beam tail, gun law and gamma, ABL (off), source clock. Tube primaries (SMPTE-C) and white (D65) are the table defaults, listed with that provenance; CRT.md says PC monitors shipped at 9300 K by default [E], so D65 is a neutral choice here, not a sourced one.
 Pitch is the diagonal dot pitch P (the horizontal triad pitch is 0.866 P, 0.225 mm).
 Spot: the nearest class row (17 to 21 in Trinitron / Diamondtron monitor, 0.35 -> 0.5 mm) is borrowed, n = 0.27 (Hitachi 51 cm monitor tube) keeps a non-negative floor. This is an estimate for another mask type.
-Amplifier: 150 MHz (PC monitor 100 to 400 MHz): amp_k = 16 recommended above 5 MHz. Ratio 1.0.
+Amplifier: 150 MHz (PC monitor 100 to 400 MHz). The amp stage blur is 0.1325 x 5.37 / 150 = 0.0047 source px, an ideal amplifier, so amp_samples = 4 (presets::recommended_amp_k). Ratio 1.0.
 Output: tube-faithful, dithered. D65 does not clip at exposure 1.
 Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness, halation.
 """
@@ -17,11 +17,16 @@ tube_visible_height_mm = 244.0
 tube_aspect = 1.3333334
 mask_type = "delta"
 mask_pitch_mm = 0.26
+tube_red_xy = [0.630, 0.340]
+tube_green_xy = [0.310, 0.595]
+tube_blue_xy = [0.155, 0.070]
+tube_white_xy = [0.3127, 0.3290]
 beam_fwhm_mid_mm = 0.35
 beam_fwhm_peak_mm = 0.5
 beam_growth_exponent = 0.27
 amp_bandwidth_mhz = 150.0
 amp_fall_rise_ratio = 1.0
+amp_samples = 4
 exposure = 1.0
 output_match_srgb = false
 output_dither = "noise"
@@ -31,11 +36,16 @@ tube_visible_height_mm = "D: CRT.md Reference scales, 17 in monitor 325 x 244 mm
 tube_aspect = "S: CRT.md Reference scales, 4:3"
 mask_type = "S: CRT.md PC monitors table, good 17 to 19 in dot"
 mask_pitch_mm = "S: CRT.md PC monitors table, 0.26 mm diagonal (0.22 horizontal)"
+tube_red_xy = "E: table default (SMPTE-C primaries) kept: CRT.md has no primaries row for this class"
+tube_green_xy = "E: table default (SMPTE-C primaries) kept: CRT.md has no primaries row for this class"
+tube_blue_xy = "E: table default (SMPTE-C primaries) kept: CRT.md has no primaries row for this class"
+tube_white_xy = "E: table default D65 kept, not sourced: CRT.md White point says PC monitors shipped at 9300 K by default [E] and US consumer sets were typically 7000 to 9300 K"
 beam_fwhm_mid_mm = "E: CRT.md Starting presets, nearest class row (17 to 21 in monitor) 0.35 mm mid"
 beam_fwhm_peak_mm = "E: CRT.md Starting presets, nearest class row (17 to 21 in monitor) 0.5 mm at peak"
-beam_growth_exponent = "S: CRT.md T-63 item 7, monitor-class about 0.27 (Hitachi 51 cm, US 5,814,930)"
+beam_growth_exponent = "D: Hitachi 51 cm apparent exponent 0.27 (CRT.md T-63 item 7, US 5,814,930); CRT.md says the model exponent is at least the apparent one, so 0.27 is the lower bound used, not a measurement of this tube"
 amp_bandwidth_mhz = "E: CRT.md RGB path table, PC monitor 100 to 400 MHz"
 amp_fall_rise_ratio = "E: symmetric, amplifier not the limit"
+amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 150 MHz = 0.0047 source px, at most the 0.01 ideal limit so K = 4 (the default)"
 exposure = "D: D65 white, no clip"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

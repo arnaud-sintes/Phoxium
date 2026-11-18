@@ -8,7 +8,7 @@ Parameters not listed keep their table defaults: dot fill (0.45), edge softness,
 Pitch is the diagonal dot pitch P (the horizontal triad pitch is 0.866 P).
 White: 9300 K default as the tube white (D93), P22 primaries (about SMPTE-C). D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or white clips.
 Spot growth: 0.3 -> 0.45 mm, n = 0.27 keeps a non-negative floor (ratio 1.5, bound 1.567).
-Amplifier: 100 MHz (PC monitor class, lower end for a 15 in VGA tube): amp_k = 16 recommended above 5 MHz. Ratio 1.0.
+Amplifier: 100 MHz (PC monitor class, lower end for a 15 in VGA tube). The amp stage blur is 0.1325 x 5.37 / 100 = 0.0071 source px, an ideal amplifier, so amp_samples = 4 (presets::recommended_amp_k). Ratio 1.0.
 Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 10 mm (estimate, no value below 400 mm diagonal), halation (10 mm / 2 %).
 """
 
@@ -26,6 +26,7 @@ beam_fwhm_peak_mm = 0.45
 beam_growth_exponent = 0.27
 amp_bandwidth_mhz = 100.0
 amp_fall_rise_ratio = 1.0
+amp_samples = 4
 exposure = 0.74
 output_match_srgb = false
 output_dither = "noise"
@@ -41,9 +42,10 @@ tube_blue_xy = "S: CRT.md Chromaticity, measured P22"
 tube_white_xy = "S: CRT.md White point, 9300 K + 8 MPCD (D93), Starting presets 9300 K default"
 beam_fwhm_mid_mm = "E: CRT.md Starting presets, 15 in VGA 0.3 mm mid"
 beam_fwhm_peak_mm = "E: CRT.md Starting presets, 15 in VGA 0.45 mm at peak"
-beam_growth_exponent = "S: CRT.md T-63 item 7, monitor-class about 0.27 (Hitachi 51 cm, US 5,814,930)"
+beam_growth_exponent = "D: Hitachi 51 cm apparent exponent 0.27 (CRT.md T-63 item 7, US 5,814,930); CRT.md says the model exponent is at least the apparent one, so 0.27 is the lower bound used, not a measurement of this tube"
 amp_bandwidth_mhz = "E: CRT.md RGB path table, PC monitor 100 to 400 MHz (lower end)"
 amp_fall_rise_ratio = "E: symmetric, amplifier not the limit"
+amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 100 MHz = 0.0071 source px, at most the 0.01 ideal limit so K = 4 (the default)"
 exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
