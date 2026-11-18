@@ -537,9 +537,10 @@ fn convergence_hook_off_is_identity_and_arbitrary_currents_match_the_oracle() {
 }
 
 /// Indicative GPU time of `screen` (PLAN gate 10; printed, not asserted): a 256 x 240 raster on 1440 host
-/// rows (1536 x 1440 tube, 6 px per line, K = 4, 4.966 px per mm), every sample lit (full white, the
-/// worst case: no dark sample is skipped), defaults (growth on) without and with a 5 % tail. The GPU may
-/// be shared with other work and the validation layer is on, so the numbers are indicative only.
+/// rows (1536 x 1440 tube, 6 px per line, K = 4, 4.966 px per mm), full white (one run of equal samples
+/// per line) and every sample distinct (the worst case: no run to merge, no dark sample to skip),
+/// defaults (growth on) without and with a 5 % tail. The GPU may be shared with other work and the
+/// validation layer is on, so the numbers are indicative only.
 #[test]
 fn screen_gpu_time_indicative() {
     let test = "stage_beam_horizontal timing";
@@ -554,14 +555,18 @@ fn screen_gpu_time_indicative() {
     let mut fc = FrameConstants::new((256, 240), (1536, 1440), false);
     fc.px_per_mm = 1440.0 / 290.0;
     fc.line_pitch_mm = 290.0 / 240.0;
-    let amp = currents(&fc, |_, _| [1.0; 3]);
-    for (name, p) in [
-        ("defaults", Params::default()),
-        ("tail 5 %", beam(0.45, 0.8, 0.5, 0.05)),
+    let white = currents(&fc, |_, _| [1.0; 3]);
+    let v = |x: u32, y: u32, k: u32| 0.2 + 0.05 * ((x * k + y * 3 + k) % 13) as f32;
+    let busy = currents(&fc, |x, y| [v(x, y, 5), v(x, y, 7), v(x, y, 2)]);
+    for (name, p, amp) in [
+        ("white, defaults", Params::default(), &white),
+        ("white, tail 5 %", beam(0.45, 0.8, 0.5, 0.05), &white),
+        ("every sample distinct, defaults", Params::default(), &busy),
+        ("every sample distinct, tail 5 %", beam(0.45, 0.8, 0.5, 0.05), &busy),
     ] {
         let mut ms = Vec::new();
         for _ in 0..5 {
-            let out = screen(&mut gpu, fc, &p, &amp);
+            let out = screen(&mut gpu, fc, &p, amp);
             assert_eq!((out.width, out.height), (1536, 1440));
             if let Some(t) = gpu.last_timings().and_then(|t| t.stage_ms("screen")) {
                 ms.push(t);

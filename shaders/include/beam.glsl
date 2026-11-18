@@ -163,10 +163,40 @@ void beam_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
     dy = vec3(0.0);
 }
 
+// Light (times 1 / P) of a run of samples of current i covering [a0, a1) on one line, in the pixel
+// [x0, x1) x [y0, y1) (e0, e1: the pixel rows from the line centre, per channel): i X Y. Core plus the
+// optional wide tail (weight w, sigma `ratio` times the core's, in both axes: the spot is a 2D Gaussian
+// core plus a 2D Gaussian tail, CRT.md Spot profile [K][E]). Early out: each component is summed only
+// within 4 of the run's own widest sigma over the channels (`far`: distance from the run to the pixel,
+// the larger of x and y, less the convergence offsets), the truncation the window gives the widest spot;
+// dark runs have narrower spots and cost less.
+vec3 beam_run(BeamSpot spot, vec3 i, float a0, float a1, float x0, float x1, vec3 e0, vec3 e1, vec3 dx,
+              float far_y, float off_x, float w, float ratio, float widen) {
+    if (all(equal(i, vec3(0.0)))) {
+        return vec3(0.0);
+    }
+    vec3 sigma = beam_sigma_px(spot, i);
+    float core = BEAM_REACH_SIGMAS * max(sigma.r, max(sigma.g, sigma.b));
+    float far = max(far_y, max(x0 - a1, a0 - x1) - off_x);
+    if (far > core * widen) {
+        return vec3(0.0);
+    }
+    vec3 s0 = vec3(a0) + dx;
+    vec3 s1 = vec3(a1) + dx;
+    vec3 f = vec3(0.0);
+    if (far <= core) {
+        f = beam_x_fraction(s0, s1, x0, x1, sigma) * beam_y_fraction(e0, e1, sigma);
+    }
+    if (w > 0.0) {
+        vec3 st = sigma * ratio;
+        f = (1.0 - w) * f + w * beam_x_fraction(s0, s1, x0, x1, st) * beam_y_fraction(e0, e1, st);
+    }
+    return i * f;
+}
+
 // Light of host pixel q: the lines and amp samples within reach (4 widest sigmas plus the convergence
-// offsets), each weighted by its spot's horizontal and vertical integrals over the pixel; core plus the
-// optional wide tail (weight beam_tail_weight, sigma beam_tail_sigma_ratio times the core's, in both axes:
-// the spot is a 2D Gaussian core plus a 2D Gaussian tail, CRT.md Spot profile [K][E]).
+// offsets), each run of equal samples weighted by its spot's horizontal and vertical integrals over the
+// pixel (beam_run).
 vec3 beam_eval(sampler2D current, ivec2 q) {
     if (!(frame.px_per_mm > 0.0) || !(frame.line_pitch_mm > 0.0)) {
         return beam_nearest(current, q);
@@ -198,9 +228,9 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
     float j1 = min(float(samples - 1), floor((x1 + reach_x) / a));
     j1 = min(j1, j0 + float(BEAM_MAX_SAMPLES - 1));
 
-    // Early out per sample: its own spot (core, and tail when on) is summed only within 4 of its own
-    // widest sigma over the channels (distances less the convergence offsets), the same truncation as the
-    // window gives the widest spot; dark samples have narrower spots and cost less.
+    // Runs of equal samples on a line are one box: their spots are the same, and the Gaussian terms at
+    // the inner sample boundaries cancel exactly (X of [a0, a1) plus X of [a1, a2) is X of [a0, a2)), so a
+    // flat stretch costs one evaluation however many samples it spans.
     float off_x = reach_x - reach;
     float off_y = reach_y - reach;
     float widen = w > 0.0 ? max(1.0, ratio) : 1.0;
@@ -212,29 +242,20 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
         vec3 e0 = y0 - c;
         vec3 e1 = y1 - c;
         int row = n / r.mult;
+        vec3 run = vec3(0.0);
+        float run0 = j0 * a;
         for (int j = int(j0); j <= int(j1); j++) {
             vec3 i = texelFetch(current, ivec2(j, row), 0).rgb;
-            if (all(equal(i, vec3(0.0)))) {
-                continue;
+            if (j > int(j0)) {
+                if (all(equal(i, run))) {
+                    continue;
+                }
+                sum += beam_run(spot, run, run0, float(j) * a, x0, x1, e0, e1, dx, far_y, off_x, w, ratio, widen);
             }
-            vec3 sigma = beam_sigma_px(spot, i);
-            float core = BEAM_REACH_SIGMAS * max(sigma.r, max(sigma.g, sigma.b));
-            float far = max(far_y, max(x0 - float(j + 1) * a, float(j) * a - x1) - off_x);
-            if (far > core * widen) {
-                continue;
-            }
-            vec3 s0 = vec3(float(j) * a) + dx;
-            vec3 s1 = vec3(float(j + 1) * a) + dx;
-            vec3 f = vec3(0.0);
-            if (far <= core) {
-                f = beam_x_fraction(s0, s1, x0, x1, sigma) * beam_y_fraction(e0, e1, sigma);
-            }
-            if (w > 0.0) {
-                vec3 st = sigma * ratio;
-                f = (1.0 - w) * f + w * beam_x_fraction(s0, s1, x0, x1, st) * beam_y_fraction(e0, e1, st);
-            }
-            sum += i * f;
+            run = i;
+            run0 = float(j) * a;
         }
+        sum += beam_run(spot, run, run0, (j1 + 1.0) * a, x0, x1, e0, e1, dx, far_y, off_x, w, ratio, widen);
     }
     return sum * r.pitch;
 }
