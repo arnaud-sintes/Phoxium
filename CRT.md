@@ -563,7 +563,7 @@ k = Lw / (1 + b)^2.6
 ```
 
 - The Grade shader uses default 2.50, range 2.30 to 2.60, noting that effective gamma runs from 2.40 at black level 0.1 to 2.60 at zero black level. [S]
-- sRGB has a linear toe and averages about 2.2, so decoding CRT-era content as sRGB lifts shadows compared with a real tube. A real CRT has zero slope at cutoff (no linear toe). Example: sRGB level 20/255 gives 0.007 linear, pure 2.4 gives 0.0049, pure 2.2 gives 0.0057. [D]
+- sRGB has a linear toe and averages about 2.2, so decoding CRT-era content as sRGB lifts shadows compared with a real tube. A real CRT has zero slope at cutoff (no linear toe). Example: sRGB level 20/255 gives 0.007 linear, pure 2.4 gives 0.00222, pure 2.2 gives 0.00370 (corrected by calculation, checked by the `crt-model` tests; an earlier version said 0.0049 and 0.0057). [D]
 - Consoles authored for CRT gamma, PC content for sRGB. The source gamma must be a user choice; there is no single correct default. [E]
 
 ### What the user controls do physically
