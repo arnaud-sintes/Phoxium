@@ -1,0 +1,161 @@
+# Mask stage parameters (ARCHITECTURE section 5, mask step; shaders/include/mask.glsl; A12, A14, PHY-2, PHY-8).
+# Format: crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
+# dimensionless. Conventions are those of the CPU oracle crates/crt-model/src/mask.rs (T-38): lengths in tube mm,
+# the emitter of a colour is the luminous shape of its phosphor elements (black-matrix opening), every edge is a
+# linear ramp whose full 0-to-1 width is centred on the nominal (half-value) edge, and the host-pixel value is
+# the area mean of the emitter over the pixel divided by the mean coverage, so flat white has mean 1.
+# T-39a implements the aperture grille. The slot-mask and delta parameters are declared here so that presets
+# (T-50) can name them; they are not read by the shader until T-39b, and selecting those types falls back to the
+# aperture grille until then.
+
+[[param]]
+id = "mask_enabled"
+stage = "mask"
+type = "bool"
+unit = "1"
+default = true
+tag = "E"
+source = "ARCHITECTURE section 5 (each stage can be bypassed or A/B compared); the mask shares the screen slot with the beam, so it has its own switch"
+description = "Mask on or off. Off: every channel weight is exactly 1 (no mask structure, no damper wires), the beam image is shown as it is."
+group = "Mask"
+
+[[param]]
+id = "mask_type"
+stage = "mask"
+type = "enum"
+unit = "1"
+default = "aperture_grille"
+values = ["aperture_grille", "slot_mask", "delta"]
+tag = "S"
+source = "CRT.md Colour selection structures, Types; QUESTIONS PHY-4 (the mask type is the only structural choice); default: PVM-20M4U, an aperture grille (CRT.md Starting presets)"
+description = "Colour selection structure of the tube: aperture grille (Trinitron, Diamondtron), slot mask or delta dot mask. Slot mask and delta are drawn as an aperture grille of the same pitch until T-39b."
+group = "Mask"
+
+[[param]]
+id = "mask_pitch_mm"
+stage = "mask"
+type = "f32"
+unit = "mm"
+default = 0.31
+min = 0.2
+max = 1.2
+tag = "S"
+source = "CRT.md Pitch values by family and Starting presets: PVM-20M4U stripe pitch 0.31 mm; monitors 0.22 to 0.28, consumer TV and arcade 0.65 to 0.9 mm. Pitch definitions: grille and slot = horizontal distance between same-colour stripes (one triad), delta = diagonal dot pitch P"
+description = "Mask pitch at the screen. Aperture grille and slot mask: horizontal triad pitch p. Delta: diagonal dot pitch P (the horizontal triad pitch is then 0.866 P)."
+group = "Mask"
+
+[[param]]
+id = "mask_stripe_fill"
+stage = "mask"
+type = "f32"
+unit = "1"
+default = 0.25
+min = 0.2
+max = 0.27
+tag = "E"
+source = "CRT.md Black matrix and phosphor screen: stripe fill of a grille about 0.2 to 0.27 of the triad pitch per colour, black guard 0.06 to 0.13 p; Beam transmission: aperture grille 20 to 27 %, geometric ceiling 1/3"
+description = "Width of one colour stripe as a fraction of the triad pitch (aperture grille and slot mask), measured between the half-value points of its edges. It is also the mean coverage of each colour of a grille. The shader limits it to 1/3 (stripes of different colours do not overlap)."
+group = "Mask"
+
+[[param]]
+id = "mask_edge_softness"
+stage = "mask"
+type = "f32"
+unit = "1"
+default = 0.07
+min = 0.0
+max = 0.1
+tag = "E"
+source = "CRT.md Black matrix and phosphor screen: phosphor element edges are soft, about 5 to 10 % of pitch; crt-model mask.rs: full 0-to-1 ramp width centred on the half-value edge, limited to min(stripe, p/3 - stripe)"
+description = "Full width of the linear edge ramp of a phosphor element as a fraction of the pitch, centred on the nominal edge (0 = hard edges). The shader limits it to the stripe width and to 1/3 - stripe fill, so a stripe and its ramps stay inside one third of the pitch."
+group = "Mask"
+
+[[param]]
+id = "mask_damper_count"
+stage = "mask"
+type = "i32"
+unit = "1"
+default = 0
+min = 0
+max = 3
+tag = "S"
+source = "CRT.md Aperture grille geometry: one damper wire about 2/3 of the way down on tubes of 15 in and below, two at 1/3 and 2/3 on larger monitors, three above 21 in (Goldwasser; positions of three wires not sourced, taken at 1/4, 1/2, 3/4 as crt-model damper_positions_mm). Default 0 until the presets (T-50) set it per tube (a 20 in PVM has 2)"
+description = "Number of damper wires of an aperture grille (0 = none). Their shadows are dark horizontal lines at fixed fractions of the visible height: 1 wire at 2/3, 2 wires at 1/3 and 2/3, n wires at k / (n + 1)."
+group = "Mask"
+
+[[param]]
+id = "mask_damper_width_mm"
+stage = "mask"
+type = "f32"
+unit = "mm"
+default = 0.02
+min = 0.01
+max = 0.03
+tag = "S"
+source = "CRT.md Aperture grille geometry: damper wires are tungsten, 10 to 30 micrometres in diameter (15 to 30 in another Sony patent)"
+description = "Width of the shadow of a damper wire, between the half-value points of its edges. A host pixel row crossed by the whole shadow is dimmed by width / row height."
+group = "Mask"
+
+[[param]]
+id = "mask_damper_edge_mm"
+stage = "mask"
+type = "f32"
+unit = "mm"
+default = 0.01
+min = 0.0
+max = 0.03
+tag = "E"
+source = "crt-model mask.rs Grille::damper_edge_mm (penumbra of the wire shadow, not sourced in CRT.md); the shadow area does not depend on it"
+description = "Full width of the linear edge ramp (penumbra) of a damper-wire shadow, centred on the nominal edge. The shader limits it to the shadow width."
+group = "Mask"
+
+[[param]]
+id = "mask_tier"
+stage = "mask"
+type = "enum"
+unit = "1"
+default = "auto"
+values = ["auto", "integrated", "prefiltered"]
+tag = "D"
+source = "QUESTIONS PHY-2 (option A: automatic tiering by host pixels per triad); CRT.md Host-display resolution budget (masks below about 3 px per triad must be prefiltered, otherwise host-grid moire appears, which is not a real CRT artefact); crt-model mask.rs tier() and Mask::host_value"
+description = "How the mask is brought to host pixels. auto: exact area integral per host pixel from 3 host px per triad (tiers A and B), prefiltered below (tier C: the mask is averaged over one full period, so only its mean, 1, and the damper wires remain). integrated: area integral at any density (shows host-grid moire below 3 px per triad, for inspection). prefiltered: tier C at any density."
+group = "Mask"
+
+[[param]]
+id = "mask_slot_period"
+stage = "mask"
+type = "f32"
+unit = "1"
+default = 0.8333
+min = 0.6667
+max = 1.6
+tag = "E"
+source = "CRT.md Slot mask geometry: vertical slot period typically 2 to 3 times the stripe spacing p/3 on TVs (0.667 to 1.0 p; default 2.5 p/3 as the crt-model test tube); Starting presets: consumer 26 in slot TV about 1.6 p"
+description = "Slot mask only (T-39b): vertical slot period V as a fraction of the triad pitch. Adjacent triad columns are staggered by V / 2."
+group = "Mask"
+
+[[param]]
+id = "mask_slot_bridge"
+stage = "mask"
+type = "f32"
+unit = "1"
+default = 0.15
+min = 0.1
+max = 0.2
+tag = "E"
+source = "CRT.md Slot mask geometry: bridges about 10 to 20 % of the slot period"
+description = "Slot mask only (T-39b): height of the bridge between two slots as a fraction of the slot period."
+group = "Mask"
+
+[[param]]
+id = "mask_dot_fill"
+stage = "mask"
+type = "f32"
+unit = "1"
+default = 0.45
+min = 0.4
+max = 0.5
+tag = "E"
+source = "CRT.md Delta (dot) triad geometry: dot diameter about 0.4 to 0.5 P (below the dot spacing P / sqrt 3 because of the black matrix)"
+description = "Delta mask only (T-39b): phosphor dot diameter as a fraction of the diagonal dot pitch P, between the half-value points of its edge."
+group = "Mask"
