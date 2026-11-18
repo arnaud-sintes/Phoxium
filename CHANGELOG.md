@@ -8,6 +8,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 ## [Unreleased]
 
 ### Added
+- `scripts/poll-foreground.ps1`: polls the foreground window every 100 ms and logs each change to a CSV (title, pid, executable, is-source), with a summary and a `-SelfTest` switch.
 - `--log <file.csv>`: per-second diagnostics (capture and render fps, min/max/p99 intervals, gaps over 50 ms, foreground-window changes, "foreground is the source" flag) and a summary at exit.
 - `pixel-demo`: demo source window with a procedural NES-style scene, a test card and optional PNG display, at any source resolution and integer scale.
 - `ultimatecrt`: window capture (Windows.Graphics.Capture, client area only, CPU copy) and Vulkan 1.3 output through a passthrough GLSL pass, in a windowed or fullscreen non-activating window. Ctrl+Alt+Q always quits.

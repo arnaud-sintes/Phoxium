@@ -139,3 +139,14 @@ Check the result with `gh release view vX.Y.Z`.
 | `no such monitor` | `--monitor` index out of range: see the monitor lines of `--list-windows`. |
 | `cargo clippy` or `fmt` fails during packaging | Fix the warning or run `cargo fmt --all`, commit, package again. |
 | Capture reports few frames per second on a static window | Windows.Graphics.Capture only delivers a frame when the window content changes. |
+
+### Foreground poll (focus checks)
+
+`scripts/poll-foreground.ps1` polls `GetForegroundWindow` every 100 ms (no hook) and writes one CSV row per foreground change (plus a baseline row): `timestamp,title,pid,exe,is_source`. It prints the number of changes and the share of time the source was in the foreground at the end.
+
+```powershell
+.\scripts\poll-foreground.ps1 -SourceTitle "<game title>" -OutFile .\poll.csv -DurationSeconds 600   # 0 = until Ctrl+C
+.\scripts\poll-foreground.ps1 -SelfTest                                                               # 3 s, prints PASS or FAIL
+```
+
+`-SourceTitle` is a case-insensitive title substring, `-IntervalMs` defaults to 100. Window titles can hold private content (documents, chats): delete the CSV after the run.
