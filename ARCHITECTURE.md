@@ -91,7 +91,7 @@ The Direct3D capture device uses the default adapter. The Vulkan device is chose
 | A14 | Area-averaged mask by default, coarser tube preset as an alternative | Planned (PHY-2) | The host (2560×1440) gives 1.5 to 4 px per triad. | Host subpixels (HW-6) deferred. |
 | A15 | Optional modules, off by default: composite video, interlace, ageing and burn-in | Planned (PHY-9, SRC-7, PHY-14) | In scope by owner decision. Burn-in needs a persistent per-colour wear map. | After the first usable version. |
 | A16 | Headless renderer and analytic tests from `CRT.md` | Planned (TEC-7, SCP-3) | A physical model cannot be validated by eye. | None. |
-| A17 | Dear ImGui for live tuning, in a separate control window plus an optional overlay | Planned (OUT-3, TEC-5) | Output never takes focus. | Another UI toolkit only with the owner's agreement. |
+| A17 | Dear ImGui for live tuning, as a settings menu inside the output window (F12) plus an optional read-only overlay | Planned (OUT-3, TEC-5, owner decision 2026-11-18) | Output does not take focus while it displays; the menu takes it while open and returns it on close. | Another UI toolkit only with the owner's agreement. |
 | A18 | No GPL code, permissive dependencies only | Policy (PRJ-2) | Personal project that may become public. Inspiration from existing shaders is allowed, copying is not. | None. |
 
 ## 5. Target pipeline (Planned)

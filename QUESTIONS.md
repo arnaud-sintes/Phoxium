@@ -27,6 +27,8 @@ Answers from the project owner to the blocking table. They override the defaults
 | PRJ-1, PRJ-2 | Personal project. No GPL shader code is reused, inspiration only. |
 | SCP-5 | The wording "each source RGB pixel becomes RGB light sources" is shorthand for the beam-and-phosphor model. `CLAUDE.md` is updated. |
 | TEC-1 | Vulkan, GLSL, Rust and ImGui are the owner's own guess, not hard constraints. Counter-proposals welcome, decided after the spikes. |
+| OUT-3, OUT-5 (2026-11-18, planning) | No separate control window. F11 toggles fullscreen and a resizable windowed output. F12 opens and closes the ImGui settings menu inside the output window; the menu takes the focus while open and gives it back to the source on close. Output otherwise stays non-activating. F11 and F12 are global hotkeys, configurable. |
+| SRC-1, SRC-2 (2026-11-18, planning) | Mina the Hollower is not on the dev machine. A stand-in pixel-art game is used during development; Mina is the final acceptance test on the owner's other machine (PLAN.md T-83). First usable version keeps all 3 mask types. |
 
 Still open:
 - Which GPU drives the monitors: the Intel iGPU or the NVIDIA GPU (see HW-3, new hybrid-graphics finding).
@@ -63,7 +65,7 @@ Each has a recommended default so you can reply with exceptions only.
 | COL-1 (answered) | Is HDR a requirement, an enhancement, or later? How is the 75 to 85 % mask loss handled in SDR? | HDR is the reference, not required. SDR uses an honest exposure control, no hidden bloom compensation |
 | OUT-1, CAP-4 (answered) | Is the reference setup one monitor (output covers the game) or two? Does a covered, off-screen or minimised source keep rendering and keep delivering captured frames? | Design for both. Guarantee two monitors first, let a spike decide whether one monitor works |
 | OUT-2 | Can a Vulkan window that is topmost, borderless, non-activating (optionally click-through) present fullscreen at full rate, with HDR, without ever taking focus? | Borderless topmost non-activating window, exclusive fullscreen disallowed. Spike before committing |
-| OUT-3 | What exactly does "does not steal focus" cover, and where does the ImGui menu live? | Output never activates. Menu is a separate control window plus an optional on-output overlay toggled by a hotkey |
+| OUT-3 | What exactly does "does not steal focus" cover, and where does the ImGui menu live? | DECIDED 2026-11-18: no separate control window. F12 toggles the ImGui settings menu inside the output window (it takes the focus while open, returns it on close); F11 toggles fullscreen and a resizable windowed output. Output otherwise never activates. |
 | SRC-1, SRC-2 (answered) | Which content must work (pixel art only, emulators, DOS, modern 3D, video), which 5 to 10 apps form the acceptance set, and what does "1:1" mean in practice? | Low-resolution raster content first. Per-profile crop and integer divisor, with a warning when the capture is not integer-scaled |
 | TEC-1 (answered) | Are Vulkan, GLSL, Rust and Dear ImGui hard constraints or preferences? Is cross-platform a real future goal? | Keep them. Isolate capture and presentation behind interfaces so a D3D path stays possible |
 | PHY-12 | Temporal scope of the first version: frame-integrated, 60 Hz afterglow, or rolling-scan sub-frames at 120/240 Hz? | Frame-integrated first. Model emission as a function of time so sub-frames can be added later |

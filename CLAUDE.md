@@ -11,7 +11,7 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 - Runs externally to the captured game or software: no injection, no modification of the target application.
 - Captures the content of a chosen window (generally 1:1 pixel-art content).
 - Transforms it on the GPU and presents the result in a second window, which can be put fullscreen.
-- Presenting or interacting with the output window must not steal focus from the captured application.
+- Presenting or interacting with the output window must not steal focus from the captured application. One deliberate exception: the ImGui settings menu (F12, inside the output window) takes the focus while it is open and returns it to the source on close. F11 toggles fullscreen and a resizable windowed output.
 - Must work with a single screen: the fullscreen output covers the captured window on the same monitor.
 - Input resolution and colour count are arbitrary (the model works on the captured RGB frame).
 - Output is SDR only. HDR output and HDR colour are out of scope for now.
