@@ -1,8 +1,8 @@
-﻿//! Command line: the usage text, the parsed options and the parser.
+//! Command line: the usage text, the parsed options and the parser.
 
 use std::env;
 
-use crate::{scaling, Res};
+use crate::{patterns, scaling, Res};
 
 pub const USAGE: &str = "ultimatecrt: captures a window and shows it in a second window through a GPU pipeline.
 
@@ -20,6 +20,11 @@ Usage: ultimatecrt [options]
   --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
                        1 means native. Default: detected from the first informative frames
   --integer            integer scale only (letterboxed)
+  --pattern <name[:args]>  generated test pattern instead of a capture (no window needed): flat[:level],
+                       ramp, vline[:N], hline[:N], grating[:N], checker[:N], crosshatch[:N], point,
+                       window[:APL%], bar[:width[:px-per-frame]], pluge, moire[:N]
+  --pattern-size <WxH> size of the pattern (default 320x240)
+  --image <file.png>   still PNG image instead of a capture (divisor 1)
   --validation         enable the Vulkan validation layer (needs the Vulkan SDK)
   --stats              print capture and render rates every second
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
@@ -50,6 +55,9 @@ pub struct Args {
     pub save_capture: Option<String>,
     pub exit_after: Option<f64>,
     pub log: Option<String>,
+    pub pattern: Option<String>,
+    pub pattern_size: Option<(u32, u32)>,
+    pub image: Option<String>,
 }
 
 fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Res<T> {
@@ -79,6 +87,9 @@ pub fn parse_args() -> Res<Args> {
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
             "--exit-after" => a.exit_after = Some(number("--exit-after", &value("--exit-after")?)?),
             "--log" => a.log = Some(value("--log")?),
+            "--pattern" => a.pattern = Some(value("--pattern")?),
+            "--pattern-size" => a.pattern_size = Some(patterns::parse_size(&value("--pattern-size")?)?),
+            "--image" => a.image = Some(value("--image")?),
             "--version" => {
                 println!("ultimatecrt {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
