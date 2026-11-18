@@ -167,6 +167,11 @@ mod tests {
             (100.0, 0.1, 0.0)
         );
         assert!(!p.gun_white_balance);
+        assert_eq!(
+            p.gun_retune_white_xy, p.tube_white_xy,
+            "the retune target defaults to the tube white"
+        );
+        assert_eq!(meta("gun_retune_white_xy").unwrap().file, "params/gun.toml");
         assert_eq!(meta("gun_gamma").unwrap().file, "params/gun.toml");
         assert_eq!(Params::identity_gun().gun_gamma, 1.0);
     }
