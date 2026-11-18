@@ -217,6 +217,167 @@ fn is_snake_ident(s: &str) -> bool {
         && !s.ends_with('_')
 }
 
+/// Rust keywords (strict, reserved and weak ones that matter for a field name).
+const RUST_RESERVED: &[&str] = &[
+    "abstract", "as", "async", "await", "become", "box", "break", "const", "continue", "crate", "do", "dyn", "else",
+    "enum", "extern", "false", "final", "fn", "for", "gen", "if", "impl", "in", "let", "loop", "macro", "match", "mod",
+    "move", "mut", "override", "priv", "pub", "ref", "return", "self", "static", "struct", "super", "trait", "true",
+    "try", "type", "typeof", "unsafe", "unsized", "use", "virtual", "where", "while", "yield",
+];
+
+/// Names the generated code already uses: `params` is the GLSL block instance, `meta` collides with the
+/// `PARAMS_META` naming of the consumers.
+const GENERATED_NAMES: &[&str] = &["params", "meta"];
+
+/// GLSL keywords and words reserved by the GLSL 4.50 specification (section 3.6), lower case only.
+const GLSL_RESERVED: &[&str] = &[
+    "active",
+    "asm",
+    "attribute",
+    "bool",
+    "break",
+    "buffer",
+    "bvec2",
+    "bvec3",
+    "bvec4",
+    "case",
+    "cast",
+    "centroid",
+    "class",
+    "coherent",
+    "common",
+    "const",
+    "continue",
+    "default",
+    "discard",
+    "dmat2",
+    "dmat3",
+    "dmat4",
+    "do",
+    "double",
+    "dvec2",
+    "dvec3",
+    "dvec4",
+    "else",
+    "enum",
+    "extern",
+    "external",
+    "false",
+    "filter",
+    "fixed",
+    "flat",
+    "float",
+    "for",
+    "fvec2",
+    "fvec3",
+    "fvec4",
+    "goto",
+    "half",
+    "highp",
+    "hvec2",
+    "hvec3",
+    "hvec4",
+    "if",
+    "iimage1d",
+    "iimage2d",
+    "iimage3d",
+    "image1d",
+    "image2d",
+    "image3d",
+    "in",
+    "inline",
+    "inout",
+    "input",
+    "int",
+    "interface",
+    "invariant",
+    "isampler1d",
+    "isampler2d",
+    "isampler3d",
+    "ivec2",
+    "ivec3",
+    "ivec4",
+    "layout",
+    "long",
+    "lowp",
+    "mat2",
+    "mat3",
+    "mat4",
+    "mediump",
+    "namespace",
+    "noinline",
+    "noperspective",
+    "out",
+    "output",
+    "packed",
+    "partition",
+    "patch",
+    "precise",
+    "precision",
+    "public",
+    "readonly",
+    "resource",
+    "restrict",
+    "return",
+    "sample",
+    "sampler",
+    "sampler1d",
+    "sampler2d",
+    "sampler3d",
+    "samplercube",
+    "shared",
+    "short",
+    "sizeof",
+    "smooth",
+    "static",
+    "struct",
+    "subpassinput",
+    "subroutine",
+    "superp",
+    "switch",
+    "template",
+    "texture1d",
+    "texture2d",
+    "texture3d",
+    "this",
+    "true",
+    "typedef",
+    "uint",
+    "uniform",
+    "union",
+    "unsigned",
+    "usampler1d",
+    "usampler2d",
+    "usampler3d",
+    "using",
+    "uvec2",
+    "uvec3",
+    "uvec4",
+    "varying",
+    "vec2",
+    "vec3",
+    "vec4",
+    "void",
+    "volatile",
+    "while",
+    "writeonly",
+];
+
+/// Why an id cannot be used as a Rust field and a GLSL block member, `None` when it is fine.
+fn reserved_reason(id: &str) -> Option<&'static str> {
+    if RUST_RESERVED.contains(&id) {
+        Some("a Rust keyword")
+    } else if GENERATED_NAMES.contains(&id) {
+        Some("a name used by the generated code")
+    } else if GLSL_RESERVED.contains(&id) {
+        Some("a GLSL keyword or reserved word")
+    } else if id.starts_with("gl_") {
+        Some("in the GLSL `gl_` namespace")
+    } else {
+        None
+    }
+}
+
 fn number(v: &toml::Value) -> Option<f64> {
     match v {
         toml::Value::Float(f) => Some(*f),
@@ -239,6 +400,12 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         return err(format!(
             "{at}: the id must be snake_case (a-z, 0-9, single underscores)"
         ));
+    }
+    if let Some(why) = reserved_reason(&id) {
+        return err(format!("{at}: the id `{id}` is not allowed, it is {why}"));
+    }
+    if file.chars().any(|c| c.is_control()) {
+        return err(format!("{at}: the file name contains a control character"));
     }
     if r.stage != stem {
         return err(format!(
@@ -265,6 +432,14 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         if text.trim().is_empty() {
             return err(format!("{at}: `{name}` is empty"));
         }
+        // Newlines and other control characters would break the doc comments and the GLSL line comments the
+        // text is written into. A description may hold line breaks and tabs (it is flattened to one line).
+        let bad = |c: char| {
+            (c.is_control() && !(name == "description" && c.is_whitespace())) || c == '\u{2028}' || c == '\u{2029}'
+        };
+        if text.chars().any(bad) {
+            return err(format!("{at}: `{name}` contains a control character or a line break"));
+        }
     }
     if ty != Type::Enum && !r.values.is_empty() {
         return err(format!("{at}: `values` is only allowed for type enum"));
@@ -283,6 +458,11 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         }
         if !(min.is_finite() && max.is_finite()) || min > max {
             return err(format!("{at}: invalid soft range [{min}, {max}]"));
+        }
+        if ty == Type::I32 && (min < i32::MIN as f64 || max > i32::MAX as f64) {
+            return err(format!(
+                "{at}: the soft range [{min}, {max}] of an i32 is outside the i32 limits"
+            ));
         }
         Some((min, max))
     } else {
@@ -612,13 +792,14 @@ pub fn rust_source(t: &Table) -> String {
     s.push_str(
         "    /// Sets the parameter `id`. Returns false (and changes nothing) for an unknown id, a value of the\n",
     );
-    s.push_str("    /// wrong type or an enum index out of range. Values outside the soft range are accepted.\n");
+    s.push_str("    /// wrong type, a non-finite float (NaN or infinity) or an enum index out of range. Values outside the soft range are accepted.\n");
     s.push_str("    pub fn set(&mut self, id: &str, value: ParamValue) -> bool {\n        match (id, value) {\n");
     for p in &t.params {
-        let guard = if p.ty == Type::Enum {
-            format!(" if v < {}", p.values.len())
-        } else {
-            String::new()
+        let guard = match p.ty {
+            Type::Enum => format!(" if v < {}", p.values.len()),
+            Type::F32 => " if v.is_finite()".to_string(),
+            Type::Vec2 | Type::Vec3 | Type::Vec4 => " if v.iter().all(|x| x.is_finite())".to_string(),
+            _ => String::new(),
         };
         s.push_str(&format!(
             "            ({:?}, ParamValue::{}(v)){guard} => self.{} = v,\n",
@@ -865,6 +1046,157 @@ mod tests {
     #[test]
     fn empty_table_is_an_error() {
         assert!(table("").is_err());
+    }
+
+    #[test]
+    fn reserved_ids_are_rejected_with_the_file_and_the_id() {
+        // One per class: Rust keyword, GLSL reserved word, `gl_` prefix, generated name.
+        for (id, why) in [
+            ("type", "Rust keyword"),
+            ("input", "GLSL keyword or reserved word"),
+            ("gl_gain", "`gl_` namespace"),
+            ("params", "used by the generated code"),
+            ("meta", "used by the generated code"),
+        ] {
+            let e = table(&entry(id, "f32", "1.0", RANGE)).unwrap_err();
+            assert!(e.0.starts_with(&format!("params/t.toml: parameter `{id}`: ")), "{e}");
+            assert!(e.0.contains(why), "expected `{why}` in: {e}");
+        }
+    }
+
+    #[test]
+    fn control_characters_in_text_fields_are_rejected_but_non_ascii_is_kept() {
+        let bad = [
+            entry("x", "f32", "1.0", RANGE).replace("unit = \"1\"", "unit = \"a\\nb\""),
+            entry("x", "f32", "1.0", RANGE).replace("unit = \"1\"", "unit = \"a\\u0000b\""),
+            entry("x", "f32", "1.0", RANGE).replace("group = \"Test\"", "group = \"a\\rb\""),
+            entry("x", "f32", "1.0", RANGE).replace("source = \"test\"", "source = \"a\\u2028b\""),
+        ];
+        for text in bad {
+            let e = table(&text).unwrap_err();
+            assert!(e.0.starts_with("params/t.toml: parameter `x`: "), "{e}");
+            assert!(e.0.contains("control character"), "{e}");
+        }
+        // A file name with a control character is rejected too.
+        let e = build(&[("params/t\n.toml".into(), "t".into(), entry("x", "f32", "1.0", RANGE))]).unwrap_err();
+        assert!(e.0.contains("control character"), "{e}");
+        // Micro sign stays allowed, and a description may hold line breaks.
+        let ok = entry("x", "f32", "1.0", RANGE)
+            .replace("unit = \"1\"", "unit = \"\u{b5}m\"")
+            .replace("description = \"test entry\"", "description = \"two\\nlines\"");
+        assert!(table(&ok).is_ok());
+    }
+
+    #[test]
+    fn i32_soft_range_outside_the_i32_limits_is_rejected() {
+        let e = table(&entry("x", "i32", "0", "min = -3000000000\nmax = 10\n")).unwrap_err();
+        assert!(e.0.contains("outside the i32 limits"), "{e}");
+        let e = table(&entry("x", "i32", "0", "min = 0\nmax = 4294967296\n")).unwrap_err();
+        assert!(e.0.contains("outside the i32 limits"), "{e}");
+        assert!(table(&entry("x", "i32", "0", "min = -2147483648\nmax = 2147483647\n")).is_ok());
+    }
+
+    /// Compiles and runs a probe around the generated Rust source: it sets distinct values on the `mixed()`
+    /// table, prints the std140 block, and tries to set non-finite values. Works in release builds (it does not
+    /// read the repository table).
+    #[test]
+    fn generated_rust_serialises_the_full_std140_block_and_rejects_non_finite_values() {
+        let t = table(&mixed()).unwrap();
+        let dir = std::env::temp_dir().join(format!("paramgen-test-{}-probe", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let probe = format!(
+            "#![allow(dead_code)]\n\
+             #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamType {{ F32, I32, Bool, Enum, Vec2, Vec3, Vec4 }}\n\
+             #[derive(Debug, Clone, Copy, PartialEq)] pub enum Confidence {{ Sourced, Derived, Known, Estimate }}\n\
+             #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamValue {{ F32(f32), I32(i32), Bool(bool), Enum(u32), Vec2([f32; 2]), Vec3([f32; 3]), Vec4([f32; 4]) }}\n\
+             pub struct ParamMeta {{ pub id: &'static str, pub stage: &'static str, pub ty: ParamType, pub unit: &'static str, pub default: ParamValue, pub soft_range: Option<(f64, f64)>, pub confidence: Confidence, pub source: &'static str, pub description: &'static str, pub group: &'static str, pub values: &'static [&'static str], pub file: &'static str, pub offset: usize, pub size: usize }}\n\
+             {generated}\n\
+             fn main() {{\n\
+                 let mut p = Params::default();\n\
+                 let sets = [\n\
+                     p.set(\"a\", ParamValue::F32(1.0)),\n\
+                     p.set(\"b\", ParamValue::Vec3([2.0, 3.0, 4.0])),\n\
+                     p.set(\"c\", ParamValue::I32(-7)),\n\
+                     p.set(\"d\", ParamValue::Vec2([5.0, 6.0])),\n\
+                     p.set(\"e\", ParamValue::Bool(true)),\n\
+                     p.set(\"f\", ParamValue::Vec4([7.0, 8.0, 9.0, 10.0])),\n\
+                     p.set(\"g\", ParamValue::F32(11.0)),\n\
+                     p.set(\"h\", ParamValue::Enum(2)),\n\
+                     p.set(\"i\", ParamValue::Vec2([12.0, 13.0])),\n\
+                     p.set(\"j\", ParamValue::F32(14.0)),\n\
+                 ];\n\
+                 assert!(sets.iter().all(|&b| b));\n\
+                 let bytes = p.to_std140();\n\
+                 println!(\"{{}}\", bytes.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(\",\"));\n\
+                 let before = p;\n\
+                 assert!(!p.set(\"a\", ParamValue::F32(f32::NAN)));\n\
+                 assert!(!p.set(\"a\", ParamValue::F32(f32::INFINITY)));\n\
+                 assert!(!p.set(\"b\", ParamValue::Vec3([0.0, f32::NEG_INFINITY, 0.0])));\n\
+                 assert!(!p.set(\"f\", ParamValue::Vec4([0.0, 0.0, f32::NAN, 0.0])));\n\
+                 assert!(!p.set(\"h\", ParamValue::Enum(3)));\n\
+                 assert!(!p.set(\"nope\", ParamValue::F32(1.0)));\n\
+                 assert!(p == before);\n\
+                 println!(\"ok\");\n\
+             }}\n",
+            generated = rust_source(&t)
+        );
+        let src = dir.join("probe.rs");
+        fs::write(&src, probe).unwrap();
+        let exe = dir.join(if cfg!(windows) { "probe.exe" } else { "probe" });
+        let rustc = std::env::var("RUSTC").unwrap_or_else(|_| "rustc".into());
+        let build = std::process::Command::new(rustc)
+            .args(["--edition=2021", "-o"])
+            .arg(&exe)
+            .arg(&src)
+            .output()
+            .expect("cannot run rustc");
+        assert!(
+            build.status.success(),
+            "probe does not compile:\n{}",
+            String::from_utf8_lossy(&build.stderr)
+        );
+        let run = std::process::Command::new(&exe).output().expect("cannot run the probe");
+        let stdout = String::from_utf8_lossy(&run.stdout).into_owned();
+        let _ = fs::remove_dir_all(&dir);
+        assert!(
+            run.status.success(),
+            "probe failed:\n{}",
+            String::from_utf8_lossy(&run.stderr)
+        );
+        let mut lines = stdout.lines();
+        let got: Vec<u8> = lines.next().unwrap().split(',').map(|b| b.parse().unwrap()).collect();
+        assert_eq!(lines.next(), Some("ok"));
+
+        // Hand-written block, one u32 word per 4 bytes (offset / 4), padding words included.
+        let words: [u32; 24] = [
+            0x3F80_0000,
+            0,
+            0,
+            0, // a = 1.0 at 0, padding 4..16
+            0x4000_0000,
+            0x4040_0000,
+            0x4080_0000,
+            0xFFFF_FFF9, // b = [2, 3, 4] at 16, c = -7 at 28
+            0x40A0_0000,
+            0x40C0_0000,
+            1,
+            0, // d = [5, 6] at 32, e = true at 40, padding 44..48
+            0x40E0_0000,
+            0x4100_0000,
+            0x4110_0000,
+            0x4120_0000, // f = [7, 8, 9, 10] at 48
+            0x4130_0000,
+            2,
+            0x4140_0000,
+            0x4150_0000, // g = 11 at 64, h = 2 at 68, i = [12, 13] at 72
+            0x4160_0000,
+            0,
+            0,
+            0, // j = 14 at 80, padding 84..96
+        ];
+        let expected: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
+        assert_eq!(expected.len(), 96);
+        assert_eq!(got, expected);
     }
 
     fn glslc() -> std::path::PathBuf {
