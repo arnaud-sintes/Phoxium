@@ -146,7 +146,7 @@ struct BeamRaster {
 BeamRaster beam_raster() {
     BeamRaster r;
     r.pitch = frame.line_pitch_mm * frame.px_per_mm;
-    float h = float(frame.tube_size.y);
+    float h = float(geometry_raster_size().y); // T-37 hook: the raster, inside the tube image's margin
     int rows = max(frame.native_size.y, 1);
     r.mult = int(clamp(round(h / (r.pitch * float(rows))), 1.0, 16.0));
     r.lines = rows * r.mult;
@@ -221,7 +221,7 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
     n1 = min(n1, n0 + float(BEAM_MAX_LINES - 1));
 
     int samples = amp_size().x;
-    float a = float(frame.tube_size.x) / float(samples);
+    float a = float(geometry_raster_size().x) / float(samples); // T-37 hook: raster width
     float x0 = g0.x;
     float x1 = x0 + 1.0;
     float j0 = max(0.0, floor((x0 - reach_x) / a));

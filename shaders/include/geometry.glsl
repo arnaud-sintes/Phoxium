@@ -33,6 +33,13 @@
 
 const float GEOMETRY_DEG = 0.017453292;
 
+// HOOK (beam_raster, beam_eval): size (host px) of the beam raster. The tube image is the raster grown by
+// frame.raster_margin on each side (the margin holds the spot's skirt past the raster's ends); both share the
+// tube centre. Raster coordinates (beam.glsl) start at the raster's top-left corner.
+ivec2 geometry_raster_size() {
+    return frame.tube_size - 2 * frame.raster_margin;
+}
+
 // raster_scale = 1 + abl_breathing (apl_f - abl_breathing_ref), read from the ABL state the `abl` slot left for
 // this frame (its reduce pass runs before `screen`; src/gpu/stages/screen.rs binds that buffer as set 1).
 // Exactly 1 when breathing is off, without reading the buffer. A value out of [0.5, 2] (a state never written,
@@ -93,7 +100,7 @@ bool geometry_surface_arc(vec2 u, out vec2 arc) {
 vec2 geometry_raster_px(vec2 p, float scale) {
     float ppm = frame.px_per_mm;
     vec2 c = 0.5 * vec2(frame.tube_size);
-    vec2 half_mm = c / ppm;
+    vec2 half_mm = 0.5 * vec2(geometry_raster_size()) / ppm;
     vec2 s;
     if (!geometry_surface_arc((p - c) / ppm, s)) {
         return vec2(-1e6); // far outside the raster: no line or sample within reach, black
@@ -122,14 +129,14 @@ vec2 geometry_raster_px(vec2 p, float scale) {
     return c + s * ppm;
 }
 
-// HOOK (beam_eval): origin of the footprint of host pixel q in the beam raster (host px). vec2(q) exactly when
-// the geometry is the identity or the tube is not placed.
+// HOOK (beam_eval): origin of the footprint of host pixel q (tube image) in the beam raster (host px from the
+// raster's top-left). q - raster_margin exactly when the geometry is the identity or the tube is not placed.
 vec2 geometry_footprint(ivec2 q) {
     float scale = geometry_raster_scale();
     if (geometry_identity(scale) || !(frame.px_per_mm > 0.0)) {
-        return vec2(q);
+        return vec2(q - frame.raster_margin);
     }
-    return geometry_raster_px(vec2(q) + 0.5, scale) - 0.5;
+    return geometry_raster_px(vec2(q) + 0.5, scale) - 0.5 - vec2(frame.raster_margin);
 }
 
 // HOOK (beam_convergence_px): landing offset (host px) of the red, green and blue beams at host position p: the
@@ -148,7 +155,7 @@ void geometry_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
     }
     vec2 c = 0.5 * vec2(frame.tube_size);
     vec2 u = (p - c) / ppm;
-    vec2 half_mm = c / ppm;
+    vec2 half_mm = 0.5 * vec2(geometry_raster_size()) / ppm;
     // u |u| / rc^2: the unit radial direction times (r / rc)^2.
     vec2 g = u * (length(u) / dot(half_mm, half_mm));
     dx = (sx + rad * g.x) * ppm;

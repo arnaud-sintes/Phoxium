@@ -55,12 +55,20 @@
 //!     factor 1.0117813, seen at (49.5773, 37.4359) mm = host (227.155, 170.872) at 2 px per mm. The mask
 //!     (16 px per triad) is not moved: a flat white field gives the same mask x beam image with and
 //!     without the pincushion.
+//! G11. Skirt [Spot profile; review of T-36b]. A flat field of current I ends at the raster edge; the
+//!     spot's x-profile spills past it. Per unit length of line the light beyond the edge is
+//!     I integral_0^inf Q(x / sigma) dx = I sigma / sqrt(2 pi) = 0.3989 I sigma; per row, averaged over whole
+//!     line periods (the line deposits I P per unit length per pitch P), the same. PVM-20M4U peak spot:
+//!     FWHM 0.8 mm, sigma 0.8 / 2.3548 x (1440 / 290) = 1.6870 px, skirt 0.6730 px of light per row and per
+//!     bright edge (previously cut). The tube image is grown by at least 4 sigma at I = 2 per side.
 
 mod common;
 
+use crt_model::beam::{AmpRaster, BeamOracle, Spot, SpotGrowth};
 use crt_model::geometry::{
     arc_from_projected_mm, convergence_offset_mm, cylinder_seen_mm, projected_from_arc_mm, sphere_seen_mm,
 };
+use crt_model::units::sigma_from_fwhm;
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{Params, GEOMETRY_CURVATURE_CYLINDRICAL, GEOMETRY_CURVATURE_SPHERICAL};
 
@@ -467,6 +475,99 @@ fn pincushion_moves_the_beam_not_the_mask() {
             }
         }
     }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// G11: the spot's skirt past the raster's ends is drawn in the tube image's margin (review of T-36b) and
+/// matches the oracle; the skirt energy per row at a flat-field edge is I sigma / sqrt(2 pi).
+#[test]
+fn skirt_past_the_raster_ends_matches_the_oracle() {
+    let test = "stage_geometry skirt";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let ppm = 1440.0_f32 / 290.0;
+    let p = Params {
+        beam_fwhm_mid_mm: 0.45,
+        beam_fwhm_peak_mm: 0.8,
+        beam_growth_exponent: 0.5,
+        beam_tail_weight: 0.0,
+        mask_enabled: false,
+        ..Params::default()
+    };
+    // Raster 96 x 48 px (16 x 8 native, 6 px per line) centred in a 160 x 100 target.
+    let mut fc = tube(16, 8, 6, ppm);
+    fc.target_size = [160, 100];
+    fc.tube_rect_px = [32.0, 26.0, 128.0, 74.0];
+    let fc = fc.with_skirt_margin(&p);
+    let growth = SpotGrowth {
+        fwhm_mid: 0.45,
+        fwhm_peak: 0.8,
+        n: 0.5,
+    };
+    let ppm64 = f64::from(ppm);
+    let reach = 4.0 * sigma_from_fwhm(growth.fwhm(2.0)) * ppm64;
+    let m = fc.raster_margin;
+    println!("{test}: margin {m:?} px, 4 sigma at I = 2: {reach:.3} px");
+    assert!(
+        f64::from(m[0]) >= reach && f64::from(m[1]) >= reach,
+        "{test}: margin {m:?} < {reach}"
+    );
+    assert_eq!(fc.tube_size, [96 + 2 * m[0], 48 + 2 * m[1]]);
+
+    let amp = currents(&fc, |_, _| WHITE);
+    let out = run(&mut gpu, &["screen"], fc, &p, &amp);
+    let ones = vec![1.0; amp.rgba.len() / 4];
+    let sigma = |i: f64| sigma_from_fwhm(growth.fwhm(i)) * ppm64;
+    let spot = Spot {
+        sigma_px: &sigma,
+        tail_weight: 0.0,
+        tail_ratio: 1.0,
+    };
+    let oracle = BeamOracle::new(
+        AmpRaster {
+            currents: &ones,
+            samples: amp.width as usize,
+            sample_width: 96.0 / f64::from(amp.width),
+            first: 3.0,
+            pitch: 6.0,
+            mult: 1,
+        },
+        &spot,
+    );
+    // Rows m + 12 .. m + 36: four whole line periods inside the raster; left margin columns.
+    let (mx, my) = (m[0] as u32, m[1] as u32);
+    let rows = my + 12..my + 36;
+    let (mut got, mut want) = (0.0, 0.0);
+    for y in rows.clone() {
+        for x in 0..mx {
+            let rx = f64::from(x) - f64::from(mx);
+            let ry = f64::from(y) - f64::from(my);
+            let w = oracle.pixel_mean((0.0, 0.0), (rx, rx + 1.0), (ry, ry + 1.0));
+            let g = f64::from(out.pixel(x, y)[1]);
+            assert!(
+                (g - w).abs() <= 1e-3 * w + 3e-4,
+                "{test}: ({x}, {y}) GPU {g} vs oracle {w}"
+            );
+            got += g;
+            want += w;
+        }
+    }
+    let n_rows = f64::from(rows.end - rows.start);
+    let hand = sigma(1.0) / (2.0 * std::f64::consts::PI).sqrt();
+    println!(
+        "{test}: skirt energy per row GPU {:.4}, oracle {:.4}, hand sigma / sqrt(2 pi) = {hand:.4} px",
+        got / n_rows,
+        want / n_rows
+    );
+    assert!((got / want - 1.0).abs() <= 0.01, "{test}: skirt {got} vs oracle {want}");
+    assert!(
+        (want / n_rows / hand - 1.0).abs() <= 0.01,
+        "{test}: oracle skirt vs hand"
+    );
+    assert!((hand - 0.673).abs() <= 0.002, "{test}: hand {hand}");
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
