@@ -274,6 +274,8 @@ dependencies = [
  "ash",
  "paramgen",
  "png",
+ "serde",
+ "toml",
  "windows",
 ]
 
