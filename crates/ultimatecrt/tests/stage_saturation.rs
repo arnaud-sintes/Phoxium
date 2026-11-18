@@ -358,11 +358,11 @@ fn interaction_with_persistence() {
     // exactly black although the history held light (the first frame after the switch has no trail).
     let off = params(false, S, true);
     let first = run(&mut gpu, &off, &pic);
-    for ch in 0..3 {
+    for (ch, &xc) in x.iter().enumerate() {
         // The history was dropped and primed to the steady state of this first frame (T-41 review fix):
         // a static picture shows its own value at once, x (saturation off), not w0 x.
         assert!(
-            rel(texel(&first, 0, 0, ch), f64::from(x[ch])) <= 2.5 * FP16,
+            rel(texel(&first, 0, 0, ch), f64::from(xc)) <= 2.5 * FP16,
             "ch {ch}: first frame after the switch"
         );
     }
