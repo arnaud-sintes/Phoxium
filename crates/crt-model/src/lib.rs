@@ -121,6 +121,48 @@ pub fn delta_distances_mm(p_mm: f64) -> [f64; 4] {
     [p_mm * s3, p_mm * s3 / 2.0, p_mm / 2.0, p_mm / s3]
 }
 
+/// 3x3 matrix, row major.
+pub type Mat3 = [[f64; 3]; 3];
+
+/// xy chromaticity to XYZ with Y = 1.
+pub fn xy_to_xyz(x: f64, y: f64) -> [f64; 3] {
+    [x / y, 1.0, (1.0 - x - y) / y]
+}
+
+fn det3(m: &Mat3) -> f64 {
+    m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+        + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+}
+
+/// Inverse of a 3x3 matrix (cofactors over determinant).
+pub fn inv3(m: &Mat3) -> Mat3 {
+    let d = det3(m);
+    let c = |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
+    [
+        [c(1, 2, 1, 2) / d, -c(0, 2, 1, 2) / d, c(0, 1, 1, 2) / d],
+        [-c(1, 2, 0, 2) / d, c(0, 2, 0, 2) / d, -c(0, 1, 0, 2) / d],
+        [c(1, 2, 0, 1) / d, -c(0, 2, 0, 1) / d, c(0, 1, 0, 1) / d],
+    ]
+}
+
+/// RGB to XYZ matrix from primaries and white chromaticities (white Y = 1).
+pub fn rgb_to_xyz(r: (f64, f64), g: (f64, f64), b: (f64, f64), w: (f64, f64)) -> Mat3 {
+    let (pr, pg, pb) = (xy_to_xyz(r.0, r.1), xy_to_xyz(g.0, g.1), xy_to_xyz(b.0, b.1));
+    let p: Mat3 = [[pr[0], pg[0], pb[0]], [pr[1], pg[1], pb[1]], [pr[2], pg[2], pb[2]]];
+    let wx = xy_to_xyz(w.0, w.1);
+    let pi = inv3(&p);
+    let s: Vec<f64> = (0..3)
+        .map(|i| pi[i][0] * wx[0] + pi[i][1] * wx[1] + pi[i][2] * wx[2])
+        .collect();
+    let mut m = p;
+    for row in &mut m {
+        for (j, v) in row.iter_mut().enumerate() {
+            *v *= s[j];
+        }
+    }
+    m
+}
+
 /// Triads across a visible width.
 pub fn triads_across(visible_width_mm: f64, pitch_mm: f64) -> f64 {
     visible_width_mm / pitch_mm
@@ -272,6 +314,16 @@ mod tests {
     fn decay_green_ghost_trail_in_phy12_range() {
         let g = frame_energy_ratios(FRAME_60HZ_MS, 1.0, 0.05, 0.046, 1.0, 0.72);
         assert!((0.005..=0.04).contains(&g[0]), "green E1/E0 = {}", g[0]);
+    }
+
+    #[test]
+    fn srgb_primaries_matrix() {
+        let m = rgb_to_xyz((0.64, 0.33), (0.30, 0.60), (0.15, 0.06), (0.3127, 0.3290));
+        assert!(close(m[0][0], 0.4124, 0.0002), "{m:?}");
+        assert!(close(m[1][1], 0.7152, 0.0002), "{m:?}");
+        assert!(close(m[2][2], 0.9505, 0.0002), "{m:?}");
+        let i = inv3(&m);
+        assert!(close(i[0][0], 3.2406, 0.001), "{i:?}");
     }
 
     #[test]
