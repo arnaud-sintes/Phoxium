@@ -1654,7 +1654,7 @@ mod tests {
     #[test]
     fn the_chain_is_ordered_and_consistent() {
         let names: Vec<&str> = stages::CHAIN.iter().map(|r| r.name).collect();
-        assert_eq!(names, ["signal", "amp", "gun", "screen", "phosphor", "optics"]);
+        assert_eq!(names, ["signal", "amp", "gun", "abl", "screen", "phosphor", "optics"]);
         check_chain(stages::CHAIN).expect("valid chain");
         let domains: Vec<(Domain, Domain)> = stages::CHAIN.iter().map(|r| (r.input, r.output)).collect();
         use Domain::*;
@@ -1663,6 +1663,7 @@ mod tests {
             [
                 (Native, Native),
                 (Native, Amp),
+                (Amp, Amp),
                 (Amp, Amp),
                 (Amp, Tube),
                 (Tube, Tube),

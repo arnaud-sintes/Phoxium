@@ -1,0 +1,57 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `abl`, reduce pass (T-35, QUESTIONS PHY-13; src/gpu/stages/abl.rs). One workgroup of 256
+// invocations: the frame APL a = mean over the amp image of (I_r + I_g + I_b) / 3 of the UNLIMITED beam
+// current (the slot's input, the gun output), summed in FP32 (each invocation a strided set of texels,
+// then a tree in shared memory: deterministic, no atomics), then the low-pass on the real frame time:
+// apl_f += (1 - exp(-dt / tau)) (a - apl_f); tau = 0 follows a at once, dt = 0 keeps apl_f. The apply
+// pass of the NEXT frame reads apl_f. When neither the limiter nor the breathing is on, the state is reset
+// to 0 (cold start when switched on).
+
+#include "params.glsl"
+#include "common.glsl"
+#define ABL_STATE_QUALIFIER
+#include "abl.glsl"
+
+#define REDUCE_SIZE 256u
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 2) uniform sampler2D current_in;
+
+shared float partial[REDUCE_SIZE];
+
+void main() {
+    uint t = gl_LocalInvocationIndex;
+    if (!params.abl_enable && params.abl_breathing == 0.0) {
+        if (t == 0u) {
+            abl_state.apl_f = 0.0;
+            abl_state.apl_frame = 0.0;
+        }
+        return;
+    }
+    ivec2 size = textureSize(current_in, 0);
+    uint w = uint(size.x);
+    uint n = w * uint(size.y);
+    float s = 0.0;
+    for (uint i = t; i < n; i += REDUCE_SIZE) {
+        vec3 c = texelFetch(current_in, ivec2(int(i % w), int(i / w)), 0).rgb;
+        s += c.r + c.g + c.b;
+    }
+    partial[t] = s;
+    barrier();
+    for (uint h = REDUCE_SIZE / 2u; h > 0u; h >>= 1u) {
+        if (t < h) {
+            partial[t] += partial[t + h];
+        }
+        barrier();
+    }
+    if (t == 0u) {
+        float a = n == 0u ? 0.0 : partial[0] / (3.0 * float(n));
+        float dt = max(frame.frame_time_ms, 0.0) * 0.001;
+        float alpha = params.abl_tau_s <= 0.0 ? 1.0 : 1.0 - exp(-dt / params.abl_tau_s);
+        abl_state.apl_f += alpha * (a - abl_state.apl_f);
+        abl_state.apl_frame = a;
+    }
+}

@@ -14,6 +14,7 @@
 //! release builds), and documents the domain in a `# Panics` section. An
 //! oracle that panics loudly is preferred over one that returns a silent NaN.
 
+pub mod abl;
 pub mod beam;
 pub mod colour;
 pub mod geometry;

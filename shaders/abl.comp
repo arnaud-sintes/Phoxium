@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `abl`, apply pass (T-35, QUESTIONS PHY-13; src/gpu/stages/abl.rs): amp domain -> amp domain, beam
+// current (gun output) times the ABL gain g of the filtered APL the reduce pass (reduce.comp) left at the
+// end of the PREVIOUS frame (one frame of latency). With abl_enable off the texel is copied unchanged
+// (exact identity). With abl_probe on, texel (0, 0) holds the state instead: (g, filtered APL,
+// raster_scale, last frame APL); g is 1 when the limiter is off.
+
+#include "params.glsl"
+#include "common.glsl"
+#define ABL_STATE_QUALIFIER readonly
+#include "abl.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D current_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D current_out;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(current_out)))) {
+        return;
+    }
+    vec4 c = texelFetch(current_in, p, 0);
+    float x = abl_state.apl_f;
+    float g = params.abl_enable ? abl_gain(x) : 1.0;
+    if (params.abl_probe && p == ivec2(0)) {
+        imageStore(current_out, p, vec4(g, x, abl_raster_scale(x), abl_state.apl_frame));
+        return;
+    }
+    if (params.abl_enable) {
+        c.rgb *= g;
+    }
+    imageStore(current_out, p, c);
+}
