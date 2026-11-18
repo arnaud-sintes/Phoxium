@@ -53,6 +53,8 @@ $env:UCRT_REQUIRE_GPU = '1'; cargo test
 - `gpu_passthrough` checks that every 8-bit code k of a BGRA8 ramp reads back with `round(v * 255) == k`. FP16 cannot hold k/255 exactly, and the NVIDIA driver converts to FP16 toward zero (254 reads 253.879), so the FP16 tolerance is one FP16 step.
 - Software Vulkan for a future CI (report only, unverified on Windows): Mesa lavapipe (llvmpipe Vulkan driver, Vulkan 1.3; Windows builds exist from third parties such as mesa-dist-win) and Google SwiftShader are candidates. Installing either as an ICD (`VK_DRIVER_FILES` pointing at its JSON manifest) would let a GPU-less runner run these tests with `UCRT_REQUIRE_GPU=1`. Neither has been tried here; check its Vulkan 1.3, dynamic rendering and synchronization2 support and its licence first.
 
+`scripts/check.ps1` runs all of the above in one go (fmt, clippy `-D warnings`, tests with `UCRT_REQUIRE_GPU=1`, licence check) and exits non-zero on the first failure. `-Smoke` adds a 10 s live run (`--pattern ramp --exit-after 10 --validation`, opens a window) that fails on any validation line on stderr. The licence check runs `cargo deny check licenses` against `deny.toml` when cargo-deny is installed (`cargo install cargo-deny --locked`), else warns, and always runs the declared-licence check shared in policy with `package.ps1`.
+
 There is no automated test of capture or output, and no CI yet: a hosted runner has no GPU and cannot capture windows.
 
 ### Manual end-to-end test
@@ -63,7 +65,7 @@ There is no automated test of capture or output, and no CI yet: a hosted runner 
 
 Useful variants:
 - `--fullscreen` covers the source's monitor and never takes focus. Quit with `Ctrl+Alt+Q`. Use `--exit-after 10` on the first tries so it ends by itself.
-- `--save-capture out.png` saves the first captured frame (check that the client area is exact, for example 768×720 for a 256×240 source at 3×).
+- `--save-capture out.png` saves the first captured frame (check that the client area is exact, for example 768Ã—720 for a 256Ã—240 source at 3Ã—).
 - `--list-windows`, `--list-gpus`, `--gpu N`, `--window "text"`, `--divisor N`, `--crop x,y,w,h`, `--integer`.
 
 Tips: launch the demo and the CRT app from the same kind of shell. When a program is started with `Start-Process` from PowerShell, the console window it opens can carry the exe path in its title and be picked as the target. The target match prefers titles that start with the text, so `pixel-demo |` wins. Do not take full-desktop screenshots when checking output (see `DESIGN.md`, testing).

@@ -78,7 +78,7 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 ## 10. Testing
 
 - Pure logic has unit tests with synthetic data, named after the behaviour (`tolerates_rounded_window_corners`). Run `cargo test`.
-- Physics gets analytic tests derived from `CRT.md` (for example 57 % scanline modulation at σ/P = 0.25) before the matching shader is trusted. **(planned, SCP-3)**
+- Physics gets analytic tests derived from `CRT.md` (for example 57 % scanline modulation at Ïƒ/P = 0.25) before the matching shader is trusted. **(planned, SCP-3)**
 - GPU passes are tested headless (`gpu::Headless`, no window): integration tests in `crates/ultimatecrt/tests/gpu_*.rs` get a renderer from `common::gpu_or_skip`, which enables the validation layer when installed, and end with `common::assert_no_validation_messages` after dropping the renderer. Without a Vulkan 1.3 device they print "skipped" and pass; `UCRT_REQUIRE_GPU=1` turns a missing device or validation layer into a failure (use it on the dev machine).
 - Capture and presentation are checked by hand with `pixel-demo` and `ultimatecrt --stats --validation` (see `ENV.md`). A hosted CI runner (none is set up yet) has no GPU, so it could cover build, format, lint and unit tests only (GPU tests skip).
 - Every bug found by hand that can be expressed on pure logic gets a regression test.
@@ -87,7 +87,7 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 ## 11. Interface, dependencies, privacy, process
 
 - **Command line:** long flags in `--kebab-case`, `--help` and `--version` on every program, every option listed in the `USAGE` text printed by `--help` (`main.rs`) and in `README.md`, sensible defaults, unknown flags are errors, a bad value names the flag.
-- **Dependencies:** `std`, `windows`, `ash`, `png` today. New dependencies need a permissive licence (MIT, Apache-2.0, BSD). No GPL. `cargo-deny` is planned. Prefer std over a small crate.
+- **Dependencies:** `std`, `windows`, `ash`, `png` today. New dependencies need a permissive licence (MIT, Apache-2.0, BSD). No GPL. `deny.toml` holds the licence allow list (GPL denied); `scripts/check.ps1` runs `cargo deny check licenses` when cargo-deny is installed. Prefer std over a small crate.
 - **Privacy and safety:** offline, no telemetry, no network. Capture only the chosen window. No injection, no hooks, no input synthesis, no low-level keyboard hooks (only `RegisterHotKey`).
 - **Commits:** imperative subject up to 72 characters, a body that says why, a `Co-Authored-By` trailer when an AI assisted. Small, buildable commits on `main`. No force pushes to `main`.
 - **Documentation:** a behaviour change updates `README.md` and `ARCHITECTURE.md` in the same commit, adds a line under `## [Unreleased]` in `CHANGELOG.md`, and updates `QUESTIONS.md` if it settles a question.
@@ -99,6 +99,6 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 - The frame path is GPU, CPU, GPU (decision A3).
 - `pixel-demo` uses `unwrap` and `expect` on window-system calls at start-up.
 - `capture.rs` unwraps the out-parameters of `D3D11CreateDevice` and the texture creation after the call returned success. The invariant holds but is not commented.
-- There is no continuous integration, and no `cargo-deny` check of licences (`package.ps1` only checks the declared licences of dependencies).
+- There is no continuous integration, and the `cargo-deny` licence check is local only (`scripts/check.ps1`, skipped with a warning when cargo-deny is missing; `package.ps1` only checks the declared licences).
 - There is no automated test of `capture` or `output`; `gpu` has headless tests of device creation, the validation messenger and the passthrough pass, but none of presentation.
 - Synchronization validation is enabled for headless contexts only; the window path (`--validation`) has not been run against it yet.
