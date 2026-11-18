@@ -15,6 +15,12 @@ use super::Res;
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
+/// True when `UCRT_REQUIRE_GPU` is set to a non-empty value other than `0`: a missing GPU, validation
+/// layer or synchronization validation then fails the GPU tests instead of skipping them.
+pub fn gpu_required() -> bool {
+    std::env::var("UCRT_REQUIRE_GPU").is_ok_and(|v| !v.is_empty() && v != "0")
+}
+
 /// True when the Vulkan loader is present and lists `VK_LAYER_KHRONOS_validation` (Vulkan SDK).
 pub fn validation_layer_available() -> bool {
     // SAFETY: loading the Vulkan loader library has no precondition beyond it being a real loader.
@@ -169,6 +175,8 @@ pub struct Context {
     /// Count of validation messages; its `AtomicU32` is the messenger's user data, so it must
     /// outlive the instance (the field drops after `Drop::drop` destroyed the instance).
     validation: ValidationCounter,
+    /// True when synchronization validation (and its shader-access heuristic) is on.
+    sync_validation: bool,
 }
 
 impl Context {
@@ -180,6 +188,12 @@ impl Context {
     /// True when the validation layer and the counting messenger are enabled.
     pub fn validation_enabled(&self) -> bool {
         self.messenger.is_some()
+    }
+
+    /// True when synchronization validation is active, with the shader-access heuristic: needs the
+    /// layer to offer VK_EXT_validation_features and VK_EXT_layer_settings, else it is silently off.
+    pub fn sync_validation_enabled(&self) -> bool {
+        self.sync_validation
     }
 
     /// Creates a surface-less context (no window, no swapchain extension): NVIDIA discrete, else
@@ -324,6 +338,7 @@ impl Context {
                     can_present: surface.is_some(),
                     messenger,
                     validation: counter,
+                    sync_validation: sync_validation && shader_accesses,
                 };
                 Ok((ctx, surface))
             }
@@ -484,7 +499,7 @@ mod tests {
     /// `UCRT_REQUIRE_GPU=1`.
     #[test]
     fn messenger_counts_validation_messages() {
-        let require = std::env::var("UCRT_REQUIRE_GPU").as_deref() == Ok("1");
+        let require = gpu_required();
         if !validation_layer_available() {
             assert!(!require, "UCRT_REQUIRE_GPU=1 but the validation layer is not installed");
             eprintln!("messenger_counts_validation_messages skipped: no validation layer");
@@ -522,7 +537,7 @@ mod tests {
     fn headless_device() {
         let ctx = match Context::new_headless(false) {
             Ok(ctx) => ctx,
-            Err(e) if std::env::var("UCRT_REQUIRE_GPU").as_deref() != Ok("1") => {
+            Err(e) if !gpu_required() => {
                 eprintln!("headless_device skipped: no Vulkan 1.3 device ({e})");
                 return;
             }

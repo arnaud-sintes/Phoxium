@@ -88,3 +88,67 @@ fn ramp_round_trips_through_bgra8_unorm() {
     // error (< 0.125 of a code) disappears and every code comes back exactly.
     check(TargetFormat::Bgra8Unorm, 0.0);
 }
+
+/// Code of channel `c` of pixel `i` in the odd-size images: mixes the exact FP16 values 0 and 255
+/// with other codes, and differs between neighbours so a stride or row-length mistake shows.
+fn odd_code(i: u32, c: u32) -> u8 {
+    match (i + c) % 5 {
+        0 => 0,
+        1 => 255,
+        _ => ((i * 37 + c * 91 + 13) % 256) as u8,
+    }
+}
+
+/// Odd sizes (rows not a multiple of 4 pixels or 16 bytes) through the RGBA16F target: every pixel
+/// is the code it was given (0 and 255 exactly, others within the FP16 truncation).
+fn check_odd_size(w: u32, h: u32) {
+    let test = format!("gpu_passthrough odd {w}x{h}");
+    let Some(mut gpu) = common::gpu_or_skip(&test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut bgra = Vec::new();
+    for i in 0..w * h {
+        bgra.extend_from_slice(&[odd_code(i, 2), odd_code(i, 1), odd_code(i, 0), 255]);
+    }
+    let out = gpu
+        .passthrough(w, h, &bgra, TargetFormat::Rgba16F)
+        .expect("headless passthrough");
+    drop(gpu);
+
+    assert_eq!((out.width, out.height), (w, h));
+    assert_eq!(out.rgba.len(), (w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let p = out.pixel(x, y);
+            for c in 0..3 {
+                let code = odd_code(y * w + x, c);
+                let v = p[c as usize] * 255.0;
+                assert_eq!(
+                    v.round(),
+                    f32::from(code),
+                    "pixel ({x}, {y}) channel {c}: {code} -> {v}"
+                );
+                assert!(
+                    (v - f32::from(code)).abs() <= 0.125,
+                    "pixel ({x}, {y}) channel {c}: {code} -> {v}"
+                );
+                if code == 0 || code == 255 {
+                    assert_eq!(v, f32::from(code), "pixel ({x}, {y}) channel {c} must be exact");
+                }
+            }
+            assert_eq!(p[3], 1.0, "pixel ({x}, {y}) alpha");
+        }
+    }
+    common::assert_no_validation_messages(&counter);
+}
+
+#[test]
+fn odd_size_3x5_round_trips_through_rgba16f() {
+    check_odd_size(3, 5);
+}
+
+#[test]
+fn single_pixel_round_trips_through_rgba16f() {
+    check_odd_size(1, 1);
+}
