@@ -7,7 +7,7 @@ use windows::Win32::{
     UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
 };
 
-use crate::{capture, cli, diag, gpu, output, scaling, source, sources, Res};
+use crate::{capture, cli, diag, gpu, lifecycle, output, scaling, source, sources, Res};
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
@@ -60,8 +60,8 @@ pub fn run() -> Res<()> {
     let kind = source::Source::choose(args.pattern.as_deref(), args.pattern_size, args.image.as_deref())?;
     let synthetic = !matches!(kind, source::Source::Capture);
     let mut synthetic_n = 0u64;
-    let (capture, follow) = if synthetic {
-        (None, windows::Win32::Foundation::HWND::default())
+    let (mut capture, follow, mut reattach) = if synthetic {
+        (None, windows::Win32::Foundation::HWND::default(), None)
     } else {
         let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
         let source = sources::find_by_title(&needle)
@@ -72,12 +72,16 @@ pub fn run() -> Res<()> {
         );
         let capture = capture::Capture::start(source.hwnd, !args.no_crop)?;
         println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
-        (Some(capture), source.hwnd)
+        // Follows the target across closes and relaunches (T-56): same executable and class.
+        let target = lifecycle::TargetKey::of(&sources::WindowEntry::from_info(&source));
+        let reattach = lifecycle::Reattacher::new(target, source.hwnd.0 as isize);
+        (Some(capture), source.hwnd, Some(reattach))
     };
     // Next frame of the source: the capture, or a pattern or image (static ones only once).
-    let mut poll = |frame: &mut capture::Frame| -> Res<bool> {
-        match &capture {
+    let mut poll = |capture: Option<&capture::Capture>, frame: &mut capture::Frame| -> Res<bool> {
+        match capture {
             Some(c) => Ok(c.take_frame(frame)),
+            None if !synthetic => Ok(false), // target lost, waiting for a relaunch
             None if synthetic_n == 0 || kind.is_animated() => {
                 if let Some(f) = kind.frame(synthetic_n)? {
                     *frame = f;
@@ -92,7 +96,7 @@ pub fn run() -> Res<()> {
 
     if let Some(path) = &args.save_capture {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !poll(&mut frame)? {
+        while !poll(capture.as_ref(), &mut frame)? {
             if Instant::now() > deadline {
                 return Err(NO_FRAME.into());
             }
@@ -105,7 +109,7 @@ pub fn run() -> Res<()> {
 
     // Wait for the first frame to size the window.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while !poll(&mut frame)? {
+    while !poll(capture.as_ref(), &mut frame)? {
         if Instant::now() > deadline {
             return Err(NO_FRAME.into());
         }
@@ -153,14 +157,62 @@ pub fn run() -> Res<()> {
     let mut detector = scaling::Detector::default();
     let mut detect_key = (0u32, 0u32, None);
     let mut view = scaling::View::full(frame.width, frame.height);
+    // Target lifecycle (T-56): reattach, black or stale frames, smoothed source, size changes.
+    let mut health = lifecycle::Health::new(0.0);
+    let mut smoothing = lifecycle::SmoothingWatch::default();
+    let mut size_watch = lifecycle::SizeWatch::default();
+    let mut captured_base = 0u64; // frames of the sessions already closed
+    let mut notice: Option<String> = None;
     loop {
-        if !output::pump() || capture.as_ref().is_some_and(|c| c.is_closed()) {
+        if !output::pump() {
             break;
         }
         if args.exit_after.is_some_and(|s| start.elapsed().as_secs_f64() > s) {
             break;
         }
-        if poll(&mut frame)? {
+        let now = start.elapsed().as_secs_f64();
+        if let Some(r) = reattach.as_mut() {
+            let closed = capture.as_ref().is_some_and(|c| c.is_closed());
+            match r.update(now, closed, sources::window_exists, sources::list_entries) {
+                lifecycle::Step::Idle => {}
+                lifecycle::Step::Lost => {
+                    captured_base += capture.as_ref().map_or(0, |c| c.frames_captured());
+                    capture = None;
+                    println!("source lost: waiting for {}", r.target().describe());
+                }
+                lifecycle::Step::TryAttach(hwnd) => {
+                    let h = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
+                    match capture::Capture::start(h, !args.no_crop) {
+                        Ok(c) => {
+                            capture = Some(c);
+                            r.attach_result(now, hwnd, true);
+                            frame.seq = 0; // the new session counts from 1
+                            health.reset(now);
+                            size_watch.request_history_clear();
+                            println!("source reattached: {}", r.target().describe());
+                        }
+                        Err(e) => {
+                            r.attach_result(now, hwnd, false);
+                            if r.failures() == 1 {
+                                println!("reattach failed, retrying: {e}");
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if poll(capture.as_ref(), &mut frame)? {
+            if size_watch.observe(frame.width, frame.height) {
+                // SRC-8: the renderer rebuilds its source-sized resources when it gets this frame
+                // and the detector restarts below; the history is cleared by the persistence stage
+                // (T-41) through `size_watch.take_history_clear()`.
+                smoothing.reset();
+                println!("source size changed: {}x{}", frame.width, frame.height);
+            }
+            if capture.is_some() {
+                let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
+                health.note_frame(now, black);
+            }
             fresh = true;
             let full = scaling::Rect {
                 x: 0,
@@ -197,17 +249,40 @@ pub fn run() -> Res<()> {
                 }
             };
             view = scaling::View::new(region, div);
+            // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
+            let eligible = capture.is_some() && args.divisor.is_none() && detector.is_locked() && div == (1, 1);
+            if smoothing.feed(&frame.data, frame.width, region, eligible) {
+                println!("warning: {}", lifecycle::SMOOTHED_WARNING);
+            }
         }
         let upload = fresh.then_some((frame.width, frame.height, frame.data.as_slice()));
         renderer.render(upload, view, output::client_size(win.hwnd))?;
         fresh = false;
         renders += 1;
         if let Some(l) = log.as_mut() {
-            l.tick(capture.as_ref().map_or(0, |c| c.frames_captured()));
+            l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
         }
 
         if stat_time.elapsed() >= Duration::from_secs(1) {
-            let captured = capture.as_ref().map_or(0, |c| c.frames_captured());
+            let captured = captured_base + capture.as_ref().map_or(0, |c| c.frames_captured());
+            // The one message to show: target lost, black or silent frames, smoothed source.
+            let now_notice = if reattach.as_ref().is_some_and(|r| !r.is_attached()) {
+                reattach
+                    .as_ref()
+                    .map(|r| format!("waiting for {}", r.target().describe()))
+            } else if let Some(m) = health.status(now).message() {
+                Some(m)
+            } else if smoothing.warning() {
+                Some("smoothed source?".to_string())
+            } else {
+                None
+            };
+            if now_notice != notice {
+                if let Some(m) = &now_notice {
+                    println!("notice: {m}");
+                }
+                notice = now_notice;
+            }
             let secs = stat_time.elapsed().as_secs_f64();
             // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
             let gpu = renderer.take_timing_average();
@@ -217,14 +292,15 @@ pub fn run() -> Res<()> {
             output::set_title(
                 win.hwnd,
                 &format!(
-                    "ultimatecrt | capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}",
+                    "ultimatecrt | capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}{}",
                     (captured - last_captured) as f64 / secs,
                     renders as f64 / secs,
                     view.native.0,
                     view.native.1,
                     view.div.0,
                     view.div.1,
-                    renderer.gpu_name
+                    renderer.gpu_name,
+                    notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
                 ),
             );
             if args.stats {

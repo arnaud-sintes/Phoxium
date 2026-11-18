@@ -9,7 +9,7 @@ use windows::{
             PROCESS_QUERY_LIMITED_INFORMATION,
         },
         UI::WindowsAndMessaging::{
-            EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
+            EnumWindows, GetClassNameW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic, IsWindow,
             IsWindowVisible,
         },
     },
@@ -60,6 +60,42 @@ pub fn list_windows() -> Vec<WinInfo> {
         let _ = EnumWindows(Some(collect), LPARAM(&mut list as *mut _ as isize));
     }
     list
+}
+
+/// One row of the window list shown by the UI (T-56): plain data, no OS handle types, so the list
+/// can be filtered, matched and tested without windows. `hwnd` is the raw handle value.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WindowEntry {
+    pub hwnd: isize,
+    pub title: String,
+    /// Executable file name, `None` when it cannot be queried (for example an elevated process).
+    pub exe: Option<String>,
+    pub class: String,
+    pub width: i32,
+    pub height: i32,
+}
+
+impl WindowEntry {
+    pub fn from_info(info: &WinInfo) -> Self {
+        WindowEntry {
+            hwnd: info.hwnd.0 as isize,
+            title: info.title.clone(),
+            exe: executable_name(info.hwnd),
+            class: info.class.clone(),
+            width: info.width,
+            height: info.height,
+        }
+    }
+}
+
+/// The window list for the UI: title, executable and class of every candidate window.
+pub fn list_entries() -> Vec<WindowEntry> {
+    list_windows().iter().map(WindowEntry::from_info).collect()
+}
+
+/// True while `hwnd` still designates a window (a destroyed window or a stale handle gives false).
+pub fn window_exists(hwnd: isize) -> bool {
+    unsafe { IsWindow(Some(HWND(hwnd as *mut std::ffi::c_void))).as_bool() }
 }
 
 /// Window whose title starts with `needle`, else the first one that contains it (case insensitive).
