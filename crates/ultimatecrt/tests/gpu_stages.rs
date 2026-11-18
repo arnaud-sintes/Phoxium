@@ -20,6 +20,9 @@ use ultimatecrt::params::Params;
 use ultimatecrt::scaling::View;
 
 const SLOTS: [&str; 6] = ["signal", "amp", "gun", "screen", "phosphor", "optics"];
+/// The slots that are still identity placeholders or copies. `screen` is excluded since T-36a: with the
+/// tube placed (T-30) it draws scanlines, so it is no longer an identity (its tests are `stage_beam_*`).
+const PASSTHROUGH: [&str; 5] = ["signal", "amp", "gun", "phosphor", "optics"];
 const W: u32 = 256;
 const H: u32 = 4;
 
@@ -126,7 +129,7 @@ fn full_chain_identity_all_slots_on_and_off() {
     let counter = gpu.validation_counter();
     let bgra = ramp();
     for t in [Transfer::Power(2.4), Transfer::Srgb, Transfer::Identity] {
-        gpu.enable_only(&SLOTS).unwrap();
+        gpu.enable_only(&PASSTHROUGH).unwrap();
         let on = render(&mut gpu, &bgra, t);
         assert_exact(&on, &format!("{test} {t:?} all on"));
         assert_chain_images_carry_native(&on, &format!("{test} {t:?} all on"));
@@ -151,8 +154,9 @@ fn toggling_each_slot_keeps_the_identity() {
     let counter = gpu.validation_counter();
     let bgra = ramp();
     let t = Transfer::Power(2.4);
+    gpu.set_stage_enabled("screen", false).unwrap();
     let reference = render(&mut gpu, &bgra, t);
-    for s in SLOTS {
+    for s in PASSTHROUGH {
         gpu.set_stage_enabled(s, false).unwrap();
         assert_eq!(gpu.stage_enabled(s), Some(false));
         let r = render(&mut gpu, &bgra, t);
@@ -189,7 +193,7 @@ fn toggling_each_slot_keeps_the_identity() {
         .render_burst(&frames, &settings, &Params::default(), (W, H), TargetFormat::Bgra8Unorm)
         .unwrap();
     assert_eq!(r.output, reference.output, "{test}: burst, all off");
-    gpu.enable_only(&SLOTS).unwrap();
+    gpu.enable_only(&PASSTHROUGH).unwrap();
     let r = gpu
         .render_burst(&frames, &settings, &Params::default(), (W, H), TargetFormat::Bgra8Unorm)
         .unwrap();

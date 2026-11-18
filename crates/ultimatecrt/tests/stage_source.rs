@@ -231,6 +231,9 @@ fn tube_rectangle_and_black_surround_in_the_output() {
         return;
     };
     let counter = gpu.validation_counter();
+    // The test is about where the tube rectangle is: bypass the beam (T-36a), which would modulate the
+    // white field with scanlines; a bypassed screen slot copies the amp image into the tube rectangle.
+    gpu.set_stage_enabled("screen", false).unwrap();
     let target = (2560, 1440);
     let lit = |r: &Rendered, x: u32, y: u32| r.output.pixel(x, y)[..3].iter().all(|&v| v == 1.0);
     let black = |r: &Rendered, x: u32, y: u32| r.output.pixel(x, y)[..3].iter().all(|&v| v == 0.0);

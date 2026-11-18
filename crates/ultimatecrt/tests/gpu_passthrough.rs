@@ -33,6 +33,8 @@ fn check(format: TargetFormat, tol: f32) {
     let Some(mut gpu) = common::gpu_or_skip(&test) else {
         return;
     };
+    // Decode and encode only: the beam (T-36a) has its own tests.
+    gpu.enable_only(&[]).expect("bypass every slot");
     let counter = gpu.validation_counter();
     eprintln!("{test}: on {}", gpu.context().gpu.name);
     let out = gpu.passthrough(W, H, &ramp(), format).expect("headless passthrough");
@@ -106,6 +108,8 @@ fn check_odd_size(w: u32, h: u32) {
     let Some(mut gpu) = common::gpu_or_skip(&test) else {
         return;
     };
+    // Decode and encode only: the beam (T-36a) has its own tests.
+    gpu.enable_only(&[]).expect("bypass every slot");
     let counter = gpu.validation_counter();
     let mut bgra = Vec::new();
     for i in 0..w * h {

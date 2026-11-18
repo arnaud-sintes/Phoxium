@@ -159,6 +159,9 @@ fn identity_case(t: Transfer, subnormal_codes: &[u8]) {
     };
     let counter = gpu.validation_counter();
     eprintln!("{test}: on {}", gpu.context().gpu.name);
+    // These tests are about decode and encode: since T-36a the beam draws scanlines once the tube is
+    // placed, so every chain slot is bypassed (a bypassed slot is an exact identity, A11).
+    gpu.enable_only(&[]).expect("bypass every slot");
     let half = render_identity(&mut gpu, t, TargetFormat::Rgba16F);
     let unorm = render_identity(&mut gpu, t, TargetFormat::Bgra8Unorm);
     drop(gpu);
@@ -246,6 +249,8 @@ fn frames_in_flight_burst_with_silent_sync_validation() {
         return;
     };
     let counter = gpu.validation_counter();
+    // Decode and encode only: the beam (T-36a) is a separate stage with its own tests.
+    gpu.enable_only(&[]).expect("bypass every slot");
     let a = ramp(W, H);
     // `b` is `a` mirrored horizontally, so a stale upload is detected.
     let mut b = Vec::with_capacity(a.len());
