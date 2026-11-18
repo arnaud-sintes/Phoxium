@@ -1,0 +1,43 @@
+# Beam stage parameters (ARCHITECTURE section 5, step 3; shaders/include/beam.glsl). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means dimensionless.
+# T-36a: vertical scanline profile (Gaussian core plus an optional wide Gaussian tail, area-integrated over each
+# host pixel). T-36b adds the horizontal spot, spot growth (FWHM at peak, exponent n) and convergence.
+
+[[param]]
+id = "beam_fwhm_mid_mm"
+stage = "beam"
+type = "f32"
+unit = "mm"
+default = 0.45
+min = 0.1
+max = 3.0
+tag = "E"
+source = "CRT.md Measured and estimated spot sizes (working defaults: PC 0.3 to 0.5, PVM/BVM 0.4 to 0.7, TV 0.7 to 1.5 mm FWHM at mid drive) and Starting presets (PVM-20M4U 0.45 mm mid)"
+description = "Full width at half maximum of the beam spot core at mid drive, at the screen centre. Scanline profile sigma = FWHM / 2.3548. Until spot growth (T-36b) it is the width at every beam current."
+group = "Beam"
+
+[[param]]
+id = "beam_tail_weight"
+stage = "beam"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 0.15
+tag = "E"
+source = "CRT.md Spot profile: Gaussian core plus a wider Gaussian or exponential tail at about 2 to 10 % weight; Starting presets, Other defaults (tail 2 to 10 % weight)"
+description = "Fraction of the beam energy in the wide Gaussian tail of the spot (0 = pure Gaussian). The total energy does not change with it."
+group = "Beam"
+
+[[param]]
+id = "beam_tail_sigma_ratio"
+stage = "beam"
+type = "f32"
+unit = "1"
+default = 3.0
+min = 1.5
+max = 10.0
+tag = "E"
+source = "CRT.md Spot profile: a 'wider' Gaussian tail; its width is not sourced (estimate)"
+description = "Sigma of the wide tail as a multiple of the core sigma."
+group = "Beam"

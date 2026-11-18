@@ -22,6 +22,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Headless renderer (offscreen RGBA16F/RGBA32F render and readback, no window) and GPU tests run by `cargo test`, failing on any validation message; `UCRT_REQUIRE_GPU=1` makes a missing GPU or validation layer a failure instead of a skip.
 - `--validation` prints the layer's messages on stderr through a debug messenger, and names the missing layer when the Vulkan SDK is not installed.
 - Pipeline core: an FP16 `decode` stage (compute, native raster read at block centres) and an `encode` stage (explicit host EOTF, black surround around the tube rectangle), two frames in flight with per-frame uniform and staging buffers, images reallocated on source or native size change. Headless identity tests: all 256 codes per channel come back exact through the FP16 raster, FP16 subnormals kept.
+- Beam, vertical scanline profile: each native row is drawn as a scanline whose Gaussian spot (plus an optional wide tail) is integrated over every host pixel, with the flat-field brightness independent of the spot width. New parameters `beam_fwhm_mid_mm` (default 0.45 mm), `beam_tail_weight`, `beam_tail_sigma_ratio`. Active once the tube is placed (px per mm and line pitch set); until then the screen stage keeps the nearest-sample copy.
 
 ### Changed
 - A fullscreen output now refuses to start when the Ctrl+Alt+Q hotkey cannot be registered, and an unknown `--monitor` index is an error (it used to fall back to a default rectangle).
