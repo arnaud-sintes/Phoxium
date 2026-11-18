@@ -31,6 +31,7 @@ Usage: ultimatecrt [options]
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
   --exit-after <secs>  quit after some seconds (for automated tests)
+  render ...           (first argument) offline render of a pattern or image to PNG or PFM, no window; see `ultimatecrt render --help`
   --version            print the version and exit
   --help               print this text
 

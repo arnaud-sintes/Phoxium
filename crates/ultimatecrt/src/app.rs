@@ -13,6 +13,11 @@ const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
 
 pub fn run() -> Res<()> {
+    // `render` is an offline sub-command: no window, no capture, no COM setup.
+    let argv: Vec<String> = std::env::args().skip(1).collect();
+    if argv.first().map(String::as_str) == Some("render") {
+        return crate::render_cmd::run(&argv[1..]);
+    }
     let args = cli::parse_args()?;
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
