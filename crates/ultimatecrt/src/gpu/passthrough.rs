@@ -1,4 +1,7 @@
-//! Passthrough pipeline: shader modules, pipeline and command recording.
+//! Passthrough pipeline: shader modules, layouts, pipeline and command recording.
+//!
+//! The free functions build the objects for any colour target format, so the window
+//! [`Renderer`] and the offscreen [`super::Headless`] renderer share them.
 
 use std::io::Cursor;
 
@@ -14,77 +17,174 @@ pub(super) struct PushConstants {
     ints: [i32; 6],
 }
 
+impl PushConstants {
+    /// Push constants drawing the native raster of `view` into `rect` (NDC, min x, min y, max x, max y).
+    pub(super) fn new(rect: [f32; 4], view: View) -> Self {
+        Self {
+            rect,
+            ints: [
+                view.origin.0 as i32,
+                view.origin.1 as i32,
+                view.div.0 as i32,
+                view.div.1 as i32,
+                view.native.0 as i32,
+                view.native.1 as i32,
+            ],
+        }
+    }
+
+    /// Records `vkCmdPushConstants` for the whole block.
+    ///
+    /// # Safety
+    /// `cb` must be recording on `d` and `layout` must be a pipeline layout made by [`create_pipeline_layout`].
+    pub(super) unsafe fn push(&self, d: &ash::Device, cb: vk::CommandBuffer, layout: vk::PipelineLayout) {
+        // SAFETY: PushConstants is #[repr(C)] plain data (f32 and i32 only, no padding).
+        let bytes = std::slice::from_raw_parts((self as *const Self).cast::<u8>(), size_of::<Self>());
+        d.cmd_push_constants(
+            cb,
+            layout,
+            vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
+            0,
+            bytes,
+        );
+    }
+}
+
 const VERT_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/fullscreen.vert.spv"));
 const FRAG_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/passthrough.frag.spv"));
 
+/// Descriptor set layout of the passthrough pass: one combined image sampler (the source frame).
+///
+/// # Safety
+/// `d` must be a live device; the caller destroys the returned layout.
+pub(super) unsafe fn create_set_layout(d: &ash::Device) -> Res<vk::DescriptorSetLayout> {
+    let bindings = [vk::DescriptorSetLayoutBinding::default()
+        .binding(0)
+        .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+        .descriptor_count(1)
+        .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
+    Ok(d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?)
+}
+
+/// Pipeline layout of the passthrough pass: `set_layout` plus the [`PushConstants`] range.
+///
+/// # Safety
+/// `d` must be a live device and `set_layout` one of its layouts; the caller destroys the result.
+pub(super) unsafe fn create_pipeline_layout(
+    d: &ash::Device,
+    set_layout: vk::DescriptorSetLayout,
+) -> Res<vk::PipelineLayout> {
+    let set_layouts = [set_layout];
+    let push = [vk::PushConstantRange::default()
+        .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
+        .offset(0)
+        .size(size_of::<PushConstants>() as u32)];
+    Ok(d.create_pipeline_layout(
+        &vk::PipelineLayoutCreateInfo::default()
+            .set_layouts(&set_layouts)
+            .push_constant_ranges(&push),
+        None,
+    )?)
+}
+
+/// Nearest, clamp-to-edge sampler (the shader uses `texelFetch`, the sampler only completes the
+/// combined image sampler descriptor).
+///
+/// # Safety
+/// `d` must be a live device; the caller destroys the sampler.
+pub(super) unsafe fn create_sampler(d: &ash::Device) -> Res<vk::Sampler> {
+    Ok(d.create_sampler(
+        &vk::SamplerCreateInfo::default()
+            .mag_filter(vk::Filter::NEAREST)
+            .min_filter(vk::Filter::NEAREST)
+            .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
+            .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
+        None,
+    )?)
+}
+
+/// Creates a shader module from SPIR-V bytes.
+///
+/// # Safety
+/// `d` must be a live device; the caller destroys the returned module.
+pub(super) unsafe fn shader_module(d: &ash::Device, spv: &[u8]) -> Res<vk::ShaderModule> {
+    let words = ash::util::read_spv(&mut Cursor::new(spv))?;
+    Ok(d.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?)
+}
+
+/// Creates the passthrough graphics pipeline (dynamic rendering, one colour attachment of `format`,
+/// dynamic viewport and scissor, no blending).
+///
+/// # Safety
+/// `d` must be a live device and `layout` a pipeline layout of it made by [`create_pipeline_layout`];
+/// the caller destroys the pipeline.
+pub(super) unsafe fn create_pipeline(
+    d: &ash::Device,
+    layout: vk::PipelineLayout,
+    format: vk::Format,
+) -> Res<vk::Pipeline> {
+    let vert = shader_module(d, VERT_SPV)?;
+    let frag = match shader_module(d, FRAG_SPV) {
+        Ok(m) => m,
+        Err(e) => {
+            d.destroy_shader_module(vert, None);
+            return Err(e);
+        }
+    };
+    let stages = [
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::VERTEX)
+            .module(vert)
+            .name(c"main"),
+        vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::FRAGMENT)
+            .module(frag)
+            .name(c"main"),
+    ];
+    let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
+    let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
+    let viewport = vk::PipelineViewportStateCreateInfo::default()
+        .viewport_count(1)
+        .scissor_count(1);
+    let raster = vk::PipelineRasterizationStateCreateInfo::default()
+        .polygon_mode(vk::PolygonMode::FILL)
+        .cull_mode(vk::CullModeFlags::NONE)
+        .line_width(1.0);
+    let multisample =
+        vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+    let attachments =
+        [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+    let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
+    let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
+    let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
+    let formats = [format];
+    let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
+    let info = vk::GraphicsPipelineCreateInfo::default()
+        .stages(&stages)
+        .vertex_input_state(&vertex_input)
+        .input_assembly_state(&assembly)
+        .viewport_state(&viewport)
+        .rasterization_state(&raster)
+        .multisample_state(&multisample)
+        .color_blend_state(&blend)
+        .dynamic_state(&dynamic)
+        .layout(layout)
+        .push_next(&mut rendering);
+    let result = d.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);
+    d.destroy_shader_module(vert, None);
+    d.destroy_shader_module(frag, None);
+    Ok(result.map_err(|(_, e)| e)?[0])
+}
+
 impl Renderer {
-    /// Creates the passthrough graphics pipeline.
+    /// Creates the passthrough graphics pipeline for the swapchain format.
     ///
     /// # Safety
     /// The device and `pipeline_layout` must be live, the swapchain format set, and no previous pipeline alive.
     pub(super) unsafe fn create_pipeline(&mut self) -> Res<()> {
-        let vert = self.shader_module(VERT_SPV)?;
-        let frag = self.shader_module(FRAG_SPV)?;
-        let stages = [
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::VERTEX)
-                .module(vert)
-                .name(c"main"),
-            vk::PipelineShaderStageCreateInfo::default()
-                .stage(vk::ShaderStageFlags::FRAGMENT)
-                .module(frag)
-                .name(c"main"),
-        ];
-        let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-        let assembly =
-            vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
-        let viewport = vk::PipelineViewportStateCreateInfo::default()
-            .viewport_count(1)
-            .scissor_count(1);
-        let raster = vk::PipelineRasterizationStateCreateInfo::default()
-            .polygon_mode(vk::PolygonMode::FILL)
-            .cull_mode(vk::CullModeFlags::NONE)
-            .line_width(1.0);
-        let multisample =
-            vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let attachments =
-            [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
-        let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
-        let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
-        let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [self.presenter.format()];
-        let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
-        let info = vk::GraphicsPipelineCreateInfo::default()
-            .stages(&stages)
-            .vertex_input_state(&vertex_input)
-            .input_assembly_state(&assembly)
-            .viewport_state(&viewport)
-            .rasterization_state(&raster)
-            .multisample_state(&multisample)
-            .color_blend_state(&blend)
-            .dynamic_state(&dynamic)
-            .layout(self.pipeline_layout)
-            .push_next(&mut rendering);
-        let result = self
-            .ctx
-            .device
-            .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);
-        self.ctx.device.destroy_shader_module(vert, None);
-        self.ctx.device.destroy_shader_module(frag, None);
-        self.pipeline = result.map_err(|(_, e)| e)?[0];
+        self.pipeline = create_pipeline(&self.ctx.device, self.pipeline_layout, self.presenter.format())?;
         Ok(())
-    }
-
-    /// Creates a shader module from SPIR-V bytes.
-    ///
-    /// # Safety
-    /// The device must be live; the caller destroys the returned module.
-    pub(super) unsafe fn shader_module(&self, spv: &[u8]) -> Res<vk::ShaderModule> {
-        let words = ash::util::read_spv(&mut Cursor::new(spv))?;
-        Ok(self
-            .ctx
-            .device
-            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?)
     }
 
     /// Records the frame command buffer for swapchain image `index`.
@@ -208,27 +308,7 @@ impl Renderer {
                 &[self.desc_set],
                 &[],
             );
-            let pc = PushConstants {
-                rect,
-                ints: [
-                    v.origin.0 as i32,
-                    v.origin.1 as i32,
-                    v.div.0 as i32,
-                    v.div.1 as i32,
-                    v.native.0 as i32,
-                    v.native.1 as i32,
-                ],
-            };
-            // SAFETY: PushConstants is #[repr(C)] plain data (f32 and i32 only, no padding).
-            let bytes =
-                std::slice::from_raw_parts((&pc as *const PushConstants).cast::<u8>(), size_of::<PushConstants>());
-            d.cmd_push_constants(
-                cb,
-                self.pipeline_layout,
-                vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT,
-                0,
-                bytes,
-            );
+            PushConstants::new(rect, v).push(d, cb, self.pipeline_layout);
             d.cmd_draw(cb, 4, 1, 0, 0);
         }
         d.cmd_end_rendering(cb);

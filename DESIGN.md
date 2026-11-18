@@ -79,7 +79,8 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 
 - Pure logic has unit tests with synthetic data, named after the behaviour (`tolerates_rounded_window_corners`). Run `cargo test`.
 - Physics gets analytic tests derived from `CRT.md` (for example 57 % scanline modulation at σ/P = 0.25) before the matching shader is trusted. **(planned, SCP-3)**
-- GPU and capture behaviour is checked by hand with `pixel-demo` and `ultimatecrt --stats --validation` (see `ENV.md`). A hosted CI runner (none is set up yet) has no GPU, so it could cover build, format, lint and unit tests only.
+- GPU passes are tested headless (`gpu::Headless`, no window): integration tests in `crates/ultimatecrt/tests/gpu_*.rs` get a renderer from `common::gpu_or_skip`, which enables the validation layer when installed, and end with `common::assert_no_validation_messages` after dropping the renderer. Without a Vulkan 1.3 device they print "skipped" and pass; `UCRT_REQUIRE_GPU=1` turns a missing device or validation layer into a failure (use it on the dev machine).
+- Capture and presentation are checked by hand with `pixel-demo` and `ultimatecrt --stats --validation` (see `ENV.md`). A hosted CI runner (none is set up yet) has no GPU, so it could cover build, format, lint and unit tests only (GPU tests skip).
 - Every bug found by hand that can be expressed on pure logic gets a regression test.
 - Screenshots used to check output must show only the output monitor or window, never the whole desktop, and are deleted afterwards (they can contain private content).
 
@@ -99,4 +100,5 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 - `pixel-demo` uses `unwrap` and `expect` on window-system calls at start-up.
 - `capture.rs` unwraps the out-parameters of `D3D11CreateDevice` and the texture creation after the call returned success. The invariant holds but is not commented.
 - There is no continuous integration, and no `cargo-deny` check of licences (`package.ps1` only checks the declared licences of dependencies).
-- There is no automated test of `capture` or `output`; `gpu` only has a headless device-creation test and unit tests of the device choice.
+- There is no automated test of `capture` or `output`; `gpu` has headless tests of device creation, the validation messenger and the passthrough pass, but none of presentation.
+- Synchronization validation is enabled for headless contexts only; the window path (`--validation`) has not been run against it yet.
