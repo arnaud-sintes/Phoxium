@@ -78,7 +78,12 @@ impl Headless {
     /// With `validation`, the validation layer must be installed and its messages are counted
     /// ([`Headless::validation_counter`]).
     pub fn new(validation: bool) -> Res<Self> {
-        let ctx = Context::new_headless(validation)?;
+        Self::from_context(Context::new_headless(validation)?)
+    }
+
+    /// Creates the pipeline on an existing headless context. Lets a caller tell a missing device
+    /// (Context::new_headless fails) from a failure to create the renderer objects (this fails).
+    pub fn from_context(ctx: Context) -> Res<Self> {
         // SAFETY: `ctx` is live; `Drop for Headless` destroys the pipeline before the context.
         let pipeline = unsafe { Pipeline::new(&ctx)? };
         Ok(Self { pipeline, ctx })
