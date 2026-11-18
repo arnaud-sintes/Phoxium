@@ -129,6 +129,266 @@ pub fn spot_fwhm_mm(current_ua: f64, d0_mm: f64, k: f64, n: f64) -> f64 {
     (d0_mm * d0_mm + k * current_ua.max(0.0).powf(2.0 * n)).sqrt()
 }
 
+/// Normalised beam current at mid drive (T-36b; QUESTIONS PHY-7 "normalised drive with FWHM at mid and
+/// at peak"): drive voltage V = 0.5 through the reference gun law I = V^2.4 (CRT.md Gun law, gamma 2.4;
+/// the PLAN T-34 check GOG V = 0.5 -> 0.18946), so 0.5^2.4. Peak drive V = 1 is I = 1. [D]
+pub const MID_DRIVE_CURRENT: f64 = 0.189_464_570_813_799_78;
+
+/// Smallest spot FWHM in mm: a guard for parameters whose law would reach zero (a spot shrinking with
+/// current below 0). Not reached by any physical setting. [E]
+pub const MIN_SPOT_FWHM_MM: f64 = 0.001;
+
+/// Smallest growth exponent n (guard: n = 0 would divide by zero). [E]
+pub const MIN_GROWTH_EXPONENT: f64 = 0.05;
+
+/// Spot size against the normalised beam current I (CRT.md "Spot growth with beam current"):
+/// FWHM^2 = d0^2 + k I^(2n). As QUESTIONS PHY-7 and PLAN T-36b set it, the law is given by its FWHM at
+/// mid drive (I = [`MID_DRIVE_CURRENT`]), its FWHM at peak (I = 1) and n; d0 and k follow. [E][D]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpotGrowth {
+    /// FWHM at mid drive, mm.
+    pub fwhm_mid: f64,
+    /// FWHM at peak drive, mm.
+    pub fwhm_peak: f64,
+    /// Growth exponent n (CRT.md: 0.2 to 0.5).
+    pub n: f64,
+}
+
+impl SpotGrowth {
+    /// No growth: the same FWHM at every current (k = 0).
+    pub fn constant(fwhm: f64) -> Self {
+        Self {
+            fwhm_mid: fwhm,
+            fwhm_peak: fwhm,
+            n: 0.5,
+        }
+    }
+
+    /// The exponent the law uses. The two widths and n give d0^2 = (d_mid^2 - d_peak^2 x) / (1 - x)
+    /// with x = I_mid^(2n) (see [`Self::floor_sq_and_k`]), negative when d_peak / d_mid > I_mid^(-n),
+    /// that is n < ln(d_peak / d_mid) / ln(1 / I_mid). A negative floor is not physical (the spot would
+    /// vanish at a low current), so n is raised to that bound, where d0 = 0 and the law is the pure
+    /// power d = d_mid (I / I_mid)^n. n is also kept above [`MIN_GROWTH_EXPONENT`]. [D]
+    pub fn exponent(&self) -> f64 {
+        let n_min = if self.fwhm_peak > self.fwhm_mid {
+            (self.fwhm_peak / self.fwhm_mid).ln() / (1.0 / MID_DRIVE_CURRENT).ln()
+        } else {
+            0.0
+        };
+        self.n.max(MIN_GROWTH_EXPONENT).max(n_min)
+    }
+
+    /// (d0^2, k), in mm^2 and mm^2 per unit current^(2n). From d_peak^2 = d0^2 + k (I = 1) and
+    /// d_mid^2 = d0^2 + k x (x = I_mid^(2n)): k = (d_peak^2 - d_mid^2) / (1 - x), d0^2 = d_peak^2 - k. [D]
+    ///
+    /// # Panics
+    /// Unless both widths are finite and positive.
+    pub fn floor_sq_and_k(&self) -> (f64, f64) {
+        assert!(
+            self.fwhm_mid.is_finite() && self.fwhm_mid > 0.0 && self.fwhm_peak.is_finite() && self.fwhm_peak > 0.0,
+            "spot growth: {self:?}"
+        );
+        let x = MID_DRIVE_CURRENT.powf(2.0 * self.exponent());
+        let (dm2, dp2) = (self.fwhm_mid * self.fwhm_mid, self.fwhm_peak * self.fwhm_peak);
+        let k = (dp2 - dm2) / (1.0 - x);
+        (dp2 - k, k)
+    }
+
+    /// FWHM (mm) at the normalised beam current `i` (negative currents count as 0), at least
+    /// [`MIN_SPOT_FWHM_MM`].
+    pub fn fwhm(&self, i: f64) -> f64 {
+        let (d0_sq, k) = self.floor_sq_and_k();
+        let d_sq = d0_sq + k * i.max(0.0).powf(2.0 * self.exponent());
+        d_sq.max(MIN_SPOT_FWHM_MM * MIN_SPOT_FWHM_MM).sqrt()
+    }
+}
+
+/// Standard normal distribution function Phi(t) = (1 + erf(t / sqrt 2)) / 2. [K]
+fn normal_cdf(t: f64) -> f64 {
+    0.5 * (1.0 + erf(t / 2.0_f64.sqrt()))
+}
+
+/// Standard normal density phi(t) = exp(-t^2 / 2) / sqrt(2 pi). [K]
+fn normal_pdf(t: f64) -> f64 {
+    (-0.5 * t * t).exp() / (2.0 * PI).sqrt()
+}
+
+/// Energy that a uniform segment [a0, a1] of unit linear density, blurred by a unit-area Gaussian of
+/// sigma `sigma`, puts into [b0, b1]: the integral over x' in [a0, a1] and x in [b0, b1] of
+/// g(x - x') (length squared; divide by b1 - b0 for the mean over [b0, b1]). The inner integral is
+/// Phi((b1 - x') / sigma) - Phi((b0 - x') / sigma); G(u) = u Phi(u / sigma) + sigma phi(u / sigma) has the
+/// derivative Phi(u / sigma), so the result is G(b1 - a0) - G(b1 - a1) - G(b0 - a0) + G(b0 - a1). [D]
+///
+/// # Panics
+/// Unless `sigma` > 0, a0 <= a1 and b0 <= b1 (all finite).
+pub fn box_gaussian_overlap(a0: f64, a1: f64, b0: f64, b1: f64, sigma: f64) -> f64 {
+    assert!(
+        sigma.is_finite() && sigma > 0.0 && a0.is_finite() && a1.is_finite() && b0.is_finite() && b1.is_finite(),
+        "box_gaussian_overlap: sigma = {sigma}, [{a0}, {a1}] x [{b0}, {b1}]"
+    );
+    assert!(
+        a0 <= a1 && b0 <= b1,
+        "box_gaussian_overlap: [{a0}, {a1}] x [{b0}, {b1}]"
+    );
+    let g = |u: f64| u * normal_cdf(u / sigma) + sigma * normal_pdf(u / sigma);
+    g(b1 - a0) - g(b1 - a1) - g(b0 - a0) + g(b0 - a1)
+}
+
+/// One channel of the beam-current image of the amp domain placed on the tube (T-36b), host px units:
+/// `currents` holds the native rows one after the other, `samples` amp samples per row; sample j of a
+/// line covers [j a, (j + 1) a) with a = `sample_width` (the current is held over the sample, zero-order
+/// hold); line n is centred at `first + n * pitch` and draws native row n / `mult`.
+#[derive(Clone, Copy, Debug)]
+pub struct AmpRaster<'a> {
+    pub currents: &'a [f64],
+    pub samples: usize,
+    pub sample_width: f64,
+    pub first: f64,
+    pub pitch: f64,
+    pub mult: usize,
+}
+
+/// The 2D spot of the oracle (CRT.md "Spot profile"; round at the screen centre, 0.4 x 0.4 mm in the
+/// datasheet table): core sigma in px as a function of the beam current (spot growth), and the optional
+/// wide tail of [`ScanlineProfile`] applied to both axes (core and tail are 2D Gaussians). [K][E]
+pub struct Spot<'a> {
+    pub sigma_px: &'a dyn Fn(f64) -> f64,
+    pub tail_weight: f64,
+    pub tail_ratio: f64,
+}
+
+/// The 2D beam oracle of one channel (T-36b; CRT.md "Horizontal versus vertical sharpness": along the
+/// line the held signal convolved with the spot x-profile, across it the scanlines blurred by the spot
+/// y-profile). [`BeamOracle::new`] evaluates the spot sigma of every sample once; [`BeamOracle::pixel_mean`]
+/// gives the light of one host pixel.
+pub struct BeamOracle<'a> {
+    raster: AmpRaster<'a>,
+    tail_weight: f64,
+    tail_ratio: f64,
+    /// Core sigma (px) of every sample, same layout as the currents.
+    sigma: Vec<f64>,
+    /// Widest sigma (core or tail) of each native row.
+    row_widest: Vec<f64>,
+}
+
+impl<'a> BeamOracle<'a> {
+    /// # Panics
+    /// Unless the raster is consistent (pitch and sample width > 0, mult >= 1, whole rows), 0 <=
+    /// tail weight <= 1 and tail ratio > 0, and every sigma is finite and positive.
+    pub fn new(raster: AmpRaster<'a>, spot: &Spot) -> Self {
+        let AmpRaster {
+            currents,
+            samples,
+            sample_width,
+            pitch,
+            mult,
+            ..
+        } = raster;
+        assert!(
+            pitch > 0.0 && sample_width > 0.0 && mult >= 1 && samples >= 1 && currents.len() % samples == 0,
+            "beam oracle: raster {raster:?}"
+        );
+        let (w, r) = (spot.tail_weight, spot.tail_ratio);
+        assert!((0.0..=1.0).contains(&w) && r > 0.0, "beam oracle: tail {w}, {r}");
+        let sigma: Vec<f64> = currents.iter().map(|&i| (spot.sigma_px)(i)).collect();
+        assert!(
+            sigma.iter().all(|s| s.is_finite() && *s > 0.0),
+            "beam oracle: sigma not finite and positive"
+        );
+        let widen = if w > 0.0 { r.max(1.0) } else { 1.0 };
+        let row_widest = sigma
+            .chunks(samples)
+            .map(|row| row.iter().fold(0.0_f64, |m, &s| m.max(s)) * widen)
+            .collect();
+        Self {
+            raster,
+            tail_weight: w,
+            tail_ratio: r,
+            sigma,
+            row_widest,
+        }
+    }
+
+    /// Area-mean light of the host pixel [x0, x1) x [y0, y1). While the beam crosses sample j of line
+    /// n it carries i = i_nj, draws a spot of core sigma s = sigma_px(i) and deposits i * pitch of
+    /// light per unit length (one line pitch of screen per line, as [`scanline_row_mean`]). With the
+    /// convergence offset `offset` = (dx, dy) px of this channel's beam, the pixel receives
+    ///   sum over n, j of i P [(1 - w) X(s) Y(s) + w X(r s) Y(r s)] / ((x1 - x0) (y1 - y0)),
+    /// X(s) = [`box_gaussian_overlap`](j a + dx, (j + 1) a + dx, x0, x1, s), Y(s) =
+    /// [`gaussian_fraction`](y0 - c, y1 - c, s), c = first + n P + dy. Terms farther than 12 widest
+    /// sigmas from the pixel are skipped (each below 2e-33 of i P). A flat field of current I gives I;
+    /// an isolated sample keeps its energy i a P over the whole plane. [D]
+    ///
+    /// # Panics
+    /// Unless the pixel is not empty.
+    pub fn pixel_mean(&self, offset: (f64, f64), x: (f64, f64), y: (f64, f64)) -> f64 {
+        assert!(x.0 < x.1 && y.0 < y.1, "beam oracle: pixel {x:?} x {y:?}");
+        let AmpRaster {
+            currents,
+            samples,
+            sample_width: a,
+            first,
+            pitch,
+            mult,
+        } = self.raster;
+        let (w, r) = (self.tail_weight, self.tail_ratio);
+        let (dx, dy) = offset;
+        let rows = currents.len() / samples;
+        // X depends on the sample and sigma only: remembered per sample for the last sigma seen.
+        let mut x_memo: Vec<(f64, f64, f64)> = vec![(f64::NAN, 0.0, 0.0); samples];
+        let mut sum = 0.0;
+        for n in 0..rows * mult {
+            let row = n / mult;
+            let c = first + n as f64 * pitch + dy;
+            let far_y = (y.0 - c).max(c - y.1);
+            if far_y > 12.0 * self.row_widest[row] {
+                continue;
+            }
+            let mut y_memo = (f64::NAN, 0.0, 0.0);
+            for j in 0..samples {
+                let i = currents[row * samples + j];
+                if i == 0.0 {
+                    continue;
+                }
+                let s = self.sigma[row * samples + j];
+                let widest = if w > 0.0 { s * r.max(1.0) } else { s };
+                let (s0, s1) = (j as f64 * a + dx, (j + 1) as f64 * a + dx);
+                let far_x = (x.0 - s1).max(s0 - x.1);
+                if far_x > 12.0 * widest || far_y > 12.0 * widest {
+                    continue;
+                }
+                if x_memo[j].0 != s {
+                    let core = box_gaussian_overlap(s0, s1, x.0, x.1, s);
+                    let tail = if w > 0.0 {
+                        box_gaussian_overlap(s0, s1, x.0, x.1, s * r)
+                    } else {
+                        0.0
+                    };
+                    x_memo[j] = (s, core, tail);
+                }
+                if y_memo.0 != s {
+                    let core = gaussian_fraction(y.0 - c, y.1 - c, s);
+                    let tail = if w > 0.0 {
+                        gaussian_fraction(y.0 - c, y.1 - c, s * r)
+                    } else {
+                        0.0
+                    };
+                    y_memo = (s, core, tail);
+                }
+                let (_, xc, xt) = x_memo[j];
+                let (_, yc, yt) = y_memo;
+                let f = if w > 0.0 {
+                    (1.0 - w) * xc * yc + w * xt * yt
+                } else {
+                    xc * yc
+                };
+                sum += i * f;
+            }
+        }
+        sum * pitch / ((x.1 - x.0) * (y.1 - y.0))
+    }
+}
+
 /// Least-squares fit of a pure power law d = c I^m in log-log space.
 /// Returns (c, m).
 ///
@@ -511,6 +771,210 @@ mod tests {
         let pts = [100.0, 200.0, 400.0].map(|i| (i, spot_fwhm_mm(i, 0.3, 0.002, 0.4)));
         let (d0_sq, k, n) = fit_spot_growth_floor(pts);
         assert!(close(d0_sq, 0.09, 1e-9) && close(k, 0.002, 1e-9) && close(n, 0.4, 1e-9));
+    }
+
+    /// Mid drive: V = 0.5 through I = V^2.4, 0.18946 (PLAN T-34 GOG check).
+    #[test]
+    fn mid_drive_current() {
+        assert!(close(MID_DRIVE_CURRENT, 0.5_f64.powf(2.4), 1e-16));
+        assert!(close(MID_DRIVE_CURRENT, 0.18946, 1e-5));
+    }
+
+    /// PVM-20M4U (CRT.md Starting presets 0.45 -> 0.8 mm) with n = 0.5: x = I_mid = 0.189465,
+    /// k = (0.64 - 0.2025) / (1 - 0.189465) = 0.539767, d0^2 = 0.64 - 0.539767 = 0.100233
+    /// (d0 = 0.316596 mm, black to white 0.8 / 0.3166 = 2.53, CRT.md 1.5 to 2.5); at I = 0.5:
+    /// d^2 = 0.100233 + 0.539767 x 0.5 = 0.370117, d = 0.608373 mm. Hand-derived.
+    #[test]
+    fn spot_growth_pvm_defaults() {
+        let g = SpotGrowth {
+            fwhm_mid: 0.45,
+            fwhm_peak: 0.8,
+            n: 0.5,
+        };
+        assert_eq!(g.exponent(), 0.5);
+        let (d0_sq, k) = g.floor_sq_and_k();
+        assert!(
+            close(k, 0.539_767, 1e-6) && close(d0_sq, 0.100_233, 1e-6),
+            "{d0_sq} {k}"
+        );
+        assert!(close(g.fwhm(MID_DRIVE_CURRENT), 0.45, 1e-12));
+        assert!(close(g.fwhm(1.0), 0.8, 1e-12));
+        assert!(close(g.fwhm(0.0), 0.316_596, 1e-6));
+        assert!(close(g.fwhm(-1.0), g.fwhm(0.0), 0.0));
+        assert!(close(g.fwhm(0.5), 0.608_373, 1e-6));
+    }
+
+    /// With n = 0.27 (CRT.md T-63, monitor class) the same widths would need a negative floor:
+    /// d0^2 = (0.2025 - 0.64 x) / (1 - x), x = 0.189465^0.54 = 0.40724, gives -0.0980. The exponent is
+    /// raised to ln(0.8 / 0.45) / ln(1 / 0.189465) = 0.575364 / 1.663553 = 0.345865, where d0 = 0 and
+    /// d = 0.45 (I / I_mid)^0.345865.
+    #[test]
+    fn spot_growth_negative_floor_raises_n() {
+        let g = SpotGrowth {
+            fwhm_mid: 0.45,
+            fwhm_peak: 0.8,
+            n: 0.27,
+        };
+        let x = MID_DRIVE_CURRENT.powf(0.54);
+        assert!(close((0.2025 - 0.64 * x) / (1.0 - x), -0.0980, 5e-4));
+        assert!(close(g.exponent(), 0.345_865, 1e-6), "n = {}", g.exponent());
+        let (d0_sq, _) = g.floor_sq_and_k();
+        assert!(d0_sq.abs() < 1e-12, "d0^2 = {d0_sq}");
+        let n_min = (0.8_f64 / 0.45).ln() / (1.0 / MID_DRIVE_CURRENT).ln();
+        for i in [0.01, 0.1, 0.5, 2.0] {
+            let want = 0.45 * (i / MID_DRIVE_CURRENT).powf(n_min);
+            assert!(close(g.fwhm(i), want, 1e-9 * want), "I {i}");
+        }
+        assert_eq!(g.fwhm(0.0), MIN_SPOT_FWHM_MM);
+    }
+
+    /// The datasheet points 0.4, 0.5, 0.6 mm at relative currents 1, 2, 4 (PLAN T-36b: n = 0.29, d0 = 0):
+    /// peak = relative 4, d(r) = 0.4 r^0.29 = 0.4, 0.489056, 0.597940 mm, each within 0.011 mm of the
+    /// datasheet. Set by d_mid = 0.4 (4 I_mid)^0.29 and d_peak = 0.4 4^0.29; the floor is then 0.
+    #[test]
+    fn spot_growth_datasheet_with_zero_floor() {
+        let g = SpotGrowth {
+            fwhm_mid: 0.4 * (4.0 * MID_DRIVE_CURRENT).powf(0.29),
+            fwhm_peak: 0.4 * 4.0_f64.powf(0.29),
+            n: 0.29,
+        };
+        assert!(close(g.exponent(), 0.29, 1e-12));
+        assert!(g.floor_sq_and_k().0.abs() < 1e-12);
+        for (r, model, sheet) in [(1.0, 0.4, 0.4), (2.0, 0.489_056, 0.5), (4.0, 0.597_940, 0.6)] {
+            let d = g.fwhm(r / 4.0);
+            assert!(close(d, model, 1e-6), "r {r}: {d}");
+            assert!(close(d, sheet, 0.011), "r {r}: {d} vs datasheet {sheet}");
+        }
+    }
+
+    /// No growth: k = 0 and the width is the same at every current; a spot that shrinks with current
+    /// (peak < mid) keeps a positive floor and is clamped at the minimum width at high current.
+    #[test]
+    fn spot_growth_constant_and_shrinking() {
+        let g = SpotGrowth::constant(0.45);
+        assert_eq!(g.floor_sq_and_k().1, 0.0);
+        for i in [0.0, 0.2, 1.0, 3.0] {
+            assert!(close(g.fwhm(i), 0.45, 1e-15));
+        }
+        let s = SpotGrowth {
+            fwhm_mid: 0.6,
+            fwhm_peak: 0.3,
+            n: 0.5,
+        };
+        assert_eq!(s.exponent(), 0.5);
+        assert!(close(s.fwhm(1.0), 0.3, 1e-12) && s.fwhm(0.0) > 0.6);
+        assert_eq!(s.fwhm(100.0), MIN_SPOT_FWHM_MM);
+    }
+
+    /// The box overlap equals a numeric integral of [`gaussian_fraction`] over the source box
+    /// (Simpson, 2000 intervals), tends to the overlap length for a tiny sigma, and a box much wider
+    /// than sigma on both sides keeps all of a unit segment's energy.
+    #[test]
+    fn box_gaussian_overlap_checks() {
+        for (a0, a1, b0, b1, s) in [
+            (0.0, 1.0, 0.0, 1.0, 0.5),
+            (0.0, 0.25, 3.0, 4.0, 1.3),
+            (-2.0, 5.0, 1.0, 1.5, 0.7),
+            (10.0, 12.0, -1.0, 0.0, 4.0),
+        ] {
+            let m = 2000;
+            let h = (a1 - a0) / f64::from(m);
+            let f = |x: f64| gaussian_fraction(b0 - x, b1 - x, s);
+            let simpson = (0..=m)
+                .map(|k| {
+                    let wgt = if k == 0 || k == m {
+                        1.0
+                    } else if k % 2 == 1 {
+                        4.0
+                    } else {
+                        2.0
+                    };
+                    wgt * f(a0 + f64::from(k) * h)
+                })
+                .sum::<f64>()
+                * h
+                / 3.0;
+            let got = box_gaussian_overlap(a0, a1, b0, b1, s);
+            assert!(
+                close(got, simpson, 1e-12),
+                "{a0} {a1} {b0} {b1} {s}: {got} vs {simpson}"
+            );
+        }
+        assert!(close(box_gaussian_overlap(0.0, 2.0, 1.5, 3.0, 1e-6), 0.5, 1e-9));
+        assert!(close(box_gaussian_overlap(0.0, 1.0, -50.0, 51.0, 2.0), 1.0, 1e-12));
+    }
+
+    /// The 2D oracle: an isolated sample keeps its energy i a P (sum over a large pixel grid), its
+    /// centroid sits at the sample centre plus the convergence offset, a flat field gives its current
+    /// at every interior pixel for any growth, and with an x-flat raster it reduces to
+    /// [`scanline_row_mean`].
+    #[test]
+    fn beam_oracle_energy_centroid_flat() {
+        let growth = SpotGrowth {
+            fwhm_mid: 0.45,
+            fwhm_peak: 0.8,
+            n: 0.5,
+        };
+        let ppm = 10.0;
+        let sigma = |i: f64| sigma_from_fwhm(growth.fwhm(i)) * ppm;
+        let spot = Spot {
+            sigma_px: &sigma,
+            tail_weight: 0.05,
+            tail_ratio: 3.0,
+        };
+        let mut one = vec![0.0; 8 * 12];
+        one[4 * 12 + 5] = 0.7;
+        let raster = AmpRaster {
+            currents: &one,
+            samples: 12,
+            sample_width: 2.0,
+            first: 4.0,
+            pitch: 8.0,
+            mult: 1,
+        };
+        let oracle = BeamOracle::new(raster, &spot);
+        for offset in [(0.0, 0.0), (1.5, -2.25)] {
+            let (mut e, mut mx, mut my) = (0.0, 0.0, 0.0);
+            for py in -40..104 {
+                for px in -40..64 {
+                    let (x, y) = (f64::from(px), f64::from(py));
+                    let v = oracle.pixel_mean(offset, (x, x + 1.0), (y, y + 1.0));
+                    e += v;
+                    mx += v * (x + 0.5);
+                    my += v * (y + 0.5);
+                }
+            }
+            assert!(close(e, 0.7 * 2.0 * 8.0, 1e-6), "energy {e}");
+            assert!(close(mx / e, 11.0 + offset.0, 1e-6), "x centroid {}", mx / e);
+            assert!(close(my / e, 36.0 + offset.1, 1e-6), "y centroid {}", my / e);
+        }
+        // Flat field 128 x 128 px: the pixels near (64, 68) are 7.7 tail sigmas (8.3 px) from every edge.
+        let flat = vec![0.6; 16 * 64];
+        let raster = AmpRaster {
+            currents: &flat,
+            samples: 64,
+            ..raster
+        };
+        let oracle = BeamOracle::new(raster, &spot);
+        let p = ScanlineProfile {
+            sigma: sigma(0.6),
+            tail_weight: 0.05,
+            tail_ratio: 3.0,
+        };
+        let line = vec![0.6; 16];
+        for (px, py) in [(62, 20), (63, 33), (64, 70)] {
+            let (x, y) = (f64::from(px), f64::from(py));
+            let got = oracle.pixel_mean((0.0, 0.0), (x, x + 1.0), (y, y + 1.0));
+            let want = scanline_row_mean(&line, 4.0, 8.0, &p, y, y + 1.0);
+            assert!(close(got, want, 1e-12), "({px}, {py}): {got} vs {want}");
+        }
+        let period: f64 = (64..72)
+            .map(|py| {
+                let y = f64::from(py);
+                oracle.pixel_mean((0.0, 0.0), (63.0, 64.0), (y, y + 1.0))
+            })
+            .sum();
+        assert!(close(period / 8.0, 0.6, 1e-9), "flat mean {}", period / 8.0);
     }
 
     /// "Width versus video level goes roughly as V^0.7 to V^1.2" for gamma 2.4, n 0.3 to 0.5.
