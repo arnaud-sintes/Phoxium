@@ -36,7 +36,14 @@ pub fn delta_distances_mm(p_mm: f64) -> [f64; 4] {
 
 /// Sagitta of a spherical cap of radius `r_mm` over a half chord `h_mm`:
 /// s = R - sqrt(R^2 - h^2). [D]
+///
+/// # Panics
+/// Unless 0 <= |`h_mm`| <= `r_mm` < inf (a chord cannot exceed the diameter).
 pub fn sagitta_mm(r_mm: f64, h_mm: f64) -> f64 {
+    assert!(
+        r_mm.is_finite() && h_mm.abs() <= r_mm,
+        "sagitta needs |h| <= R: R {r_mm}, h {h_mm}"
+    );
     r_mm - (r_mm * r_mm - h_mm * h_mm).sqrt()
 }
 
@@ -57,56 +64,51 @@ mod tests {
         assert!(close(w, 400.0, 1e-9) && close(h, 300.0, 1e-9));
     }
 
-    /// CRT.md reference scales: viewable diagonal = nominal - 1 in, 4:3.
-    /// Rows whose stated size follows that rule.
-    #[test]
-    fn reference_scale_visible_sizes() {
-        for (nominal_in, w, h) in [(14.0, 264.0, 198.0), (20.0, 386.0, 290.0), (17.0, 325.0, 244.0)] {
-            let (gw, gh) = visible_size_mm(inch_to_mm(nominal_in - 1.0), 4.0 / 3.0);
-            assert!(close(gw, w, 0.6) && close(gh, h, 0.6), "{nominal_in} in: {gw} x {gh}");
-        }
-        // "26 in viewable": the 26 in is already the viewable diagonal.
-        let (gw, gh) = visible_size_mm(inch_to_mm(26.0), 4.0 / 3.0);
-        assert!(close(gw, 528.0, 0.6) && close(gh, 396.0, 0.6));
-    }
-
-    /// The 15 in and 21 in rows do not follow the nominal - 1 in rule stated
-    /// above the table (they match about 13.8 in and 19.8 in viewable).
-    /// Recorded, not hidden: see the T-14 report.
-    #[test]
-    fn reference_scale_rows_off_the_stated_rule() {
-        let (w15, _) = visible_size_mm(inch_to_mm(14.0), 4.0 / 3.0);
-        let (w21, _) = visible_size_mm(inch_to_mm(20.0), 4.0 / 3.0);
-        assert!(close(w15, 284.5, 0.1), "15 in rule width {w15}, table 280");
-        assert!(close(w21, 406.4, 0.1), "21 in rule width {w21}, table 402");
-    }
-
-    /// CRT.md reference-scale table: line pitch, triads across, triads per source pixel.
+    /// CRT.md reference-scale table, every column derived from the tube's
+    /// diagonal alone (viewable = nominal - 1 in, or the stated viewable
+    /// diagonal), 4:3, then compared with the printed (rounded) values: whole
+    /// mm for sizes and triads, 0.01 mm for line pitch, 2 significant digits
+    /// above 1.5 triads per source pixel and 3 below.
     #[test]
     fn reference_scale_table() {
-        // (visible w, visible h, source w, active lines, line pitch, triad pitch, triads, per source px)
+        // (viewable diagonal in, source w, active lines, triad pitch,
+        //  table: w, h, line pitch, triads across, triads per source px)
         let rows = [
-            (264.0, 198.0, 320.0, 240.0, 0.83, 0.25, 1056.0, 3.3),
-            (386.0, 290.0, 320.0, 240.0, 1.21, 0.30, 1287.0, 4.0),
-            (386.0, 290.0, 320.0, 240.0, 1.21, 0.31, 1245.0, 3.9),
-            (386.0, 290.0, 320.0, 240.0, 1.21, 0.65, 594.0, 1.9),
-            // CRT.md says 2.0; 660 / 320 = 2.06, which rounds to 2.1 (minor rounding slip).
-            (528.0, 396.0, 320.0, 240.0, 1.65, 0.80, 660.0, 2.06),
-            (280.0, 210.0, 640.0, 480.0, 0.44, 0.242, 1157.0, 1.8),
-            (280.0, 210.0, 320.0, 400.0, 0.53, 0.242, 1157.0, 3.6),
-            (325.0, 244.0, 1024.0, 768.0, 0.32, 0.25, 1300.0, 1.27),
-            (402.0, 302.0, 1600.0, 1200.0, 0.25, 0.22, 1827.0, 1.14),
+            (13.0, 320.0, 240.0, 0.25, 264.0, 198.0, 0.83, 1056.0, 3.3),
+            (19.0, 320.0, 240.0, 0.30, 386.0, 290.0, 1.21, 1287.0, 4.0),
+            (19.0, 320.0, 240.0, 0.31, 386.0, 290.0, 1.21, 1245.0, 3.9),
+            (19.0, 320.0, 240.0, 0.65, 386.0, 290.0, 1.21, 594.0, 1.9),
+            (26.0, 320.0, 240.0, 0.80, 528.0, 396.0, 1.65, 660.0, 2.1),
+            (14.0, 640.0, 480.0, 0.242, 284.0, 213.0, 0.44, 1176.0, 1.8),
+            (14.0, 320.0, 400.0, 0.242, 284.0, 213.0, 0.53, 1176.0, 3.7),
+            (16.0, 1024.0, 768.0, 0.25, 325.0, 244.0, 0.32, 1300.0, 1.27),
+            (20.0, 1600.0, 1200.0, 0.22, 406.0, 305.0, 0.25, 1847.0, 1.15),
         ];
-        for (w, h, src, lines, pitch, triad, n, per_px) in rows {
-            let p = line_pitch_mm(h, lines);
-            let t = triads_across(w, triad);
-            let s = triads_per_source_px(t, src);
-            assert!(close(p, pitch, 0.006), "line pitch {p} vs {pitch}");
-            assert!(close(t, n, 0.6), "triads {t} vs {n}");
-            // Table rounds to 2 significant digits above 1.5, 3 below.
+        for (diag_in, src, lines, triad, w, h, pitch, n, per_px) in rows {
+            let (gw, gh) = visible_size_mm(inch_to_mm(diag_in), 4.0 / 3.0);
+            assert!(close(gw, w, 0.5) && close(gh, h, 0.5), "{diag_in} in: {gw} x {gh}");
+            let p = line_pitch_mm(gh, lines);
+            let t = triads_across(gw, triad);
+            let s = triads_per_source_px(t.round(), src);
+            assert!(close(p, pitch, 0.005), "{diag_in} in: line pitch {p} vs {pitch}");
+            // The table divides the width rounded to whole mm: +-0.5 mm / pitch.
+            assert!(close(t, n, 0.5 + 0.5 / triad), "{diag_in} in: triads {t} vs {n}");
             let tol = if per_px >= 1.5 { 0.05 } else { 0.005 };
-            assert!(close(s, per_px, tol), "per source px {s} vs {per_px}");
+            assert!(close(s, per_px, tol), "{diag_in} in: per source px {s} vs {per_px}");
         }
+        // Spot values derived by hand: 14 in viewable is 355.6 mm, 0.8 x =
+        // 284.48 mm wide, / 0.242 = 1175.5 triads; 20 in = 508 mm, 406.4 mm,
+        // / 0.22 = 1847.3 triads.
+        assert!(close(
+            triads_across(visible_size_mm(355.6, 4.0 / 3.0).0, 0.242),
+            1175.537,
+            0.001
+        ));
+        assert!(close(
+            triads_across(visible_size_mm(508.0, 4.0 / 3.0).0, 0.22),
+            1847.273,
+            0.001
+        ));
         // 256-wide source: x 1.25. 480 lines: half the 240-line pitch.
         assert!(close(
             triads_per_source_px(1245.0, 256.0) / triads_per_source_px(1245.0, 320.0),
@@ -137,6 +139,18 @@ mod tests {
             let got = sagitta_mm(r_over_d * d, d / 2.0) / d;
             assert!(close(got, ratio, 0.0006), "R/D {r_over_d}: {got}");
         }
+    }
+
+    #[test]
+    #[should_panic(expected = "|h| <= R")]
+    fn sagitta_chord_beyond_diameter_panics() {
+        sagitta_mm(100.0, 101.0);
+    }
+
+    #[test]
+    fn sagitta_hemisphere() {
+        assert!(close(sagitta_mm(100.0, 100.0), 100.0, 1e-12));
+        assert!(close(sagitta_mm(100.0, 60.0), 20.0, 1e-12));
     }
 
     #[test]

@@ -12,7 +12,14 @@ pub fn gun_gog(v: f64, gain: f64, offset: f64, gamma: f64) -> f64 {
 }
 
 /// BT.1886 constants (a, b) for white luminance `lw` and black luminance `lb`, gamma 2.4. [S]
+///
+/// # Panics
+/// Unless 0 <= `lb` < `lw` < inf (also for [`bt1886_eotf`]).
 pub fn bt1886_constants(lw: f64, lb: f64) -> (f64, f64) {
+    assert!(
+        lw.is_finite() && 0.0 <= lb && lb < lw,
+        "BT.1886 needs 0 <= Lb < Lw: Lw {lw}, Lb {lb}"
+    );
     let g = 1.0 / 2.4;
     let d = lw.powf(g) - lb.powf(g);
     (d.powf(2.4), lb.powf(g) / d)
@@ -35,7 +42,15 @@ pub const ANNEX1_A2: f64 = 3.0;
 /// L = k (V + b)^2.6 for V >= 0.35,
 /// L = k (0.35 + b)^(2.6 - 3.0) (V + b)^3.0 below,
 /// k = Lw / (1 + b)^2.6. `b` is the black-level lift.
+///
+/// # Panics
+/// Unless `b` > -0.35 (the knee term (0.35 + b)^-0.4 needs a positive base)
+/// and `lw`, `b` are finite.
 pub fn bt1886_annex1_eotf(v: f64, lw: f64, b: f64) -> f64 {
+    assert!(
+        lw.is_finite() && b.is_finite() && b > -ANNEX1_VC,
+        "BT.1886 Annex 1 needs b > -0.35: b {b}, Lw {lw}"
+    );
     let k = lw / (1.0 + b).powf(ANNEX1_A1);
     let x = (v + b).max(0.0);
     if v >= ANNEX1_VC {
@@ -58,7 +73,14 @@ pub fn srgb_eotf(v: f64) -> f64 {
 pub type Mat3 = [[f64; 3]; 3];
 
 /// xy chromaticity to XYZ with Y = 1.
+///
+/// # Panics
+/// Unless `y` > 0 and `x` is finite.
 pub fn xy_to_xyz(x: f64, y: f64) -> [f64; 3] {
+    assert!(
+        x.is_finite() && y.is_finite() && y > 0.0,
+        "chromaticity needs y > 0: ({x}, {y})"
+    );
     [x / y, 1.0, (1.0 - x - y) / y]
 }
 
@@ -68,8 +90,13 @@ fn det3(m: &Mat3) -> f64 {
 }
 
 /// Inverse of a 3x3 matrix (cofactors over determinant).
+///
+/// # Panics
+/// If the matrix is singular (determinant 0) or not finite (also for
+/// [`rgb_to_xyz`] with collinear primaries).
 pub fn inv3(m: &Mat3) -> Mat3 {
     let d = det3(m);
+    assert!(d.is_finite() && d != 0.0, "singular matrix: {m:?}");
     let c = |r0: usize, r1: usize, c0: usize, c1: usize| m[r0][c0] * m[r1][c1] - m[r0][c1] * m[r1][c0];
     [
         [c(1, 2, 1, 2) / d, -c(0, 2, 1, 2) / d, c(0, 1, 1, 2) / d],
@@ -132,6 +159,64 @@ mod tests {
         assert!(close(bt1886_annex1_eotf(0.5, 1.0, 0.0), 0.164_94, 0.000_01));
         assert!(close(bt1886_annex1_eotf(0.2, 1.0, 0.0), 0.012_18, 0.000_01));
         assert_eq!(bt1886_annex1_eotf(0.0, 1.0, 0.0), 0.0);
+        // b = 0.1, Lw = 1, by hand: k = 1 / 1.1^2.6 = 1 / 1.281212 = 0.780511.
+        // V = 0.5: k 0.6^2.6 = 0.780511 x 0.264968 = 0.206810.
+        // V = 0.2: k 0.45^-0.4 0.3^3 = 0.780511 x 1.376306 x 0.027 = 0.029004.
+        assert!(close(bt1886_annex1_eotf(0.5, 1.0, 0.1), 0.206_810, 0.000_002));
+        assert!(close(bt1886_annex1_eotf(0.2, 1.0, 0.1), 0.029_004, 0.000_002));
+    }
+
+    #[test]
+    #[should_panic(expected = "b > -0.35")]
+    fn bt1886_annex1_lift_below_knee_panics() {
+        bt1886_annex1_eotf(0.5, 100.0, -0.4);
+    }
+
+    #[test]
+    #[should_panic(expected = "Lb < Lw")]
+    fn bt1886_black_above_white_panics() {
+        bt1886_constants(100.0, 100.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "y > 0")]
+    fn xy_zero_y_panics() {
+        xy_to_xyz(0.3, 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "singular")]
+    fn coincident_primaries_panic() {
+        rgb_to_xyz((0.3, 0.6), (0.3, 0.6), (0.15, 0.06), (0.3127, 0.3290));
+    }
+
+    fn assert_identity(m: &Mat3, inv: &Mat3) {
+        for (i, row) in m.iter().enumerate() {
+            for j in 0..3 {
+                let col = inv.map(|r| r[j]);
+                let p: f64 = row.iter().zip(col).map(|(a, b)| a * b).sum();
+                let want = if i == j { 1.0 } else { 0.0 };
+                assert!(close(p, want, 1e-12), "M inv(M) [{i}][{j}] = {p}");
+            }
+        }
+    }
+
+    /// SMPTE-C primaries (RP 145) with D65: reference matrix (Lindbloom,
+    /// RGB/XYZ matrices page), 4 decimals.
+    #[test]
+    fn smpte_c_primaries_matrix() {
+        let m = rgb_to_xyz((0.630, 0.340), (0.310, 0.595), (0.155, 0.070), (0.3127, 0.3290));
+        let expected = [
+            [0.3936, 0.3652, 0.1916],
+            [0.2124, 0.7010, 0.0865],
+            [0.0187, 0.1119, 0.9582],
+        ];
+        for (r, (got, want)) in m.iter().zip(expected).enumerate() {
+            for (c, (g, w)) in got.iter().zip(want).enumerate() {
+                assert!(close(*g, w, 0.0005), "[{r}][{c}] {g} vs {w}");
+            }
+        }
+        assert_identity(&m, &inv3(&m));
     }
 
     #[test]
@@ -159,5 +244,6 @@ mod tests {
         // RGB white maps to the white point with Y = 1.
         let w = mul3(&m, [1.0, 1.0, 1.0]);
         assert!(close(w[1], 1.0, 1e-12) && close(w[0], 0.3127 / 0.3290, 1e-12));
+        assert_identity(&m, &i);
     }
 }
