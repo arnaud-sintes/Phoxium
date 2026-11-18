@@ -158,6 +158,17 @@ impl Stage for Abl {
         );
         d.cmd_bind_pipeline(cb, bind, self.reduce);
         d.cmd_dispatch(cb, 1, 1, 1);
+        // T-37: the reduce writes before the later compute stages (`screen`, raster_scale) read the state.
+        self.state_barrier(
+            d,
+            cb,
+            (compute, vk::AccessFlags2::SHADER_STORAGE_WRITE),
+            (compute, vk::AccessFlags2::SHADER_STORAGE_READ),
+        );
+    }
+
+    fn abl_state(&self) -> Option<vk::Buffer> {
+        Some(self.buffer)
     }
 
     unsafe fn destroy(&mut self, d: &ash::Device) {

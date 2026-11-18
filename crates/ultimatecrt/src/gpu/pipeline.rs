@@ -577,6 +577,12 @@ impl Pipeline {
         for l in &mut self.chain {
             l.stage.create(d)?;
         }
+        // T-37: the ABL state buffer (owned by `abl`) is read by `screen` for raster_scale.
+        if let Some(abl) = self.chain.iter().find_map(|l| l.stage.abl_state()) {
+            for l in &mut self.chain {
+                l.stage.link_abl_state(d, abl);
+            }
+        }
         self.sampler = d.create_sampler(
             &vk::SamplerCreateInfo::default()
                 .mag_filter(vk::Filter::NEAREST)

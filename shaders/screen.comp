@@ -8,6 +8,10 @@
 
 #include "params.glsl"
 #include "common.glsl"
+// T-37: the ABL state (set 1, read only) for raster_scale, and the geometry hooks beam.glsl calls.
+#define ABL_STATE_QUALIFIER readonly
+#include "abl.glsl"
+#include "geometry.glsl"
 #include "beam.glsl"
 #include "mask.glsl"
 
