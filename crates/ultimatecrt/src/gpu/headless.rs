@@ -119,7 +119,7 @@ impl Headless {
             Some(frame),
             View::full(width, height),
             &Settings::identity(),
-            &Params::default(),
+            &Params::identity_gun(),
             (width, height),
             format,
         )?;

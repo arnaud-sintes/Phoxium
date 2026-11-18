@@ -8,6 +8,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 ## [Unreleased]
 
 ### Added
+- Gun law and white balance (`gun` slot, `shaders/gun.comp`, `params/gun.toml`): `gun_law` power (default, 2.4), gog (contrast, brightness, per-gun cutoff and drive), bt1886 (Lw, Lb) and bt1886_annex1; optional white balance from the tube primaries and white xy (`gun_white_balance`, default off). Oracle `crt_model::gun`.
 - `scripts/poll-foreground.ps1`: polls the foreground window every 100 ms and logs each change to a CSV (title, pid, executable, is-source), with a summary and a `-SelfTest` switch.
 - `--log <file.csv>`: per-second diagnostics (capture and render fps, min/max/p99 intervals, gaps over 50 ms, foreground-window changes, "foreground is the source" flag) and a summary at exit.
 - `pixel-demo`: demo source window with a procedural NES-style scene, a test card and optional PNG display, at any source resolution and integer scale.

@@ -1,0 +1,132 @@
+# Electron gun: drive voltage V in [0, 1] to beam current (T-34: PHY-6, COL-2). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
+# dimensionless. Read by `gun` (law and controls) and by `decode` (gun_gamma, srgb source mode).
+# Beam current is relative: 1 at full drive for the power, BT.1886 and Annex 1 laws.
+# Defaults reproduce the pre-T-34 picture: pure power law 2.4, neutral controls, no white balance.
+
+[[param]]
+id = "gun_law"
+stage = "gun"
+type = "enum"
+unit = "1"
+default = "power"
+values = ["power", "gog", "bt1886", "bt1886_annex1"]
+tag = "S"
+source = "CRT.md Gun law (QUESTIONS PHY-6): pure power, GOG (Berns, Motta and Gorzynski 1993), BT.1886 (2011) and BT.1886 Annex 1. Default power 2.4 per SRC-5 and COL-3 (gog with neutral controls gives the same curve)"
+description = "Gun transfer law. power: I = V^gamma, ignoring every control below except the white balance. gog: I = drive x max(gain V + brightness + cutoff, 0)^gamma per channel. bt1886: I = L / Lw of the BT.1886 law of the white and black luminances (gamma 2.4, black lift b from Lb and Lw). bt1886_annex1: the two-exponent Annex 1 law (2.6 above V = 0.35, 3.0 below) with the black lift below. Every law has zero slope at cutoff (no linear toe, unlike sRGB)."
+group = "Gun"
+
+[[param]]
+id = "gun_gamma"
+stage = "gun"
+type = "f32"
+unit = "1"
+default = 2.4
+min = 1.5
+max = 3.5
+tag = "S"
+source = "CRT.md Gun law: 2.4 (BT.1886), real guns 2.2 to 3.0, an ideal diode 1.5 (triode characteristic of the gun, not the phosphor)"
+description = "Exponent of the power and gog laws. Also the exponent of the inverse law of the srgb source mode (source_eotf), which is exact for the power law only."
+group = "Gun"
+
+[[param]]
+id = "gun_gain"
+stage = "gun"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.25
+max = 2.0
+tag = "K"
+source = "CRT.md What the user controls do physically: contrast = video amplifier gain k_g; GOG model (Berns, Motta and Gorzynski 1993)"
+description = "Contrast: gain k_g on the drive voltage inside the gog law. Above 1 the peak beam current exceeds 1 (raises spot growth, blooming and ABL activity downstream)."
+group = "Gun"
+
+[[param]]
+id = "gun_offset"
+stage = "gun"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -0.3
+max = 0.3
+tag = "K"
+source = "CRT.md What the user controls do physically: brightness = DC bias relative to cutoff = k_o, an offset before the power law"
+description = "Brightness: offset k_o added to the drive inside the gog law, before the power. Positive lifts the blacks (lowers the effective gamma near black), negative crushes the shadows."
+group = "Gun"
+
+[[param]]
+id = "gun_cutoff_rgb"
+stage = "gun"
+type = "vec3"
+unit = "1"
+default = [0.0, 0.0, 0.0]
+min = -0.1
+max = 0.1
+tag = "E"
+source = "CRT.md Gun law: cutoff differs per gun, about +-10 to 20 V on a 100 to 150 V drive range, which tints the dark tones (fixed by the bias adjustment)"
+description = "Per-gun cutoff offset (red, green, blue) added to the drive inside the gog law: the grey-scale tracking error near black. Zero is perfectly matched guns."
+group = "Gun"
+
+[[param]]
+id = "gun_drive_rgb"
+stage = "gun"
+type = "vec3"
+unit = "1"
+default = [1.0, 1.0, 1.0]
+min = 0.5
+max = 1.5
+tag = "K"
+source = "CRT.md What the user controls do physically: RGB drive (service menu) = per-gun gain, white point at the highlights"
+description = "Per-gun drive (red, green, blue): multiplies the beam current of the gog law, as the RGB drive of a service menu. Independent of the automatic white balance (gun_white_balance)."
+group = "Gun"
+
+[[param]]
+id = "gun_bt1886_white"
+stage = "gun"
+type = "f32"
+unit = "cd/m2"
+default = 100.0
+min = 20.0
+max = 300.0
+tag = "S"
+source = "ITU-R BT.1886 (CRT.md Gun law) with the broadcast reference white 100 cd/m2 (CRT.md Luminance and contrast)"
+description = "White luminance Lw of the bt1886 law. The stage outputs the relative current L / Lw, so only the ratio Lb / Lw shapes the curve; Lw is the absolute scale reserved for the optics and output stages."
+group = "Gun"
+
+[[param]]
+id = "gun_bt1886_black"
+stage = "gun"
+type = "f32"
+unit = "cd/m2"
+default = 0.1
+min = 0.0
+max = 5.0
+tag = "E"
+source = "ITU-R BT.1886 (CRT.md Gun law); CRT.md Luminance and contrast: practical black floor 0.01 to 0.05 cd/m2, 0.1 is the black level of the effective-gamma note (2.40 at black level 0.1, 2.60 at zero)"
+description = "Black luminance Lb of the bt1886 law, which sets the lift b = Lb^(1/2.4) / (Lw^(1/2.4) - Lb^(1/2.4)). Must stay below Lw."
+group = "Gun"
+
+[[param]]
+id = "gun_annex1_lift"
+stage = "gun"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 0.2
+tag = "E"
+source = "ITU-R BT.1886 Annex 1 (CRT.md Gun law): b is the black-level lift of the two-exponent law; the value is a user choice"
+description = "Black lift b of the bt1886_annex1 law, I = (1 + b)^-2.6 (V + b)^2.6 above V = 0.35 and the continuous 3.0-exponent branch below. Values at or below -0.35 are not allowed (the knee term is undefined)."
+group = "Gun"
+
+[[param]]
+id = "gun_white_balance"
+stage = "gun"
+type = "bool"
+unit = "1"
+default = false
+tag = "D"
+source = "QUESTIONS COL-2 and CRT.md White point: colour temperature is a per-gun gain in linear light; solved from the primaries and white xy of colour.toml (crt-model gun.rs)"
+description = "Apply the white balance gains: per-gun factors, the largest 1, so that drive (1, 1, 1) has the chromaticity tube_white_xy with the tube primaries. Off until the output transform (T-46) converts tube light to the host primaries: without it the host would show the raw gun currents."
+group = "Gun"

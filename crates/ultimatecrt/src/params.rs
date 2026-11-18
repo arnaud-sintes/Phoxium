@@ -100,6 +100,18 @@ pub const PARAMS_GLSL: &str = include_str!(concat!(env!("OUT_DIR"), "/params.gls
 
 include!(concat!(env!("OUT_DIR"), "/params.rs"));
 
+impl Params {
+    /// The defaults with an identity gun (power law of exponent 1, which `gun.comp` returns unchanged, bit
+    /// exact). With `Settings::identity()` the output codes equal the captured codes (T-34 moved the tube
+    /// gamma from `decode` to the `gun` slot, so `Params::default()` no longer passes codes through).
+    pub fn identity_gun() -> Self {
+        Self {
+            gun_gamma: 1.0,
+            ..Self::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,6 +150,25 @@ mod tests {
         assert!((p.tube_aspect - 4.0 / 3.0).abs() < 1e-6);
         assert_eq!(meta("tube_aspect").unwrap().file, "params/tube.toml");
         assert_eq!(meta("line_multiplier").unwrap().file, "params/source.toml");
+    }
+
+    #[test]
+    fn gun_entries_have_the_t34_defaults() {
+        let p = Params::default();
+        assert_eq!(p.gun_law, GUN_LAW_POWER);
+        assert_eq!(
+            meta("gun_law").unwrap().values,
+            ["power", "gog", "bt1886", "bt1886_annex1"]
+        );
+        assert_eq!((p.gun_gamma, p.gun_gain, p.gun_offset), (2.4, 1.0, 0.0));
+        assert_eq!((p.gun_cutoff_rgb, p.gun_drive_rgb), ([0.0; 3], [1.0; 3]));
+        assert_eq!(
+            (p.gun_bt1886_white, p.gun_bt1886_black, p.gun_annex1_lift),
+            (100.0, 0.1, 0.0)
+        );
+        assert!(!p.gun_white_balance);
+        assert_eq!(meta("gun_gamma").unwrap().file, "params/gun.toml");
+        assert_eq!(Params::identity_gun().gun_gamma, 1.0);
     }
 
     #[test]

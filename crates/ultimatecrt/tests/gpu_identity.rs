@@ -1,27 +1,37 @@
-//! GPU tests of the pipeline core (T-20a): the decode -> encode chain through the FP16 native raster,
-//! headless, with the validation layer (synchronization validation on) and zero validation messages.
+//! GPU tests of the pipeline core (T-20a, updated by T-34): the decode -> gun -> encode chain through the
+//! FP16 images, headless, with the validation layer (synchronization validation on) and zero validation
+//! messages.
 //!
-//! # Identity: tube gamma = host gamma
+//! # Identity: gun law = host EOTF
 //!
-//! The chain on one channel, for code k in 0..=255:
-//! - `decode`: V = k / 255 (UNORM read), L = T(V) with the source transfer T, stored as FP16;
+//! The chain on one channel, for code k in 0..=255 (T-34 moved the tube transfer from `decode` to the
+//! `gun` slot, the default gun law is the pure power 2.4 of `params/gun.toml`):
+//! - `decode`: V = k / 255 (UNORM read), the drive voltage, stored as FP16 in the native raster;
+//! - `gun`: L = T(V) with T the gun law (power law of exponent `gun_gamma`), stored as FP16;
 //! - `encode`: v = T^-1(min(max(L * exposure, 0), 1)) with exposure = 1 (the `params/output.toml`
 //!   default) and the same T as host EOTF, written to the target.
 //!
-//! For each transfer used here (identity, pure power 2.4 and 2.2, piecewise sRGB per IEC 61966-2-1),
-//! T^-1(T(V)) = V on [0, 1], so v = k / 255 in exact arithmetic and the output code is k.
+//! For each transfer used here (identity: gun gamma 1, pure power 2.4 and 2.2, and piecewise sRGB per
+//! IEC 61966-2-1 through the `srgb` source mode of `decode` with gun gamma 2.4), T^-1(T(V)) = V on [0, 1],
+//! so v = k / 255 in exact arithmetic and the output code is k. As before T-34 the live default
+//! (`Settings::default`, `Params::default`: gun 2.4, host 2.2) gives round(255 (k / 255)^(2.4 / 2.2)).
 //!
-//! Error budget (why `round(v * 255) == k` must hold exactly):
-//! - FP16 storage of L: the NVIDIA driver truncates to FP16 (observed in T-09: 254/255 reads
-//!   253.879/255), so for a normal L the relative error is below 2^-10; for a subnormal L
-//!   (L < 2^-14) the absolute error is below 2^-24.
-//! - Through T^-1 = L^(1/gamma) the relative error is divided by gamma: below 2^-10 / 2.2 = 4.4e-4,
-//!   at most 0.113 of a code at k = 255.
-//! - An RGBA16F target adds its own truncation: below 255 * 2^-11 = 0.1245 of a code.
-//!   Total below 0.24 of a code, so rounding gives k. A `B8G8R8A8_UNORM` target (the swapchain
-//!   format) rounds to the nearest code: exact.
+//! Error budget (why `round(v * 255) == k` must hold exactly). T-34 adds one FP16 rounding (of V, before
+//! the gun law), so the budget is the old one plus the propagated error of V:
+//! - FP16 storage: the NVIDIA driver truncates to FP16 (observed in T-09: 254/255 reads 253.879/255), so
+//!   for a normal value the relative error is below e = 2^-10; for a subnormal value (< 2^-14) the
+//!   absolute error is below 2^-24.
+//! - V' = V (1 - e1), e1 <= e. The gun gives L' = V'^g (1 - e2) with e2 <= e: relative error g e1 + e2.
+//!   Through the host's T^-1 = L^(1/g) the relative error is divided by g: v' = v (1 - e1 - e2 / g), at
+//!   most e (1 + 1 / 2.2) = 1.42e-3 relative, 0.362 of a code at k = 255. The `srgb` source mode adds
+//!   nothing worse: dv = (v + 0.055) rel(L) / 2.4 with rel(L) <= 3.4 e gives 0.372 of a code.
+//! - An RGBA16F target adds its own truncation: below 255 * 2^-11 = 0.1245 of a code. Total below
+//!   0.4968 of a code (tolerance 0.5, and `round` must still give k). A `B8G8R8A8_UNORM` target (the
+//!   swapchain format) rounds to the nearest code: error below 0.372, exact.
+//! - Before T-34 the budget was 0.24 of a code (one FP16 rounding of L only).
 //! - Worst subnormal, code 1 at gamma 2.4: L = (1/255)^2.4 = 1.6761e-6 = 28.12 * 2^-24, stored as
-//!   28 * 2^-24 at worst (relative -0.43 %), giving v * 255 = 0.9982: rounds to 1.
+//!   28 * 2^-24 at worst (relative -0.43 %), giving v * 255 = 0.9982: rounds to 1; V' = V (1 - e1)
+//!   moves L by 2.4 e1 = 0.23 % more (0.4 % of a code at the end), still rounding to 1.
 //!
 //! # FP16 subnormals (hand derivation, IEEE 754 binary16)
 //!
@@ -33,7 +43,7 @@
 //! - sRGB: the linear toe gives L = k / 255 / 12.92 >= 3.035e-4 for k >= 1: none.
 //!
 //! A device that flushed FP16 subnormals to zero would store 0 for those codes and the identity would
-//! output code 0: the tests read back the native raster and assert 0 < L < 2^-14 for them.
+//! output code 0: the tests read back the `gun` image and assert 0 < L < 2^-14 for them.
 //!
 //! The linear values are also compared with the `crt-model` oracle (`gun_power`, `srgb_eotf`, f64),
 //! not with a copy of the shader formula.
@@ -41,8 +51,8 @@
 mod common;
 
 use crt_model::colour::{gun_power, srgb_eotf};
-use ultimatecrt::gpu::{Headless, Rendered, Settings, SourceFrame, TargetFormat, Transfer};
-use ultimatecrt::params::Params;
+use ultimatecrt::gpu::{Headless, Rendered, Settings, SourceFrame, TargetFormat, Transfer, AMP_K};
+use ultimatecrt::params::{ParamValue, Params, SOURCE_EOTF_SRGB};
 use ultimatecrt::scaling::{Rect, View};
 
 const W: u32 = 256;
@@ -81,10 +91,25 @@ fn linear(t: Transfer, k: u8) -> f64 {
     }
 }
 
-/// Renders the ramp once with `t` on both sides into a `format` target of the native size.
+/// The gun parameters that make `t` the tube law: gun gamma 1 for the identity (`gun.comp` returns V
+/// unchanged), the exponent for a power law, and the `srgb` source mode with the default gun gamma 2.4
+/// for the piecewise sRGB (the tube then shows the sRGB luminance of the code).
+fn params_for(t: Transfer) -> Params {
+    let mut p = Params::default();
+    let ok = match t {
+        Transfer::Identity => p.set("gun_gamma", ParamValue::F32(1.0)),
+        Transfer::Power(g) => p.set("gun_gamma", ParamValue::F32(g)),
+        Transfer::Srgb => p.set("source_eotf", ParamValue::Enum(SOURCE_EOTF_SRGB)),
+    };
+    assert!(ok);
+    p
+}
+
+/// Renders the ramp once with the gun law of `t` and `t` as the host EOTF into a `format` target of the
+/// native size.
 fn render_identity(gpu: &mut Headless, t: Transfer, format: TargetFormat) -> Rendered {
     let settings = Settings {
-        source: t,
+        source: Transfer::Identity,
         host: t,
         integer_scale: false,
     };
@@ -97,7 +122,7 @@ fn render_identity(gpu: &mut Headless, t: Transfer, format: TargetFormat) -> Ren
         }),
         View::full(W, H),
         &settings,
-        &Params::default(),
+        &params_for(t),
         (W, H),
         format,
     )
@@ -127,29 +152,77 @@ fn assert_identity(out: &ultimatecrt::gpu::ImageF32, what: &str, tol: f32) {
     }
 }
 
-/// Asserts that the native raster holds the oracle's linear values within FP16 precision.
-fn assert_native_linear(r: &Rendered, t: Transfer, what: &str) {
+/// The oracle: drive voltage V of code `k` (what `decode` stores): k / 255, or for the `srgb` source mode
+/// the inverse of the gun power law of exponent 2.4 applied to the sRGB luminance.
+fn drive(t: Transfer, k: u8) -> f64 {
+    match t {
+        Transfer::Srgb => srgb_eotf(f64::from(k) / 255.0).powf(1.0 / 2.4),
+        _ => f64::from(k) / 255.0,
+    }
+}
+
+/// Exponent of the gun law behind `t` (relative error amplification of V, see the error budget).
+fn gun_exponent(t: Transfer) -> f64 {
+    match t {
+        Transfer::Identity => 1.0,
+        Transfer::Power(g) => f64::from(g),
+        Transfer::Srgb => 2.4,
+    }
+}
+
+/// Asserts that the native raster holds the drive voltage V within FP16 precision (the `decode` contract:
+/// the gun law is not applied there any more).
+fn assert_native_drive(r: &Rendered, t: Transfer, what: &str) {
     assert_eq!((r.native.width, r.native.height), (W, H), "{what}: native size");
     for y in 0..H {
         for x in 0..W {
             let p = r.native.pixel(x, y);
             for (c, &k) in codes(x, y).iter().enumerate() {
-                let want = linear(t, k);
+                let want = drive(t, k);
                 let got = f64::from(p[c]);
                 // Truncation or rounding to FP16: below one ULP, 2^-10 relative (normal) or 2^-24.
                 let tol = (want * 2f64.powi(-10)).max(FP16_SUBNORMAL_STEP);
                 assert!(
                     (got - want).abs() <= tol,
-                    "{what}: native ({x}, {y}) channel {c}: code {k} -> {got}, oracle {want}"
+                    "{what}: native ({x}, {y}) channel {c}: code {k} -> {got}, V oracle {want}"
                 );
             }
         }
     }
 }
 
-/// The FP16 value stored for code `k` on the red channel (pixel x = k of row 0).
-fn native_red(r: &Rendered, k: u8) -> f64 {
-    f64::from(r.native.pixel(u32::from(k), 0)[0])
+/// The `gun` slot image of a render: the beam current, K texels wide per native texel.
+fn gun_image(r: &Rendered) -> &ultimatecrt::gpu::ImageF32 {
+    let g = r.stage("gun").expect("gun slot ran");
+    assert_eq!((g.width, g.height), (W * AMP_K, H), "gun image size");
+    g
+}
+
+/// Asserts that the `gun` image holds the oracle's linear values within FP16 precision: the error of V
+/// (rel. e) amplified by the exponent g, plus the truncation of the result: (g + 1) e relative, or a
+/// subnormal step of absolute error on top.
+fn assert_gun_linear(r: &Rendered, t: Transfer, what: &str) {
+    let gun = gun_image(r);
+    let rel = (gun_exponent(t) + 1.0) * 2f64.powi(-10);
+    for y in 0..H {
+        for x in 0..W * AMP_K {
+            let p = gun.pixel(x, y);
+            for (c, &k) in codes(x / AMP_K, y).iter().enumerate() {
+                let want = linear(t, k);
+                let got = f64::from(p[c]);
+                let tol = want * rel + FP16_SUBNORMAL_STEP;
+                assert!(
+                    (got - want).abs() <= tol,
+                    "{what}: gun ({x}, {y}) channel {c}: code {k} -> {got}, oracle {want}"
+                );
+            }
+        }
+    }
+}
+
+/// The FP16 value the `gun` slot stored for code `k` on the red channel (pixel x = k of row 0).
+fn gun_red(r: &Rendered, k: u8) -> f64 {
+    f64::from(gun_image(r).pixel(u32::from(k) * AMP_K, 0)[0])
 }
 
 fn identity_case(t: Transfer, subnormal_codes: &[u8]) {
@@ -163,9 +236,10 @@ fn identity_case(t: Transfer, subnormal_codes: &[u8]) {
     let unorm = render_identity(&mut gpu, t, TargetFormat::Bgra8Unorm);
     drop(gpu);
 
-    assert_identity(&half.output, &format!("{test} RGBA16F"), 0.25);
+    assert_identity(&half.output, &format!("{test} RGBA16F"), 0.5);
     assert_identity(&unorm.output, &format!("{test} BGRA8"), 0.0);
-    assert_native_linear(&half, t, &test);
+    assert_native_drive(&half, t, &test);
+    assert_gun_linear(&half, t, &test);
     assert_eq!(
         half.native, unorm.native,
         "{test}: the native raster does not depend on the target"
@@ -175,7 +249,7 @@ fn identity_case(t: Transfer, subnormal_codes: &[u8]) {
     // and the GPU stored them as non-zero subnormals.
     for &k in subnormal_codes {
         assert!(linear(t, k) < FP16_MIN_NORMAL, "{test}: code {k} should be subnormal");
-        let got = native_red(&half, k);
+        let got = gun_red(&half, k);
         eprintln!(
             "{test}: code {k} stored as {got:e} = {} * 2^-24 (oracle {:e})",
             got / FP16_SUBNORMAL_STEP,
@@ -276,12 +350,12 @@ fn frames_in_flight_burst_with_silent_sync_validation() {
     ];
     let t = Transfer::Power(2.4);
     let settings = Settings {
-        source: t,
+        source: Transfer::Identity,
         host: t,
         integer_scale: false,
     };
     let r = gpu
-        .render_burst(&frames, &settings, &Params::default(), (W, H), TargetFormat::Bgra8Unorm)
+        .render_burst(&frames, &settings, &params_for(t), (W, H), TargetFormat::Bgra8Unorm)
         .expect("headless burst");
     drop(gpu);
     for y in 0..H {
@@ -304,7 +378,7 @@ fn native_size_changes_and_surround_with_silent_validation() {
         return;
     };
     let counter = gpu.validation_counter();
-    let params = Params::default();
+    let params = Params::identity_gun();
     let settings = Settings::identity();
     let mut render = |w: u32, h: u32, bgra: Option<&[u8]>, view: View, target: (u32, u32)| {
         gpu.render(

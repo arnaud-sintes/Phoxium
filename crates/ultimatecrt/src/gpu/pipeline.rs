@@ -82,10 +82,10 @@ impl Transfer {
 /// Pipeline settings that are not yet entries of the parameter table.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Settings {
-    /// Transfer applied by `decode` to the code value V = code / 255. Until the gun law exists (T-34)
-    /// it stands in for it, so that the chain ends in linear light. With [`Transfer::Identity`] the
-    /// native raster holds code values (drive voltages), the input contract of the voltage-domain
-    /// stages (`signal`, `amp`, `gun`).
+    /// Optional transfer applied by `decode` to the drive voltage V. Since T-34 the gun law is the `gun`
+    /// slot (`params/gun.toml`), so the default is [`Transfer::Identity`]: the native raster holds the
+    /// drive voltage, the input contract of the voltage-domain stages (`signal`, `amp`, `gun`). Any other
+    /// value is the pre-T-34 stand-in and applies a second transfer before the gun law.
     pub source: Transfer,
     /// Host display EOTF; `encode` applies its inverse (COL-3).
     pub host: Transfer,
@@ -94,11 +94,11 @@ pub struct Settings {
 }
 
 impl Default for Settings {
-    /// Tube gamma 2.4 [E] (SRC-5 default: captured values are drive voltages) and host pure 2.2 [E]
-    /// (COL-3 default).
+    /// Drive voltage out of `decode` (the tube gamma 2.4 is the default gun law, `params/gun.toml`; SRC-5:
+    /// captured values are drive voltages) and host pure 2.2 [E] (COL-3 default).
     fn default() -> Self {
         Self {
-            source: Transfer::Power(2.4),
+            source: Transfer::Identity,
             host: Transfer::Power(2.2),
             integer_scale: false,
         }
@@ -117,7 +117,7 @@ impl Settings {
 }
 
 /// Per-frame constants, std140, laid out as the `FrameConstants` block of `shaders/include/common.glsl`
-/// (60 bytes, 4-byte fields only, no padding; a test checks the offsets against the GLSL).
+/// (76 bytes, 4-byte fields only, one explicit padding field; a test checks the offsets against the GLSL).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameConstants {
@@ -141,6 +141,11 @@ pub struct FrameConstants {
     /// Horizontal supersampling factor K of the amp-domain images (`amp` and `gun` outputs): their size
     /// is `native_size * (K, 1)` (T-20b image contract, default [`stages::AMP_K`]).
     pub amp_k: i32,
+    /// Padding to the 16-byte alignment of the std140 `vec3` below (bytes 60 to 63).
+    pub(crate) pad0: i32,
+    /// White balance gains of the `gun` stage (T-34): per-channel factors on the beam current. `new` gives
+    /// (1, 1, 1); `placed` computes them from the parameter table (`src/white.rs`).
+    pub white_gain: [f32; 3],
 }
 
 impl FrameConstants {
@@ -155,6 +160,7 @@ impl FrameConstants {
             target_size: [target.0 as i32, target.1 as i32],
             tube_size: [(r[2] - r[0]) as i32, (r[3] - r[1]) as i32],
             amp_k: stages::AMP_K as i32,
+            white_gain: [1.0; 3],
             ..Self::default()
         }
     }
@@ -1247,11 +1253,12 @@ mod tests {
             (std::mem::offset_of!(FrameConstants, frame_time_ms), "frame_time_ms"),
             (std::mem::offset_of!(FrameConstants, tube_size), "tube_size"),
             (std::mem::offset_of!(FrameConstants, amp_k), "amp_k"),
+            (std::mem::offset_of!(FrameConstants, white_gain), "white_gain"),
         ];
         let rust: Vec<(usize, String)> = rust.iter().map(|&(o, n)| (o, n.to_string())).collect();
         assert_eq!(members, rust);
-        assert_eq!(size_of::<FrameConstants>(), 60);
-        assert!(glsl.contains("std140, 60 bytes"));
+        assert_eq!(size_of::<FrameConstants>(), 76);
+        assert!(glsl.contains("std140, 76 bytes"));
     }
 
     #[test]
