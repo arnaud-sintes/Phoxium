@@ -19,8 +19,6 @@ pub struct Presenter {
     views: Vec<vk::ImageView>,
     /// Signalled by the frame submission, waited by the present of the same image.
     render_done: Vec<vk::Semaphore>,
-    /// Signalled by the acquire, waited by the frame submission.
-    image_available: vk::Semaphore,
 }
 
 impl Presenter {
@@ -54,7 +52,6 @@ impl Presenter {
             images: Vec::new(),
             views: Vec::new(),
             render_done: Vec::new(),
-            image_available: vk::Semaphore::null(),
         };
         let result = (|| -> Res<()> {
             let supported =
@@ -63,7 +60,6 @@ impl Presenter {
             if !supported {
                 return Err(format!("{} cannot present to this window", ctx.gpu.name).into());
             }
-            p.image_available = ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
             p.resize(ctx, size)
         })();
         match result {
@@ -94,11 +90,6 @@ impl Presenter {
     /// Semaphore the frame submission signals for image `index`; [`Presenter::present`] waits on it.
     pub fn render_done(&self, index: u32) -> vk::Semaphore {
         self.render_done[index as usize]
-    }
-
-    /// Semaphore [`Presenter::acquire`] signals; the frame submission waits on it.
-    pub fn image_available(&self) -> vk::Semaphore {
-        self.image_available
     }
 
     /// (Re)creates the swapchain, its image views and per-image semaphores for `size`.
@@ -175,16 +166,17 @@ impl Presenter {
         Ok(())
     }
 
-    /// Acquires the next image, signalling [`Presenter::image_available`]. Returns `None` when
-    /// the swapchain was out of date: it has been recreated for `size` and the frame is skipped.
+    /// Acquires the next image, signalling `signal` (one semaphore per frame in flight, owned by the
+    /// caller). Returns `None` when the swapchain was out of date: it has been recreated for `size`
+    /// and the frame is skipped (`signal` is not signalled).
     ///
     /// # Safety
-    /// `ctx` is the presenter's context and the previous submission that waited on
-    /// `image_available` has completed (its fence was waited).
-    pub unsafe fn acquire(&mut self, ctx: &Context, size: (u32, u32)) -> Res<Option<u32>> {
+    /// `ctx` is the presenter's context and `signal` is a live binary semaphore with no pending
+    /// signal or wait (the submission that last waited on it has completed: its fence was waited).
+    pub unsafe fn acquire(&mut self, ctx: &Context, size: (u32, u32), signal: vk::Semaphore) -> Res<Option<u32>> {
         match self
             .swapchain_fn
-            .acquire_next_image(self.swapchain, u64::MAX, self.image_available, vk::Fence::null())
+            .acquire_next_image(self.swapchain, u64::MAX, signal, vk::Fence::null())
         {
             Ok((index, _)) => Ok(Some(index)),
             Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -232,10 +224,6 @@ impl Presenter {
         if self.swapchain != vk::SwapchainKHR::null() {
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
             self.swapchain = vk::SwapchainKHR::null();
-        }
-        if self.image_available != vk::Semaphore::null() {
-            ctx.device.destroy_semaphore(self.image_available, None);
-            self.image_available = vk::Semaphore::null();
         }
         if self.surface != vk::SurfaceKHR::null() {
             ctx.surface_fn.destroy_surface(self.surface, None);

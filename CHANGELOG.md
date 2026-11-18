@@ -20,9 +20,11 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Declarative parameter table `params/*.toml` (units, soft ranges, confidence tags, sources) and the `paramgen` build-time generator of the Rust `Params` struct, its metadata and std140 bytes, and the matching GLSL uniform block. First entries: `exposure` and the tube primaries and white point.
 - Headless renderer (offscreen RGBA16F/RGBA32F render and readback, no window) and GPU tests run by `cargo test`, failing on any validation message; `UCRT_REQUIRE_GPU=1` makes a missing GPU or validation layer a failure instead of a skip.
 - `--validation` prints the layer's messages on stderr through a debug messenger, and names the missing layer when the Vulkan SDK is not installed.
+- Pipeline core: an FP16 `decode` stage (compute, native raster read at block centres) and an `encode` stage (explicit host EOTF, black surround around the tube rectangle), two frames in flight with per-frame uniform and staging buffers, images reallocated on source or native size change. Headless identity tests: all 256 codes per channel come back exact through the FP16 raster, FP16 subnormals kept.
 
 ### Changed
 - A fullscreen output now refuses to start when the Ctrl+Alt+Q hotkey cannot be registered, and an unknown `--monitor` index is an error (it used to fall back to a default rectangle).
 - The output window releases its hotkey and window when dropped.
 - The swapchain warns when it has to use a format other than `B8G8R8A8_UNORM`.
 - The Esc hint is no longer printed for a `--no-activate` output.
+- The output is no longer a plain copy: captured codes are linearised with a pure 2.4 power law (stand-in for the gun law until it exists, SRC-5 default) and encoded for a pure 2.2 host display (COL-3 default), so the picture is slightly darker than the source. GPU tests now also report shader-access hazards (synchronization validation with `syncval_shader_accesses_heuristic`).

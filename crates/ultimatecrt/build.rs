@@ -1,8 +1,10 @@
-//! Compiles the GLSL shaders of the workspace `shaders/` folder to SPIR-V with glslc.
+//! Compiles every GLSL shader of the workspace `shaders/` folder (`*.vert`, `*.frag`, `*.comp`) to
+//! SPIR-V with glslc, with `shaders/include` and the generated `params.glsl` on the include path.
 
 use std::{env, path::PathBuf, process::Command};
 
-const SHADERS: [&str; 2] = ["fullscreen.vert", "passthrough.frag"];
+/// Shader file extensions compiled by `build.rs`, one SPIR-V file `<name>.spv` each in `OUT_DIR`.
+const SHADER_EXTENSIONS: [&str; 3] = ["vert", "frag", "comp"];
 
 fn glslc() -> PathBuf {
     if let Ok(sdk) = env::var("VULKAN_SDK") {
@@ -21,19 +23,36 @@ fn main() {
         .join("..")
         .join("..")
         .join("shaders");
-    for name in SHADERS {
-        let src = dir.join(name);
-        println!("cargo:rerun-if-changed={}", src.display());
+    // params.glsl must exist before the shaders that include it are compiled.
+    generate_params(&out);
+    // A directory is scanned recursively for changes (shaders/include too).
+    println!("cargo:rerun-if-changed={}", dir.display());
+    let mut sources: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()))
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| {
+            p.is_file()
+                && p.extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| SHADER_EXTENSIONS.contains(&x))
+        })
+        .collect();
+    sources.sort();
+    for src in sources {
+        let name = src.file_name().unwrap().to_string_lossy().into_owned();
         let dst = out.join(format!("{name}.spv"));
         let status = Command::new(glslc())
-            .args(["-O", "--target-env=vulkan1.3", "-o"])
+            .args(["-O", "--target-env=vulkan1.3", "-I"])
+            .arg(dir.join("include"))
+            .arg("-I")
+            .arg(&out)
+            .arg("-o")
             .arg(&dst)
             .arg(&src)
             .status()
             .unwrap_or_else(|e| panic!("cannot run glslc ({e}); install the Vulkan SDK and set VULKAN_SDK"));
         assert!(status.success(), "glslc failed on {}", src.display());
     }
-    generate_params(&out);
 }
 
 /// Generates `params.rs` and `params.glsl` in `OUT_DIR` from the parameter table `params/*.toml` (paramgen),

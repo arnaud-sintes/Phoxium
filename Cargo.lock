@@ -275,6 +275,7 @@ name = "ultimatecrt"
 version = "0.1.0"
 dependencies = [
  "ash",
+ "crt-model",
  "paramgen",
  "png",
  "serde",

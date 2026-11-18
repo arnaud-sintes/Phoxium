@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Stage `decode` (ARCHITECTURE 3.7): captured BGRA8 frame -> native raster, RGBA16F.
+//
+// Native pixel p is read at the centre of its block in the captured frame: origin + p * div + div / 2
+// (div = 1 when the source is native), with texelFetch on exact texels (DESIGN 7).
+// The value written is the code value V = code / 255 (drive voltage, SRC-5 default) passed through the
+// `source` transfer. Until the gun stage exists (T-20b), that transfer stands in for the gun law so the
+// chain ends in linear light; with TRANSFER_IDENTITY the raster holds code values, the contract of the
+// voltage-domain stages that T-20b inserts after this one.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D src;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D native_out;
+
+layout(push_constant) uniform Push {
+    ivec2 origin;
+    ivec2 div;
+    uint transfer;
+    float gamma;
+} pc;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, frame.native_size))) {
+        return;
+    }
+    ivec2 texel = clamp(pc.origin + p * pc.div + pc.div / 2, ivec2(0), textureSize(src, 0) - 1);
+    vec3 v = texelFetch(src, texel, 0).rgb;
+    imageStore(native_out, p, vec4(transfer_to_linear(v, pc.transfer, pc.gamma), 1.0));
+}
