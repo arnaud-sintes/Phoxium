@@ -2,7 +2,7 @@
 
 use std::env;
 
-use crate::{patterns, scaling, Res};
+use crate::{lifecycle, patterns, scaling, Res};
 
 pub const USAGE: &str = "ultimatecrt: captures a window and shows it in a second window through a GPU pipeline.
 
@@ -33,6 +33,10 @@ Usage: ultimatecrt [options]
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
+  --wait-source <secs> when the captured window closes: a fullscreen output drops to a normal window after
+                       this many seconds (default 30; 0 = wait forever). Reattaches to a new window of the
+                       same program and class meanwhile
+  --exit-on-lost       exit when the captured window closes instead of waiting for it
   --exit-after <secs>  quit after some seconds (for automated tests)
   render ...           (first argument) offline render of a pattern or image to PNG or PFM, no window; see `ultimatecrt render --help`
   --version            print the version and exit
@@ -58,6 +62,7 @@ pub struct Args {
     pub stats: bool,
     pub save_capture: Option<String>,
     pub exit_after: Option<f64>,
+    pub lost: lifecycle::LostPolicy,
     pub log: Option<String>,
     pub pattern: Option<String>,
     pub pattern_size: Option<(u32, u32)>,
@@ -90,6 +95,14 @@ pub fn parse_args() -> Res<Args> {
             "--validation" => a.validation = true,
             "--stats" => a.stats = true,
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
+            "--wait-source" => {
+                let secs: f64 = number("--wait-source", &value("--wait-source")?)?;
+                if !secs.is_finite() || secs < 0.0 {
+                    return Err("--wait-source expects a number of seconds >= 0".into());
+                }
+                a.lost.wait_s = secs;
+            }
+            "--exit-on-lost" => a.lost.exit_on_lost = true,
             "--exit-after" => a.exit_after = Some(number("--exit-after", &value("--exit-after")?)?),
             "--log" => a.log = Some(value("--log")?),
             "--pattern" => a.pattern = Some(value("--pattern")?),

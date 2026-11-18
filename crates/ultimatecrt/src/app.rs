@@ -166,6 +166,9 @@ pub fn run() -> Res<()> {
     let mut size_watch = lifecycle::SizeWatch::default();
     let mut captured_base = 0u64; // frames of the sessions already closed
     let mut notice: Option<String> = None;
+    // Lost source (T-56): reminders, then a fullscreen output drops to a window, or the app exits.
+    let mut lost_watch = lifecycle::LostWatch::new(args.lost, args.fullscreen);
+    let windowed_size = (frame.width as i32 * scale, frame.height as i32 * scale);
     loop {
         if !output::pump() {
             break;
@@ -201,6 +204,21 @@ pub fn run() -> Res<()> {
                             }
                         }
                     }
+                }
+            }
+            match lost_watch.update(now, r.is_attached()) {
+                lifecycle::LostAction::None => {}
+                lifecycle::LostAction::Remind => println!("{}", lifecycle::LOST_REMINDER),
+                lifecycle::LostAction::GoWindowed => {
+                    output::drop_to_windowed(win.hwnd, windowed_size);
+                    println!(
+                        "source lost for {:.0} s: the output is now a normal window (Esc closes it)",
+                        args.lost.wait_s
+                    );
+                }
+                lifecycle::LostAction::Exit => {
+                    println!("source lost: exiting (--exit-on-lost)");
+                    break;
                 }
             }
         }
@@ -253,6 +271,8 @@ pub fn run() -> Res<()> {
             };
             view = scaling::View::new(region, div);
             // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
+            // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
+            // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
             let eligible = capture.is_some() && args.divisor.is_none() && detector.is_locked() && div == (1, 1);
             if smoothing.feed(&frame.data, frame.width, region, eligible) {
                 println!("warning: {}", lifecycle::SMOOTHED_WARNING);

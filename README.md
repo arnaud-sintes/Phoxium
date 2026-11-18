@@ -46,6 +46,15 @@ The CRT model needs the native raster: scanlines are native rows. A game shown a
 - The shader reads the centre of each block, so no extra pass is needed. Detection restarts when the captured size changes.
 - Only simple integer nearest-neighbour upscales are handled. Smoothed or non-integer scaling detects as x1.
 
+## Target lifecycle (T-56)
+
+- **Reattach:** when the captured window closes, the app waits for a new window with the same executable and window class (title preferred, then the largest) and captures it. Only windows that appear after the loss are candidates, or the old handle if it comes back: sibling windows of a shared host (every Chrome window, every UWP app) that were already open are ignored. A sibling that was hidden or minimised when the target closed and is shown later counts as new.
+- **Lost source:** the console prints `source lost; Ctrl+Alt+Q to quit` at once and every 10 s. A fullscreen output drops to a normal window (taskbar button, Esc closes it) after `--wait-source SECS` (default 30, 0 waits forever); it does not go back to fullscreen by itself. `--exit-on-lost` exits at once instead. Reattaching keeps working while windowed.
+- **Black or silent frames:** `protected or not drawing` in the title and the console after 3 s of black frames or 10 s without a frame (a static picture is silent too).
+- **Smoothed source (advisory only):** when no integer scale is found, a warning is printed if the window looks like a low-resolution source upscaled with filtering: most edges between flat areas are ramps of a few pixels (bilinear, sharp bilinear, bicubic, Lanczos, integer or not) and the edges lie on a regular grid (period 1.5 to 16 px). Text at 1:1 has ramps too but no grid, nearest-neighbour scaling has no ramps, so neither warns. It cannot tell apart monospaced text with heavy strokes at 1:1 (its stems repeat at the character pitch, a possible false warning), and it misses an upscale whose flat areas are all shorter than the filter support (for example bicubic or Lanczos x2 of art without runs of about three native pixels: no flat area is left to measure). Thresholds are tuned on synthetic images only (`lifecycle.rs` tests); they have not been checked on real captures.
+- **Size change:** a new source size restarts the scale detection and clears the persistence history.
+- TODO(T-80b): a capture session lost without the window closing (Direct3D 11 device loss, monitor hot-plug) is not a lost target: the frames stop and only the `protected or not drawing: no new frame` message appears, with no restart. T-80b must restart the capture session.
+
 ## Known limits of the scaffold
 
 - Frames go GPU to CPU to GPU (CAP-2, CPU copy path). A shared-handle path is a later spike.

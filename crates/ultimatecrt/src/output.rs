@@ -170,6 +170,43 @@ impl Drop for Output {
     }
 }
 
+/// Turns the fullscreen output into a normal window (frame, taskbar button, not topmost, can take
+/// focus so Esc works), centred on the monitor it covered, with a client area of `client` clamped to
+/// that monitor. It does not take the focus itself. Used when the source is lost for too long (T-56).
+pub fn drop_to_windowed(hwnd: HWND, client: (i32, i32)) {
+    NO_ACTIVATE.store(false, Ordering::Relaxed);
+    unsafe {
+        let mon = monitor_rect(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).unwrap_or(RECT {
+            left: 0,
+            top: 0,
+            right: 1280,
+            bottom: 720,
+        });
+        let style = WS_OVERLAPPEDWINDOW;
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: client.0.clamp(160, ((mon.right - mon.left) * 3 / 4).max(160)),
+            bottom: client.1.clamp(120, ((mon.bottom - mon.top) * 3 / 4).max(120)),
+        };
+        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
+        let (w, h) = (r.right - r.left, r.bottom - r.top);
+        // Hidden while the styles change so the taskbar picks up the removed tool-window style.
+        let _ = ShowWindow(hwnd, SW_HIDE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style.0 as isize);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, 0);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_NOTOPMOST),
+            mon.left + ((mon.right - mon.left) - w) / 2,
+            mon.top + ((mon.bottom - mon.top) - h) / 2,
+            w,
+            h,
+            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
+    }
+}
+
 /// Processes pending messages. Returns false once the window asked to quit.
 pub fn pump() -> bool {
     unsafe {
