@@ -14,6 +14,9 @@ pub struct Presenter {
     surface: vk::SurfaceKHR,
     swapchain: vk::SwapchainKHR,
     format: vk::Format,
+    /// The surface offers a 10-bit UNORM format with `SRGB_NONLINEAR` (COL-4); only recorded, the
+    /// swapchain stays `B8G8R8A8_UNORM` (A7).
+    ten_bit_offered: bool,
     extent: vk::Extent2D,
     images: Vec<vk::Image>,
     views: Vec<vk::ImageView>,
@@ -48,6 +51,7 @@ impl Presenter {
             surface,
             swapchain: vk::SwapchainKHR::null(),
             format: vk::Format::UNDEFINED,
+            ten_bit_offered: false,
             extent: vk::Extent2D { width: 0, height: 0 },
             images: Vec::new(),
             views: Vec::new(),
@@ -73,6 +77,12 @@ impl Presenter {
 
     pub fn format(&self) -> vk::Format {
         self.format
+    }
+
+    /// Whether the surface offers a 10-bit SDR format (COL-4). The swapchain does not use it yet: `encode`
+    /// already dithers to 1023 levels for such a target, once a later task switches the format.
+    pub fn ten_bit_offered(&self) -> bool {
+        self.ten_bit_offered
     }
 
     pub fn extent(&self) -> vk::Extent2D {
@@ -115,6 +125,12 @@ impl Presenter {
             })
             .ok_or("surface has no formats")?;
         self.format = chosen.format;
+        self.ten_bit_offered = formats.iter().any(|f| {
+            matches!(
+                f.format,
+                vk::Format::A2B10G10R10_UNORM_PACK32 | vk::Format::A2R10G10B10_UNORM_PACK32
+            ) && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        });
         self.extent = if caps.current_extent.width != u32::MAX {
             caps.current_extent
         } else {

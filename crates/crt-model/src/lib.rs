@@ -19,6 +19,7 @@ pub mod colour;
 pub mod geometry;
 pub mod mask;
 pub mod optics;
+pub mod output;
 pub mod phosphor;
 pub mod tube;
 pub mod units;

@@ -468,11 +468,14 @@ unsafe fn create_device(
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
         .dynamic_rendering(true)
         .synchronization2(true);
+    // `encode` counts clipped pixels with atomics in a storage buffer (T-46); universal on desktop GPUs.
+    let features = vk::PhysicalDeviceFeatures::default().fragment_stores_and_atomics(true);
     let device = instance.create_device(
         physical,
         &vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
             .enabled_extension_names(dev_exts)
+            .enabled_features(&features)
             .push_next(&mut f13),
         None,
     )?;

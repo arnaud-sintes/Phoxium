@@ -8,6 +8,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 ## [Unreleased]
 
 ### Added
+- Output transform (`encode` stage): tube primaries and white to sRGB colour matrix (`output_match_srgb`), soft shoulder (`output_knee`), clip counters (`Renderer::clip_counts`), and a final 1 LSB dither (`output_dither`: off, ordered, noise). `crt-model::output` is the f64 oracle; `crt-model` is now a regular dependency of `ultimatecrt`.
 - `scripts/poll-foreground.ps1`: polls the foreground window every 100 ms and logs each change to a CSV (title, pid, executable, is-source), with a summary and a `-SelfTest` switch.
 - `--log <file.csv>`: per-second diagnostics (capture and render fps, min/max/p99 intervals, gaps over 50 ms, foreground-window changes, "foreground is the source" flag) and a summary at exit.
 - `pixel-demo`: demo source window with a procedural NES-style scene, a test card and optional PNG display, at any source resolution and integer scale.

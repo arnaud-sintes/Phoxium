@@ -13,3 +13,39 @@ tag = "E"
 source = "QUESTIONS COL-1 and SCP-8: honest exposure control, 1 maps tube white to panel white; no hidden compensation"
 description = "Scale factor from the tube's linear light to the host panel's linear light, before the SDR encode. Values above 1 clip highlights."
 group = "Output"
+
+[[param]]
+id = "output_match_srgb"
+stage = "output"
+type = "bool"
+unit = "1"
+default = true
+tag = "E"
+source = "QUESTIONS COL-2: one-click 'match sRGB colours' toggle. On: the tube primaries are shown as the host's own sRGB primaries (identity matrix, colours as the game authored them on sRGB). Off: tube-faithful, the linear 3x3 matrix from the tube primaries and white (colour.toml) to sRGB/Rec.709 primaries with D65. Default on keeps the chain an exact identity until the presets (T-50) choose per tube."
+description = "Show the tube colours as sRGB colours (identity colour matrix). Off applies the tube primaries and white to the sRGB panel (tube-faithful colours)."
+group = "Output"
+
+[[param]]
+id = "output_knee"
+stage = "output"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.5
+max = 1.0
+tag = "E"
+source = "QUESTIONS COL-1: element peaks above panel white are soft-clipped when the mask is resolved; knee 1 is a hard clip. Shape: identity up to the knee, then k + (1 - k) (1 - exp(-(x - k) / (1 - k))) per channel (continuous slope, monotonic, asymptote 1) [E]"
+description = "Start of the soft shoulder for linear values above panel white, as a fraction of panel white. 1 clips hard at panel white."
+group = "Output"
+
+[[param]]
+id = "output_dither"
+stage = "output"
+type = "enum"
+unit = "1"
+default = "off"
+values = ["off", "ordered", "noise"]
+tag = "E"
+source = "QUESTIONS COL-4 and CAP-9: final dither of 1 LSB against dark-tone banding at 8 bits. ordered = 8x8 Bayer matrix (static); noise = interleaved gradient noise (Jimenez 2014, blue-noise-like spectrum) shifted every frame. Off by default so the identity tests stay exact; presets and the app turn it on."
+description = "Final dither of 1 LSB of the output format: off, ordered (static 8x8 Bayer) or noise (blue-noise-like, changes every frame). Only integer targets are dithered."
+group = "Output"
