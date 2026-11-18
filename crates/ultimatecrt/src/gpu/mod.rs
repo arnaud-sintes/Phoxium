@@ -19,6 +19,9 @@ mod headless;
 mod pipeline;
 mod present;
 mod stages;
+mod timing;
+
+pub use timing::{csv_columns, FrameTimings, StageTiming, TimingAverager};
 
 pub use context::{gpu_required, validation_layer_available, ValidationCounter};
 pub use context::{list_gpus, Context, GpuInfo};
@@ -186,6 +189,29 @@ impl Renderer {
             .as_mut()
             .expect("pipeline created in new")
             .set_enabled(name, on)
+    }
+
+    /// GPU timings of the latest frame whose results were read (at most [`FRAMES_IN_FLIGHT`] frames
+    /// behind the last one rendered; reading them never waits). `None` before the first, or when the
+    /// device has no timestamp support ([`Renderer::timing_unavailable`]).
+    pub fn timings(&self) -> Option<&FrameTimings> {
+        self.pipeline.as_ref().and_then(Pipeline::timings)
+    }
+
+    /// Mean GPU timings of the frames read since the previous call (`--stats`, the diagnostics log, the
+    /// overlay call it once per second), then restarts the average.
+    pub fn take_timing_average(&mut self) -> Option<FrameTimings> {
+        self.pipeline.as_mut().and_then(Pipeline::take_timing_average)
+    }
+
+    /// Why GPU timestamps are off, `None` when they work.
+    pub fn timing_unavailable(&self) -> Option<&str> {
+        self.pipeline.as_ref().and_then(Pipeline::timing_unavailable)
+    }
+
+    /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`.
+    pub fn timing_names(&self) -> Vec<&'static str> {
+        self.pipeline.as_ref().map(Pipeline::timing_names).unwrap_or_default()
     }
 }
 

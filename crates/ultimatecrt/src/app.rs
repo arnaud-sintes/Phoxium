@@ -136,7 +136,16 @@ pub fn run() -> Res<()> {
         }
     );
 
-    let mut log = args.log.as_deref().map(|p| diag::Log::create(p, follow)).transpose()?;
+    let mut log = args
+        .log
+        .as_deref()
+        .map(|p| diag::Log::create(p, follow, renderer.timing_names()))
+        .transpose()?;
+    if args.stats {
+        if let Some(why) = renderer.timing_unavailable() {
+            println!("gpu timings unavailable: {why}");
+        }
+    }
     let start = Instant::now();
     let mut stat_time = Instant::now();
     let (mut renders, mut last_captured) = (0u32, 0u64);
@@ -200,8 +209,10 @@ pub fn run() -> Res<()> {
         if stat_time.elapsed() >= Duration::from_secs(1) {
             let captured = capture.as_ref().map_or(0, |c| c.frames_captured());
             let secs = stat_time.elapsed().as_secs_f64();
+            // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
+            let gpu = renderer.take_timing_average();
             if let Some(l) = log.as_mut() {
-                l.second(captured - last_captured, renders, secs)?;
+                l.second(captured - last_captured, renders, secs, gpu.as_ref())?;
             }
             output::set_title(
                 win.hwnd,
@@ -228,6 +239,9 @@ pub fn run() -> Res<()> {
                     view.div.0,
                     view.div.1
                 );
+                if let Some(g) = &gpu {
+                    println!("  {}", g.stats_line());
+                }
             }
             stat_time = Instant::now();
             renders = 0;
