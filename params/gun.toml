@@ -2,7 +2,7 @@
 # crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
 # dimensionless. Read by `gun` (law and controls) and by `decode` (gun_gamma, srgb source mode).
 # Beam current is relative: 1 at full drive for the power, BT.1886 and Annex 1 laws.
-# Defaults reproduce the pre-T-34 picture: pure power law 2.4, neutral controls, no white balance.
+# Defaults reproduce the pre-T-34 picture: pure power law 2.4, neutral controls, no white retune.
 
 [[param]]
 id = "gun_law"
@@ -13,7 +13,7 @@ default = "power"
 values = ["power", "gog", "bt1886", "bt1886_annex1"]
 tag = "S"
 source = "CRT.md Gun law (QUESTIONS PHY-6): pure power, GOG (Berns, Motta and Gorzynski 1993), BT.1886 (2011) and BT.1886 Annex 1. Default power 2.4 per SRC-5 and COL-3 (gog with neutral controls gives the same curve)"
-description = "Gun transfer law. power: I = V^gamma, ignoring every control below except the white balance. gog: I = drive x max(gain V + brightness + cutoff, 0)^gamma per channel. bt1886: I = L / Lw of the BT.1886 law of the white and black luminances (gamma 2.4, black lift b from Lb and Lw). bt1886_annex1: the two-exponent Annex 1 law (2.6 above V = 0.35, 3.0 below) with the black lift below. Every law has zero slope at cutoff (no linear toe, unlike sRGB)."
+description = "Gun transfer law. power: I = V^gamma, ignoring every control below except the white retune. gog: I = drive x max(gain V + brightness + cutoff, 0)^gamma per channel. bt1886: I = L / Lw of the BT.1886 law of the white and black luminances (gamma 2.4, black lift b from Lb and Lw; with Lb > 0 the black floor is I(0) = Lb / Lw and the slope at V = 0 is small but not zero, about 0.04 for the defaults). bt1886_annex1: the two-exponent Annex 1 law (2.6 above V = 0.35, 3.0 below) with the black lift; its two branches meet at the knee but their slopes do not (0.559 below, 0.485 above for b = 0). The slope is zero at the cutoff only for power, gog and Annex 1 with b = 0 (no linear toe, unlike sRGB), and for BT.1886 only at V = -b. A disabled gun slot passes V through and the output then treats it as linear light: the picture comes out lighter, not darker (code 20 shows about code 80 on a pure 2.2 host)."
 group = "Gun"
 
 [[param]]
@@ -26,7 +26,7 @@ min = 1.5
 max = 3.5
 tag = "S"
 source = "CRT.md Gun law: 2.4 (BT.1886), real guns 2.2 to 3.0, an ideal diode 1.5 (triode characteristic of the gun, not the phosphor)"
-description = "Exponent of the power and gog laws. Also the exponent of the inverse law of the srgb source mode (source_eotf), which is exact for the power law only."
+description = "Exponent of the power and gog laws. Also the exponent of the inverse used by the srgb source mode (source_eotf) when the law is power or gog; with bt1886 and bt1886_annex1 that mode inverts the nominal curve of the law instead. Values below 0.1 are clamped to 0.1 in the shaders; 1 is an exact identity for the power law."
 group = "Gun"
 
 [[param]]
@@ -78,7 +78,7 @@ min = 0.5
 max = 1.5
 tag = "K"
 source = "CRT.md What the user controls do physically: RGB drive (service menu) = per-gun gain, white point at the highlights"
-description = "Per-gun drive (red, green, blue): multiplies the beam current of the gog law, as the RGB drive of a service menu. Independent of the automatic white balance (gun_white_balance)."
+description = "Per-gun drive (red, green, blue): multiplies the beam current of the gog law, as the RGB drive of a service menu. Independent of the white retune (gun_white_balance)."
 group = "Gun"
 
 [[param]]
@@ -91,7 +91,7 @@ min = 20.0
 max = 300.0
 tag = "S"
 source = "ITU-R BT.1886 (CRT.md Gun law) with the broadcast reference white 100 cd/m2 (CRT.md Luminance and contrast)"
-description = "White luminance Lw of the bt1886 law. The stage outputs the relative current L / Lw, so only the ratio Lb / Lw shapes the curve; Lw is the absolute scale reserved for the optics and output stages."
+description = "White luminance Lw of the bt1886 law. The stage outputs the relative current L / Lw, so Lw matters only through the ratio Lb / Lw (changing Lw alone, with Lb scaled with it, changes nothing); it is not an absolute luminance of the picture."
 group = "Gun"
 
 [[param]]
@@ -127,6 +127,19 @@ type = "bool"
 unit = "1"
 default = false
 tag = "D"
-source = "QUESTIONS COL-2 and CRT.md White point: colour temperature is a per-gun gain in linear light; solved from the primaries and white xy of colour.toml (crt-model gun.rs)"
-description = "Apply the white balance gains: per-gun factors, the largest 1, so that drive (1, 1, 1) has the chromaticity tube_white_xy with the tube primaries. Off until the output transform (T-46) converts tube light to the host primaries: without it the host would show the raw gun currents."
+source = "QUESTIONS COL-2 and CRT.md White point: colour temperature is a per-gun gain in linear light; retune solved from the primaries and white xy of colour.toml (crt-model gun.rs); relative form from the T-34 review (gate 11)"
+description = "Retune the tube white, like a service-menu colour-temperature adjustment: per-gun gains, the largest 1, equal to s(target) / s(tube white) with s the weights of the primaries that make a white, so that drive (1, 1, 1) has the chromaticity gun_retune_white_xy. They are relative to tube_white_xy: the tube RGB (1, 1, 1) is already the tube white in the output transform, so a target equal to the tube white gives gains (1, 1, 1) exactly. Off by default: the tube white is then used as it is."
+group = "Gun"
+
+[[param]]
+id = "gun_retune_white_xy"
+stage = "gun"
+type = "vec2"
+unit = "CIE 1931 xy"
+default = [0.3127, 0.3290]
+min = 0.0
+max = 0.9
+tag = "K"
+source = "T-34 review (gate 11): target of the relative retune; same default as the tube white of colour.toml (CRT.md White point: D65). Colour temperature as a per-gun gain: CRT.md White point"
+description = "Target white chromaticity of the white retune (used only when gun_white_balance is on). A D65 tube retuned to 9300 K (0.2831, 0.2971) gets gains about (0.621, 0.753, 1). Set it equal to tube_white_xy for no change. A white outside the triangle of the tube primaries is ignored (neutral gains)."
 group = "Gun"

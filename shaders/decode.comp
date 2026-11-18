@@ -7,17 +7,25 @@
 // (div = 1 when the source is native), with texelFetch on exact texels (DESIGN 7).
 // Source interpretation (T-30, SRC-5), `params.source_eotf`:
 // - drive_voltage (default): the drive voltage is V = code / 255.
-// - srgb: the code is decoded with the sRGB EOTF to linear light L, and V = L^(1 / gun_gamma), the inverse
-//   of the pure power gun law (`gun_gamma` of params/gun.toml), so a power-law gun shows exactly L.
+// - srgb: the code is decoded with the sRGB EOTF to linear light L, and V is the inverse of the NOMINAL curve
+//   of the active gun law (include/gun_law.glsl: power, and gog as its power law of `gun_gamma`; BT.1886 with
+//   its black lift b; the piecewise Annex 1), so that the gun shows exactly L, relative to white. The user
+//   controls of the gog law (brightness, contrast, cutoff, drive) are tube controls and are not inverted.
+//   Exception: a BT.1886 law with a black floor Lb / Lw cannot show a luminance below it, so the codes whose
+//   L is under the floor decode to V = 0 and show the floor. `gun_gamma` is clamped to >= 0.1.
 //
 // CONTRACT for the voltage-domain stages and the gun law (T-34, done): drive_voltage() returns V in [0, 1]
 // per channel, a gamma-encoded drive voltage, and with the default pc.transfer = TRANSFER_IDENTITY that
 // is what is written to the native raster: the gun law is applied by `gun.comp` (slot `gun`), not here.
+// A disabled `gun` slot passes V through bit for bit, and `encode` then treats V as linear light: the
+// picture comes out LIGHTER than with the gun on (V is a gamma-encoded value shown as if it were light;
+// code 20 shows about code 80 on a pure 2.2 host instead of 20), not darker.
 // pc.transfer and pc.gamma (Settings::source) remain only as an optional transfer applied to V after the
 // drive voltage, for tests of the pre-T-34 chain; the default is the identity.
 
 #include "params.glsl"
 #include "common.glsl"
+#include "gun_law.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -35,7 +43,7 @@ layout(push_constant) uniform Push {
 vec3 drive_voltage(vec3 code) {
     if (params.source_eotf == SOURCE_EOTF_SRGB) {
         vec3 l = transfer_to_linear(code, TRANSFER_SRGB, 2.4);
-        return clamp(transfer_from_linear(l, TRANSFER_POWER, params.gun_gamma), 0.0, 1.0);
+        return clamp(vec3(gun_nominal_inverse(l.r), gun_nominal_inverse(l.g), gun_nominal_inverse(l.b)), 0.0, 1.0);
     }
     return code;
 }

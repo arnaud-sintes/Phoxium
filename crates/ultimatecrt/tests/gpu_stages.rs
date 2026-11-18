@@ -223,7 +223,8 @@ fn full_chain_identity_all_slots_on_and_off() {
 
 /// Each slot toggled alone, frame after frame on one pipeline (descriptor rewrites, routing changes,
 /// tracked barriers across frames): the output stays exact, except that `gun` off passes the drive
-/// voltage through (the host EOTF then darkens it, see [`assert_drive_through_host`]); validation silent.
+/// voltage through (the host EOTF inverse then lightens it, V being shown as linear light, see
+/// [`assert_drive_through_host`]); validation silent.
 #[test]
 fn toggling_each_slot_keeps_the_identity() {
     let test = "gpu_stages toggling";
