@@ -28,8 +28,14 @@
 //! [`OPTION_D_THRESHOLD_PX_PER_TRIAD`] (the oracle `crt_model::mask::option_d` is used for the list).
 //! The tube is placed as in `placement.rs`: height fraction of the output, limited by the width.
 //!
-//! `amp_k` (the amplifier sub-samples per source pixel) is a `FrameConstants` field, not a parameter, so a
-//! preset cannot carry it: [`recommended_amp_k`] gives the value its bandwidth needs.
+//! `amp_samples` (the amplifier sub-samples per source pixel, `FrameConstants::amp_k`) is a parameter, so a
+//! preset carries it: [`recommended_amp_k`] gives the value the amplifier blur needs, and the shipped files
+//! set it (a test checks).
+//!
+//! Option D and the mask tier: a preset is offered from [`OPTION_D_THRESHOLD_PX_PER_TRIAD`] (2.8 px per
+//! triad), but `mask_tier = auto` prefilters the mask below 3 px per triad (tier C). A preset between the two
+//! thresholds therefore sets `mask_tier = integrated`, and [`OptionDSuggestion::needs_integrated`] and
+//! [`Preset::host_note`] tell it.
 
 use std::{
     collections::BTreeMap,
@@ -37,10 +43,13 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crt_model::mask::{option_d, tier, Tier, OPTION_D_THRESHOLD_PX_PER_TRIAD};
+use crt_model::{
+    beam::gaussian_amp_sigma_ns,
+    mask::{option_d, tier, Tier, OPTION_D_THRESHOLD_PX_PER_TRIAD, TIER_B_MIN_PX_PER_TRIAD},
+};
 
 use crate::{
-    params::{meta, Confidence, ParamType, ParamValue, Params, MASK_TYPE_DELTA},
+    params::{meta, Confidence, ParamType, ParamValue, Params, MASK_TIER_INTEGRATED, MASK_TYPE_DELTA},
     settings::{from_value, to_value},
 };
 
@@ -50,17 +59,43 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Shown for a preset whose mask the host cannot resolve (PLAN P-1).
 pub const NOT_RESOLVABLE_NOTE: &str = "mask not resolvable on this host";
 
-/// Bandwidth above which the box-integral amplifier needs K = 16 sub-samples (K = 4 over-dims isolated
-/// vertical lines above about 5 MHz: 8 MHz 14.99 % against 12.36 % continuous, K = 16 12.68 %).
-pub const AMP_K_HIGH_BANDWIDTH_MHZ: f32 = 5.0;
+/// Shown for a preset the host resolves only between [`OPTION_D_THRESHOLD_PX_PER_TRIAD`] and the tier B
+/// threshold (3 px per triad) and whose `mask_tier` is `integrated`: the mask is drawn, without prefilter.
+pub const INTEGRATED_NOTE: &str = "mask drawn with the integrated tier (ripple possible)";
 
-/// Amplifier sub-samples per native pixel that `params` needs: 16 above [`AMP_K_HIGH_BANDWIDTH_MHZ`], else the
-/// pipeline default 4 (`FrameConstants::amp_k`, which a preset cannot set).
+/// Edge sigma (source px) at or below which the amp stage is an exact hold and extra samples change nothing
+/// (`SIGMA_IDEAL` of `shaders/amp.comp`).
+pub const AMP_SIGMA_IDEAL_PX: f64 = 0.01;
+
+/// Edge sigma (source px) from which K = 16 is used. The T-33 follow-up measured the over-dimming of isolated
+/// vertical lines at K = 4 against K = 16 (under 0.4 points everywhere): 2.3 / 2.6 / 2.0 / 1.1 points at
+/// 5 / 8 / 15 / 30 MHz, that is at sigma 0.142 / 0.089 / 0.047 / 0.024 px with the 5.37 MHz clock. Every
+/// measured point needs K = 16, and the error falls roughly linearly to the ideal limit (about 0.5 points at
+/// 0.01 px), so 0.02 px, between the ideal limit and the smallest measured sigma, is where K = 16 starts.
+pub const AMP_SIGMA_K16_PX: f64 = 0.02;
+
+/// The amplifier edge sigma in source pixels that the amp stage uses for the slower edge:
+/// `0.1325 x pixel clock / bandwidth` (`crt_model::beam::gaussian_amp_sigma_ns`), times the fall/rise ratio
+/// when above 1 (peaking is not counted).
+pub fn amp_sigma_px(params: &Params) -> f64 {
+    let rise =
+        gaussian_amp_sigma_ns(f64::from(params.amp_bandwidth_mhz)) * 1e-3 * f64::from(params.amp_pixel_clock_mhz);
+    rise * f64::from(params.amp_fall_rise_ratio).max(1.0)
+}
+
+/// Amplifier sub-samples per native pixel that `params` needs, from the blur in source pixels
+/// ([`amp_sigma_px`]): 4 (the pipeline default) when the amplifier is ideal (at most
+/// [`AMP_SIGMA_IDEAL_PX`]), 16 from [`AMP_SIGMA_K16_PX`], 8 in the unmeasured gap between. The result is the
+/// `amp_samples` value of a shipped preset (computed for the table's default pixel clock; a source with another
+/// clock needs it recomputed).
 pub fn recommended_amp_k(params: &Params) -> i32 {
-    if params.amp_bandwidth_mhz > AMP_K_HIGH_BANDWIDTH_MHZ {
-        16
-    } else {
+    let sigma = amp_sigma_px(params);
+    if sigma <= AMP_SIGMA_IDEAL_PX {
         crate::gpu::AMP_K as i32
+    } else if sigma < AMP_SIGMA_K16_PX {
+        8
+    } else {
+        16
     }
 }
 
@@ -180,6 +215,25 @@ fn components(v: ParamValue) -> Vec<f64> {
         ParamValue::Vec3(a) => a.iter().map(|x| f64::from(*x)).collect(),
         ParamValue::Vec4(a) => a.iter().map(|x| f64::from(*x)).collect(),
         ParamValue::Bool(_) | ParamValue::Enum(_) => Vec::new(),
+    }
+}
+
+/// A value as the preset files write it: enums by value name, floats in their shortest decimal form (so a
+/// saved 0.31 reads back as the same f32 and the file shows 0.31, not 0.3100000023841858).
+fn file_value(id: &str, v: ParamValue) -> toml::Value {
+    use toml::Value as V;
+    let float = |x: f32| V::Float(x.to_string().parse().unwrap_or(f64::from(x)));
+    let arr = |a: &[f32]| V::Array(a.iter().map(|x| float(*x)).collect());
+    match v {
+        ParamValue::F32(x) => float(x),
+        ParamValue::Enum(i) => match meta(id).and_then(|m| m.values.get(i as usize)) {
+            Some(name) => V::String((*name).to_string()),
+            None => V::Integer(i64::from(i)),
+        },
+        ParamValue::Vec2(a) => arr(&a),
+        ParamValue::Vec3(a) => arr(&a),
+        ParamValue::Vec4(a) => arr(&a),
+        other => to_value(other),
     }
 }
 
@@ -324,6 +378,83 @@ impl Preset {
         p
     }
 
+    /// A user preset holding `params`: every id whose value differs from the table default, each with the
+    /// provenance `E: user` (the source of a value the user set; the tag is an estimate by definition).
+    pub fn from_params(id: &str, name: &str, params: &Params) -> Result<Preset, PresetError> {
+        let file = format!("{id}.toml");
+        if !is_valid_id(id) {
+            return Err(err(
+                &file,
+                format!("id '{id}' must use lower case letters, digits and '-'"),
+            ));
+        }
+        if name.trim().is_empty() {
+            return Err(err(&file, "the name must not be empty"));
+        }
+        let mut values = Vec::new();
+        let mut provenance = BTreeMap::new();
+        for m in crate::params::PARAMS_META {
+            if let Some(v) = params.get(m.id).filter(|v| *v != m.default) {
+                values.push((m.id, v));
+                provenance.insert(
+                    m.id.to_string(),
+                    Provenance {
+                        tag: Confidence::Estimate,
+                        source: "user".to_string(),
+                    },
+                );
+            }
+        }
+        Ok(Preset {
+            id: id.to_string(),
+            name: name.to_string(),
+            label: "saved from the live parameters (user preset)".to_string(),
+            notes: "Values that differ from the table defaults, saved by the user.".to_string(),
+            file,
+            origin: Origin::User(PathBuf::new()),
+            values,
+            provenance,
+            warnings: Vec::new(),
+        })
+    }
+
+    /// The preset file text, in the schema of the shipped files (`Preset::parse` reads it back).
+    pub fn to_toml(&self) -> String {
+        let mut t = toml::Table::new();
+        t.insert("schema".into(), toml::Value::Integer(i64::from(SCHEMA_VERSION)));
+        t.insert("id".into(), toml::Value::String(self.id.clone()));
+        t.insert("name".into(), toml::Value::String(self.name.clone()));
+        t.insert("label".into(), toml::Value::String(self.label.clone()));
+        if !self.notes.is_empty() {
+            t.insert("notes".into(), toml::Value::String(self.notes.clone()));
+        }
+        let mut params = toml::Table::new();
+        for (id, v) in &self.values {
+            params.insert((*id).to_string(), file_value(id, *v));
+        }
+        let mut prov = toml::Table::new();
+        for (id, p) in &self.provenance {
+            prov.insert(
+                id.clone(),
+                toml::Value::String(format!("{}: {}", p.tag.tag(), p.source)),
+            );
+        }
+        t.insert("params".into(), toml::Value::Table(params));
+        t.insert("provenance".into(), toml::Value::Table(prov));
+        toml::to_string(&t).expect("a table of strings, numbers and arrays serialises")
+    }
+
+    /// Writes the preset to `dir\<id>.toml` (atomically: temporary file, then rename) and returns the path.
+    /// `dir` is created when missing; it is normally [`user_dir`].
+    pub fn save(&self, dir: &Path) -> crate::Res<PathBuf> {
+        fs::create_dir_all(dir)?;
+        let path = dir.join(format!("{}.toml", self.id));
+        let tmp = dir.join(format!("{}.toml.tmp", self.id));
+        fs::write(&tmp, self.to_toml())?;
+        fs::rename(&tmp, &path)?;
+        Ok(path)
+    }
+
     /// The overrides of `current` against this preset: the ids whose value differs from the preset applied
     /// onto the defaults (T-53 "diff vs preset", T-51 settings overrides).
     pub fn diff(&self, current: &Params) -> BTreeMap<String, toml::Value> {
@@ -365,10 +496,30 @@ impl Preset {
         tier(self.px_per_triad(host))
     }
 
-    /// "mask not resolvable on this host" when the host gets fewer px per triad than
-    /// [`OPTION_D_THRESHOLD_PX_PER_TRIAD`] (PLAN P-1), else `None`.
+    /// True when the host gives this preset at least [`OPTION_D_THRESHOLD_PX_PER_TRIAD`] but fewer than the
+    /// tier B threshold (3) px per triad: option D offers it, but `mask_tier = auto` would still prefilter
+    /// the mask (tier C), so it needs the integrated tier.
+    pub fn needs_integrated_tier(&self, host: (u32, u32)) -> bool {
+        let ppt = self.px_per_triad(host);
+        (OPTION_D_THRESHOLD_PX_PER_TRIAD..TIER_B_MIN_PX_PER_TRIAD).contains(&ppt)
+    }
+
+    /// The label of the preset on `host` (PLAN P-1), or `None` when the mask is resolved:
+    /// - [`NOT_RESOLVABLE_NOTE`] below [`OPTION_D_THRESHOLD_PX_PER_TRIAD`], and also between that and 3 px per
+    ///   triad when the preset's `mask_tier` is not `integrated` (the shader then averages the mask away);
+    /// - [`INTEGRATED_NOTE`] between the two thresholds when `mask_tier` is `integrated`.
     pub fn host_note(&self, host: (u32, u32)) -> Option<&'static str> {
-        (self.px_per_triad(host) < OPTION_D_THRESHOLD_PX_PER_TRIAD).then_some(NOT_RESOLVABLE_NOTE)
+        if self.px_per_triad(host) < OPTION_D_THRESHOLD_PX_PER_TRIAD {
+            Some(NOT_RESOLVABLE_NOTE)
+        } else if self.needs_integrated_tier(host) {
+            Some(if self.params().mask_tier == MASK_TIER_INTEGRATED {
+                INTEGRATED_NOTE
+            } else {
+                NOT_RESOLVABLE_NOTE
+            })
+        } else {
+            None
+        }
     }
 
     /// Bandwidth-dependent `amp_k` for this preset ([`recommended_amp_k`]).
@@ -414,6 +565,21 @@ pub fn diff_overrides(base: &Params, params: &Params) -> BTreeMap<String, toml::
 /// Option D (PHY-2): the presets of `presets` (indices) whose mask the `host` output resolves, that is at
 /// least [`OPTION_D_THRESHOLD_PX_PER_TRIAD`] px per triad, computed with `crt_model::mask::option_d`.
 pub fn option_d_suggestions(presets: &[Preset], host: (u32, u32)) -> Vec<usize> {
+    option_d_detail(presets, host).iter().map(|s| s.index).collect()
+}
+
+/// One option D suggestion: the preset (index in the list) and whether it needs `mask_tier = integrated`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OptionDSuggestion {
+    pub index: usize,
+    /// 2.8 <= px per triad < 3 on the host: `mask_tier = auto` would prefilter this mask (tier C), so the
+    /// mask is drawn only with the integrated tier (ripple possible). The shipped presets in that range set
+    /// it; for any other, the UI must set `mask_tier` to `integrated` when applying it.
+    pub needs_integrated: bool,
+}
+
+/// [`option_d_suggestions`] with, for each suggestion, whether it needs the integrated mask tier.
+pub fn option_d_detail(presets: &[Preset], host: (u32, u32)) -> Vec<OptionDSuggestion> {
     // The tubes differ in size, so each one is placed on its own: its image is `visible width * px_per_mm`
     // pixels wide and holds `triads across` triads, which is what the oracle takes.
     presets
@@ -427,7 +593,10 @@ pub fn option_d_suggestions(presets: &[Preset], host: (u32, u32)) -> Vec<usize> 
                 * host_px_per_mm(&params, host);
             !option_d(&[(0, triads)], width_px, OPTION_D_THRESHOLD_PX_PER_TRIAD).is_empty()
         })
-        .map(|(i, _)| i)
+        .map(|(index, p)| OptionDSuggestion {
+            index,
+            needs_integrated: p.needs_integrated_tier(host),
+        })
         .collect()
 }
 
@@ -482,7 +651,17 @@ impl Library {
             Ok(p) => {
                 self.warnings.extend(p.warnings.iter().cloned());
                 match self.presets.iter_mut().find(|q| q.id == p.id) {
-                    Some(slot) => *slot = p,
+                    Some(slot) => {
+                        // A user file replacing a shipped preset is the documented way to override it; two
+                        // user files with one id is a mistake the later (by file name) one wins silently.
+                        if matches!(slot.origin, Origin::User(_)) {
+                            self.warnings.push(format!(
+                                "preset {}: id '{}' is already defined by {}; this file replaces it",
+                                p.file, p.id, slot.file
+                            ));
+                        }
+                        *slot = p;
+                    }
                     None => self.presets.push(p),
                 }
             }
@@ -522,6 +701,11 @@ impl Library {
     /// Indices of the presets that `host` resolves ([`option_d_suggestions`]).
     pub fn option_d(&self, host: (u32, u32)) -> Vec<usize> {
         option_d_suggestions(&self.presets, host)
+    }
+
+    /// The suggestions of [`Library::option_d`] with whether each needs the integrated mask tier.
+    pub fn option_d_detail(&self, host: (u32, u32)) -> Vec<OptionDSuggestion> {
+        option_d_detail(&self.presets, host)
     }
 }
 
@@ -608,7 +792,110 @@ mod tests {
         let l = lib();
         assert_eq!(l.find("pvm-20m4u").unwrap().params().mask_damper_count, 2);
         assert_eq!(l.find("bvm-20f1u").unwrap().params().mask_damper_count, 2);
-        assert_eq!(l.find("kv-trinitron-tv").unwrap().params().exposure, 0.74);
+        assert_eq!(l.find("kv-trinitron-tv").unwrap().params().exposure, 0.81);
+    }
+
+    /// Linear sRGB of the light of XYZ (Rec.709 matrix).
+    fn xyz_to_srgb(xyz: [f64; 3]) -> [f64; 3] {
+        let [x, y, z] = xyz;
+        [
+            3.2406 * x - 1.5372 * y - 0.4986 * z,
+            -0.9689 * x + 1.8758 * y + 0.0415 * z,
+            0.0557 * x - 0.2040 * y + 1.0570 * z,
+        ]
+    }
+
+    /// Largest linear sRGB channel of each pure tube primary at full drive (white at Y = 1 built from the
+    /// primaries and the white point), times the exposure.
+    fn primary_maxima(q: &Params) -> [f64; 3] {
+        let col = |xy: [f32; 2]| {
+            let (x, y) = (f64::from(xy[0]), f64::from(xy[1]));
+            [x / y, 1.0, (1.0 - x - y) / y]
+        };
+        let cols = [col(q.tube_red_xy), col(q.tube_green_xy), col(q.tube_blue_xy)];
+        let w = col(q.tube_white_xy);
+        let det = |m: &[[f64; 3]; 3]| {
+            m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1]) - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0])
+        };
+        // Rows of the matrix are the XYZ components, columns the primaries; Cramer's rule for the scales.
+        let m = |i: usize, j: usize| cols[j][i];
+        let a = [
+            [m(0, 0), m(0, 1), m(0, 2)],
+            [m(1, 0), m(1, 1), m(1, 2)],
+            [m(2, 0), m(2, 1), m(2, 2)],
+        ];
+        let d = det(&a);
+        let mut out = [0.0; 3];
+        for (k, o) in out.iter_mut().enumerate() {
+            let mut b = a;
+            for (row, wi) in b.iter_mut().zip(w) {
+                row[k] = wi;
+            }
+            let s = det(&b) / d;
+            let xyz = [cols[k][0] * s, cols[k][1] * s, cols[k][2] * s];
+            let rgb = xyz_to_srgb(xyz);
+            *o = rgb.iter().copied().fold(f64::MIN, f64::max) * f64::from(q.exposure);
+        }
+        out
+    }
+
+    /// Informational: the pure tube primaries that clip in linear sRGB at the preset exposure (the no-clip check
+    /// covers white only). Prints the list; fails only if white itself were wrongly computed.
+    #[test]
+    fn clipped_primaries_are_reported_per_preset() {
+        for p in lib().list() {
+            let q = p.params();
+            let m = primary_maxima(&q);
+            let clipped: Vec<String> = ["red", "green", "blue"]
+                .iter()
+                .zip(m)
+                .filter(|(_, v)| *v > 1.0 + 1e-3)
+                .map(|(n, v)| format!("{n} {v:.3}"))
+                .collect();
+            eprintln!(
+                "clipped primaries (linear sRGB, exposure {}): {:<16} {}",
+                q.exposure,
+                p.id,
+                if clipped.is_empty() {
+                    "none".into()
+                } else {
+                    clipped.join(", ")
+                }
+            );
+            assert!(m.iter().all(|v| v.is_finite() && *v > 0.0), "{}", p.id);
+        }
+    }
+
+    /// Preset 3: 9300 K + 27 MPCD (CRT.md, Japanese TV practice, not D93) with the exposure derived from its
+    /// linear sRGB blue.
+    #[test]
+    fn kv_trinitron_white_is_9300k_plus_27_mpcd_with_exposure_below_0_811() {
+        let q = lib().find("kv-trinitron-tv").unwrap().params();
+        assert_eq!(q.tube_white_xy, [0.281, 0.311]);
+        let blue = xy_to_srgb_max([0.281, 0.311]);
+        assert!(
+            (blue - 1.233).abs() < 1e-3 && (1.0 / blue - 0.811).abs() < 1e-3,
+            "{blue}"
+        );
+        assert!(q.exposure <= 0.811 && f64::from(q.exposure) * blue <= 1.0 + 1e-3);
+    }
+
+    /// T-36b review: presets 1 and 2 use n = 0.5, which gives a peak to floor ratio of about 2.5.
+    #[test]
+    fn pro_monitor_spot_growth_has_a_peak_to_floor_ratio_near_2_5() {
+        for id in ["pvm-20m4u", "bvm-20f1u"] {
+            let q = lib().find(id).unwrap().params();
+            assert_eq!(q.beam_growth_exponent, 0.5, "{id}");
+            let g = SpotGrowth {
+                fwhm_mid: f64::from(q.beam_fwhm_mid_mm),
+                fwhm_peak: f64::from(q.beam_fwhm_peak_mm),
+                n: f64::from(q.beam_growth_exponent),
+            };
+            let d0 = g.floor_sq_and_k().0.sqrt();
+            let ratio = g.fwhm_peak / d0;
+            assert!((2.0..3.0).contains(&ratio), "{id}: peak/d0 {ratio}");
+        }
     }
 
     /// Largest linear Rec.709 channel of the white (x, y) at Y = 1.
@@ -671,15 +958,45 @@ mod tests {
     }
 
     #[test]
-    fn high_bandwidth_presets_recommend_amp_k_16() {
+    fn amp_samples_of_every_preset_is_the_recommended_k() {
         let l = lib();
-        for p in l.list() {
-            let b = p.params().amp_bandwidth_mhz;
-            assert_eq!(p.recommended_amp_k(), if b > 5.0 { 16 } else { 4 }, "{}", p.id);
+        let want = [16, 16, 16, 4, 16, 16, 4, 16, 4, 4];
+        for (p, w) in l.list().iter().zip(want) {
+            let q = p.params();
+            assert_eq!(q.amp_samples, p.recommended_amp_k(), "{}", p.id);
+            assert_eq!(q.amp_samples, w, "{}: sigma {} px", p.id, amp_sigma_px(&q));
+            assert!(p.provenance.contains_key("amp_samples"), "{}", p.id);
         }
-        assert_eq!(l.find("tv-13in").unwrap().recommended_amp_k(), 4);
-        assert_eq!(l.find("pvm-20m4u").unwrap().recommended_amp_k(), 16);
-        assert_eq!(recommended_amp_k(&Params::default()), 16, "the 100 MHz default");
+        // The default (100 MHz, 5.37 MHz clock) is an ideal amplifier: K = 4, which is also the default value.
+        assert_eq!(recommended_amp_k(&Params::default()), 4);
+        assert_eq!(Params::default().amp_samples, crate::gpu::AMP_K as i32);
+    }
+
+    #[test]
+    fn recommended_k_follows_the_blur_in_source_pixels() {
+        let k = |bw: f32, clock: f32, ratio: f32| {
+            let mut p = Params::default();
+            assert!(p.set("amp_bandwidth_mhz", ParamValue::F32(bw)));
+            assert!(p.set("amp_pixel_clock_mhz", ParamValue::F32(clock)));
+            assert!(p.set("amp_fall_rise_ratio", ParamValue::F32(ratio)));
+            (amp_sigma_px(&p), recommended_amp_k(&p))
+        };
+        // The T-33 follow-up points (5.37 MHz clock): sigma 0.142 / 0.089 / 0.047 / 0.024 px all need K = 16.
+        for bw in [5.0, 8.0, 15.0, 30.0] {
+            assert_eq!(k(bw, 5.37, 1.0).1, 16, "{bw} MHz");
+        }
+        let (s, kk) = k(100.0, 5.37, 1.0);
+        assert!((s - 0.1325 * 5.37 / 100.0).abs() < 1e-4 && kk == 4);
+        // The pixel clock matters: the same 100 MHz amplifier on a 25 MHz VGA clock blurs 0.033 px.
+        assert_eq!(k(100.0, 25.175, 1.0).1, 16);
+        // The gap between the ideal limit and the smallest measured sigma.
+        let (s, kk) = k(50.0, 5.37, 1.0);
+        assert!(s > AMP_SIGMA_IDEAL_PX && s < AMP_SIGMA_K16_PX && kk == 8, "{s}");
+        // A slow fall counts (the stage uses the slower edge); a slow rise does not.
+        assert_eq!(k(80.0, 5.37, 1.0).1, 4);
+        assert_eq!(k(80.0, 5.37, 2.0).1, 8);
+        assert_eq!(k(80.0, 5.37, 0.5).1, 4);
+        assert_eq!(k(60.0, 5.37, 2.0).1, 16);
     }
 
     /// PHY-4 table, 1920 px wide image (1440 px high): px per triad within 10 % of the recorded values.
@@ -730,6 +1047,115 @@ mod tests {
         assert_eq!(noted, vec![1, 2, 4, 7, 9, 10]);
         assert_eq!(l.list()[2].tier(HOST), Tier::C);
         assert_eq!(l.list()[5].tier(HOST), Tier::B);
+        // Presets 3 (2.96) and 5 (2.98) are offered by option D but tier C by the shader's 3 px threshold:
+        // they set mask_tier = integrated and say so.
+        for i in [2, 4] {
+            let p = &l.list()[i];
+            assert!(p.px_per_triad(HOST) > OPTION_D_THRESHOLD_PX_PER_TRIAD && p.px_per_triad(HOST) < 3.0);
+            assert_eq!(p.params().mask_tier, MASK_TIER_INTEGRATED, "{}", p.id);
+            assert_eq!(p.host_note(HOST), Some(INTEGRATED_NOTE), "{}", p.id);
+        }
+        // Everything else has the automatic tier, and no other preset carries the integrated note.
+        for (i, p) in l.list().iter().enumerate() {
+            if ![2, 4].contains(&i) {
+                assert_ne!(p.params().mask_tier, MASK_TIER_INTEGRATED, "{}", p.id);
+                assert_ne!(p.host_note(HOST), Some(INTEGRATED_NOTE), "{}", p.id);
+            }
+        }
+    }
+
+    #[test]
+    fn option_d_reports_which_suggestions_need_the_integrated_tier() {
+        let l = lib();
+        let d = l.option_d_detail(HOST);
+        let flags: Vec<(usize, bool)> = d.iter().map(|s| (s.index + 1, s.needs_integrated)).collect();
+        assert_eq!(flags, vec![(3, true), (5, true), (6, false), (8, false)]);
+        // The same list as the plain suggestions.
+        assert_eq!(l.option_d(HOST), d.iter().map(|s| s.index).collect::<Vec<_>>());
+        // Every suggestion that needs the integrated tier sets it (else its mask would be averaged away),
+        // and the note of a preset with the automatic tier in that range stays "not resolvable".
+        for s in &d {
+            let p = &l.list()[s.index];
+            assert_eq!(s.needs_integrated, p.needs_integrated_tier(HOST));
+            if s.needs_integrated {
+                assert_eq!(p.params().mask_tier, MASK_TIER_INTEGRATED, "{}", p.id);
+            }
+        }
+        let mut auto = l.list()[2].clone();
+        auto.values.retain(|(id, _)| *id != "mask_tier");
+        assert_eq!(auto.host_note(HOST), Some(NOT_RESOLVABLE_NOTE));
+        // A 4K host resolves from 3 px per triad: nothing needs the integrated tier there.
+        assert!(l.option_d_detail((3840, 2160)).iter().all(|s| !s.needs_integrated));
+    }
+
+    #[test]
+    fn saved_preset_round_trips_to_identical_params() {
+        let l = lib();
+        let dir = std::env::temp_dir().join(format!("ucrt-presets-save-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        // Every shipped preset, with edits of every value kind on top.
+        for base in l.list() {
+            let mut cur = base.params();
+            assert!(cur.set("exposure", ParamValue::F32(0.6123)));
+            assert!(cur.set("gun_white_balance", ParamValue::Bool(true)));
+            assert!(cur.set("tube_red_xy", ParamValue::Vec2([0.64, 0.33])));
+            assert!(cur.set("line_multiplier", ParamValue::I32(2)));
+            assert!(cur.set("mask_tier", ParamValue::Enum(2)));
+            let saved = Preset::from_params(&format!("my-{}", base.id), "My preset", &cur).unwrap();
+            assert!(saved
+                .provenance
+                .values()
+                .all(|p| p.source == "user" && p.tag == Confidence::Estimate));
+            let path = saved.save(&dir).unwrap();
+            let text = fs::read_to_string(&path).unwrap();
+            let back = Preset::parse(&path.display().to_string(), &text, Origin::User(path.clone()))
+                .unwrap_or_else(|e| panic!("{e}\n{text}"));
+            assert_eq!(back.params(), cur, "{}\n{text}", base.id);
+            assert!(back.warnings.is_empty(), "{:?}", back.warnings);
+            assert_eq!((back.id.as_str(), back.name.as_str()), (saved.id.as_str(), "My preset"));
+            // The file shows plain decimals, enums by name, and the schema of the shipped files.
+            assert!(
+                text.contains("schema = 1") && text.contains("mask_tier = \"prefiltered\""),
+                "{text}"
+            );
+            assert!(text.contains("exposure = 0.6123"), "{text}");
+            assert!(text.contains("E: user"), "{text}");
+        }
+        // The saved files load as user presets through the library, next to the shipped ones.
+        let lib2 = Library::load(Some(&dir));
+        assert!(lib2.warnings.is_empty(), "{:?}", lib2.warnings);
+        assert_eq!(lib2.list().len(), 20);
+        // A shipped preset written back unchanged also round-trips.
+        let kv = l.find("kv-trinitron-tv").unwrap();
+        let again = Preset::parse("kv.toml", &kv.to_toml(), Origin::Embedded).unwrap();
+        assert_eq!(again.params(), kv.params());
+        assert_eq!(again.provenance, kv.provenance);
+        // Invalid ids are refused.
+        assert!(Preset::from_params("Bad Id", "n", &Params::default()).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_user_files_with_one_id_warn() {
+        let dir = std::env::temp_dir().join(format!("ucrt-presets-dup-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.toml"), sample("")).unwrap();
+        fs::write(
+            dir.join("b.toml"),
+            sample("").replace("exposure = 0.5", "exposure = 0.9"),
+        )
+        .unwrap();
+        let l = Library::load(Some(&dir));
+        assert_eq!(l.list().len(), 11);
+        assert_eq!(l.find("x").unwrap().params().exposure, 0.9, "the later file wins");
+        assert_eq!(l.warnings.len(), 1, "{:?}", l.warnings);
+        assert!(
+            l.warnings[0].contains("b.toml") && l.warnings[0].contains("a.toml") && l.warnings[0].contains("'x'"),
+            "{:?}",
+            l.warnings
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

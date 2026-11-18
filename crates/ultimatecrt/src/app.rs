@@ -58,6 +58,8 @@ pub fn run() -> Res<()> {
     }
 
     let kind = source::Source::choose(args.pattern.as_deref(), args.pattern_size, args.image.as_deref())?;
+    // T-50: --preset (else the settings preset), then the settings overrides; an unknown preset stops here.
+    let params = crate::render_cmd::live_params(args.preset.as_deref())?;
     let synthetic = !matches!(kind, source::Source::Capture);
     let mut synthetic_n = 0u64;
     let (mut capture, follow, mut reattach) = if synthetic {
@@ -130,6 +132,7 @@ pub fn run() -> Res<()> {
         args.validation,
         args.integer,
     )?;
+    renderer.set_params(params);
     println!("render: Vulkan on {}", renderer.gpu_name);
     println!(
         "quit: Ctrl+Alt+Q{}",

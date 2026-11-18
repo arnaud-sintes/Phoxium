@@ -5,10 +5,11 @@ label = "based on published data for Sony KV-class Trinitron televisions"
 notes = """
 The classic console-on-a-TV look. Mostly estimated: pitch 0.78 mm is the middle of the CRT.md range 0.75 to 0.8 (PHY-4 about 0.78), the 51 x 38 cm size, spot sizes and amplifier are estimates.
 Parameters not listed keep their table defaults: mask stripe fill, edge softness, damper width, beam tail, gun law and gamma (power 2.4, CRT.md says 2.4 to 2.5), raster breathing (0, CRT.md consumer 1 to 5 %, no preset value chosen), ABL full-white current, ratio and time constant (table defaults), source clock.
-Dampers: two wires by the CRT.md rule for tubes larger than 15 in; the rule is stated for monitors, not for this TV [E].
-White: D93 (9300 K, Japanese consumer practice) as the tube white, shown without chromatic adaptation. D93 at luminance 1 has a linear sRGB blue of 1.343, so exposure is 0.74 (<= 0.745) or white clips.
+Dampers: two wires by the CRT.md rule for larger monitors [E]. CRT.md also says Goldwasser reports three wires above 21 in [S], and this tube (51 x 38 cm, about 25 in viewable) is above that, so three may be nearer the real tube. Two is kept because the rule is stated for monitors, the three-wire report is generic and not Sony-specific, and the size here is itself an estimate; open point.
+White: 9300 K + 27 MPCD (0.281, 0.311), Japanese TV practice as CRT.md gives it (the resolved conflict 6 keeps it apart from D93 = 9300 K + 8 MPCD = (0.2831, 0.2971)), shown without chromatic adaptation. Its linear sRGB at luminance 1 is (R, G, B) = (0.737, 1.055, 1.233) (X/Y = 0.9035, Z/Y = 1.3119), the blue is the largest, so white clips unless exposure <= 1 / 1.233 = 0.811; 0.81 is used.
 Spot growth: 0.9 -> 1.6 mm with n = 0.42 (Panasonic 76 cm TV datasheet exponent) keeps a non-negative floor (bound ratio 2.01).
-Amplifier: 6 MHz (cheap consumer RGB 4 to 8 MHz), above 5 MHz so amp_k = 16 is recommended (presets::recommended_amp_k). Fall/rise ratio 0.8: slow rise, so isolated bright pixels lose light (CRT.md adjacent-pixel nonlinearity); the opposite direction (> 1) would brighten them and is not chosen.
+Amplifier: 6 MHz (cheap consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 / 6 = 0.119 source px, so amp_samples = 16 (presets::recommended_amp_k). Fall/rise ratio 0.8: slow rise, so isolated bright pixels lose light (CRT.md adjacent-pixel nonlinearity); the opposite direction (> 1) would brighten them and is not chosen.
+Host (PHY-2 option D): 2.96 px per triad on 2560 x 1440, between the option D threshold 2.8 and the tier B threshold 3, where mask_tier = auto would still average the mask away; mask_tier = integrated draws it (ripple possible).
 ABL on: threshold 1.4 mA, steady state about 0.5 s (RCA patents, not Sony values).
 Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 12 mm, halation (13 mm / 2 %), horizontal curvature radius (estimate only).
 """
@@ -19,19 +20,21 @@ tube_aspect = 1.3333334
 mask_type = "aperture_grille"
 mask_pitch_mm = 0.78
 mask_damper_count = 2
+mask_tier = "integrated"
 tube_red_xy = [0.625, 0.340]
 tube_green_xy = [0.280, 0.595]
 tube_blue_xy = [0.155, 0.070]
-tube_white_xy = [0.2831, 0.2971]
+tube_white_xy = [0.281, 0.311]
 beam_fwhm_mid_mm = 0.9
 beam_fwhm_peak_mm = 1.6
 beam_growth_exponent = 0.42
 amp_bandwidth_mhz = 6.0
 amp_fall_rise_ratio = 0.8
+amp_samples = 16
 abl_enable = true
 abl_threshold_ma = 1.4
 abl_tau_s = 0.1667
-exposure = 0.74
+exposure = 0.81
 output_match_srgb = false
 output_dither = "noise"
 
@@ -40,19 +43,21 @@ tube_visible_height_mm = "E: CRT.md Starting presets, Sony KV Trinitron TV 51 x 
 tube_aspect = "S: CRT.md Reference scales, 4:3"
 mask_type = "S: CRT.md Starting presets, Sony KV Trinitron TV AG"
 mask_pitch_mm = "E: CRT.md Starting presets 0.75 to 0.8 mm; PHY-4 about 0.78 (no Sony-specific pitch data)"
-mask_damper_count = "E: CRT.md Aperture grille geometry, two wires on larger tubes (rule stated for monitors)"
+mask_damper_count = "E: CRT.md Aperture grille geometry, two wires on larger tubes (rule stated for monitors); CRT.md: three wires above 21 in (Goldwasser), not applied, see notes"
+mask_tier = "D: PHY-2 option D: 2.96 px per triad on 2560 x 1440, below the tier B threshold 3, so auto would prefilter the mask; integrated draws it, ripple possible"
 tube_red_xy = "K: CRT.md Starting presets, Trinitron (0.625, 0.34); same as Apple RGB row"
 tube_green_xy = "K: CRT.md Starting presets, Trinitron (0.28, 0.595)"
 tube_blue_xy = "K: CRT.md Starting presets, Trinitron (0.155, 0.07)"
-tube_white_xy = "S: CRT.md White point, 9300 K + 8 MPCD (D93), Starting presets 9300 K"
+tube_white_xy = "S: CRT.md White point table, 9300 K + 27 MPCD (0.281, 0.311), Japanese TV practice; not D93 (CRT.md resolved conflict 6)"
 beam_fwhm_mid_mm = "E: CRT.md Starting presets, Sony KV 0.9 mm mid"
 beam_fwhm_peak_mm = "E: CRT.md Starting presets, Sony KV 1.6 mm at peak"
 beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42 (Panasonic 76 cm), floor non-negative for 0.9 -> 1.6"
 amp_bandwidth_mhz = "E: CRT.md RGB path table, cheap consumer TV RGB 4 to 8 MHz"
 amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
+amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 6 MHz = 0.119 source px, above 0.02 so K = 16"
 abl_enable = "E: CRT.md ABL, consumer TVs limit; T-63 item 3"
 abl_threshold_ma = "S: CRT.md T-63, RCA/Thomson average limiter 1.4 mA (RCA value, not Sony)"
 abl_tau_s = "D: CRT.md T-63, steady state about 0.5 s (RCA US 4,330,792), tau = 0.5 / 3 s"
-exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
+exposure = "D: white (0.281, 0.311) has linear sRGB blue 1.233 at Y = 1, so exposure <= 1 / 1.233 = 0.811; 0.81 used"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

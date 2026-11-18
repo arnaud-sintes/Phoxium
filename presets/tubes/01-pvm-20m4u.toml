@@ -8,9 +8,9 @@ label = "based on published data for the Sony PVM-20M4U"
 notes = """
 Reference look for clean 240p with deep scanlines. Pitch sourced (0.31 mm); spot size, spot growth and amplifier bandwidth are estimates.
 Parameters not listed keep their table defaults: mask stripe fill, edge softness, damper width, beam tail (CRT.md gives only a class range of 2 to 10 %), gun law and gamma (power 2.4), ABL (off, PVM/BVM have very mild ABL), source clock (comes from the source profile).
-Spot growth: CRT.md 0.45 -> 0.8 mm needs n >= 0.3459 for a zero floor (T-36b); n = 0.35 is the smallest two-decimal value. n = 0.27 (Hitachi 51 cm datasheet 0.45 / 0.57 / 0.70 mm at 100 / 300 / 500 uA) would force a peak of at most 0.705 mm.
-Amplifier: bandwidth above 5 MHz needs amp_k = 16 (K = 4 over-dims isolated vertical lines); amp_k is a FrameConstants field, not a preset parameter, see presets::recommended_amp_k. Fall/rise ratio 1.0 (symmetric): at this bandwidth the asymmetry is negligible.
-Output: tube-faithful (SMPTE-C primaries, D65), not matched to sRGB; dithered. D65 white does not clip at exposure 1.
+Spot growth: n = 0.5 with the widths 0.45 -> 0.8 mm kept (T-36b review). The earlier n = 0.35 (the smallest two-decimal zero-floor value, bound 0.3459) leaves a floor d0 of 0.063 mm, peak/d0 = 12.6, a spot that is almost a pure power law; the Hitachi datasheet fits n about 0.71, and n = 0.5 gives peak/d0 about 2.5. CRT.md puts the model exponent at least at the Hitachi apparent exponent 0.27. The widths are the CRT.md estimates and are not changed.
+Amplifier: 12 MHz. The amp stage blur is 0.1325 x 5.37 / 12 = 0.059 source px (above the 0.01 px ideal limit), so amp_samples = 16 (K = 4 over-dims isolated vertical lines, T-33 follow-up; presets::recommended_amp_k). Fall/rise ratio 1.0 (symmetric): at this bandwidth the asymmetry is negligible. The M4U is a higher-resolution model than the M2U class whose 8 to 15 MHz row gives this value, so 12 MHz may be low (research point).
+Output: tube-faithful (SMPTE-C primaries, D65), not matched to sRGB; dithered. D65 white does not clip at exposure 1 (the pure SMPTE-C blue is 1.006 in linear sRGB, a marginal clip, reported as information by the presets.rs test).
 Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 11 mm, halation (12 mm / 1.5 %), glass transmission.
 """
 
@@ -26,9 +26,10 @@ tube_blue_xy = [0.155, 0.070]
 tube_white_xy = [0.3127, 0.3290]
 beam_fwhm_mid_mm = 0.45
 beam_fwhm_peak_mm = 0.8
-beam_growth_exponent = 0.35
+beam_growth_exponent = 0.5
 amp_bandwidth_mhz = 12.0
 amp_fall_rise_ratio = 1.0
+amp_samples = 16
 exposure = 1.0
 output_match_srgb = false
 output_dither = "noise"
@@ -45,9 +46,10 @@ tube_blue_xy = "S: CRT.md Chromaticity, SMPTE-C"
 tube_white_xy = "S: CRT.md White point, D65 (Starting presets: D65 or D93; D65 chosen)"
 beam_fwhm_mid_mm = "E: CRT.md Starting presets, PVM-20M4U 0.45 mm mid"
 beam_fwhm_peak_mm = "E: CRT.md Starting presets, PVM-20M4U 0.8 mm at peak"
-beam_growth_exponent = "D: smallest two-decimal n with a non-negative floor for 0.45 -> 0.8 mm (bound 0.345865, T-36b)"
-amp_bandwidth_mhz = "E: CRT.md RGB path table, PVM-xxM2U class 8 to 15 MHz (middle)"
+beam_growth_exponent = "E: chosen between the zero-floor bound 0.3459 (0.35 gave peak/d0 = 12.6) and the Hitachi datasheet fit about 0.71; n = 0.5 gives peak/d0 about 2.5 for 0.45 -> 0.8 mm (T-36b review); CRT.md: the model exponent is at least the Hitachi apparent 0.27"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, middle of the PVM-xxM2U class row 8 to 15 MHz; the PVM-20M4U is a higher-resolution model than that class (the PVM/BVM high-res row is 20 to 30 MHz), so this is probably low"
 amp_fall_rise_ratio = "E: symmetric; asymmetric direction not chosen for a professional amplifier"
+amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 12 MHz = 0.059 source px, above 0.02 so K = 16"
 exposure = "D: D65 white, no clip"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

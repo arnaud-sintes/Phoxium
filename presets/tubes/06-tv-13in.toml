@@ -4,9 +4,9 @@ name = "13 in consumer TV (GE class)"
 label = "based on published data for a 13 in GE television (pitch measured by a third party)"
 notes = """
 Small consumer set with a coarse slot mask. Pitch 0.60 mm is measured by Goldwasser (CRT.md); about 440 triads across. Everything else is a consumer-TV class estimate.
-No CRT.md data for this set, so these keep their table defaults: tube primaries and white (SMPTE-C, D65), slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma, ABL (off: no value for a 13 in set), raster breathing, source clock. The visible size is derived from the triad count (440 x 0.60 = 264 mm wide), the same size as the 14 in BVM.
-Spot: CRT.md gives no row for this set; the consumer TV class (mid 0.7 to 1.5 mm, peak 1.5 to 2 mm) is used with 0.75 -> 1.5 mm, n = 0.42 (ratio 2.0 stays under the zero-floor bound 2.01).
-Amplifier: 5 MHz (cheap consumer RGB 4 to 8 MHz, K = 4 is enough up to 5 MHz). Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
+No CRT.md data for this set, so these keep their table defaults (primaries and white are listed with that provenance): slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma, ABL (off: no value for a 13 in set), raster breathing, source clock. The visible size is derived from the triad count (440 x 0.60 = 264 mm wide), the same size as the 14 in BVM.
+Spot: CRT.md gives no row for this set; the consumer TV class (mid 0.7 to 1.5 mm, peak 1.5 to 2 mm) is used with 0.75 -> 1.5 mm, n = 0.42 (ratio 2.0 stays under the zero-floor bound 2.01, which leaves a floor d0 close to zero). Research point (T-36b review): these widths need n = 0.5 for a ratio of 2, which gives peak/d0 about 3.7 at n = 0.5; no 13 in spot data exists, so the widths are not changed here.
+Amplifier: 5 MHz (cheap consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 / 5 = 0.142 source px, so amp_samples = 16 (K = 4 over-dims isolated vertical lines by 2.3 points at 5 MHz, T-33 follow-up). Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
 Output: tube-faithful, dithered. D65 does not clip at exposure 1.
 Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness (10 mm estimate), halation.
 """
@@ -16,11 +16,16 @@ tube_visible_height_mm = 198.0
 tube_aspect = 1.3333334
 mask_type = "slot_mask"
 mask_pitch_mm = 0.60
+tube_red_xy = [0.630, 0.340]
+tube_green_xy = [0.310, 0.595]
+tube_blue_xy = [0.155, 0.070]
+tube_white_xy = [0.3127, 0.3290]
 beam_fwhm_mid_mm = 0.75
 beam_fwhm_peak_mm = 1.5
 beam_growth_exponent = 0.42
 amp_bandwidth_mhz = 5.0
 amp_fall_rise_ratio = 0.8
+amp_samples = 16
 exposure = 1.0
 output_match_srgb = false
 output_dither = "noise"
@@ -30,11 +35,16 @@ tube_visible_height_mm = "D: CRT.md Consumer TVs table, about 440 triads x 0.60 
 tube_aspect = "S: CRT.md Reference scales, 4:3"
 mask_type = "S: CRT.md Consumer TVs table, 13 in GE TV slot"
 mask_pitch_mm = "S: CRT.md Consumer TVs table, 13 in GE TV 0.60 mm (Goldwasser)"
+tube_red_xy = "E: table default (SMPTE-C primaries) kept: CRT.md has no primaries row for this set"
+tube_green_xy = "E: table default (SMPTE-C primaries) kept: CRT.md has no primaries row for this set"
+tube_blue_xy = "E: table default (SMPTE-C primaries) kept: CRT.md has no primaries row for this set"
+tube_white_xy = "E: table default D65 kept, not sourced: CRT.md White point says US consumer sets were typically 7000 to 9300 K and PC monitors shipped at 9300 K by default [E]"
 beam_fwhm_mid_mm = "E: CRT.md Measured and estimated spot sizes, consumer TV class 0.7 to 1.5 mm"
 beam_fwhm_peak_mm = "E: CRT.md Measured and estimated spot sizes, consumer TV class peak 1.5 to 2 mm"
 beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42, floor non-negative for 0.75 -> 1.5"
 amp_bandwidth_mhz = "E: CRT.md RGB path table, cheap consumer TV RGB 4 to 8 MHz"
 amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
+amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 5 MHz = 0.142 source px, above 0.02 so K = 16"
 exposure = "D: D65 white, no clip"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

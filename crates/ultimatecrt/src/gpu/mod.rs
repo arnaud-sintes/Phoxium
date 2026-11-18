@@ -87,6 +87,11 @@ impl Renderer {
         }
     }
 
+    /// Replaces the tube parameters used from the next frame on (the startup preset and settings overrides).
+    pub fn set_params(&mut self, params: Params) {
+        self.params = params;
+    }
+
     /// Renders one frame. `frame` is a newly captured BGRA8 image, if any. `client` is the current
     /// client size of the output window.
     ///

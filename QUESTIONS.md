@@ -400,6 +400,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Who:** USER.
 - **Options:** tier A at least 6 px per triad (resolved); tier B area-integrated (3 to 6); tier C prefiltered average only (under 3); tier D enlarged cell (non-physical).
 - **Default:** Automatic tiering by computed px per triad with a visible readout, area-integrated in B and C, zoom as an inspection mode, enlarged cell only on explicit request and labelled non-physical, host subpixels per HW-6.
+- **IMPLEMENTED, option D thresholds (2026-11-18, T-50 review):** option D offers a preset from 2.8 px per triad (`crt_model::mask::OPTION_D_THRESHOLD_PX_PER_TRIAD`), but `mask_tier = auto` prefilters the mask below 3 px per triad (tier C). Presets between the two (3 at 2.96, 5 at 2.98 on 2560 x 1440) therefore set `mask_tier = integrated` so the mask is drawn (host-grid ripple possible), and the loader reports it: `option_d_detail` gives for each suggestion whether it needs the integrated tier, and `Preset::host_note` reads "mask drawn with the integrated tier (ripple possible)" for them ("mask not resolvable on this host" below 2.8, and also between 2.8 and 3 for a preset whose `mask_tier` is not `integrated`). Alternative not taken: raising the option D threshold to 3, which would drop presets 3 and 5 from the suggestions on this host.
 
 ### PHY-3 Physical scale and units of the virtual tube
 - **IMPLEMENTED (2026-11-18, T-30):** the tube is `tube_visible_height_mm` (290 for the PVM-20M4U class, CRT.md reference table) x `tube_aspect`; the CPU converts to host pixels (`px_per_mm`, `FrameConstants`, 4.966 on 2560x1440 at full height), ratios preserved when scaled. Lengths of later stages are tube mm times `px_per_mm`. Viewing distance (curvature perspective) comes with T-37.
@@ -438,6 +439,7 @@ Each has a recommended default so you can reply with exceptions only.
   | 10 | 17 in good delta-dot monitor | Delta dot | 0.26 diagonal | about 1.3 | Sourced class values |
 
   Only presets 3, 5, 6 and 8 are close to resolvable on this host. The rest rely on the area-averaged mask. Final list open for the owner to change.
+- **OPEN, preset 5 slot period (2026-11-18, T-50 review):** `mask_slot_period` is 1.6 in `presets/tubes/05-slot-tv-26in.toml`, which is the parameter maximum, and `CRT.md` contradicts itself: the Mask section says the vertical slot period is 2 to 3 times the stripe spacing p/3 on TVs (0.67 to 1.0 p), the starting-preset row says about 1.6 p. The shipped value follows the starting-preset row. Needs an owner decision or research: which statement is right for the RCA 26V class, and whether the parameter range should be widened or the value lowered.
 - **Q:** Are presets generic classes ("20 in professional aperture grille, 0.31 mm") or named real units (PVM-20M4U)? Who creates presets, in what format, and how is provenance stored?
 - **Why:** A model name implies measured fidelity the data cannot support for most parameters, and raises a trademark question (PRJ-3). Preset provenance is the trust anchor.
 - **Who:** USER.

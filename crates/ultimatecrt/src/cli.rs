@@ -25,8 +25,11 @@ Usage: ultimatecrt [options]
                        window[:APL%], bar[:width[:px-per-frame]], pluge, moire[:N]
   --pattern-size <WxH> size of the pattern (default 320x240)
   --image <file.png>   still PNG image instead of a capture (divisor 1)
+  --preset <id|file.toml>  tube preset to start with: a shipped or user preset id, or a preset file (default:
+                       the preset of the settings file, else the parameter table defaults); the parameter
+                       overrides of the settings file apply on top
   --validation         enable the Vulkan validation layer (needs the Vulkan SDK)
-  --stats              print capture and render rates every second
+  --stats             print capture and render rates every second
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
@@ -59,6 +62,7 @@ pub struct Args {
     pub pattern: Option<String>,
     pub pattern_size: Option<(u32, u32)>,
     pub image: Option<String>,
+    pub preset: Option<String>,
 }
 
 fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Res<T> {
@@ -91,6 +95,7 @@ pub fn parse_args() -> Res<Args> {
             "--pattern" => a.pattern = Some(value("--pattern")?),
             "--pattern-size" => a.pattern_size = Some(patterns::parse_size(&value("--pattern-size")?)?),
             "--image" => a.image = Some(value("--image")?),
+            "--preset" => a.preset = Some(value("--preset")?),
             "--version" => {
                 println!("ultimatecrt {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
