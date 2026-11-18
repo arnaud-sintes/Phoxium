@@ -123,6 +123,26 @@ pub(super) trait Stage {
     /// # Safety
     /// The GPU must have finished every use of them.
     unsafe fn destroy(&mut self, d: &ash::Device);
+
+    /// Prepares what the stage owns beyond the chain images (its history images, T-41) for the frame
+    /// about to be recorded, after the routing is known; `runs` is false when the slot does not run in
+    /// that frame. May idle the device and allocate. Default: nothing.
+    ///
+    /// # Safety
+    /// `ctx` is the pipeline's context and no command buffer using the stage's objects is recording.
+    unsafe fn prepare(
+        &mut self,
+        _ctx: &crate::gpu::Context,
+        _fc: &crate::gpu::FrameConstants,
+        _params: &crate::params::Params,
+        _runs: bool,
+    ) -> Res<()> {
+        Ok(())
+    }
+
+    /// Forgets the stage's history (T-41; SRC-8: source size change, new capture session): the next
+    /// frame starts from a cleared history. Default: nothing.
+    fn clear_history(&mut self) {}
 }
 
 /// A slot whose stage is not written yet: always bypassed (exact identity).

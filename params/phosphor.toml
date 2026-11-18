@@ -1,0 +1,42 @@
+# Phosphor stage parameters (ARCHITECTURE section 5, step 5; shaders/phosphor.comp, src/gpu/stages/phosphor.rs).
+# Format: crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
+# dimensionless. T-41: persistence as a 60 Hz frame feedback (CRT.md rule 8, "Decay and persistence"; QUESTIONS
+# PHY-12). The decay constants are the Kuhn (2002) P22 fits of crt-model (phosphor.rs, KUHN_RED, KUHN_GREEN,
+# KUHN_BLUE); the presets choose them later (T-64).
+
+[[param]]
+id = "phosphor_persistence"
+stage = "phosphor"
+type = "bool"
+unit = "1"
+default = false
+tag = "D"
+source = "CRT.md Decay and persistence (Kuhn 2002 P22 impulse responses, per-frame energy ratios E_k / E_0) and Display rate (60 Hz: persistence only as a frame-to-frame trail); QUESTIONS PHY-12 (frame-integrated first, afterglow feedback optional)"
+description = "Phosphor persistence on or off. On: each frame also shows the decaying afterglow of the previous frames (green and blue trail about 5, 3, 2 % of a frame at 60 Hz, red none); a static picture keeps its brightness. Off: the picture passes unchanged."
+group = "Phosphor"
+
+[[param]]
+id = "phosphor_frame_rate_hz"
+stage = "phosphor"
+type = "f32"
+unit = "Hz"
+default = 60.0
+min = 24.0
+max = 480.0
+tag = "E"
+source = "CRT.md Display rate: at 60 Hz every output frame is one tube frame, so the frame period of the trail is the output refresh period; 50 and 120 Hz rows of the Decay and persistence table"
+description = "Frame rate of the trail: the decay between two output frames lasts 1 / rate. Set it to the refresh rate of the output display. The per-frame weights are recomputed when it changes."
+group = "Phosphor"
+
+[[param]]
+id = "phosphor_tail_strength_rgb"
+stage = "phosphor"
+type = "vec3"
+unit = "1"
+default = [1.0, 1.0, 1.0]
+min = 0.07
+max = 1.0
+tag = "E"
+source = "CRT.md Research pass T-63, preset values item 1: 0.07 to 1 times the power-law term follows the Sony patent Ni-killer residual ratios (0.072 / 0.966, US 5,825,124); applying the ratio to the power-law term alone is an assumption"
+description = "Strength of the long power-law afterglow tail per channel (red, green, blue), relative to the measured P22 tail (1). Low values model Ni-killed sulfide phosphors with a shorter trail. Red has no power-law tail, so its value has no effect."
+group = "Phosphor"

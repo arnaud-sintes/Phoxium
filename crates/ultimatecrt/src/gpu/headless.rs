@@ -474,6 +474,12 @@ impl Headless {
         self.pipeline.is_enabled(name)
     }
 
+    /// Clears the history of the stages that keep one (persistence, T-41), as the window loop does on
+    /// a source size change or a new capture session.
+    pub fn clear_history(&mut self) {
+        self.pipeline.clear_history();
+    }
+
     /// Enables exactly the chain slots of `names` (the stage subset under test), every other slot off.
     pub fn enable_only(&mut self, names: &[&str]) -> Res<()> {
         for n in names {
