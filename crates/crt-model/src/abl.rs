@@ -70,7 +70,20 @@ impl Abl {
         if self.full_white_ma <= self.threshold_ma {
             return 0.0;
         }
-        (1.0 / self.full_white_ratio - 1.0) / (self.full_white_ma - self.threshold_ma)
+        (1.0 / self.effective_ratio() - 1.0) / (self.full_white_ma - self.threshold_ma)
+    }
+
+    /// The full-white ratio actually used: `full_white_ratio` clamped up to `I_th / I_fw`. Above the
+    /// threshold the limited anode current `x I_fw g(x)` has the derivative
+    /// `I_fw (1 - k I_th) / (1 + k (x I_fw - I_th))^2`, so it rises with the APL only while
+    /// `k <= 1 / I_th`, i.e. `r >= I_th / I_fw`; a smaller ratio would make a brighter picture draw less
+    /// current, which no limiter does. The defaults (0.5 = 1.4 / 2.8) sit on the bound (the limited
+    /// current is then constant, I_th, above the threshold). [D]
+    pub fn effective_ratio(&self) -> f64 {
+        if self.full_white_ma <= 0.0 {
+            return self.full_white_ratio;
+        }
+        self.full_white_ratio.max(self.threshold_ma / self.full_white_ma)
     }
 
     /// Gain g of the filtered APL `x`.
@@ -126,6 +139,34 @@ mod tests {
         assert_eq!(a.gain(0.5), 1.0);
         // x = 0.75: I = 2.1 mA, g = 1 / (1 + 0.7 / 1.4) = 2 / 3.
         assert!(close(a.gain(0.75), 2.0 / 3.0, 1e-12));
+    }
+
+    /// A ratio below I_th / I_fw behaves as the bound; at the bound the limited current is constant
+    /// above the threshold, and it never falls with the APL.
+    #[test]
+    fn ratio_is_clamped_to_a_rising_current() {
+        let low = Abl {
+            full_white_ratio: 0.3,
+            ..Abl::default()
+        };
+        let bound = Abl::default();
+        assert_eq!(low.effective_ratio(), 0.5);
+        assert_eq!(low.k_per_ma(), bound.k_per_ma());
+        for x in [0.4, 0.6, 0.8, 1.0] {
+            assert_eq!(low.gain(x), bound.gain(x));
+            assert!(close(
+                x * bound.full_white_ma * bound.gain(x),
+                bound.threshold_ma.min(x * 2.8),
+                1e-12
+            ));
+        }
+        let ok = Abl {
+            full_white_ratio: 0.7,
+            ..Abl::default()
+        };
+        assert_eq!(ok.effective_ratio(), 0.7);
+        let current = |x: f64| x * ok.full_white_ma * ok.gain(x);
+        assert!(current(1.0) > current(0.8) && current(0.8) > current(0.6));
     }
 
     #[test]

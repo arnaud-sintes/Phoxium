@@ -143,6 +143,11 @@ pub(super) trait Stage {
     /// Forgets the stage's history (T-41; SRC-8: source size change, new capture session): the next
     /// frame starts from a cleared history. Default: nothing.
     fn clear_history(&mut self) {}
+
+    /// The frame last prepared and recorded is abandoned (never submitted, `Pipeline::abandon`):
+    /// the stage restores what `prepare` or `record` consumed for it (a pending history clear, a layout
+    /// transition of new images), so the next frame does them again. Default: nothing.
+    fn abandon(&mut self) {}
 }
 
 /// A slot whose stage is not written yet: always bypassed (exact identity).
@@ -336,4 +341,67 @@ pub(super) unsafe fn compute_pipeline(d: &ash::Device, layout: vk::PipelineLayou
     let result = d.create_compute_pipelines(vk::PipelineCache::null(), &[info], None);
     d.destroy_shader_module(module, None);
     Ok(result.map_err(|(_, e)| e)?[0])
+}
+
+#[cfg(test)]
+mod fp16_store_guard {
+    /// The `imageStore` statements of `src` into an `rgba16f` image whose value is not wrapped in
+    /// `round_f16` (every FP16 chain store rounds to nearest, `common.glsl`). `//` comments are ignored.
+    fn unrounded_fp16_stores(src: &str) -> Vec<String> {
+        let code: String = src
+            .lines()
+            .map(|l| l.split("//").next().unwrap_or(""))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let images: Vec<&str> = code
+            .split(';')
+            .filter(|decl| decl.contains("rgba16f") && decl.contains("image"))
+            .filter_map(|decl| decl.split_whitespace().last())
+            .collect();
+        code.split(';')
+            .filter_map(|stmt| {
+                let call = &stmt[stmt.find("imageStore(")? + "imageStore(".len()..];
+                let name = call.split(',').next()?.trim();
+                (images.contains(&name) && !call.contains("round_f16(")).then(|| stmt.trim().to_string())
+            })
+            .collect()
+    }
+
+    /// Every `imageStore` into an `rgba16f` image of `shaders/*.comp` goes through `round_f16`, so a new
+    /// stage cannot store truncated FP16 values (review of T-41: `phosphor.comp` had missed it).
+    #[test]
+    fn every_fp16_store_is_rounded() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shaders");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("shaders folder") {
+            let path = entry.expect("entry").path();
+            if path.extension().is_some_and(|e| e == "comp") {
+                let src = std::fs::read_to_string(&path).expect("shader");
+                let bad = unrounded_fp16_stores(&src);
+                assert!(
+                    bad.is_empty(),
+                    "{}: FP16 store without round_f16: {bad:?}",
+                    path.display()
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked >= 8, "only {checked} shaders found");
+    }
+
+    /// The guard itself: it finds an unrounded FP16 store and ignores FP32 images and comments.
+    #[test]
+    fn the_guard_finds_an_unrounded_store() {
+        let src = "layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D out_img;\n\
+                   layout(set = 1, binding = 0, rgba32f) uniform image2D hist;\n\
+                   void main() {\n\
+                   // imageStore(out_img, p, v);\n\
+                   imageStore(hist, p, v);\n\
+                   imageStore(out_img, p, round_f16(v));\n\
+                   imageStore(out_img, p,\n        v);\n}";
+        assert_eq!(
+            unrounded_fp16_stores(src),
+            vec!["imageStore(out_img, p,\n        v)".to_string()]
+        );
+    }
 }

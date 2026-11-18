@@ -16,7 +16,9 @@
 // History: three RGBA32F storage images owned by the stage (set 1), read and written in place by the same
 // invocation (each texel by one invocation only). Term j < 3 is in image j (rgb), term 3 in the alpha of
 // image `channel`. mode 1: the history was cleared (new images, size change, explicit clear, stage not run
-// on the previous frame), the images are not read. A term below 2^-24 (the smallest FP16 value, the
+// on the previous frame), the images are not read and S_j is primed to the steady state of this frame's
+// input, S_j = c_j x / (1 - rho_j), so y = x at once (a static picture has no fade-in; a moving picture
+// starts as if the first frame had always been shown). A term below 2^-24 (the smallest FP16 value, the
 // output could not show it) is flushed to exactly 0, so a black picture ends exactly black.
 
 #include "params.glsl"
@@ -40,6 +42,11 @@ layout(push_constant) uniform Persistence {
 
 const float FLUSH = 5.9604645e-8; // 2^-24
 
+// v with every NaN or infinite component replaced by 0 (ordered compare: false for NaN).
+vec4 finite_or_zero(vec4 v) {
+    return mix(vec4(0.0), v, lessThanEqual(abs(v), vec4(3.4028235e38)));
+}
+
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, imageSize(light_out)))) {
@@ -50,9 +57,10 @@ void main() {
     vec4 h1 = vec4(0.0);
     vec4 h2 = vec4(0.0);
     if (pc.mode == 0u) {
-        h0 = imageLoad(history0, p);
-        h1 = imageLoad(history1, p);
-        h2 = imageLoad(history2, p);
+        // A non-finite history (never decays) reads as 0: guard against an uninitialised image.
+        h0 = finite_or_zero(imageLoad(history0, p));
+        h1 = finite_or_zero(imageLoad(history1, p));
+        h2 = finite_or_zero(imageLoad(history2, p));
     }
     vec4 s[3];
     s[0] = vec4(h0.r, h1.r, h2.r, h0.a);
@@ -61,11 +69,16 @@ void main() {
     vec3 y;
     for (int ch = 0; ch < 3; ++ch) {
         vec4 t = s[ch];
+        if (pc.mode != 0u) {
+            // Cleared: the history is primed to the steady state of this frame's input, so a static
+            // picture shows y = x from the first frame (no fade-in).
+            t = pc.c[ch] * x[ch] / (vec4(1.0) - pc.rho[ch]);
+        }
         y[ch] = pc.w0[ch] * (x[ch] + ((t.x + t.y) + (t.z + t.w)));
         vec4 n = pc.rho[ch] * t + pc.c[ch] * x[ch];
         s[ch] = mix(n, vec4(0.0), lessThan(abs(n), vec4(FLUSH)));
     }
-    imageStore(light_out, p, vec4(y, x.a));
+    imageStore(light_out, p, round_f16(vec4(y, x.a)));
     imageStore(history0, p, vec4(s[0].x, s[1].x, s[2].x, s[0].w));
     imageStore(history1, p, vec4(s[0].y, s[1].y, s[2].y, s[1].w));
     imageStore(history2, p, vec4(s[0].z, s[1].z, s[2].z, s[2].w));

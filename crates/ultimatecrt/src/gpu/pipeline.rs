@@ -1469,6 +1469,10 @@ impl Pipeline {
             return;
         }
         self.uploads = false;
+        // Stage-owned state the frame consumed (pending history clears and layout transitions).
+        for l in &mut self.chain {
+            l.stage.abandon();
+        }
         let mut saved = self.saved.iter().copied();
         let imgs = [&mut self.src, &mut self.native, &mut self.inject]
             .into_iter()

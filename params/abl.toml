@@ -51,7 +51,7 @@ min = 0.3
 max = 1.0
 tag = "E"
 source = "CRT.md ABL: full-field white typically 30 to 60 % of a small white window on consumer sets (no source found)"
-description = "Steady luminance of full-field white over that of a small window below the threshold. Sets the gain slope k = (1/ratio - 1) / (full white current - threshold), in g = 1 / (1 + k max(0, I - threshold))."
+description = "Steady luminance of full-field white over that of a small window below the threshold. Sets the gain slope k = (1/ratio - 1) / (full white current - threshold), in g = 1 / (1 + k max(0, I - threshold)). Values below threshold / full white current act as that bound (a lower ratio would make a brighter picture draw less current, non-physical)."
 group = "ABL"
 
 [[param]]
@@ -100,6 +100,6 @@ type = "bool"
 unit = "1"
 default = false
 tag = "E"
-source = "Diagnostic, not physical (tests and the UI readout)"
-description = "Diagnostic: writes the ABL state (gain, filtered APL, raster_scale, last frame APL) into texel (0, 0) of the abl output instead of the picture."
+source = "Diagnostic, not physical. TEST-ONLY: keep it out of the UI, profiles and presets (paramgen has no hidden flag yet, and params/_test.toml entries do not reach release shaders, which read this one)"
+description = "Test-only diagnostic (not for the UI, profiles or presets): writes the ABL state (gain, filtered APL, raster_scale, last frame APL) into texel (0, 0) of the abl output instead of the picture."
 group = "ABL"

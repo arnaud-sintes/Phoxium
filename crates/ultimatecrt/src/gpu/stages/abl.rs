@@ -59,6 +59,8 @@ struct Abl {
     memory: vk::DeviceMemory,
     /// The clear of the state buffer was recorded.
     cleared: Cell<bool>,
+    /// The frame being recorded clears the state (given back by [`Stage::abandon`]).
+    clearing: Cell<bool>,
 }
 
 impl Stage for Abl {
@@ -133,6 +135,7 @@ impl Stage for Abl {
             src_stage |= vk::PipelineStageFlags2::CLEAR;
             src_access |= vk::AccessFlags2::TRANSFER_WRITE;
             self.cleared.set(true);
+            self.clearing.set(true);
         }
         // Previous frame's reduce (and the first clear) -> this frame's apply and reduce.
         self.state_barrier(
@@ -158,6 +161,34 @@ impl Stage for Abl {
         );
         d.cmd_bind_pipeline(cb, bind, self.reduce);
         d.cmd_dispatch(cb, 1, 1, 1);
+    }
+
+    unsafe fn prepare(
+        &mut self,
+        _ctx: &crate::gpu::Context,
+        _fc: &crate::gpu::FrameConstants,
+        _params: &crate::params::Params,
+        runs: bool,
+    ) -> Res<()> {
+        self.clearing.set(false);
+        if !runs {
+            // Slot skipped (disabled or no source): the state no longer follows the picture, the slot
+            // restarts cold (black) when it runs again. `abl_enable` off is different: the reduce
+            // pass keeps tracking the APL (raster breathing works with the limiter off).
+            self.cleared.set(false);
+        }
+        Ok(())
+    }
+
+    /// Resets the APL state (cold start on black) at the next recorded frame.
+    fn clear_history(&mut self) {
+        self.cleared.set(false);
+    }
+
+    fn abandon(&mut self) {
+        if self.clearing.take() {
+            self.cleared.set(false);
+        }
     }
 
     unsafe fn destroy(&mut self, d: &ash::Device) {

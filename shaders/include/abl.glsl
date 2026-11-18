@@ -21,13 +21,17 @@ layout(set = ABL_STATE_SET, binding = ABL_STATE_BINDING, std430) ABL_STATE_QUALI
 } abl_state;
 #endif
 
-// Gain slope k in 1/mA: (1/r - 1) / (I_fw - I_th), 0 when the limiter cannot act (I_fw <= I_th).
+// Gain slope k in 1/mA: (1/r - 1) / (I_fw - I_th), 0 when the limiter cannot act (I_fw <= I_th). The
+// limited current x I_fw g(x) rises with x only while k <= 1 / I_th, i.e. r >= I_th / I_fw: a smaller
+// ratio would make a brighter picture draw less current (non-physical), so r is clamped to that bound
+// (the oracle crt_model::abl::AblParams::effective_ratio does the same).
 float abl_k() {
     float span = params.abl_full_white_ma - params.abl_threshold_ma;
     if (span <= 0.0) {
         return 0.0;
     }
-    return (1.0 / max(params.abl_full_white_ratio, 1e-3) - 1.0) / span;
+    float r = max(params.abl_full_white_ratio, params.abl_threshold_ma / params.abl_full_white_ma);
+    return (1.0 / max(r, 1e-3) - 1.0) / span;
 }
 
 // Gain g = 1 / (1 + k max(0, x I_fw - I_th)) of the filtered APL x; exactly 1 below the threshold.

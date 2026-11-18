@@ -866,6 +866,67 @@ mod tests {
         assert_eq!(counter.count(), 0, "validation messages");
     }
 
+    /// The first frame of new phosphor history images and of a cold ABL state is abandoned: the next
+    /// frame still transitions the images and clears the history and the state (`Stage::abandon`), so
+    /// it shows the static picture unchanged (primed history, ABL gain 1) with zero validation messages.
+    #[test]
+    fn an_abandoned_first_frame_keeps_the_stage_resets() {
+        let require = crate::gpu::gpu_required();
+        let validation = crate::gpu::validation_layer_available();
+        assert!(
+            validation || !require,
+            "UCRT_REQUIRE_GPU=1 but the validation layer is not installed"
+        );
+        let mut gpu = match Headless::new(validation) {
+            Ok(g) => g,
+            Err(e) => {
+                assert!(!require, "UCRT_REQUIRE_GPU=1 but no headless Vulkan device: {e}");
+                eprintln!("abandoned stage frame test skipped: {e}");
+                return;
+            }
+        };
+        let counter = gpu.validation_counter();
+        gpu.enable_only(&["abl", "phosphor"]).expect("enable");
+        let (w, h) = (3u32, 2u32);
+        let bgra: Vec<u8> = (0..w * h)
+            .flat_map(|i| [i as u8 * 40 + 3, i as u8 * 30 + 7, i as u8 * 20 + 11, 255])
+            .collect();
+        let (view, settings) = (View::full(w, h), Settings::identity());
+        let params = crate::params::Params {
+            phosphor_persistence: true,
+            abl_enable: true,
+            ..crate::params::Params::default()
+        };
+        // SAFETY: as in the test above.
+        unsafe {
+            let ctx = &gpu.ctx;
+            let mut s = Scratch::default();
+            let extent = vk::Extent2D { width: w, height: h };
+            let t = gpu
+                .next_target(&mut s, extent, TargetFormat::Bgra8Unorm)
+                .expect("target");
+            gpu.pipeline.wait_slot(ctx).expect("wait");
+            gpu.pipeline.stage_source(ctx, w, h, &bgra).expect("stage");
+            gpu.pipeline.record(ctx, view, &settings, &params, &t).expect("record");
+            gpu.pipeline.abandon();
+            let _ = ctx.device.device_wait_idle();
+            s.destroy(&ctx.device);
+        }
+        for frame in 0..3 {
+            let r = gpu
+                .render(None, view, &settings, &params, (w, h), TargetFormat::Bgra8Unorm)
+                .expect("render after the abandoned frame");
+            for i in 0..w * h {
+                let p = r.output.pixel(i % w, i / w);
+                let got = [p[0], p[1], p[2]].map(|v| (v * 255.0).round() as u8);
+                let k = i as u8;
+                assert_eq!(got, [k * 20 + 11, k * 30 + 7, k * 40 + 3], "frame {frame} pixel {i}");
+            }
+        }
+        drop(gpu);
+        assert_eq!(counter.count(), 0, "validation messages");
+    }
+
     #[test]
     fn image_pixel_reads_rows_top_to_bottom() {
         let img = ImageF32 {

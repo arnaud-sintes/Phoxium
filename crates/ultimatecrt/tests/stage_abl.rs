@@ -17,7 +17,10 @@
 //!   0.4 and 1.0 mA, below the threshold, g = 1 exactly; 50 %: 4 x 0.500260 - 1.4 = 0.601042 mA over,
 //!   g = 1 / (1 + 0.231170) = 0.812236; 100 %: 2.6 over, g = 1 / 2 = 0.5.
 //! - Defaults (I_fw 2.8, I_th 1.4, ratio 0.5): a 10 % window is 0.28 mA (g = 1), full white gives g = 0.5,
-//!   so full white / 10 % window = 0.5 (plan: within 30 to 60 %, +-2 %); ratio 0.35 gives 0.35.
+//!   so full white / 10 % window = 0.5 (plan: within 30 to 60 %, +-2 %). The ratio test uses I_fw = 4 mA,
+//!   where the bound I_th / I_fw is 0.35: ratio 0.35 gives 0.35 and 0.3 is clamped to 0.35.
+//! - Coloured field (1, 0.5, 0.25) with I_fw 4, I_th 1.4, ratio 0.5: APL = 1.75 / 3 = 0.583333, 2.333333 mA,
+//!   0.933333 over, g = 1 / (1 + 0.384615 x 0.933333) = 0.735849 on every channel (red alone: APL 1, g 0.5).
 //! - Step 0 -> 1 at 60 Hz (dt = 16.667 ms): x_n = 1 - exp(-n dt / tau). tau = 0.25 s = 15 frames:
 //!   x_15 = 0.632121 (63.2 % after tau); the first n with x_n >= 0.632 is 15. Default tau 0.1667 s: the
 //!   anode current 2.8 x_n crosses 1.4 mA when x_n > 0.5, n dt > tau ln 2 = 0.11555 s, n = 7 (0.1167 s,
@@ -210,6 +213,70 @@ fn gain_follows_apl() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// Channel handling: a coloured field (1, 0.5, 0.25). The APL is the mean of the three currents and the
+/// same gain scales all three channels (a variant limiting red only, or measuring red only, fails).
+#[test]
+fn coloured_field_limits_every_channel() {
+    let test = "stage_abl coloured";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut p = Params::default();
+    on(&mut p, "abl_enable", true);
+    f32p(&mut p, "abl_full_white_ma", 4.0);
+    f32p(&mut p, "abl_tau_s", 0.0);
+    let o = oracle(&p);
+    let beam = [1.0_f32, 0.5, 0.25];
+    let img = ImageF32 {
+        width: W,
+        height: H,
+        rgba: (0..W * H).flat_map(|_| [beam[0], beam[1], beam[2], 1.0]).collect(),
+    };
+    let a = 1.75 / 3.0;
+    let want = o.gain(a);
+    assert!((want - 0.735_849).abs() <= 1e-6, "{test}: oracle {want}");
+    frame(&mut gpu, &p, &img, DT_MS);
+    let r = frame(&mut gpu, &p, &img, DT_MS);
+    let px = abl(&r).pixel(W / 2, H / 2);
+    for ch in 0..3 {
+        let x = f64::from(beam[ch]);
+        let got = f64::from(px[ch]);
+        eprintln!("{test}: channel {ch} gain {} oracle {want:.6}", got / x);
+        near(got, want * x, &format!("{test} channel {ch}"));
+    }
+    let mut probed = p;
+    on(&mut probed, "abl_probe", true);
+    let s = probe(&frame(&mut gpu, &probed, &img, DT_MS));
+    assert!((s[3] - a).abs() <= a * 1e-3, "{test}: APL {} vs mean {a}", s[3]);
+    near(s[0], want, &format!("{test}: probe gain"));
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// `clear_history` resets the filtered APL (cold start on black): the frame after a clear is unlimited.
+#[test]
+fn clear_history_resets_the_state() {
+    let test = "stage_abl clear";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut p = Params::default();
+    on(&mut p, "abl_enable", true);
+    on(&mut p, "abl_probe", true);
+    f32p(&mut p, "abl_tau_s", 0.0);
+    let (full, _) = window(100);
+    frame(&mut gpu, &p, &full, DT_MS);
+    let s = probe(&frame(&mut gpu, &p, &full, DT_MS));
+    assert!(s[0] < 0.6, "{test}: limited before the clear ({})", s[0]);
+    gpu.clear_history();
+    let s = probe(&frame(&mut gpu, &p, &full, DT_MS));
+    assert_eq!((s[0], s[1]), (1.0, 0.0), "{test}: cold state after the clear");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 #[test]
 fn full_white_over_small_window_is_the_configured_ratio() {
     let test = "stage_abl full white ratio";
@@ -217,9 +284,11 @@ fn full_white_over_small_window_is_the_configured_ratio() {
         return;
     };
     let counter = gpu.validation_counter();
-    for ratio in [0.5_f32, 0.35, 0.6] {
+    // I_fw = 4 mA: the physical bound of the ratio is I_th / I_fw = 0.35; 0.3 is clamped to it.
+    for (ratio, want) in [(0.5_f32, 0.5), (0.35, 0.35), (0.6, 0.6), (0.3, 0.35)] {
         let mut p = Params::default();
         on(&mut p, "abl_enable", true);
+        f32p(&mut p, "abl_full_white_ma", 4.0);
         f32p(&mut p, "abl_full_white_ratio", ratio);
         f32p(&mut p, "abl_tau_s", 0.0);
         let (small, _) = window(10);
@@ -230,7 +299,7 @@ fn full_white_over_small_window_is_the_configured_ratio() {
         let l_full = centre(&frame(&mut gpu, &p, &full, DT_MS));
         let got = l_full / l_small;
         eprintln!("{test}: configured {ratio} measured {got:.6}");
-        let want = f64::from(ratio);
+        let want: f64 = want;
         assert!(
             (got - want).abs() <= want * 0.02,
             "{test}: full white / 10 % window = {got}, configured {want}"
