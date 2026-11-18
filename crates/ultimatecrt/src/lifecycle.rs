@@ -3,14 +3,21 @@
 //!
 //! - [`Reattacher`]: when the target closes (or its capture session is lost) and a window with the
 //!   same executable and class appears, say which window to capture next. The key is the one of the
-//!   source profiles (T-51): executable file name and window class, case insensitive.
+//!   source profiles (T-51): executable file name and window class, case insensitive. Only windows
+//!   that appear after the loss are candidates (the handles that existed then are ignored), so a
+//!   sibling window of a shared host (browser, UWP) is not taken for the target.
+//! - [`LostWatch`]: while the source is lost, console reminders, and the drop of a fullscreen output
+//!   to a window after a timeout (or an exit) so the only monitor is not held by a frozen frame.
 //! - [`Health`] and [`is_black`]: a protected window, an excluded window or one that does not draw
 //!   captures as black frames or as no frames at all (CAP-5): a message instead of a silent black.
-//! - [`SmoothingWatch`]: warns when no integer scale was found and the edges look smoothed (SRC-2).
+//! - [`SmoothingWatch`]: warns when no integer scale was found and the picture looks like a
+//!   low-resolution source upscaled with filtering (SRC-2), advisory only.
 //! - [`SizeWatch`]: flags a change of the source size (SRC-8). Resolution-dependent resources are
 //!   rebuilt by the renderer on its own; the history clear is a flag for the persistence stage (T-41).
 //!
 //! Times are seconds on any monotonic clock, passed in, so the logic is deterministic.
+
+use std::collections::HashSet;
 
 use crate::{scaling::Rect, sources::WindowEntry};
 
@@ -51,7 +58,7 @@ impl TargetKey {
     }
 
     /// Same executable and class, case insensitive. When the executable of the target could not be
-    /// queried (elevated process) both sides must lack it and the title must be identical, otherwise
+    /// queried (a protected or anti-cheat process) both sides must lack it and the title must be identical, otherwise
     /// any window of that class would match.
     pub fn matches(&self, e: &WindowEntry) -> bool {
         if !self.class.eq_ignore_ascii_case(&e.class) {
@@ -75,14 +82,27 @@ impl TargetKey {
 
 /// The window to reattach to among `windows`: a match of the key, preferring the previous handle
 /// (the window is still there, only the session was lost), then the same title, then the largest.
+///
+/// Only the previous handle or a window that was NOT in `known` (the handles that existed when the
+/// target was lost) is accepted. Shared hosts break a bare key match: every UWP app is
+/// `ApplicationFrameHost.exe` / `ApplicationFrameWindow` and every Chrome window is
+/// `chrome.exe` / `Chrome_WidgetWin_1`, so closing a browser game tab or a Game Pass game must not
+/// move the capture to a sibling window that was already open. Known limit: a sibling that was
+/// hidden or minimised (not in the list) when the target closed and is shown later counts as new.
 pub fn choose_reattach<'a>(
     target: &TargetKey,
     last_hwnd: isize,
+    known: &HashSet<isize>,
     windows: &'a [WindowEntry],
 ) -> Option<&'a WindowEntry> {
     windows
         .iter()
-        .filter(|w| target.matches(w) && w.width >= MIN_TARGET_SIZE && w.height >= MIN_TARGET_SIZE)
+        .filter(|w| {
+            target.matches(w)
+                && w.width >= MIN_TARGET_SIZE
+                && w.height >= MIN_TARGET_SIZE
+                && (w.hwnd == last_hwnd || !known.contains(&w.hwnd))
+        })
         .max_by_key(|w| {
             (
                 w.hwnd == last_hwnd,
@@ -115,6 +135,12 @@ pub struct Reattacher {
     hwnd: isize,
     phase: Phase,
     failures: u32,
+    /// Handles of the windows that existed when the target was lost: not candidates (see
+    /// [`choose_reattach`]). Empty while attached.
+    known: HashSet<isize>,
+    /// Handle and title of the window of the last [`Step::TryAttach`], so a successful attach can
+    /// refresh the title used as tie-breaker.
+    pending: Option<(isize, String)>,
 }
 
 impl Reattacher {
@@ -125,6 +151,8 @@ impl Reattacher {
             hwnd,
             phase: Phase::Attached,
             failures: 0,
+            known: HashSet::new(),
+            pending: None,
         }
     }
 
@@ -147,7 +175,8 @@ impl Reattacher {
 
     /// Called every loop iteration. `capture_closed` is the closed flag of the session. `alive`
     /// tells whether a handle still designates a window (the closed event can be missed), `list`
-    /// returns the current window list; both are only called when needed.
+    /// returns the current window list; both are only called when needed (`list` once when the
+    /// target is lost, to record the windows that already exist, then at every poll).
     pub fn update(
         &mut self,
         now: f64,
@@ -158,6 +187,7 @@ impl Reattacher {
         match self.phase {
             Phase::Attached => {
                 if capture_closed || !alive(self.hwnd) {
+                    self.known = list().iter().map(|w| w.hwnd).collect();
                     self.phase = Phase::Lost { next_poll: now };
                     Step::Lost
                 } else {
@@ -172,8 +202,11 @@ impl Reattacher {
                     next_poll: now + REATTACH_POLL_S,
                 };
                 let windows = list();
-                match choose_reattach(&self.target, self.hwnd, &windows) {
-                    Some(w) => Step::TryAttach(w.hwnd),
+                match choose_reattach(&self.target, self.hwnd, &self.known, &windows) {
+                    Some(w) => {
+                        self.pending = Some((w.hwnd, w.title.clone()));
+                        Step::TryAttach(w.hwnd)
+                    }
                     None => Step::Idle,
                 }
             }
@@ -181,18 +214,125 @@ impl Reattacher {
     }
 
     /// Reports the outcome of a [`Step::TryAttach`]. On failure the next attempt waits
-    /// [`REATTACH_RETRY_S`].
+    /// [`REATTACH_RETRY_S`]. On success the title of the new window becomes the tie-breaker of the
+    /// next loss.
     pub fn attach_result(&mut self, now: f64, hwnd: isize, ok: bool) {
         if ok {
+            if let Some((_, title)) = self.pending.take().filter(|(h, _)| *h == hwnd) {
+                self.target.title = title;
+            }
             self.hwnd = hwnd;
             self.phase = Phase::Attached;
             self.failures = 0;
+            self.known.clear();
         } else {
             self.failures += 1;
             self.phase = Phase::Lost {
                 next_poll: now + REATTACH_RETRY_S,
             };
         }
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Lost source: reminders, timeout, exit
+// ---------------------------------------------------------------------------------------------
+
+/// Seconds between two console reminders while the source is lost.
+pub const LOST_REMIND_S: f64 = 10.0;
+/// Default of `--wait-source`: seconds a fullscreen output waits for the source before it drops to a
+/// window.
+pub const DEFAULT_WAIT_SOURCE_S: f64 = 30.0;
+/// The console reminder.
+pub const LOST_REMINDER: &str = "source lost; Ctrl+Alt+Q to quit";
+
+/// What to do when the source is lost (command line: `--wait-source`, `--exit-on-lost`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LostPolicy {
+    /// Seconds a fullscreen output waits before dropping to a window; 0 waits forever.
+    pub wait_s: f64,
+    /// Exit when the target closes instead of waiting for it.
+    pub exit_on_lost: bool,
+}
+
+impl Default for LostPolicy {
+    fn default() -> Self {
+        LostPolicy {
+            wait_s: DEFAULT_WAIT_SOURCE_S,
+            exit_on_lost: false,
+        }
+    }
+}
+
+/// What the main loop must do after [`LostWatch::update`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LostAction {
+    None,
+    /// Print [`LOST_REMINDER`].
+    Remind,
+    /// Replace the fullscreen output by a normal window (once).
+    GoWindowed,
+    /// Leave the main loop.
+    Exit,
+}
+
+/// Decides what happens while the source stays lost. Without it a fullscreen, topmost,
+/// non-activating, taskbar-less output over the only monitor stays up with a frozen frame and only
+/// Ctrl+Alt+Q closes it. Reattaching is not decided here ([`Reattacher`] keeps going in every mode).
+#[derive(Debug)]
+pub struct LostWatch {
+    policy: LostPolicy,
+    fullscreen: bool,
+    lost_since: Option<f64>,
+    next_remind: f64,
+}
+
+impl LostWatch {
+    /// `fullscreen` is true when the output currently is a fullscreen one.
+    pub fn new(policy: LostPolicy, fullscreen: bool) -> Self {
+        LostWatch {
+            policy,
+            fullscreen,
+            lost_since: None,
+            next_remind: 0.0,
+        }
+    }
+
+    /// True while the output is still the fullscreen one.
+    pub fn is_fullscreen(&self) -> bool {
+        self.fullscreen
+    }
+
+    /// Called every loop iteration with `attached` from [`Reattacher::is_attached`]. The first call
+    /// with `attached == false` starts the lost period: reminder at once, then every
+    /// [`LOST_REMIND_S`]; a fullscreen output drops to a window after `wait_s` (never back to
+    /// fullscreen, and no further timeout once windowed). Becoming attached again ends the period.
+    pub fn update(&mut self, now: f64, attached: bool) -> LostAction {
+        if attached {
+            self.lost_since = None;
+            return LostAction::None;
+        }
+        let since = match self.lost_since {
+            Some(t) => t,
+            None => {
+                self.lost_since = Some(now);
+                self.next_remind = now;
+                if self.policy.exit_on_lost {
+                    return LostAction::Exit;
+                }
+                now
+            }
+        };
+        if self.fullscreen && self.policy.wait_s > 0.0 && now - since >= self.policy.wait_s {
+            self.fullscreen = false;
+            self.next_remind = now + LOST_REMIND_S;
+            return LostAction::GoWindowed;
+        }
+        if now >= self.next_remind {
+            self.next_remind = now + LOST_REMIND_S;
+            return LostAction::Remind;
+        }
+        LostAction::None
     }
 }
 
@@ -306,6 +446,20 @@ impl Health {
 // ---------------------------------------------------------------------------------------------
 // Smoothed source
 // ---------------------------------------------------------------------------------------------
+//
+// SRC-2 verdict: "the window shows a low-resolution source that was upscaled with filtering".
+// Advisory only (a message, nothing is changed). Two pieces of evidence are required:
+// - most edges between flat areas are filtered ones (a few in-between pixels that change
+//   monotonically, overshoot of up to a quarter of the step tolerated for bicubic and Lanczos);
+// - the edges sit on a regular grid: an upscale by a factor s puts every edge at a
+//   multiple of s (integer or not), whereas the edges of text or of a drawing at 1:1 are at
+//   arbitrary positions. The grid is searched as a period in [PERIOD_MIN, PERIOD_MAX] px, by the
+//   phase concentration of the edge positions inside short windows (so a long image does not need a
+//   fine period resolution).
+// Known cases it cannot distinguish (documented in README.md): monospaced text with heavy strokes
+// at 1:1 (its stems repeat at the character pitch), and an upscale whose flat areas are all shorter
+// than the filter support (for example bicubic x2 of art without runs of four native pixels):
+// no flat area survives, so there is no edge to count.
 
 /// Pixels ignored on every side (rounded window corners), as in the scale detector.
 const MARGIN: u32 = 16;
@@ -314,16 +468,33 @@ const LINE_STRIDE: u32 = 4;
 /// Longest run of in-between pixels taken for a filtered edge (an upscale of up to x9).
 const MAX_RAMP: usize = 8;
 /// Edges whose flat sides differ by less than this (largest channel) are noise, not edges.
-const MIN_EDGE_STEP: u8 = 16;
+const MIN_EDGE_STEP: u8 = 28;
+/// Pixels whose channels all differ by at most this from the first of a run belong to the run
+/// (the ringing of bicubic and Lanczos filters and capture noise leave flat areas a few levels off).
+const FLAT_TOLERANCE: u8 = 8;
+/// Overshoot allowed beyond the two flat levels in a filtered edge, as a fraction of the step
+/// (at least `MIN_OVERSHOOT` levels).
+const OVERSHOOT_FRACTION: f32 = 0.25;
+const MIN_OVERSHOOT: f32 = 6.0;
 /// Edges needed before the verdict means anything.
 const MIN_EDGES: u64 = 64;
 /// Fraction of filtered edges above which the source looks smoothed.
-const SMOOTHED_FRACTION: f64 = 0.5;
+const SMOOTHED_FRACTION: f64 = 0.3;
 /// Frames between two analyses, and the analyses taken before giving up.
 const SMOOTH_FRAME_GAP: u32 = 15;
 const SMOOTH_MAX_CHECKS: u32 = 8;
+/// Edge-grid search: periods in px, search step, window length in px, positions a window needs, windows
+/// needed, and the excess phase concentration above which the edges are on a grid (random positions give
+/// about 0.05, text at 1:1 0.04, a true upscale 0.25 to 1 depending on the filter).
+const PERIOD_MIN: f64 = 1.5;
+const PERIOD_MAX: f64 = 16.0;
+const PERIOD_STEP: f64 = 0.01;
+const PERIOD_WINDOW: usize = 96;
+const WINDOW_MIN_POSITIONS: usize = 4;
+const MIN_WINDOWS: usize = 4;
+const GRID_STRENGTH: f64 = 0.15;
 
-/// Edges between two flat areas (runs of at least two identical pixels), counted by kind.
+/// Edges between two flat areas (runs of at least two near-identical pixels), counted by kind.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct EdgeCounts {
     /// The flat areas touch: a nearest-neighbour edge.
@@ -348,17 +519,107 @@ impl EdgeCounts {
     }
 }
 
+/// Edge counts and the positions of the edges: `cols[i]` is set when an edge of a
+/// horizontal scan lies at x = i / 2 (px from the left of the region), `rows` the same
+/// for y.
+#[derive(Clone, Debug, Default)]
+pub struct EdgeStats {
+    pub counts: EdgeCounts,
+    cols: Vec<bool>,
+    rows: Vec<bool>,
+}
+
+impl EdgeStats {
+    fn add(&mut self, other: &EdgeStats) {
+        self.counts.add(other.counts);
+        for (mine, theirs) in [(&mut self.cols, &other.cols), (&mut self.rows, &other.rows)] {
+            if mine.len() < theirs.len() {
+                mine.resize(theirs.len(), false);
+            }
+            for (m, t) in mine.iter_mut().zip(theirs) {
+                *m |= *t;
+            }
+        }
+    }
+
+    /// Best phase concentration of the filtered edges on either axis (0 when there is no evidence).
+    pub fn grid_strength(&self) -> f64 {
+        grid_strength(&self.cols).max(grid_strength(&self.rows))
+    }
+
+    /// The verdict: mostly filtered edges, lying on a regular grid.
+    pub fn looks_like_filtered_upscale(&self) -> bool {
+        self.counts.looks_smoothed() && self.grid_strength() >= GRID_STRENGTH
+    }
+}
+
+/// Best excess phase concentration over the periods of the grid search, 0 without enough evidence.
+/// `present[i]` marks a position of i / 2 px. Per window of N positions with phase sum Z the excess
+/// is `|Z|^2 - N` (zero on average for random positions, N^2 - N when all are in phase); the score
+/// is the sum over windows divided by the sum of the maxima, so it is 0 for no grid and 1 for a
+/// perfect one, and windows with few positions weigh little.
+fn grid_strength(present: &[bool]) -> f64 {
+    // Positions per window, relative to the window start.
+    let mut windows: Vec<Vec<f64>> = Vec::new();
+    for chunk in present.chunks(PERIOD_WINDOW * 2) {
+        let pos: Vec<f64> = chunk
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| **p)
+            .map(|(i, _)| i as f64 / 2.0)
+            .collect();
+        if pos.len() >= WINDOW_MIN_POSITIONS {
+            windows.push(pos);
+        }
+    }
+    if windows.len() < MIN_WINDOWS {
+        return 0.0;
+    }
+    let max_excess: f64 = windows.iter().map(|p| (p.len() * (p.len() - 1)) as f64).sum();
+    let mut best = 0.0f64;
+    let mut s = PERIOD_MIN;
+    while s <= PERIOD_MAX {
+        let k = std::f64::consts::TAU / s;
+        let excess: f64 = windows
+            .iter()
+            .map(|pos| {
+                let (mut c, mut sn) = (0.0, 0.0);
+                for p in pos {
+                    let (a, b) = (k * p).sin_cos();
+                    sn += a;
+                    c += b;
+                }
+                c * c + sn * sn - pos.len() as f64
+            })
+            .sum();
+        best = best.max(excess / max_excess);
+        s += PERIOD_STEP;
+    }
+    best
+}
+fn same_run(a: &[u8; 4], b: &[u8; 4]) -> bool {
+    max_diff(a, b) <= FLAT_TOLERANCE
+}
+
 fn max_diff(a: &[u8; 4], b: &[u8; 4]) -> u8 {
     (0..3).map(|c| a[c].abs_diff(b[c])).max().unwrap_or(0)
 }
 
-/// True when each of B, G, R goes monotonically (up or down) from `from` through `ramp` to `to`.
+/// True when each of B, G, R goes monotonically (up or down) from `from` through `ramp` to `to`,
+/// after clamping a small overshoot beyond the two levels (bicubic and Lanczos ringing).
 fn monotone(from: &[u8; 4], ramp: &[[u8; 4]], to: &[u8; 4]) -> bool {
     (0..3).all(|c| {
+        let (a, b) = (from[c] as f32, to[c] as f32);
+        let (lo, hi) = (a.min(b), a.max(b));
+        let tol = ((hi - lo) * OVERSHOOT_FRACTION).max(MIN_OVERSHOOT);
         let mut up = true;
         let mut down = true;
-        let mut prev = from[c];
-        for v in ramp.iter().map(|p| p[c]).chain(std::iter::once(to[c])) {
+        let mut prev = a;
+        for v in ramp.iter().map(|p| p[c] as f32).chain(std::iter::once(b)) {
+            if v < lo - tol || v > hi + tol {
+                return false;
+            }
+            let v = v.clamp(lo, hi);
             up &= v >= prev;
             down &= v <= prev;
             prev = v;
@@ -367,11 +628,38 @@ fn monotone(from: &[u8; 4], ramp: &[[u8; 4]], to: &[u8; 4]) -> bool {
     })
 }
 
-/// Counts the edges of one line of pixels. Pixels are grouped in runs of identical values; a run of
-/// two or more pixels is flat. Between two consecutive flat runs there are either no pixels (hard
-/// edge) or a few single pixels. If those go monotonically from one side to the other it is a
-/// filtered edge. Anything else (texture, a thin line, a gradient) says nothing and is skipped.
-fn scan_line(line: &[[u8; 4]], counts: &mut EdgeCounts) {
+/// Position of an edge in half pixels from the start of the line: where the channel with the
+/// largest step crosses the middle of the two flat levels, interpolated between pixel centres. The
+/// right flat run starts at pixel `i`, the ramp is the `ramp.len()` pixels before it. Taking the
+/// crossing instead of the middle of the ramp keeps the position stable when a bicubic or Lanczos
+/// filter rings (the ramp then also holds the overshoot pixels).
+fn edge_centre(from: &[u8; 4], ramp: &[[u8; 4]], to: &[u8; 4], i: usize) -> usize {
+    let c = (0..3).max_by_key(|&c| from[c].abs_diff(to[c])).unwrap_or(0);
+    let seq: Vec<f64> = std::iter::once(from[c])
+        .chain(ramp.iter().map(|p| p[c]))
+        .chain(std::iter::once(to[c]))
+        .map(f64::from)
+        .collect();
+    let mid = (seq[0] + seq[seq.len() - 1]) / 2.0;
+    // Pixel index of seq[0] is i - ramp.len() - 1.
+    let first = (i - ramp.len() - 1) as f64;
+    let mut p = first + (seq.len() - 1) as f64 / 2.0;
+    for k in 0..seq.len() - 1 {
+        let (a, b) = (seq[k] - mid, seq[k + 1] - mid);
+        if a * b <= 0.0 && a != b {
+            p = first + k as f64 + a / (a - b);
+            break;
+        }
+    }
+    // The pixel centre is at +0.5, in half pixels that is 2p + 1.
+    (2.0 * p + 1.0).round().max(0.0) as usize
+}
+/// Counts the edges of one line of pixels. Pixels are grouped in runs of near-identical values; a
+/// run of two or more pixels is flat. Between two consecutive flat runs there are either no pixels
+/// (hard edge) or a few single pixels. If those go monotonically from one side to the other it is a
+/// filtered edge, whose position (in half pixels from the start of the line) is
+/// pushed on `centres`. Anything else (texture, a thin line, a gradient) says nothing and is skipped.
+fn scan_line(line: &[[u8; 4]], counts: &mut EdgeCounts, centres: &mut Vec<usize>) {
     let mut prev_flat: Option<[u8; 4]> = None;
     let mut ramp: Vec<[u8; 4]> = Vec::new();
     let mut ramp_overflow = false;
@@ -379,7 +667,7 @@ fn scan_line(line: &[[u8; 4]], counts: &mut EdgeCounts) {
     while i < line.len() {
         let px = line[i];
         let mut j = i + 1;
-        while j < line.len() && line[j] == px {
+        while j < line.len() && same_run(&line[j], &px) {
             j += 1;
         }
         if j - i >= 2 {
@@ -387,8 +675,10 @@ fn scan_line(line: &[[u8; 4]], counts: &mut EdgeCounts) {
                 if max_diff(&from, &px) >= MIN_EDGE_STEP && !ramp_overflow {
                     if ramp.is_empty() {
                         counts.hard += 1;
+                        centres.push(edge_centre(&from, &ramp, &px, i));
                     } else if monotone(&from, &ramp, &px) {
                         counts.soft += 1;
+                        centres.push(edge_centre(&from, &ramp, &px, i));
                     }
                 }
             }
@@ -407,13 +697,15 @@ fn scan_line(line: &[[u8; 4]], counts: &mut EdgeCounts) {
 }
 
 /// Counts the edges of `region` of a BGRA8 frame `frame_w` pixels wide, on one line in
-/// [`LINE_STRIDE`], horizontally and vertically.
-pub fn edge_counts(data: &[u8], frame_w: u32, region: Rect) -> EdgeCounts {
-    let mut counts = EdgeCounts::default();
+/// [`LINE_STRIDE`], horizontally and vertically, and records where the filtered ones are.
+pub fn edge_stats(data: &[u8], frame_w: u32, region: Rect) -> EdgeStats {
+    let mut stats = EdgeStats::default();
     let m = MARGIN.min(region.w / 8).min(region.h / 8);
     if region.w <= 2 * m + 2 || region.h <= 2 * m + 2 {
-        return counts;
+        return stats;
     }
+    stats.cols = vec![false; 2 * region.w as usize + 2];
+    stats.rows = vec![false; 2 * region.h as usize + 2];
     let (x0, x1) = (region.x + m, region.x + region.w - m);
     let (y0, y1) = (region.y + m, region.y + region.h - m);
     let at = |x: u32, y: u32| -> [u8; 4] {
@@ -421,26 +713,40 @@ pub fn edge_counts(data: &[u8], frame_w: u32, region: Rect) -> EdgeCounts {
         [data[i], data[i + 1], data[i + 2], data[i + 3]]
     };
     let mut line: Vec<[u8; 4]> = Vec::new();
+    let mut centres: Vec<usize> = Vec::new();
     for y in (y0..y1).step_by(LINE_STRIDE as usize) {
         line.clear();
+        centres.clear();
         line.extend((x0..x1).map(|x| at(x, y)));
-        scan_line(&line, &mut counts);
+        scan_line(&line, &mut stats.counts, &mut centres);
+        for c in &centres {
+            stats.cols[c + 2 * (x0 - region.x) as usize] = true;
+        }
     }
     for x in (x0..x1).step_by(LINE_STRIDE as usize) {
         line.clear();
+        centres.clear();
         line.extend((y0..y1).map(|y| at(x, y)));
-        scan_line(&line, &mut counts);
+        scan_line(&line, &mut stats.counts, &mut centres);
+        for c in &centres {
+            stats.rows[c + 2 * (y0 - region.y) as usize] = true;
+        }
     }
-    counts
+    stats
 }
 
-/// Accumulates [`EdgeCounts`] over a few frames while no integer scale is in use, and raises the
-/// SRC-2 warning when the edges look smoothed.
+/// The edge counts of [`edge_stats`].
+pub fn edge_counts(data: &[u8], frame_w: u32, region: Rect) -> EdgeCounts {
+    edge_stats(data, frame_w, region).counts
+}
+
+/// Accumulates [`EdgeStats`] over a few frames while no integer scale is in use, and raises the
+/// SRC-2 warning when the picture looks like a filtered upscale of a low-resolution source.
 #[derive(Debug, Default)]
 pub struct SmoothingWatch {
     frames: u32,
     checks: u32,
-    counts: EdgeCounts,
+    stats: EdgeStats,
     warned: bool,
 }
 
@@ -455,7 +761,9 @@ impl SmoothingWatch {
     }
 
     /// Feeds one new frame. `eligible` is true when the divisor was detected (not given by the
-    /// user), the detection is locked and found no integer scale; otherwise the watch is reset.
+    /// user) and the locked detection found no integer scale; otherwise the watch is reset. That
+    /// alone also holds for any text-heavy window at 1:1, so the verdict itself requires filtered
+    /// edges on a regular grid ([`EdgeStats::looks_like_filtered_upscale`]).
     /// Returns true when the warning has just been raised.
     pub fn feed(&mut self, data: &[u8], frame_w: u32, region: Rect, eligible: bool) -> bool {
         if !eligible {
@@ -471,14 +779,14 @@ impl SmoothingWatch {
             return false;
         }
         self.checks += 1;
-        self.counts.add(edge_counts(data, frame_w, region));
-        self.warned = self.counts.looks_smoothed();
+        self.stats.add(&edge_stats(data, frame_w, region));
+        self.warned = self.stats.looks_like_filtered_upscale();
         self.warned
     }
 }
 
 /// The SRC-2 warning text.
-pub const SMOOTHED_WARNING: &str = "no integer scale found and the edges look smoothed: the source is probably \
+pub const SMOOTHED_WARNING: &str = "no integer scale found and the picture looks like a low-resolution source \
     scaled with filtering, which cannot be undone (use the game at its native size or an integer scale)";
 
 // ---------------------------------------------------------------------------------------------
@@ -487,8 +795,10 @@ pub const SMOOTHED_WARNING: &str = "no integer scale found and the edges look sm
 
 /// Notices a change of the source size (a mode switch, a window resize, a relaunch with another
 /// size). The renderer rebuilds its resolution-dependent resources by itself when it is given a
-/// frame of another size; what remains is the history (afterglow, ABL state), which the
-/// persistence stage (T-41) must clear: it polls [`SizeWatch::take_history_clear`].
+/// frame of another size; what remains is the history, which the main loop clears with
+/// `Renderer::clear_history` when [`SizeWatch::take_history_clear`] says so. That call reaches
+/// every stage that implements `Stage::clear_history` (today the phosphor persistence stage resets its
+/// afterglow); a stage that keeps no history, or does not implement it, is left as it is.
 #[derive(Debug, Default)]
 pub struct SizeWatch {
     last: Option<(u32, u32)>,
@@ -578,11 +888,11 @@ mod tests {
         let retitled = entry(22, "Mina - menu", Some("Mina.exe"), "UnityWndClass", 3000, 2000);
         let same_handle = entry(10, "Mina - menu", Some("Mina.exe"), "UnityWndClass", 200, 100);
         let list = [small.clone(), retitled.clone(), big.clone()];
-        assert_eq!(choose_reattach(&key, 10, &list).unwrap().hwnd, 20);
+        assert_eq!(choose_reattach(&key, 10, &HashSet::new(), &list).unwrap().hwnd, 20);
         let list = [small.clone(), retitled.clone()];
-        assert_eq!(choose_reattach(&key, 10, &list).unwrap().hwnd, 21);
+        assert_eq!(choose_reattach(&key, 10, &HashSet::new(), &list).unwrap().hwnd, 21);
         let list = [small, retitled, big, same_handle];
-        assert_eq!(choose_reattach(&key, 10, &list).unwrap().hwnd, 10);
+        assert_eq!(choose_reattach(&key, 10, &HashSet::new(), &list).unwrap().hwnd, 10);
     }
 
     #[test]
@@ -593,7 +903,7 @@ mod tests {
             entry(31, "Mina", Some("Editor.exe"), "UnityWndClass", 1280, 720),
             entry(32, "Mina", Some("Mina.exe"), "SplashClass", 1280, 720),
         ];
-        assert!(choose_reattach(&key, 10, &list).is_none());
+        assert!(choose_reattach(&key, 10, &HashSet::new(), &list).is_none());
     }
 
     #[test]
@@ -678,6 +988,197 @@ mod tests {
         assert!(at >= 1.7 && at - 1.0 < 2.0, "reattached at {at}");
     }
 
+    // --- reattach to new windows only -------------------------------------------------------
+
+    fn chrome(hwnd: isize, title: &str) -> WindowEntry {
+        entry(hwnd, title, Some("chrome.exe"), "Chrome_WidgetWin_1", 1280, 720)
+    }
+
+    #[test]
+    fn windows_that_existed_when_the_target_was_lost_are_ignored() {
+        let key = TargetKey::of(&game(10));
+        let known: HashSet<isize> = [20, 21].into();
+        let old = entry(20, "Mina", Some("Mina.exe"), "UnityWndClass", 3000, 2000);
+        let old_same_title = entry(21, "Mina", Some("Mina.exe"), "UnityWndClass", 1280, 720);
+        let list = [old.clone(), old_same_title.clone()];
+        assert!(choose_reattach(&key, 10, &known, &list).is_none());
+        // A new window with the same key is taken, with the title then size preference among the new.
+        let new_small = entry(22, "Mina", Some("Mina.exe"), "UnityWndClass", 640, 480);
+        let new_big = entry(23, "Other", Some("Mina.exe"), "UnityWndClass", 1920, 1080);
+        let list = [old.clone(), new_big.clone(), new_small.clone()];
+        assert_eq!(choose_reattach(&key, 10, &known, &list).unwrap().hwnd, 22);
+        let list = [old.clone(), new_big];
+        assert_eq!(choose_reattach(&key, 10, &known, &list).unwrap().hwnd, 23);
+        // The old handle coming back is taken even though it is "known".
+        let back = entry(10, "Mina", Some("Mina.exe"), "UnityWndClass", 200, 100);
+        let known: HashSet<isize> = [10, 20, 21].into();
+        let list = [old, old_same_title, back];
+        assert_eq!(choose_reattach(&key, 10, &known, &list).unwrap().hwnd, 10);
+    }
+
+    #[test]
+    fn shared_host_siblings_are_not_taken_for_the_target() {
+        // A browser game tab is closed: the window of the tab is gone, other browser windows stay.
+        let target = chrome(10, "Game - Chrome");
+        let mut r = Reattacher::new(TargetKey::of(&target), 10);
+        let siblings = vec![chrome(11, "Mail - Chrome"), chrome(12, "Docs - Chrome")];
+        assert_eq!(r.update(1.0, true, |_| false, || siblings.clone()), Step::Lost);
+        // Nothing new for as long as the siblings are all there.
+        for k in 1..10 {
+            let t = 1.0 + k as f64 * REATTACH_POLL_S;
+            assert_eq!(r.update(t, true, |_| false, || siblings.clone()), Step::Idle, "t={t}");
+        }
+        // A new browser window with the same key appears: taken.
+        let mut with_new = siblings.clone();
+        with_new.push(chrome(40, "Game - Chrome"));
+        assert_eq!(r.update(5.0, true, |_| false, || with_new.clone()), Step::TryAttach(40));
+        // UWP hosts behave the same.
+        let uwp = |h, t: &str| {
+            entry(
+                h,
+                t,
+                Some("ApplicationFrameHost.exe"),
+                "ApplicationFrameWindow",
+                1280,
+                720,
+            )
+        };
+        let mut r = Reattacher::new(TargetKey::of(&uwp(1, "Game")), 1);
+        let others = vec![uwp(2, "Calculator"), uwp(3, "Settings")];
+        assert_eq!(r.update(0.0, true, |_| false, || others.clone()), Step::Lost);
+        assert_eq!(r.update(0.5, true, |_| false, || others.clone()), Step::Idle);
+    }
+
+    #[test]
+    fn the_old_handle_returning_is_taken_after_a_session_loss() {
+        // The session was lost but the window never went away: it is in the list at once.
+        let mut r = reattacher();
+        let list = vec![
+            game(10),
+            entry(1, "Explorer", Some("explorer.exe"), "CabinetWClass", 800, 600),
+        ];
+        assert_eq!(r.update(0.0, true, |_| true, || list.clone()), Step::Lost);
+        assert_eq!(r.update(0.0, true, |_| true, || list.clone()), Step::TryAttach(10));
+    }
+
+    #[test]
+    fn the_title_follows_the_attached_window() {
+        let mut r = reattacher();
+        assert_eq!(r.target().title, "Mina");
+        r.update(0.0, true, |_| false, Vec::new);
+        let relaunched = vec![entry(
+            50,
+            "Mina - level 2",
+            Some("Mina.exe"),
+            "UnityWndClass",
+            1280,
+            720,
+        )];
+        assert_eq!(r.update(0.0, true, |_| false, || relaunched), Step::TryAttach(50));
+        // A failed attach does not change the title.
+        r.attach_result(0.0, 50, false);
+        assert_eq!(r.target().title, "Mina");
+        r.attach_result(0.0, 50, true);
+        assert_eq!(r.target().title, "Mina - level 2");
+        // The next loss prefers the new title over the bigger window.
+        let before = vec![entry(
+            60,
+            "Mina - level 2",
+            Some("Mina.exe"),
+            "UnityWndClass",
+            1280,
+            720,
+        )];
+        assert_eq!(r.update(1.0, true, |_| false, || before), Step::Lost);
+        let list = vec![
+            entry(61, "Mina", Some("Mina.exe"), "UnityWndClass", 1920, 1080),
+            entry(62, "Mina - level 2", Some("Mina.exe"), "UnityWndClass", 800, 600),
+        ];
+        assert_eq!(r.update(2.0, true, |_| false, || list), Step::TryAttach(62));
+    }
+
+    // --- lost source: reminders, timeout, exit ----------------------------------------------
+
+    #[test]
+    fn lost_source_reminds_at_once_then_every_ten_seconds() {
+        let mut w = LostWatch::new(LostPolicy::default(), false);
+        assert_eq!(w.update(0.0, true), LostAction::None);
+        assert_eq!(w.update(5.0, false), LostAction::Remind);
+        assert_eq!(w.update(5.5, false), LostAction::None);
+        assert_eq!(w.update(14.9, false), LostAction::None);
+        assert_eq!(w.update(15.0, false), LostAction::Remind);
+        // A windowed output never drops to anything, however long it waits.
+        assert_eq!(w.update(500.0, false), LostAction::Remind);
+        assert!(!w.is_fullscreen());
+    }
+
+    #[test]
+    fn fullscreen_drops_to_a_window_after_the_timeout_once() {
+        let mut w = LostWatch::new(LostPolicy::default(), true);
+        assert_eq!(w.update(100.0, false), LostAction::Remind);
+        assert_eq!(w.update(110.0, false), LostAction::Remind);
+        assert_eq!(w.update(120.0, false), LostAction::Remind);
+        assert_eq!(w.update(129.9, false), LostAction::None);
+        assert_eq!(w.update(130.0, false), LostAction::GoWindowed);
+        assert!(!w.is_fullscreen());
+        // Windowed from now on: reminders go on, no second drop.
+        assert_eq!(w.update(130.5, false), LostAction::None);
+        assert_eq!(w.update(140.0, false), LostAction::Remind);
+        assert_eq!(w.update(1000.0, false), LostAction::Remind);
+    }
+
+    #[test]
+    fn wait_zero_waits_forever_and_a_custom_timeout_applies() {
+        let mut w = LostWatch::new(
+            LostPolicy {
+                wait_s: 0.0,
+                exit_on_lost: false,
+            },
+            true,
+        );
+        let mut t = 0.0;
+        while t < 10_000.0 {
+            assert_ne!(w.update(t, false), LostAction::GoWindowed);
+            t += 1.0;
+        }
+        assert!(w.is_fullscreen());
+        let mut w = LostWatch::new(
+            LostPolicy {
+                wait_s: 5.0,
+                exit_on_lost: false,
+            },
+            true,
+        );
+        assert_eq!(w.update(0.0, false), LostAction::Remind);
+        assert_eq!(w.update(4.9, false), LostAction::None);
+        assert_eq!(w.update(5.0, false), LostAction::GoWindowed);
+    }
+
+    #[test]
+    fn exit_on_lost_exits_at_the_first_loss() {
+        let mut w = LostWatch::new(
+            LostPolicy {
+                wait_s: 30.0,
+                exit_on_lost: true,
+            },
+            true,
+        );
+        assert_eq!(w.update(1.0, true), LostAction::None);
+        assert_eq!(w.update(2.0, false), LostAction::Exit);
+    }
+
+    #[test]
+    fn reattaching_restarts_the_clock() {
+        let mut w = LostWatch::new(LostPolicy::default(), true);
+        assert_eq!(w.update(0.0, false), LostAction::Remind);
+        assert_eq!(w.update(20.0, false), LostAction::Remind);
+        // Back at 25 s, lost again at 40 s: the 30 s run from 40 s, not from 0 s.
+        assert_eq!(w.update(25.0, true), LostAction::None);
+        assert_eq!(w.update(40.0, false), LostAction::Remind);
+        assert_eq!(w.update(69.9, false), LostAction::Remind);
+        assert_eq!(w.update(70.0, false), LostAction::GoWindowed);
+    }
+
     // --- black or stale ---------------------------------------------------------------------
 
     fn frame(w: u32, h: u32, px: [u8; 4]) -> Vec<u8> {
@@ -744,6 +1245,22 @@ mod tests {
     }
 
     #[test]
+    fn session_loss_without_a_window_close_only_gives_the_stale_message() {
+        // TODO(T-80b): a lost capture session whose window stays open (Direct3D 11 device loss, a
+        // monitor hot-plug) is not detected as a lost target: the frames just stop and the only
+        // reaction is this message. T-80b must restart the capture session. Until then this pins
+        // the state machine: silence, then Stale, until a frame arrives again.
+        let mut h = Health::new(0.0);
+        h.note_frame(1.0, Some(false));
+        assert_eq!(h.status(1.0 + STALE_AFTER_S - 0.1), HealthStatus::Ok);
+        for t in [11.0, 60.0, 3600.0] {
+            assert_eq!(h.status(t), HealthStatus::Stale);
+        }
+        h.note_frame(3601.0, Some(false));
+        assert_eq!(h.status(3601.0), HealthStatus::Ok);
+    }
+
+    #[test]
     fn black_scan_is_rate_limited() {
         let mut h = Health::new(0.0);
         assert!(h.wants_sample(0.0));
@@ -755,9 +1272,10 @@ mod tests {
 
     // --- smoothed source --------------------------------------------------------------------
 
-    /// Native raster of flat colour blocks (a stand-in for pixel art): `bw` x `bh` blocks of `cell`
-    /// pixels, colours from a small palette, deterministic.
-    fn native_art(bw: u32, bh: u32, cell: u32) -> (u32, u32, Vec<[u8; 3]>) {
+    /// Low-resolution "pixel art": `w` x `h` native pixels of a small palette in blocks whose widths
+    /// and heights are pseudo-random in `runs.0 ..= runs.1` native pixels (a wide enough flat area
+    /// survives a filter, and the varying widths avoid a lucky phase between edges and samples).
+    fn pixel_art(w: u32, h: u32, runs: (u32, u32)) -> (u32, u32, Vec<[u8; 3]>) {
         let palette: [[u8; 3]; 6] = [
             [20, 20, 40],
             [200, 60, 40],
@@ -766,90 +1284,305 @@ mod tests {
             [90, 90, 220],
             [250, 250, 250],
         ];
-        let (w, h) = (bw * cell, bh * cell);
+        let mut seed = 12345u32;
+        let mut cuts = |n: u32| -> Vec<u32> {
+            // Block index of every native coordinate.
+            let (mut idx, mut left, mut cur) = (Vec::new(), 0, 0u32);
+            for _ in 0..n {
+                if left == 0 {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    left = runs.0 + (seed >> 16) % (runs.1 - runs.0 + 1);
+                    cur += 1;
+                }
+                left -= 1;
+                idx.push(cur);
+            }
+            idx
+        };
+        let (bx, by) = (cuts(w), cuts(h));
         let mut px = Vec::new();
-        for y in 0..h {
-            for x in 0..w {
-                let (bx, by) = (x / cell, y / cell);
-                let i = (bx * 7 + by * 13 + (bx * by) % 5) as usize % palette.len();
+        for &cy in &by {
+            for &cx in &bx {
+                let i = (cx * 7 + cy * 13 + (cx * cy) % 5) as usize % palette.len();
                 px.push(palette[i]);
             }
         }
         (w, h, px)
     }
-
     fn to_bgra(px: &[[u8; 3]]) -> Vec<u8> {
         px.iter().flat_map(|p| [p[2], p[1], p[0], 255]).collect()
     }
 
-    fn nearest(w: u32, h: u32, px: &[[u8; 3]], k: u32) -> (u32, u32, Vec<u8>) {
-        let mut out = Vec::new();
-        for y in 0..h * k {
-            for x in 0..w * k {
-                let p = px[((y / k) * w + x / k) as usize];
-                out.extend_from_slice(&[p[2], p[1], p[0], 255]);
-            }
-        }
-        (w * k, h * k, out)
+    #[derive(Clone, Copy, Debug)]
+    enum Filter {
+        Linear,
+        CatmullRom,
+        Lanczos3,
     }
 
-    /// Bilinear upscale by `k`, pixel centres aligned as a GPU texture filter does.
-    fn bilinear(w: u32, h: u32, px: &[[u8; 3]], k: u32) -> (u32, u32, Vec<u8>) {
-        let mut out = Vec::new();
-        let at = |x: i32, y: i32| px[(y.clamp(0, h as i32 - 1) as u32 * w + x.clamp(0, w as i32 - 1) as u32) as usize];
-        for y in 0..h * k {
-            for x in 0..w * k {
-                let fx = (x as f32 + 0.5) / k as f32 - 0.5;
-                let fy = (y as f32 + 0.5) / k as f32 - 0.5;
-                let (x0, y0) = (fx.floor() as i32, fy.floor() as i32);
-                let (tx, ty) = (fx - x0 as f32, fy - y0 as f32);
-                let mut c = [0u8; 3];
-                for (ch, v) in c.iter_mut().enumerate() {
-                    let p = |dx, dy| at(x0 + dx, y0 + dy)[ch] as f32;
-                    let top = p(0, 0) * (1.0 - tx) + p(1, 0) * tx;
-                    let bottom = p(0, 1) * (1.0 - tx) + p(1, 1) * tx;
-                    *v = (top * (1.0 - ty) + bottom * ty).round() as u8;
-                }
-                out.extend_from_slice(&[c[2], c[1], c[0], 255]);
+    impl Filter {
+        fn radius(self) -> i32 {
+            match self {
+                Filter::Linear => 1,
+                Filter::CatmullRom => 2,
+                Filter::Lanczos3 => 3,
             }
         }
-        (w * k, h * k, out)
+
+        fn weight(self, x: f32) -> f32 {
+            let a = x.abs();
+            match self {
+                Filter::Linear => (1.0 - a).max(0.0),
+                Filter::CatmullRom => {
+                    if a < 1.0 {
+                        1.5 * a * a * a - 2.5 * a * a + 1.0
+                    } else if a < 2.0 {
+                        -0.5 * a * a * a + 2.5 * a * a - 4.0 * a + 2.0
+                    } else {
+                        0.0
+                    }
+                }
+                Filter::Lanczos3 => {
+                    let sinc = |t: f32| {
+                        if t.abs() < 1e-6 {
+                            1.0
+                        } else {
+                            (std::f32::consts::PI * t).sin() / (std::f32::consts::PI * t)
+                        }
+                    };
+                    if a < 3.0 {
+                        sinc(x) * sinc(x / 3.0)
+                    } else {
+                        0.0
+                    }
+                }
+            }
+        }
+    }
+
+    /// Separable resample to `ow` x `oh` with pixel centres aligned (as a GPU filter or an image
+    /// library does), in f32, rounded and clamped to 8 bits.
+    fn resample(w: u32, h: u32, px: &[[u8; 3]], ow: u32, oh: u32, f: Filter) -> Vec<[u8; 3]> {
+        // One axis: taps (source index, weight) of every output coordinate.
+        let taps = |n_in: u32, n_out: u32| -> Vec<Vec<(usize, f32)>> {
+            (0..n_out)
+                .map(|o| {
+                    let u = (o as f32 + 0.5) * n_in as f32 / n_out as f32 - 0.5;
+                    let i0 = u.floor() as i32;
+                    let mut t: Vec<(usize, f32)> = (i0 - f.radius() + 1..=i0 + f.radius())
+                        .map(|i| (i.clamp(0, n_in as i32 - 1) as usize, f.weight(u - i as f32)))
+                        .collect();
+                    let sum: f32 = t.iter().map(|x| x.1).sum();
+                    t.iter_mut().for_each(|x| x.1 /= sum);
+                    t
+                })
+                .collect()
+        };
+        let (tx, ty) = (taps(w, ow), taps(h, oh));
+        let mut mid = vec![[0f32; 3]; (ow * h) as usize];
+        for y in 0..h as usize {
+            for (x, t) in tx.iter().enumerate() {
+                for c in 0..3 {
+                    mid[y * ow as usize + x][c] = t.iter().map(|&(i, k)| px[y * w as usize + i][c] as f32 * k).sum();
+                }
+            }
+        }
+        let mut out = vec![[0u8; 3]; (ow * oh) as usize];
+        for (y, t) in ty.iter().enumerate() {
+            for x in 0..ow as usize {
+                for c in 0..3 {
+                    let v: f32 = t.iter().map(|&(i, k)| mid[i * ow as usize + x][c] * k).sum();
+                    out[y * ow as usize + x][c] = v.round().clamp(0.0, 255.0) as u8;
+                }
+            }
+        }
+        out
+    }
+
+    /// Nearest-neighbour resample by a factor `s` (integer or not).
+    fn nearest(w: u32, h: u32, px: &[[u8; 3]], s: f32) -> (u32, u32, Vec<[u8; 3]>) {
+        let (ow, oh) = ((w as f32 * s).round() as u32, (h as f32 * s).round() as u32);
+        let mut out = Vec::new();
+        for y in 0..oh {
+            for x in 0..ow {
+                let sx = (((x as f32 + 0.5) / s) as u32).min(w - 1);
+                let sy = (((y as f32 + 0.5) / s) as u32).min(h - 1);
+                out.push(px[(sy * w + sx) as usize]);
+            }
+        }
+        (ow, oh, out)
+    }
+
+    /// Filtered upscale by `s`: (width, height, BGRA).
+    fn filtered(w: u32, h: u32, px: &[[u8; 3]], s: f32, f: Filter) -> (u32, u32, Vec<u8>) {
+        let (ow, oh) = ((w as f32 * s).round() as u32, (h as f32 * s).round() as u32);
+        (ow, oh, to_bgra(&resample(w, h, px, ow, oh, f)))
+    }
+
+    /// "Sharp bilinear": integer nearest prescale up to the next integer, bilinear to the final size.
+    fn sharp_bilinear(w: u32, h: u32, px: &[[u8; 3]], s: f32) -> (u32, u32, Vec<u8>) {
+        let p = s.ceil();
+        let (pw, ph, pre) = nearest(w, h, px, p);
+        let (ow, oh) = ((w as f32 * s).round() as u32, (h as f32 * s).round() as u32);
+        (ow, oh, to_bgra(&resample(pw, ph, &pre, ow, oh, Filter::Linear)))
+    }
+
+    /// Anti-aliased heavy text at 1:1: proportional glyph cells of random width, 3 to 4.5 px stems
+    /// and bars at random sub-pixel positions, exact box coverage, dark grey on light grey.
+    fn aa_text(w: u32, h: u32) -> Vec<u8> {
+        let mut seed = 0x2545_F491u32;
+        let mut rnd = move || {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            (seed >> 8) as f32 / (1u32 << 24) as f32
+        };
+        let mut cov = vec![0f32; (w * h) as usize];
+        let overlap = |a0: f32, a1: f32, p: u32| (a1.min(p as f32 + 1.0) - a0.max(p as f32)).max(0.0);
+        let rect = |cov: &mut Vec<f32>, x0: f32, x1: f32, y0: f32, y1: f32| {
+            for y in (y0.floor() as u32)..(y1.ceil() as u32).min(h) {
+                for x in (x0.floor() as u32)..(x1.ceil() as u32).min(w) {
+                    let c = overlap(x0, x1, x) * overlap(y0, y1, y);
+                    let v = &mut cov[(y * w + x) as usize];
+                    *v = v.max(c);
+                }
+            }
+        };
+        let mut y = 4.0;
+        while y + 18.0 < h as f32 {
+            let mut x = 4.0;
+            while x + 16.0 < w as f32 {
+                let pitch = 9.0 + rnd() * 6.0;
+                for _ in 0..1 + (rnd() * 3.0) as u32 {
+                    let sx = x + rnd() * (pitch - 5.0);
+                    let sw = 3.0 + rnd() * 1.5;
+                    rect(&mut cov, sx, sx + sw, y, y + 14.0);
+                }
+                for _ in 0..(rnd() * 3.0) as u32 {
+                    let by = y + rnd() * 10.0;
+                    rect(&mut cov, x, x + pitch - 1.0, by, by + 3.0 + rnd());
+                }
+                x += pitch + 1.0;
+            }
+            y += 20.0;
+        }
+        cov.iter()
+            .flat_map(|c| {
+                let v = (235.0 - c * 205.0).round() as u8;
+                [v, v, v, 255]
+            })
+            .collect()
     }
 
     fn whole(w: u32, h: u32) -> Rect {
         Rect { x: 0, y: 0, w, h }
     }
 
+    /// The verdict of a whole-frame analysis, with the numbers for the failure message.
+    fn verdict(data: &[u8], w: u32, h: u32) -> (bool, String) {
+        let s = edge_stats(data, w, whole(w, h));
+        (
+            s.looks_like_filtered_upscale(),
+            format!("{:?} grid {:.2}", s.counts, s.grid_strength()),
+        )
+    }
+
+    /// 200 x 150 native pixels in blocks of 3 to 7: flat areas wide enough to survive a Lanczos filter.
+    fn art() -> (u32, u32, Vec<[u8; 3]>) {
+        pixel_art(200, 150, (3, 7))
+    }
+
     #[test]
     fn crisp_sources_have_no_filtered_edges() {
-        let (w, h, px) = native_art(40, 30, 8);
+        let (w, h, px) = art();
         let native = to_bgra(&px);
         let c = edge_counts(&native, w, whole(w, h));
         assert!(c.hard > MIN_EDGES, "{c:?}");
         assert_eq!(c.soft, 0, "{c:?}");
         assert!(!c.looks_smoothed());
-
-        let (bw, bh, up) = nearest(w, h, &px, 3);
-        let c = edge_counts(&up, bw, whole(bw, bh));
-        assert!(!c.looks_smoothed(), "{c:?}");
-        assert_eq!(c.soft, 0, "{c:?}");
     }
 
     #[test]
-    fn bilinear_upscales_look_smoothed() {
-        let (w, h, px) = native_art(40, 30, 6);
-        for k in [3, 4, 6] {
-            let (bw, bh, up) = bilinear(w, h, &px, k);
-            let c = edge_counts(&up, bw, whole(bw, bh));
-            assert!(c.looks_smoothed(), "x{k}: {c:?}");
-            assert!(c.soft > c.hard * 3, "x{k}: {c:?}");
+    fn nearest_neighbour_at_any_scale_does_not_warn() {
+        let (w, h, px) = art();
+        for s in [1.0, 2.0, 3.0, 2.5, 3.37] {
+            let (bw, bh, up) = nearest(w, h, &px, s);
+            let (warn, msg) = verdict(&to_bgra(&up), bw, bh);
+            assert!(!warn, "nearest x{s}: {msg}");
         }
     }
 
     #[test]
-    fn flat_or_tiny_frames_do_not_warn() {
+    fn bilinear_upscales_warn() {
+        let (w, h, px) = art();
+        for s in [2.0, 2.5, 3.0, 3.37, 4.0] {
+            let (bw, bh, up) = filtered(w, h, &px, s, Filter::Linear);
+            let (warn, msg) = verdict(&up, bw, bh);
+            assert!(warn, "bilinear x{s}: {msg}");
+        }
+    }
+
+    #[test]
+    fn sharp_bilinear_upscales_warn() {
+        let (w, h, px) = art();
+        for s in [2.5, 3.37] {
+            let (bw, bh, up) = sharp_bilinear(w, h, &px, s);
+            let (warn, msg) = verdict(&up, bw, bh);
+            assert!(warn, "sharp bilinear x{s}: {msg}");
+        }
+    }
+
+    #[test]
+    fn bicubic_and_lanczos_upscales_warn_despite_ringing() {
+        let (w, h, px) = art();
+        // Lanczos3 rings over six output pixels at x2: with blocks of 3 to 7 native pixels the flat
+        // areas are short and the edge positions noisy, so its grid score is the weakest (about 0.25,
+        // against 0.05 for text and 1.0 for the other filters).
+        let cases = [
+            (Filter::CatmullRom, 2.0),
+            (Filter::CatmullRom, 2.5),
+            (Filter::CatmullRom, 3.37),
+            (Filter::Lanczos3, 2.0),
+            (Filter::Lanczos3, 2.5),
+            (Filter::Lanczos3, 3.37),
+        ];
+        for (f, s) in cases {
+            let (bw, bh, up) = filtered(w, h, &px, s, f);
+            let (warn, msg) = verdict(&up, bw, bh);
+            assert!(warn, "{f:?} x{s}: {msg}");
+        }
+    }
+
+    #[test]
+    fn anti_aliased_text_at_one_to_one_does_not_warn() {
+        let (w, h) = (800, 600);
+        let text = aa_text(w, h);
+        let s = edge_stats(&text, w, whole(w, h));
+        // The text really has many filtered edges (the old verdict warned) but no grid.
+        assert!(s.counts.looks_smoothed(), "{:?}", s.counts);
+        assert!(
+            !s.looks_like_filtered_upscale(),
+            "{:?} grid {:.2}",
+            s.counts,
+            s.grid_strength()
+        );
+    }
+
+    #[test]
+    fn gradients_flat_and_tiny_frames_do_not_warn() {
+        let (w, h) = (600u32, 400u32);
+        for steps in [1.0f32, 2.0, 4.0] {
+            let mut g = Vec::new();
+            for _y in 0..h {
+                for x in 0..w {
+                    let v = ((x as f32 * steps * 0.4) % 256.0) as u8;
+                    g.extend_from_slice(&[v, v / 2, 255 - v, 255]);
+                }
+            }
+            let (warn, msg) = verdict(&g, w, h);
+            assert!(!warn, "gradient {steps}: {msg}");
+        }
         let f = frame(300, 200, [10, 20, 30, 255]);
         assert_eq!(edge_counts(&f, 300, whole(300, 200)), EdgeCounts::default());
+        assert!(!verdict(&f, 300, 200).0);
         let f = frame(20, 20, [10, 20, 30, 255]);
         assert_eq!(edge_counts(&f, 20, whole(20, 20)), EdgeCounts::default());
         assert!(!EdgeCounts {
@@ -875,9 +1608,25 @@ mod tests {
     }
 
     #[test]
-    fn watch_warns_on_a_smoothed_source_only_when_eligible() {
-        let (w, h, px) = native_art(40, 30, 6);
-        let (bw, bh, smooth) = bilinear(w, h, &px, 4);
+    fn small_overshoot_is_a_filtered_edge_large_one_is_not() {
+        let from = [50, 50, 50, 255];
+        let to = [250, 250, 250, 255];
+        // 25 % of 200 = 50 levels allowed beyond the flat levels.
+        assert!(monotone(
+            &from,
+            &[[40, 40, 40, 255], [140, 140, 140, 255], [255, 255, 255, 255]],
+            &to
+        ));
+        let from = [150, 150, 150, 255];
+        assert!(!monotone(&from, &[[100, 100, 100, 255], [200, 200, 200, 255]], &to));
+        // Not monotone in the middle.
+        assert!(!monotone(&from, &[[200, 200, 200, 255], [100, 100, 100, 255]], &to));
+    }
+
+    #[test]
+    fn watch_warns_on_a_filtered_upscale_only_when_eligible() {
+        let (w, h, px) = art();
+        let (bw, bh, smooth) = filtered(w, h, &px, 2.5, Filter::Linear);
         let region = whole(bw, bh);
         let mut watch = SmoothingWatch::default();
         // Not eligible (a divisor was found or given): never warns.
@@ -894,13 +1643,13 @@ mod tests {
     }
 
     #[test]
-    fn watch_stays_quiet_on_a_crisp_source_and_stops_after_a_few_checks() {
-        let (w, h, px) = native_art(40, 30, 8);
-        let crisp = to_bgra(&px);
+    fn watch_stays_quiet_on_text_and_stops_after_a_few_checks() {
+        let (w, h) = (800, 600);
+        let text = aa_text(w, h);
         let region = whole(w, h);
         let mut watch = SmoothingWatch::default();
         for _ in 0..SMOOTH_FRAME_GAP * (SMOOTH_MAX_CHECKS + 3) {
-            assert!(!watch.feed(&crisp, w, region, true));
+            assert!(!watch.feed(&text, w, region, true));
         }
         assert!(!watch.warning());
         assert_eq!(watch.checks, SMOOTH_MAX_CHECKS);
@@ -908,7 +1657,7 @@ mod tests {
 
     #[test]
     fn watch_analyses_one_frame_in_a_few() {
-        let (w, h, px) = native_art(40, 30, 8);
+        let (w, h, px) = art();
         let crisp = to_bgra(&px);
         let mut watch = SmoothingWatch::default();
         for _ in 0..SMOOTH_FRAME_GAP {

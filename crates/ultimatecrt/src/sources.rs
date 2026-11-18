@@ -68,7 +68,7 @@ pub fn list_windows() -> Vec<WinInfo> {
 pub struct WindowEntry {
     pub hwnd: isize,
     pub title: String,
-    /// Executable file name, `None` when it cannot be queried (for example an elevated process).
+    /// Executable file name, `None` when it cannot be queried (see [`executable_name`]).
     pub exe: Option<String>,
     pub class: String,
     pub width: i32,
@@ -115,8 +115,10 @@ pub fn exe_file_name(path: &str) -> &str {
     path.trim_end().rsplit(['\\', '/']).next().unwrap_or("")
 }
 
-/// Executable file name of the process owning `hwnd`, `None` when it cannot be queried (for example an
-/// elevated process). Key of the source profiles (T-51).
+/// Executable file name of the process owning `hwnd`, `None` when it cannot be queried.
+/// `PROCESS_QUERY_LIMITED_INFORMATION` usually succeeds even on elevated processes; `None` means a
+/// protected process (anti-cheat, protected light processes), a system process, or a process that
+/// exited meanwhile. Key of the source profiles (T-51).
 pub fn executable_name(hwnd: HWND) -> Option<String> {
     unsafe {
         let mut pid = 0u32;
