@@ -1,0 +1,53 @@
+# Tube preset, data only (T-50, QUESTIONS PHY-4, ARCHITECTURE A13). Format: crates/ultimatecrt/src/presets.rs.
+# Every key of [params] is a parameter id of params/*.toml and has a [provenance] entry "<tag>: <source>"
+# with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "pvm-20m4u"
+name = "Sony PVM-20M4U (professional monitor)"
+label = "based on published data for the Sony PVM-20M4U"
+notes = """
+Reference look for clean 240p with deep scanlines. Pitch sourced (0.31 mm); spot size, spot growth and amplifier bandwidth are estimates.
+Parameters not listed keep their table defaults: mask stripe fill, edge softness, damper width, beam tail (CRT.md gives only a class range of 2 to 10 %), gun law and gamma (power 2.4), ABL (off, PVM/BVM have very mild ABL), source clock (comes from the source profile).
+Spot growth: CRT.md 0.45 -> 0.8 mm needs n >= 0.3459 for a zero floor (T-36b); n = 0.35 is the smallest two-decimal value. n = 0.27 (Hitachi 51 cm datasheet 0.45 / 0.57 / 0.70 mm at 100 / 300 / 500 uA) would force a peak of at most 0.705 mm.
+Amplifier: bandwidth above 5 MHz needs amp_k = 16 (K = 4 over-dims isolated vertical lines); amp_k is a FrameConstants field, not a preset parameter, see presets::recommended_amp_k. Fall/rise ratio 1.0 (symmetric): at this bandwidth the asymmetry is negligible.
+Output: tube-faithful (SMPTE-C primaries, D65), not matched to sRGB; dithered. D65 white does not clip at exposure 1.
+Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 11 mm, halation (12 mm / 1.5 %), glass transmission.
+"""
+
+[params]
+tube_visible_height_mm = 290.0
+tube_aspect = 1.3333334
+mask_type = "aperture_grille"
+mask_pitch_mm = 0.31
+mask_damper_count = 2
+tube_red_xy = [0.630, 0.340]
+tube_green_xy = [0.310, 0.595]
+tube_blue_xy = [0.155, 0.070]
+tube_white_xy = [0.3127, 0.3290]
+beam_fwhm_mid_mm = 0.45
+beam_fwhm_peak_mm = 0.8
+beam_growth_exponent = 0.35
+amp_bandwidth_mhz = 12.0
+amp_fall_rise_ratio = 1.0
+exposure = 1.0
+output_match_srgb = false
+output_dither = "noise"
+
+[provenance]
+tube_visible_height_mm = "S: CRT.md Reference scales, PVM-20M4U visible 386 x 290 mm"
+tube_aspect = "S: CRT.md Reference scales, 4:3"
+mask_type = "S: CRT.md Pitch values by family, Sony professional, AG"
+mask_pitch_mm = "S: CRT.md Sony professional table, PVM-20M4U 0.31 mm"
+mask_damper_count = "S: CRT.md Aperture grille geometry, two wires on larger monitors (20 in)"
+tube_red_xy = "S: CRT.md Chromaticity, SMPTE-C (Starting presets: SMPTE-C or EBU)"
+tube_green_xy = "S: CRT.md Chromaticity, SMPTE-C"
+tube_blue_xy = "S: CRT.md Chromaticity, SMPTE-C"
+tube_white_xy = "S: CRT.md White point, D65 (Starting presets: D65 or D93; D65 chosen)"
+beam_fwhm_mid_mm = "E: CRT.md Starting presets, PVM-20M4U 0.45 mm mid"
+beam_fwhm_peak_mm = "E: CRT.md Starting presets, PVM-20M4U 0.8 mm at peak"
+beam_growth_exponent = "D: smallest two-decimal n with a non-negative floor for 0.45 -> 0.8 mm (bound 0.345865, T-36b)"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, PVM-xxM2U class 8 to 15 MHz (middle)"
+amp_fall_rise_ratio = "E: symmetric; asymmetric direction not chosen for a professional amplifier"
+exposure = "D: D65 white, no clip"
+output_match_srgb = "E: COL-2, tube-faithful presets"
+output_dither = "E: COL-4, noise dither for presets"

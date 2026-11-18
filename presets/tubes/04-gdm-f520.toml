@@ -1,0 +1,51 @@
+schema = 1
+id = "gdm-f520"
+name = "Sony GDM-F520 (21 in PC monitor)"
+label = "based on published data for the Sony GDM-F520"
+notes = """
+High-resolution PC monitor, finest pitch of the list (0.22 mm uniform, sourced). Spot, bandwidth and colour are class estimates; the primaries are the measured GDM-17SE1 Trinitron set (a sibling model, not the F520).
+Parameters not listed keep their table defaults: mask stripe fill, edge softness, damper width, beam tail, gun law and gamma (power 2.4), ABL (off), source clock.
+Dampers: two wires (CRT.md rule for larger monitors; Goldwasser reports three above 21 in).
+White: D65 chosen from "9300 or 6500 K" (Starting presets, Trinitron or Diamondtron monitor row). A 9300 K variant needs tube_white_xy (0.2831, 0.2971) and exposure <= 0.745.
+Spot growth: 0.35 -> 0.5 mm with n = 0.27 (Hitachi 51 cm monitor tube) keeps a non-negative floor (bound ratio 1.567, here 1.43).
+Amplifier: 200 MHz (PC monitor 100 to 400 MHz, the amplifier is not the limit): amp_k = 16 recommended above 5 MHz, see presets::recommended_amp_k. Ratio 1.0.
+Not yet in the parameter table (M4, T-64): decay constants, faceplate centre 12 to 15 mm, halation (12 to 20 mm / 1 %), inner radius 2300 to 2500 mm (Diamondtron NF class, not this tube).
+"""
+
+[params]
+tube_visible_height_mm = 305.0
+tube_aspect = 1.3333334
+mask_type = "aperture_grille"
+mask_pitch_mm = 0.22
+mask_damper_count = 2
+tube_red_xy = [0.621, 0.340]
+tube_green_xy = [0.281, 0.606]
+tube_blue_xy = [0.152, 0.067]
+tube_white_xy = [0.3127, 0.3290]
+beam_fwhm_mid_mm = 0.35
+beam_fwhm_peak_mm = 0.5
+beam_growth_exponent = 0.27
+amp_bandwidth_mhz = 200.0
+amp_fall_rise_ratio = 1.0
+exposure = 1.0
+output_match_srgb = false
+output_dither = "noise"
+
+[provenance]
+tube_visible_height_mm = "D: CRT.md Reference scales, 21 in monitor 406 x 305 mm"
+tube_aspect = "S: CRT.md Reference scales, 4:3"
+mask_type = "S: CRT.md PC monitors table, GDM-F500 / F520 AG"
+mask_pitch_mm = "S: CRT.md PC monitors table, GDM-F500 / F520 0.22 mm uniform"
+mask_damper_count = "S: CRT.md Aperture grille geometry, two wires on larger monitors"
+tube_red_xy = "S: CRT.md Chromaticity, Trinitron GDM-17SE1 (Color.org); sibling model"
+tube_green_xy = "S: CRT.md Chromaticity, Trinitron GDM-17SE1 (Color.org)"
+tube_blue_xy = "S: CRT.md Chromaticity, Trinitron GDM-17SE1 (Color.org)"
+tube_white_xy = "E: CRT.md White point, D65; 9300 or 6500 K per Starting presets, 6500 K chosen"
+beam_fwhm_mid_mm = "E: CRT.md Starting presets, 17 to 21 in Trinitron / Diamondtron monitor 0.35 mm mid"
+beam_fwhm_peak_mm = "E: CRT.md Starting presets, 17 to 21 in monitor 0.5 mm at peak"
+beam_growth_exponent = "S: CRT.md T-63 item 7, monitor-class about 0.27 (Hitachi 51 cm, US 5,814,930)"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, PC monitor 100 to 400 MHz"
+amp_fall_rise_ratio = "E: symmetric, amplifier not the limit"
+exposure = "D: D65 white, no clip"
+output_match_srgb = "E: COL-2, tube-faithful presets"
+output_dither = "E: COL-4, noise dither for presets"

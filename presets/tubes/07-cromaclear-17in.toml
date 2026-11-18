@@ -1,0 +1,48 @@
+schema = 1
+id = "cromaclear-17in"
+name = "NEC CromaClear 17 in"
+label = "based on published data for the NEC CromaClear 17 in"
+notes = """
+Fine slot-mask PC monitor. Pitch sourced (0.25 mm mask pitch). The real mask has elliptical slots; the model has only the rectangular slot mask, so the slot period and bridge keep their table defaults (no CRT.md value) and the elliptical shape is not represented.
+Parameters not listed keep their table defaults: tube slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma (power 2.4), ABL (off), source clock.
+White: 9300 K as the tube white (D93, Starting presets "9300 K"), P22 primaries (SMPTE J. 1982 measured). D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or white clips. A D65 variant needs the white reset and exposure 1.
+Spot growth: 0.35 -> 0.5 mm, n = 0.27 (Hitachi 51 cm monitor tube) keeps a non-negative floor.
+Amplifier: 150 MHz (PC monitor 100 to 400 MHz): amp_k = 16 recommended above 5 MHz. Ratio 1.0.
+Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness (10 to 12 mm class), halation (12 mm / 1.5 %).
+"""
+
+[params]
+tube_visible_height_mm = 244.0
+tube_aspect = 1.3333334
+mask_type = "slot_mask"
+mask_pitch_mm = 0.25
+tube_red_xy = [0.635, 0.340]
+tube_green_xy = [0.305, 0.595]
+tube_blue_xy = [0.155, 0.070]
+tube_white_xy = [0.2831, 0.2971]
+beam_fwhm_mid_mm = 0.35
+beam_fwhm_peak_mm = 0.5
+beam_growth_exponent = 0.27
+amp_bandwidth_mhz = 150.0
+amp_fall_rise_ratio = 1.0
+exposure = 0.74
+output_match_srgb = false
+output_dither = "noise"
+
+[provenance]
+tube_visible_height_mm = "D: CRT.md Reference scales, 17 in monitor 325 x 244 mm"
+tube_aspect = "S: CRT.md Reference scales, 4:3"
+mask_type = "S: CRT.md PC monitors table, NEC CromaClear slot (elliptical, modelled as slot)"
+mask_pitch_mm = "S: CRT.md PC monitors table, NEC CromaClear 15 to 17 in 0.25 mm"
+tube_red_xy = "S: CRT.md Chromaticity, measured P22 (Starting presets: P22)"
+tube_green_xy = "S: CRT.md Chromaticity, measured P22"
+tube_blue_xy = "S: CRT.md Chromaticity, measured P22"
+tube_white_xy = "S: CRT.md White point, 9300 K + 8 MPCD (D93), Starting presets 9300 K"
+beam_fwhm_mid_mm = "E: CRT.md Starting presets, NEC CromaClear 0.35 mm mid"
+beam_fwhm_peak_mm = "E: CRT.md Starting presets, NEC CromaClear 0.5 mm at peak"
+beam_growth_exponent = "S: CRT.md T-63 item 7, monitor-class about 0.27 (Hitachi 51 cm, US 5,814,930)"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, PC monitor 100 to 400 MHz"
+amp_fall_rise_ratio = "E: symmetric, amplifier not the limit"
+exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
+output_match_srgb = "E: COL-2, tube-faithful presets"
+output_dither = "E: COL-4, noise dither for presets"

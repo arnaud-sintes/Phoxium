@@ -1,0 +1,57 @@
+schema = 1
+id = "slot-tv-26in"
+name = "Consumer 26 in slot-mask TV"
+label = "based on published data for consumer 26 in slot-mask televisions (RCA 26V tube class)"
+notes = """
+Generic living-room set, brick-pattern mask. Pitch 0.82 mm is the RCA A66ABU10X (66 cm, 26V) datasheet value (T-63; replaces the older 0.80); primaries and white are the hobbyist measurement of an RCA ColorTrak; the rest is estimated.
+Parameters not listed keep their table defaults: mask stripe fill, edge softness, bridge height (0.15), beam tail, gun law and gamma (power 2.4, CRT.md says 2.4 to 2.5), raster breathing (0), ABL full-white current, ratio and time constant (table defaults), source clock.
+White: RCA ColorTrak (0.301, 0.308), about 7500 to 8000 K, a US consumer white inside the 7500 to 9300 K range of Starting presets. Its linear sRGB blue is 1.192 at Y = 1, so exposure is 0.83 (<= 0.838) or white clips.
+Spot growth: 1.0 -> 1.7 mm with n = 0.42 (Panasonic 76 cm TV) keeps a non-negative floor.
+Amplifier: 6 MHz (consumer RGB 4 to 8 MHz): amp_k = 16 recommended above 5 MHz. Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light (CRT.md adjacent-pixel nonlinearity); the opposite direction would brighten them and is not chosen.
+ABL on: threshold 1.4 mA, steady state about 0.5 s (RCA patents).
+Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 12 mm, glass transmission 0.85, halation (12 mm / 3 %).
+"""
+
+[params]
+tube_visible_height_mm = 396.0
+tube_aspect = 1.3333334
+mask_type = "slot_mask"
+mask_pitch_mm = 0.82
+mask_slot_period = 1.6
+tube_red_xy = [0.6235, 0.3440]
+tube_green_xy = [0.3123, 0.5903]
+tube_blue_xy = [0.1536, 0.0645]
+tube_white_xy = [0.301, 0.308]
+beam_fwhm_mid_mm = 1.0
+beam_fwhm_peak_mm = 1.7
+beam_growth_exponent = 0.42
+amp_bandwidth_mhz = 6.0
+amp_fall_rise_ratio = 0.8
+abl_enable = true
+abl_threshold_ma = 1.4
+abl_tau_s = 0.1667
+exposure = 0.83
+output_match_srgb = false
+output_dither = "noise"
+
+[provenance]
+tube_visible_height_mm = "D: CRT.md Reference scales, 26 in viewable consumer TV 528 x 396 mm"
+tube_aspect = "S: CRT.md Reference scales, 4:3"
+mask_type = "S: CRT.md Starting presets, consumer 26 in viewable TV slot"
+mask_pitch_mm = "S: CRT.md Consumer TVs table, RCA A66ABU10X 26V 0.82 mm (T-63 item 2: 0.82 to 0.84)"
+mask_slot_period = "E: CRT.md Starting presets, vertical period about 1.6 p"
+tube_red_xy = "S: CRT.md Chromaticity, RCA ColorTrak E13169GM (hobbyist measurement)"
+tube_green_xy = "S: CRT.md Chromaticity, RCA ColorTrak E13169GM"
+tube_blue_xy = "S: CRT.md Chromaticity, RCA ColorTrak E13169GM"
+tube_white_xy = "S: CRT.md White point, RCA ColorTrak (1989), about 7500 to 8000 K"
+beam_fwhm_mid_mm = "E: CRT.md Starting presets, consumer 26 in TV 1.0 mm mid"
+beam_fwhm_peak_mm = "E: CRT.md Starting presets, consumer 26 in TV 1.7 mm at peak"
+beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42 (Panasonic 76 cm), floor non-negative for 1.0 -> 1.7"
+amp_bandwidth_mhz = "E: CRT.md RGB path table, cheap consumer TV RGB 4 to 8 MHz"
+amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
+abl_enable = "E: CRT.md ABL, consumer TVs limit; T-63 item 2"
+abl_threshold_ma = "S: CRT.md T-63, RCA/Thomson average limiter 1.4 mA"
+abl_tau_s = "D: CRT.md T-63, steady state about 0.5 s (RCA US 4,330,792), tau = 0.5 / 3 s"
+exposure = "D: white (0.301, 0.308) has linear sRGB blue 1.192 at Y = 1, so exposure <= 0.838"
+output_match_srgb = "E: COL-2, tube-faithful presets"
+output_dither = "E: COL-4, noise dither for presets"
