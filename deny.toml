@@ -1,0 +1,27 @@
+# Licence policy, same as scripts/package.ps1 and DESIGN.md 11: permissive licences only, GPL denied.
+# Run: cargo deny check licenses   (scripts/check.ps1 does it when cargo-deny is installed)
+[graph]
+targets = [{ triple = "x86_64-pc-windows-msvc" }]
+
+[licenses]
+confidence-threshold = 0.8
+unused-allowed-license = "allow"
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Zlib",
+    "Unicode-3.0",
+    "0BSD",
+    "CC0-1.0",
+]
+# GPL and AGPL are simply absent from the allow list (denied). LGPL is not allowed either.
+
+# Workspace crates are private (publish = false) and carry no licence field.
+[licenses.private]
+ignore = true
+
+
