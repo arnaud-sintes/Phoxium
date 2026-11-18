@@ -3,6 +3,7 @@
 pub mod app;
 pub mod capture;
 pub mod cli;
+pub mod diag;
 pub mod gpu;
 pub mod output;
 pub mod scaling;
