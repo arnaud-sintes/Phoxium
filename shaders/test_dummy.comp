@@ -18,5 +18,5 @@ void main() {
         return;
     }
     vec4 v = texelFetch(light_in, q, 0);
-    imageStore(light_out, q, vec4(1.0 - v.rgb, v.a));
+    imageStore(light_out, q, round_f16(vec4(1.0 - v.rgb, v.a)));
 }

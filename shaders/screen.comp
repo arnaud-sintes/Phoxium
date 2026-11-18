@@ -22,5 +22,5 @@ void main() {
         return;
     }
     vec3 l = mask_eval(q) * beam_eval(current_in, q);
-    imageStore(light_out, q, vec4(l, 1.0));
+    imageStore(light_out, q, round_f16(vec4(l, 1.0)));
 }

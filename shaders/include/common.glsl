@@ -80,4 +80,46 @@ vec3 transfer_from_linear(vec3 l, uint kind, float gamma) {
                 transfer_from_linear(l.b, kind, gamma));
 }
 
+// FP16 stores (T-fp16). The Vulkan spec leaves the rounding of a float -> FP16 conversion to the
+// implementation (the NVIDIA driver truncates toward zero, other vendors round to nearest), so a chain
+// stage that stores through imageStore into an rgba16f image calls round_f16 on the value first: the
+// result is already the nearest FP16 value (ties to even, IEEE 754 roundTiesToEven), exactly
+// representable in FP16, so the hardware conversion is exact under any rounding mode and the stored
+// bits do not depend on the vendor.
+//
+//   |x| < 2^-14 (FP16 subnormal range, step 2^-24): round(x * 2^24) * 2^-24 with roundEven (the scale
+//     is a power of two, so the product is exact in f32); zero keeps its sign, and a value that rounds
+//     up to 2^-14 becomes the smallest normal value.
+//   normal range: the f32 bits get 0x0FFF plus the lowest kept bit (bit 13) added, then the 13 dropped
+//     mantissa bits are masked off; that is round to nearest, ties to even, and a carry into the
+//     exponent is the correct renormalisation. Magnitudes that reach 2^16 after rounding (>= 65520)
+//     are +-inf, as in IEEE 754; 65504 is the largest finite FP16 value.
+//   NaN and inf pass through unchanged (the bit trick would corrupt a NaN payload).
+float round_f16(float x) {
+    uint b = floatBitsToUint(x);
+    if ((b & 0x7F800000u) == 0x7F800000u) {
+        return x; // inf or NaN
+    }
+    if (abs(x) < 6.103515625e-5) { // 2^-14
+        return roundEven(x * 16777216.0) * 5.9604644775390625e-8; // 2^24, 2^-24
+    }
+    uint r = (b + 0x0FFFu + ((b >> 13) & 1u)) & 0xFFFFE000u;
+    if ((r & 0x7FFFFFFFu) >= 0x47800000u) { // 2^16: beyond the largest finite FP16 value
+        r = (r & 0x80000000u) | 0x7F800000u;
+    }
+    return uintBitsToFloat(r);
+}
+
+vec2 round_f16(vec2 v) {
+    return vec2(round_f16(v.x), round_f16(v.y));
+}
+
+vec3 round_f16(vec3 v) {
+    return vec3(round_f16(v.x), round_f16(v.y), round_f16(v.z));
+}
+
+vec4 round_f16(vec4 v) {
+    return vec4(round_f16(v.x), round_f16(v.y), round_f16(v.z), round_f16(v.w));
+}
+
 #endif

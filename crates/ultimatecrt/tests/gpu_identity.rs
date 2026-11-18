@@ -16,22 +16,28 @@
 //! so v = k / 255 in exact arithmetic and the output code is k. As before T-34 the live default
 //! (`Settings::default`, `Params::default`: gun 2.4, host 2.2) gives round(255 (k / 255)^(2.4 / 2.2)).
 //!
-//! Error budget (why `round(v * 255) == k` must hold exactly). T-34 adds one FP16 rounding (of V, before
-//! the gun law), so the budget is the old one plus the propagated error of V:
-//! - FP16 storage: the NVIDIA driver truncates to FP16 (observed in T-09: 254/255 reads 253.879/255), so
-//!   for a normal value the relative error is below e = 2^-10; for a subnormal value (< 2^-14) the
-//!   absolute error is below 2^-24.
-//! - V' = V (1 - e1), e1 <= e. The gun gives L' = V'^g (1 - e2) with e2 <= e: relative error g e1 + e2.
-//!   Through the host's T^-1 = L^(1/g) the relative error is divided by g: v' = v (1 - e1 - e2 / g), at
-//!   most e (1 + 1 / 2.2) = 1.42e-3 relative, 0.362 of a code at k = 255. The `srgb` source mode adds
-//!   nothing worse: dv = (v + 0.055) rel(L) / 2.4 with rel(L) <= 3.4 e gives 0.372 of a code.
-//! - An RGBA16F target adds its own truncation: below 255 * 2^-11 = 0.1245 of a code. Total below
-//!   0.4968 of a code (tolerance 0.5, and `round` must still give k). A `B8G8R8A8_UNORM` target (the
-//!   swapchain format) rounds to the nearest code: error below 0.372, exact.
+//! Error budget (why `round(v * 255) == k` must hold exactly). T-34 added one FP16 rounding (of V, before
+//! the gun law); T-fp16 made every stage store round to nearest (`round_f16`, `common.glsl`), which halves
+//! the error of each store. The budget, by hand:
+//! - FP16 storage rounds to nearest (before T-fp16 the NVIDIA driver truncated: observed in T-09, 254/255
+//!   read 253.879/255, a bias of -2^-10 to 0 per store). A normal value has relative error at most
+//!   e = 2^-11 = 4.88e-4 (half an ulp, worst just above a power of two); a subnormal value (< 2^-14) has
+//!   absolute error at most 2^-25.
+//! - V' = V (1 - e1), |e1| <= e. The gun gives L' = V'^g (1 - e2) with |e2| <= e: relative error
+//!   g e1 + e2. Through the host's T^-1 = L^(1/g) the relative error is divided by g: v' = v (1 - e1 -
+//!   e2 / g), at most e (1 + 1 / 2.2) = 7.10e-4 relative, 0.181 of a code at k = 255 (was 0.362). The `srgb`
+//!   source mode: dv = (v + 0.055) rel(L) / 2.4 with rel(L) <= 3.4 e and v + 0.055 <= 1.055 gives
+//!   255 x 1.055 / 2.4 x 3.4 x 2^-11 = 0.186 of a code (was 0.372).
+//! - A `B8G8R8A8_UNORM` target (the swapchain format) rounds to the nearest code: error below 0.186,
+//!   exact (tolerance 0, `round` gives k). An RGBA16F target adds the hardware conversion of the encode
+//!   output, which is not a chain store and is still device defined: on this device it truncates, below
+//!   255 * 2^-11 = 0.1245 of a code, one-sided; a device that rounds to nearest adds below 0.0623. Total
+//!   below 0.186 + 0.1245 = 0.3106 here (0.248 on a nearest device); tolerance 0.32 (was 0.4968 of 0.5,
+//!   and `round` must still give k).
 //! - Before T-34 the budget was 0.24 of a code (one FP16 rounding of L only).
 //! - Worst subnormal, code 1 at gamma 2.4: L = (1/255)^2.4 = 1.6761e-6 = 28.12 * 2^-24, stored as
-//!   28 * 2^-24 at worst (relative -0.43 %), giving v * 255 = 0.9982: rounds to 1; V' = V (1 - e1)
-//!   moves L by 2.4 e1 = 0.23 % more (0.4 % of a code at the end), still rounding to 1.
+//!   28 * 2^-24 (nearest and truncation agree here; at most 0.5 step = 1.8 % in general), giving
+//!   v * 255 = 0.9982: rounds to 1; V' = V (1 - e1) moves L by 2.4 e1 = 0.12 % more, still rounding to 1.
 //!
 //! # FP16 subnormals (hand derivation, IEEE 754 binary16)
 //!
@@ -180,8 +186,8 @@ fn assert_native_drive(r: &Rendered, t: Transfer, what: &str) {
             for (c, &k) in codes(x, y).iter().enumerate() {
                 let want = drive(t, k);
                 let got = f64::from(p[c]);
-                // Truncation or rounding to FP16: below one ULP, 2^-10 relative (normal) or 2^-24.
-                let tol = (want * 2f64.powi(-10)).max(FP16_SUBNORMAL_STEP);
+                // Rounding to nearest FP16: below half an ulp, 2^-11 relative (normal) or 2^-25.
+                let tol = (want * 2f64.powi(-11)).max(FP16_SUBNORMAL_STEP / 2.0);
                 assert!(
                     (got - want).abs() <= tol,
                     "{what}: native ({x}, {y}) channel {c}: code {k} -> {got}, V oracle {want}"
@@ -199,18 +205,19 @@ fn gun_image(r: &Rendered) -> &ultimatecrt::gpu::ImageF32 {
 }
 
 /// Asserts that the `gun` image holds the oracle's linear values within FP16 precision: the error of V
-/// (rel. e) amplified by the exponent g, plus the truncation of the result: (g + 1) e relative, or a
+/// (rel. e) amplified by the exponent g, plus the rounding of the result: (g + 1) e relative, or half a
 /// subnormal step of absolute error on top.
 fn assert_gun_linear(r: &Rendered, t: Transfer, what: &str) {
     let gun = gun_image(r);
-    let rel = (gun_exponent(t) + 1.0) * 2f64.powi(-10);
+    // Half an ulp each for V and the result, plus 1e-5 for the f32 arithmetic of the shader.
+    let rel = (gun_exponent(t) + 1.0) * 2f64.powi(-11) + 1e-5;
     for y in 0..H {
         for x in 0..W * AMP_K {
             let p = gun.pixel(x, y);
             for (c, &k) in codes(x / AMP_K, y).iter().enumerate() {
                 let want = linear(t, k);
                 let got = f64::from(p[c]);
-                let tol = want * rel + FP16_SUBNORMAL_STEP;
+                let tol = want * rel + FP16_SUBNORMAL_STEP / 2.0;
                 assert!(
                     (got - want).abs() <= tol,
                     "{what}: gun ({x}, {y}) channel {c}: code {k} -> {got}, oracle {want}"
@@ -239,7 +246,7 @@ fn identity_case(t: Transfer, subnormal_codes: &[u8]) {
     let unorm = render_identity(&mut gpu, t, TargetFormat::Bgra8Unorm);
     drop(gpu);
 
-    assert_identity(&half.output, &format!("{test} RGBA16F"), 0.5);
+    assert_identity(&half.output, &format!("{test} RGBA16F"), 0.32);
     assert_identity(&unorm.output, &format!("{test} BGRA8"), 0.0);
     assert_native_drive(&half, t, &test);
     assert_gun_linear(&half, t, &test);

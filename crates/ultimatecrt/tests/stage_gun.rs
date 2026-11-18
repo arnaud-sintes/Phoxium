@@ -4,8 +4,9 @@
 //! after the `amp` slot (so the shader reads exact `f32` values, not FP16 ones), only `gun` is enabled, and
 //! the `gun` image (FP16, converted exactly to `f32`) is compared with the `crt_model::gun` oracle (f64,
 //! straight from `CRT.md`) and with the numbers derived below. The only error of the GPU against the oracle
-//! is the FP16 storage of the result, which truncates on the NVIDIA driver (see `gpu_identity.rs`): relative
-//! 2^-10 for a normal value, absolute 2^-24 for a subnormal one; `tol` is their sum. The `f32` arithmetic
+//! is the FP16 storage of the result, which rounds to nearest since T-fp16 (`round_f16`, see `gpu_identity.rs`): relative
+//! 2^-11 (half an FP16 ulp) for a normal value, absolute 2^-25 for a subnormal one; `tol` is their sum plus
+//! an `f32` allowance of 2e-6 relative (a few ulps of `pow`). The `f32` arithmetic
 //! and the driver's `pow` are far inside it.
 //!
 //! # Hand derivations (from `CRT.md`, "Gun law" and "White point")
@@ -76,12 +77,14 @@ use ultimatecrt::white::white_gains;
 
 /// Rows of the injected image (the tube domain needs a few rows; every row is the same).
 const ROWS: u32 = 4;
+/// F32 arithmetic allowance on top of the FP16 half ulp (`pow`, `exp`, sums: a few f32 ulps, 1.2e-7 each).
+const F32_REL: f64 = 2e-6;
 /// FP16 subnormal step, 2^-24.
 const STEP: f64 = 5.960464477539063e-8;
 
 /// Tolerance of an FP16 result of value `want` (module documentation).
 fn tol(want: f64) -> f64 {
-    want.abs() * 2f64.powi(-10) + STEP
+    want.abs() * (2f64.powi(-11) + F32_REL) + STEP / 2.0
 }
 
 /// An `f32`-exact `f64`: the GPU reads `f32`, so the oracle must see the same drive voltage.
@@ -667,7 +670,7 @@ fn srgb_source_mode_inverts_the_active_law() {
             for c in 0..3 {
                 let got = f64::from(g.pixel(x, 0)[c]);
                 assert!(
-                    (got - want).abs() <= want * (exponent + 1.0) * 2f64.powi(-10) + STEP,
+                    (got - want).abs() <= want * ((exponent + 1.0) * 2f64.powi(-11) + F32_REL) + STEP / 2.0,
                     "{name}: code {k} channel {c}: {got} vs sRGB luminance {want}"
                 );
             }
@@ -694,7 +697,7 @@ fn srgb_source_mode_inverts_the_active_law() {
             let want = srgb_eotf(k / 255.0) * drive;
             let got = f64::from(g.pixel(x, 0)[c]);
             assert!(
-                (got - want).abs() <= want * (2.4 + 1.0) * 2f64.powi(-10) + STEP,
+                (got - want).abs() <= want * ((2.4 + 1.0) * 2f64.powi(-11) + F32_REL) + STEP / 2.0,
                 "gog drive: code {k} channel {c}: {got} vs {want}"
             );
         }

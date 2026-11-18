@@ -50,5 +50,5 @@ void main() {
         return;
     }
     vec4 drive = texelFetch(drive_in, p, 0);
-    imageStore(current_out, p, vec4(gun_current(drive.rgb), drive.a));
+    imageStore(current_out, p, round_f16(vec4(gun_current(drive.rgb), drive.a)));
 }

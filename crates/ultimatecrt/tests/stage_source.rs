@@ -8,9 +8,9 @@
 //!
 //! The native raster holds V, the drive voltage (contract of `decode.comp`, in [0, 1]); since T-34 the gun
 //! law is applied by the `gun` slot, whose image holds the beam current T(V) (default: pure power 2.4):
-//! - `drive_voltage`: V = code / 255, exact to FP16 precision. The NVIDIA driver truncates to FP16, so
-//!   the relative error is below 2^-10 = 9.8e-4 (see `gpu_identity.rs`); the `gun` image V^2.4 has the
-//!   error of V amplified by 2.4 plus its own truncation, (2.4 + 1) 2^-10 = 3.3e-3.
+//! - `drive_voltage`: V = code / 255, exact to FP16 precision. Stores round to nearest since T-fp16
+//!   (`round_f16`), so the relative error is below 2^-11 = 4.9e-4 (see `gpu_identity.rs`); the `gun` image
+//!   V^2.4 has the error of V amplified by 2.4 plus its own rounding, (2.4 + 1) 2^-11 = 1.7e-3.
 //! - `srgb`: V = srgb_eotf(code / 255)^(1 / gun_gamma), so the pure power gun gives T(V) =
 //!   srgb_eotf(code / 255): the `gun` image holds the sRGB linear light. Code 20 at gamma 2.4:
 //!   u = (20 / 255 + 0.055) / 1.055 = 0.126475, L = u^2.4 = 0.006995 (the plan's value, +-2 %),
@@ -36,10 +36,10 @@ use ultimatecrt::scaling::View;
 const W: u32 = 256;
 const H: u32 = 4;
 
-/// FP16 relative truncation error bound, 2^-10.
-const FP16_REL: f64 = 1.0 / 1024.0;
-/// FP16 subnormal step, 2^-24: the absolute error below the smallest normal value.
-const FP16_SUBNORMAL_STEP: f64 = 5.960464477539063e-8;
+/// FP16 relative rounding error bound, 2^-11 (half an ulp; stores round to nearest since T-fp16).
+const FP16_REL: f64 = 1.0 / 2048.0;
+/// Half the FP16 subnormal step, 2^-25: the absolute error below the smallest normal value.
+const FP16_SUBNORMAL_STEP: f64 = 2.9802322387695312e-8;
 
 /// A `w` x `h` BGRA8 image where pixel (x, y) has code `x % 256` in red, `255 - x % 256` in green and
 /// `(x + 64 y) % 256` in blue.
@@ -107,7 +107,7 @@ fn assert_native(r: &Rendered, what: &str, expect: impl Fn(f64) -> f64) {
 }
 
 /// Asserts that every texel of the `gun` image (beam current) equals `expect(code)` within the error of the
-/// drive voltage amplified by the exponent `gamma` plus the FP16 truncation: (gamma + 1) 2^-10 relative.
+/// drive voltage amplified by the exponent `gamma` plus the FP16 rounding: (gamma + 1) 2^-11 relative.
 fn assert_gun(r: &Rendered, what: &str, gamma: f64, expect: impl Fn(f64) -> f64) {
     let gun = r.stage("gun").expect("gun slot ran");
     assert_eq!((gun.width, gun.height), (W * AMP_K, H), "{what}: gun size");

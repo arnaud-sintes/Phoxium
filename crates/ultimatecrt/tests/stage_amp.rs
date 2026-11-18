@@ -75,8 +75,9 @@
 //! oracle gives, in %, (continuous / K = 4 / K = 8 / K = 16): 3 MHz 32.91 / 34.39 / 33.29 / 33.01;
 //! 4 MHz 24.72 / 26.67 / 25.22 / 24.85; 5 MHz 19.78 / 22.08 / 20.40 / 19.93; 8 MHz 12.36 / 14.92 / 13.34 /
 //! 12.61; 15 MHz 6.59 / 8.51 / 7.88 / 7.05; 30 MHz 3.30 / 4.40 / 4.25 / 3.94. The excess over the
-//! continuous value is at most 2.6 points at K = 4, 1.3 at K = 8, 0.5 at K = 16 (the FP16 output adds a
-//! truncation bias of +0.03 to 0.07 point). So the PLAN +/- 1 point holds at K = 16 for every bandwidth
+//! continuous value is at most 2.6 points at K = 4, 1.3 at K = 8, 0.5 at K = 16 (before T-fp16 the truncating
+//! FP16 output added a bias of +0.03 to 0.07 point; stores now round to nearest and the bias is nil, the
+//! margins below are kept as they were). So the PLAN +/- 1 point holds at K = 16 for every bandwidth
 //! and at K = 8 up to 5 MHz; at K = 4 the box result is within +2.6 points (always dimmer), against
 //! -12 points for point samples at 15 MHz.
 //!
@@ -520,7 +521,7 @@ fn line_luminances(amp: &ImageF32, k: i32, gamma: f64, c: usize) -> (f64, f64) {
 /// luminance (box means, then the gun law per sub-sample) is within 0.2 point of the f64 box oracle
 /// computed the same way, at K = 4 (contract default), 8 and 16; it is never brighter than the continuous
 /// value (Jensen, D3) and exceeds its dimming by at most 2.8 / 1.5 / 0.6 points at K = 4 / 8 / 16 (table
-/// of D3 plus the FP16 bias); the PLAN +/- 1 point holds at K = 16 for every bandwidth and at K = 8 up to
+/// of D3, with the margin that covered the former truncation bias); the PLAN +/- 1 point holds at K = 16 for every bandwidth and at K = 8 up to
 /// 5 MHz.
 #[test]
 fn vertical_line_dimming_at_gamma_2_4() {

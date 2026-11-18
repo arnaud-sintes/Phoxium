@@ -34,6 +34,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Beam, horizontal spot and spot growth (T-36b): along each scanline the amp samples are blurred by the same round spot and integrated over every host pixel (energy per source pixel conserved, flat fields unchanged), and the spot widens with each gun's beam current, FWHM^2 = d0^2 + k I^(2n). New parameters `beam_fwhm_peak_mm` (default 0.8 mm, PVM-20M4U) and `beam_growth_exponent` (default 0.5); `beam_fwhm_mid_mm` is the width at mid drive (beam current 0.5^2.4). Per-channel convergence hook in `beam.glsl`, zero until T-37.
 
 ### Changed
+- FP16 stage stores round to nearest, ties to even, on every device (`round_f16` in `shaders/include/common.glsl`, applied at every `imageStore` of `decode`, `resample`, `amp`, `gun`, `abl` and `screen`): the Vulkan spec leaves the float to FP16 rounding to the implementation and this NVIDIA driver truncated (bias -2^-10 to 0 per store, about -0.15 to -0.2 % after the chain). The 8-bit identity budget drops from 0.4968 to 0.311 of a code on an RGBA16F target (0.186 on an 8-bit target), the stage tests use the symmetric half-ulp window, and `gpu_fp16_store` checks the stores bit for bit against a CPU reference.
 - A fullscreen output now refuses to start when the Ctrl+Alt+Q hotkey cannot be registered, and an unknown `--monitor` index is an error (it used to fall back to a default rectangle).
 - The output window releases its hotkey and window when dropped.
 - The swapchain warns when it has to use a format other than `B8G8R8A8_UNORM`.
