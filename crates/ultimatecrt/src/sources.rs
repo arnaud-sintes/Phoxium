@@ -40,7 +40,13 @@ unsafe extern "system" fn collect(hwnd: HWND, lparam: LPARAM) -> BOOL {
     let class = String::from_utf16_lossy(&buf[..n.max(0) as usize]);
     let mut r = RECT::default();
     let _ = GetWindowRect(hwnd, &mut r);
-    list.push(WinInfo { hwnd, title, class, width: r.right - r.left, height: r.bottom - r.top });
+    list.push(WinInfo {
+        hwnd,
+        title,
+        class,
+        width: r.right - r.left,
+        height: r.bottom - r.top,
+    });
     true.into()
 }
 

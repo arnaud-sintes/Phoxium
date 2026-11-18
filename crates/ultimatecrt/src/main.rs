@@ -1,24 +1,5 @@
 //! ultimatecrt: captures a window, runs it through a (for now passthrough) pipeline and presents
-//! it in a separate output window.
-//!
-//! Usage: ultimatecrt [options]
-//!   --window <text>      capture the first window whose title contains <text> (default "pixel-demo")
-//!   --list-windows       list capturable windows and exit
-//!   --list-gpus          list Vulkan devices and exit
-//!   --gpu <index>        Vulkan device to use (default: NVIDIA discrete, else any discrete)
-//!   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
-//!   --monitor <index>    monitor to cover with --fullscreen (default: the source window's monitor)
-//!   --no-activate        windowed output that never takes focus
-//!   --no-crop            capture the whole window instead of its client area
-//!   --crop <x,y,w,h>     part of the captured client area that is the source (default: all of it)
-//!   --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
-//!                        1 means native. Default: detected automatically from the first frames
-//!   --integer            integer scale only (letterboxed)
-//!   --validation         enable the Vulkan validation layer
-//!   --stats              print capture and render rates every second
-//!   --save-capture <png> save the first captured frame and exit
-//!   --exit-after <secs>  quit after some seconds (for automated tests)
-//! Ctrl+Alt+Q always quits (fullscreen output cannot take keyboard focus).
+//! it in a separate output window. Run `ultimatecrt --help` for the options.
 
 mod capture;
 mod gpu;
@@ -26,7 +7,11 @@ mod output;
 mod scaling;
 mod sources;
 
-use std::{env, error::Error, time::{Duration, Instant}};
+use std::{
+    env,
+    error::Error,
+    time::{Duration, Instant},
+};
 
 use windows::Win32::{
     System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED},
@@ -34,6 +19,35 @@ use windows::Win32::{
 };
 
 type Res<T> = Result<T, Box<dyn Error>>;
+
+const NO_FRAME: &str =
+    "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
+
+const USAGE: &str = "ultimatecrt: captures a window and shows it in a second window through a GPU pipeline.
+
+Usage: ultimatecrt [options]
+  --window <text>      capture the window whose title starts with <text>, else contains it
+                       (default \"pixel-demo\")
+  --list-windows       list capturable windows and monitors, then exit
+  --list-gpus          list Vulkan devices, then exit
+  --gpu <index>        Vulkan device to use (default: NVIDIA discrete, else any discrete)
+  --fullscreen         borderless, topmost, non-activating output covering the source's monitor
+  --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
+  --no-activate        windowed output that never takes focus (Esc cannot reach it)
+  --no-crop            capture the whole window instead of its client area
+  --crop <x,y,w,h>     part of the captured client area that is the source (default: all of it)
+  --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
+                       1 means native. Default: detected from the first informative frames
+  --integer            integer scale only (letterboxed)
+  --validation         enable the Vulkan validation layer (needs the Vulkan SDK)
+  --stats              print capture and render rates every second
+  --save-capture <png> save the first captured frame and exit
+  --exit-after <secs>  quit after some seconds (for automated tests)
+  --version            print the version and exit
+  --help               print this text
+
+Quit: Ctrl+Alt+Q (the output cannot take keyboard focus in fullscreen), or Esc in an activating
+windowed output.";
 
 #[derive(Default)]
 struct Args {
@@ -54,6 +68,11 @@ struct Args {
     exit_after: Option<f64>,
 }
 
+fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Res<T> {
+    text.parse()
+        .map_err(|_| format!("{flag} expects a number, got \"{text}\"").into())
+}
+
 fn parse_args() -> Res<Args> {
     let mut a = Args::default();
     let mut it = env::args().skip(1);
@@ -63,9 +82,9 @@ fn parse_args() -> Res<Args> {
             "--window" => a.window = Some(value("--window")?),
             "--list-windows" => a.list_windows = true,
             "--list-gpus" => a.list_gpus = true,
-            "--gpu" => a.gpu = Some(value("--gpu")?.parse()?),
+            "--gpu" => a.gpu = Some(number("--gpu", &value("--gpu")?)?),
             "--fullscreen" => a.fullscreen = true,
-            "--monitor" => a.monitor = Some(value("--monitor")?.parse()?),
+            "--monitor" => a.monitor = Some(number("--monitor", &value("--monitor")?)?),
             "--no-activate" => a.no_activate = true,
             "--no-crop" => a.no_crop = true,
             "--crop" => a.crop = Some(value("--crop")?.parse()?),
@@ -74,9 +93,13 @@ fn parse_args() -> Res<Args> {
             "--validation" => a.validation = true,
             "--stats" => a.stats = true,
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
-            "--exit-after" => a.exit_after = Some(value("--exit-after")?.parse()?),
+            "--exit-after" => a.exit_after = Some(number("--exit-after", &value("--exit-after")?)?),
+            "--version" => {
+                println!("ultimatecrt {}", env!("CARGO_PKG_VERSION"));
+                std::process::exit(0);
+            }
             "-h" | "--help" => {
-                println!("see the header of crates/ultimatecrt/src/main.rs for the options");
+                println!("{USAGE}");
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}").into()),
@@ -115,10 +138,19 @@ fn run() -> Res<()> {
     }
     if args.list_windows {
         for w in sources::list_windows() {
-            println!("{:>10}  {:>5}x{:<5} {:<28} {}", w.hwnd.0 as usize, w.width, w.height, w.class, w.title);
+            println!(
+                "{:>10}  {:>5}x{:<5} {:<28} {}",
+                w.hwnd.0 as usize, w.width, w.height, w.class, w.title
+            );
         }
         for (i, r) in output::monitor_rects().iter().enumerate() {
-            println!("monitor {i}: {}x{} at ({}, {})", r.right - r.left, r.bottom - r.top, r.left, r.top);
+            println!(
+                "monitor {i}: {}x{} at ({}, {})",
+                r.right - r.left,
+                r.bottom - r.top,
+                r.left,
+                r.top
+            );
         }
         return Ok(());
     }
@@ -126,7 +158,10 @@ fn run() -> Res<()> {
     let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
     let source = sources::find_by_title(&needle)
         .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
-    println!("source: \"{}\" ({}x{}, class {})", source.title, source.width, source.height, source.class);
+    println!(
+        "source: \"{}\" ({}x{}, class {})",
+        source.title, source.width, source.height, source.class
+    );
 
     let capture = capture::Capture::start(source.hwnd, !args.no_crop)?;
     println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
@@ -137,7 +172,7 @@ fn run() -> Res<()> {
         let deadline = Instant::now() + Duration::from_secs(5);
         while !capture.take_frame(&mut frame) {
             if Instant::now() > deadline {
-                return Err("no frame captured within 5 seconds".into());
+                return Err(NO_FRAME.into());
             }
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -150,7 +185,7 @@ fn run() -> Res<()> {
     let deadline = Instant::now() + Duration::from_secs(5);
     while !capture.take_frame(&mut frame) {
         if Instant::now() > deadline {
-            return Err("no frame captured within 5 seconds".into());
+            return Err(NO_FRAME.into());
         }
         std::thread::sleep(Duration::from_millis(5));
     }
@@ -162,9 +197,22 @@ fn run() -> Res<()> {
         follow: source.hwnd,
         client_size: (frame.width as i32 * scale, frame.height as i32 * scale),
     })?;
-    let mut renderer = gpu::Renderer::new(win.hwnd.0 as isize, win.hinstance, args.gpu, args.validation, args.integer)?;
+    let mut renderer = gpu::Renderer::new(
+        win.hwnd.0 as isize,
+        win.hinstance,
+        args.gpu,
+        args.validation,
+        args.integer,
+    )?;
     println!("render: Vulkan on {}", renderer.gpu_name);
-    println!("quit: Ctrl+Alt+Q{}", if args.fullscreen { "" } else { " or Esc in the output window" });
+    println!(
+        "quit: Ctrl+Alt+Q{}",
+        if args.fullscreen || args.no_activate {
+            ""
+        } else {
+            " or Esc in the output window"
+        }
+    );
 
     let start = Instant::now();
     let mut stat_time = Instant::now();
@@ -182,7 +230,12 @@ fn run() -> Res<()> {
         }
         if capture.take_frame(&mut frame) {
             fresh = true;
-            let full = scaling::Rect { x: 0, y: 0, w: frame.width, h: frame.height };
+            let full = scaling::Rect {
+                x: 0,
+                y: 0,
+                w: frame.width,
+                h: frame.height,
+            };
             let region = args.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
             let key = (frame.width, frame.height, args.crop);
             if key != detect_key {
@@ -264,7 +317,7 @@ fn save_png(path: &str, frame: &capture::Frame) -> Res<()> {
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header()?;
     let mut rgba = Vec::with_capacity(frame.data.len());
-    for px in frame.data.chunks_exact(4) {
+    for px in frame.data.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
     }
     writer.write_image_data(&rgba)?;

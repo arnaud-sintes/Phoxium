@@ -12,14 +12,14 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use windows::{
     core::{w, Result, HSTRING},
     Win32::{
-        Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{E_INVALIDARG, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
             EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFO,
             MONITOR_DEFAULTTONEAREST,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{RegisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT},
+            Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT},
             WindowsAndMessaging::*,
         },
     },
@@ -54,11 +54,14 @@ pub fn monitor_rects() -> Vec<RECT> {
     unsafe {
         let _ = EnumDisplayMonitors(None, None, Some(monitor_proc), LPARAM(&mut list as *mut _ as isize));
     }
-    list.into_iter().filter_map(|m| monitor_rect(m)).collect()
+    list.into_iter().filter_map(monitor_rect).collect()
 }
 
 fn monitor_rect(m: HMONITOR) -> Option<RECT> {
-    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
     unsafe { GetMonitorInfoW(m, &mut info).as_bool().then_some(info.rcMonitor) }
 }
 
@@ -80,7 +83,12 @@ pub fn create(opts: &Options) -> Result<Output> {
                 Some(i) => monitor_rects().get(i).copied(),
                 None => monitor_rect(MonitorFromWindow(opts.follow, MONITOR_DEFAULTTONEAREST)),
             }
-            .unwrap_or(RECT { left: 0, top: 0, right: 1280, bottom: 720 });
+            .ok_or_else(|| {
+                windows::core::Error::new(
+                    E_INVALIDARG,
+                    "no such monitor (see the monitor lines of --list-windows)",
+                )
+            })?;
             CreateWindowExW(
                 WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
                 w!("ultimatecrt_output"),
@@ -97,9 +105,18 @@ pub fn create(opts: &Options) -> Result<Output> {
             )?
         } else {
             let style = WS_OVERLAPPEDWINDOW;
-            let mut r = RECT { left: 0, top: 0, right: opts.client_size.0, bottom: opts.client_size.1 };
+            let mut r = RECT {
+                left: 0,
+                top: 0,
+                right: opts.client_size.0,
+                bottom: opts.client_size.1,
+            };
             let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
-            let ex = if opts.no_activate { WS_EX_NOACTIVATE } else { WINDOW_EX_STYLE(0) };
+            let ex = if opts.no_activate {
+                WS_EX_NOACTIVATE
+            } else {
+                WINDOW_EX_STYLE(0)
+            };
             CreateWindowExW(
                 ex,
                 w!("ultimatecrt_output"),
@@ -117,10 +134,39 @@ pub fn create(opts: &Options) -> Result<Output> {
         };
 
         if let Err(e) = RegisterHotKey(Some(hwnd), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q' as u32) {
+            if opts.fullscreen {
+                // Without the hotkey a fullscreen output that cannot take focus has no keyboard exit.
+                let _ = DestroyWindow(hwnd);
+                return Err(windows::core::Error::new(
+                    e.code(),
+                    "cannot register the Ctrl+Alt+Q quit hotkey (another program owns it); refusing to go fullscreen",
+                ));
+            }
             eprintln!("warning: cannot register Ctrl+Alt+Q: {e}");
         }
-        let _ = ShowWindow(hwnd, if NO_ACTIVATE.load(Ordering::Relaxed) { SW_SHOWNOACTIVATE } else { SW_SHOW });
-        Ok(Output { hwnd, hinstance: hinstance.0 as isize })
+        let _ = ShowWindow(
+            hwnd,
+            if NO_ACTIVATE.load(Ordering::Relaxed) {
+                SW_SHOWNOACTIVATE
+            } else {
+                SW_SHOW
+            },
+        );
+        Ok(Output {
+            hwnd,
+            hinstance: hinstance.0 as isize,
+        })
+    }
+}
+
+impl Drop for Output {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = UnregisterHotKey(Some(self.hwnd), 1);
+            if IsWindow(Some(self.hwnd)).as_bool() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
     }
 }
 

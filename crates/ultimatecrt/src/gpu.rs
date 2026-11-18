@@ -1,4 +1,4 @@
-﻿//! Vulkan renderer: uploads the captured frame to a texture and draws it into the swapchain with
+//! Vulkan renderer: uploads the captured frame to a texture and draws it into the swapchain with
 //! the GLSL passes of `shaders/`. Vulkan 1.3 with dynamic rendering and synchronization2.
 //!
 //! The swapchain is B8G8R8A8_UNORM, so the passthrough shader writes captured values unchanged.
@@ -39,7 +39,10 @@ fn gpu_info(instance: &Instance, pd: vk::PhysicalDevice, index: usize) -> GpuInf
     let p = unsafe { instance.get_physical_device_properties(pd) };
     GpuInfo {
         index,
-        name: p.device_name_as_c_str().map(|c| c.to_string_lossy().into_owned()).unwrap_or_default(),
+        name: p
+            .device_name_as_c_str()
+            .map(|c| c.to_string_lossy().into_owned())
+            .unwrap_or_default(),
         kind: p.device_type,
         vendor_id: p.vendor_id,
         api_version: p.api_version,
@@ -94,10 +97,14 @@ impl Renderer {
     pub fn new(hwnd: isize, hinstance: isize, gpu: Option<usize>, validation: bool, integer_scale: bool) -> Res<Self> {
         unsafe {
             let entry = Entry::load()?;
-            let app = vk::ApplicationInfo::default().application_name(c"ultimatecrt").api_version(vk::API_VERSION_1_3);
+            let app = vk::ApplicationInfo::default()
+                .application_name(c"ultimatecrt")
+                .api_version(vk::API_VERSION_1_3);
             let exts = [khr::surface::NAME.as_ptr(), khr::win32_surface::NAME.as_ptr()];
             let layers = [c"VK_LAYER_KHRONOS_validation".as_ptr()];
-            let mut info = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&exts);
+            let mut info = vk::InstanceCreateInfo::default()
+                .application_info(&app)
+                .enabled_extension_names(&exts);
             if validation {
                 info = info.enabled_layer_names(&layers);
             }
@@ -122,7 +129,9 @@ impl Renderer {
                     .enumerate()
                     .position(|(qi, q)| {
                         q.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-                            && surface_fn.get_physical_device_surface_support(pd, qi as u32, surface).unwrap_or(false)
+                            && surface_fn
+                                .get_physical_device_surface_support(pd, qi as u32, surface)
+                                .unwrap_or(false)
                     });
                 if let Some(f) = family {
                     if g.api_version >= vk::API_VERSION_1_3 {
@@ -135,7 +144,11 @@ impl Renderer {
                 None => candidates
                     .iter()
                     .position(|c| c.0.vendor_id == 0x10DE && c.0.kind == vk::PhysicalDeviceType::DISCRETE_GPU)
-                    .or_else(|| candidates.iter().position(|c| c.0.kind == vk::PhysicalDeviceType::DISCRETE_GPU))
+                    .or_else(|| {
+                        candidates
+                            .iter()
+                            .position(|c| c.0.kind == vk::PhysicalDeviceType::DISCRETE_GPU)
+                    })
                     .or(if candidates.is_empty() { None } else { Some(0) }),
             }
             .ok_or("no Vulkan 1.3 device can present to the output window (see --list-gpus)")?;
@@ -143,9 +156,13 @@ impl Renderer {
             let gpu_name = g.name.clone();
 
             let priorities = [1.0f32];
-            let queues = [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family).queue_priorities(&priorities)];
+            let queues = [vk::DeviceQueueCreateInfo::default()
+                .queue_family_index(queue_family)
+                .queue_priorities(&priorities)];
             let dev_exts = [khr::swapchain::NAME.as_ptr()];
-            let mut f13 = vk::PhysicalDeviceVulkan13Features::default().dynamic_rendering(true).synchronization2(true);
+            let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
+                .dynamic_rendering(true)
+                .synchronization2(true);
             let device = instance.create_device(
                 physical,
                 &vk::DeviceCreateInfo::default()
@@ -170,8 +187,10 @@ impl Renderer {
                     .command_buffer_count(1),
             )?[0];
             let image_available = device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?;
-            let in_flight =
-                device.create_fence(&vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED), None)?;
+            let in_flight = device.create_fence(
+                &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                None,
+            )?;
 
             // Descriptor set: one combined image sampler (the captured frame).
             let bindings = [vk::DescriptorSetLayoutBinding::default()
@@ -179,14 +198,23 @@ impl Renderer {
                 .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
                 .descriptor_count(1)
                 .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
-            let set_layout =
-                device.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
-            let sizes = [vk::DescriptorPoolSize::default().ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).descriptor_count(1)];
-            let desc_pool =
-                device.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None)?;
+            let set_layout = device.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings),
+                None,
+            )?;
+            let sizes = [vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .descriptor_count(1)];
+            let desc_pool = device.create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes),
+                None,
+            )?;
             let set_layouts = [set_layout];
-            let desc_set = device
-                .allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(desc_pool).set_layouts(&set_layouts))?[0];
+            let desc_set = device.allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(desc_pool)
+                    .set_layouts(&set_layouts),
+            )?[0];
             let sampler = device.create_sampler(
                 &vk::SamplerCreateInfo::default()
                     .mag_filter(vk::Filter::NEAREST)
@@ -202,7 +230,9 @@ impl Renderer {
                 .offset(0)
                 .size(40)];
             let pipeline_layout = device.create_pipeline_layout(
-                &vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts).push_constant_ranges(&push),
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&set_layouts)
+                    .push_constant_ranges(&push),
                 None,
             )?;
 
@@ -244,12 +274,21 @@ impl Renderer {
     }
 
     unsafe fn create_swapchain(&mut self, size: (u32, u32)) -> Res<()> {
-        let caps = self.surface_fn.get_physical_device_surface_capabilities(self.physical, self.surface)?;
-        let formats = self.surface_fn.get_physical_device_surface_formats(self.physical, self.surface)?;
+        let caps = self
+            .surface_fn
+            .get_physical_device_surface_capabilities(self.physical, self.surface)?;
+        let formats = self
+            .surface_fn
+            .get_physical_device_surface_formats(self.physical, self.surface)?;
         let chosen = formats
             .iter()
             .find(|f| f.format == vk::Format::B8G8R8A8_UNORM && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .or(formats.first())
+            .or_else(|| {
+                eprintln!(
+                    "warning: the surface does not offer B8G8R8A8_UNORM with SRGB_NONLINEAR; using the first format, passthrough is not exact"
+                );
+                formats.first()
+            })
             .ok_or("surface has no formats")?;
         self.format = chosen.format;
         self.extent = if caps.current_extent.width != u32::MAX {
@@ -297,7 +336,10 @@ impl Renderer {
                 None,
             )?;
             self.views.push(view);
-            self.render_done.push(self.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?);
+            self.render_done.push(
+                self.device
+                    .create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?,
+            );
         }
         Ok(())
     }
@@ -315,18 +357,29 @@ impl Renderer {
         let vert = self.shader_module(VERT_SPV)?;
         let frag = self.shader_module(FRAG_SPV)?;
         let stages = [
-            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::VERTEX).module(vert).name(c"main"),
-            vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::FRAGMENT).module(frag).name(c"main"),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::VERTEX)
+                .module(vert)
+                .name(c"main"),
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::FRAGMENT)
+                .module(frag)
+                .name(c"main"),
         ];
         let vertex_input = vk::PipelineVertexInputStateCreateInfo::default();
-        let assembly = vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
-        let viewport = vk::PipelineViewportStateCreateInfo::default().viewport_count(1).scissor_count(1);
+        let assembly =
+            vk::PipelineInputAssemblyStateCreateInfo::default().topology(vk::PrimitiveTopology::TRIANGLE_STRIP);
+        let viewport = vk::PipelineViewportStateCreateInfo::default()
+            .viewport_count(1)
+            .scissor_count(1);
         let raster = vk::PipelineRasterizationStateCreateInfo::default()
             .polygon_mode(vk::PolygonMode::FILL)
             .cull_mode(vk::CullModeFlags::NONE)
             .line_width(1.0);
-        let multisample = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
-        let attachments = [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
+        let multisample =
+            vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(vk::SampleCountFlags::TYPE_1);
+        let attachments =
+            [vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)];
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
@@ -343,7 +396,9 @@ impl Renderer {
             .dynamic_state(&dynamic)
             .layout(self.pipeline_layout)
             .push_next(&mut rendering);
-        let result = self.device.create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);
+        let result = self
+            .device
+            .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);
         self.device.destroy_shader_module(vert, None);
         self.device.destroy_shader_module(frag, None);
         self.pipeline = result.map_err(|(_, e)| e)?[0];
@@ -352,7 +407,9 @@ impl Renderer {
 
     unsafe fn shader_module(&self, spv: &[u8]) -> Res<vk::ShaderModule> {
         let words = ash::util::read_spv(&mut Cursor::new(spv))?;
-        Ok(self.device.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?)
+        Ok(self
+            .device
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?)
     }
 
     fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Res<u32> {
@@ -371,7 +428,11 @@ impl Renderer {
             &vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(vk::Format::B8G8R8A8_UNORM)
-                .extent(vk::Extent3D { width, height, depth: 1 })
+                .extent(vk::Extent3D {
+                    width,
+                    height,
+                    depth: 1,
+                })
                 .mip_levels(1)
                 .array_layers(1)
                 .samples(vk::SampleCountFlags::TYPE_1)
@@ -399,19 +460,25 @@ impl Renderer {
 
         let bytes = width as u64 * height as u64 * 4;
         let staging = self.device.create_buffer(
-            &vk::BufferCreateInfo::default().size(bytes).usage(vk::BufferUsageFlags::TRANSFER_SRC),
+            &vk::BufferCreateInfo::default()
+                .size(bytes)
+                .usage(vk::BufferUsageFlags::TRANSFER_SRC),
             None,
         )?;
         let sreq = self.device.get_buffer_memory_requirements(staging);
         let staging_memory = self.device.allocate_memory(
-            &vk::MemoryAllocateInfo::default().allocation_size(sreq.size).memory_type_index(self.memory_type(
-                sreq.memory_type_bits,
-                vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
-            )?),
+            &vk::MemoryAllocateInfo::default()
+                .allocation_size(sreq.size)
+                .memory_type_index(self.memory_type(
+                    sreq.memory_type_bits,
+                    vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
+                )?),
             None,
         )?;
         self.device.bind_buffer_memory(staging, staging_memory, 0)?;
-        let mapped = self.device.map_memory(staging_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())? as *mut u8;
+        let mapped =
+            self.device
+                .map_memory(staging_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())? as *mut u8;
 
         let image_info = [vk::DescriptorImageInfo::default()
             .sampler(self.sampler)
@@ -474,7 +541,12 @@ impl Renderer {
                 self.create_swapchain(client)?;
             }
 
-            let (index, _) = match self.swapchain_fn.acquire_next_image(self.swapchain, u64::MAX, self.image_available, vk::Fence::null()) {
+            let (index, _) = match self.swapchain_fn.acquire_next_image(
+                self.swapchain,
+                u64::MAX,
+                self.image_available,
+                vk::Fence::null(),
+            ) {
                 Ok(v) => v,
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
                     self.device.device_wait_idle()?;
@@ -484,7 +556,8 @@ impl Renderer {
                 Err(e) => return Err(e.into()),
             };
             self.device.reset_fences(&[self.in_flight])?;
-            self.device.reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())?;
+            self.device
+                .reset_command_buffer(self.cmd, vk::CommandBufferResetFlags::empty())?;
             self.device.begin_command_buffer(
                 self.cmd,
                 &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
@@ -509,7 +582,10 @@ impl Renderer {
             let indices = [index];
             match self.swapchain_fn.queue_present(
                 self.queue,
-                &vk::PresentInfoKHR::default().wait_semaphores(&signal).swapchains(&swapchains).image_indices(&indices),
+                &vk::PresentInfoKHR::default()
+                    .wait_semaphores(&signal)
+                    .swapchains(&swapchains)
+                    .image_indices(&indices),
             ) {
                 Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) => {}
                 Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
@@ -528,9 +604,17 @@ impl Renderer {
 
         if self.upload_pending {
             if let Some(t) = self.tex.as_mut() {
-                barrier(d, cb, t.image, t.layout, vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                    vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_READ,
-                    vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE);
+                barrier(
+                    d,
+                    cb,
+                    t.image,
+                    t.layout,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    vk::AccessFlags2::SHADER_READ,
+                    vk::PipelineStageFlags2::TRANSFER,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                );
                 d.cmd_copy_buffer_to_image(
                     cb,
                     t.staging,
@@ -538,31 +622,66 @@ impl Renderer {
                     vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                     &[vk::BufferImageCopy::default()
                         .image_subresource(
-                            vk::ImageSubresourceLayers::default().aspect_mask(vk::ImageAspectFlags::COLOR).layer_count(1),
+                            vk::ImageSubresourceLayers::default()
+                                .aspect_mask(vk::ImageAspectFlags::COLOR)
+                                .layer_count(1),
                         )
-                        .image_extent(vk::Extent3D { width: t.width, height: t.height, depth: 1 })],
+                        .image_extent(vk::Extent3D {
+                            width: t.width,
+                            height: t.height,
+                            depth: 1,
+                        })],
                 );
-                barrier(d, cb, t.image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::PipelineStageFlags2::TRANSFER, vk::AccessFlags2::TRANSFER_WRITE,
-                    vk::PipelineStageFlags2::FRAGMENT_SHADER, vk::AccessFlags2::SHADER_READ);
+                barrier(
+                    d,
+                    cb,
+                    t.image,
+                    vk::ImageLayout::TRANSFER_DST_OPTIMAL,
+                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                    vk::PipelineStageFlags2::TRANSFER,
+                    vk::AccessFlags2::TRANSFER_WRITE,
+                    vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                    vk::AccessFlags2::SHADER_READ,
+                );
                 t.layout = vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL;
             }
             self.upload_pending = false;
         }
 
         let target = self.images[index];
-        barrier(d, cb, target, vk::ImageLayout::UNDEFINED, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::NONE,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE);
+        barrier(
+            d,
+            cb,
+            target,
+            vk::ImageLayout::UNDEFINED,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::NONE,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+        );
 
         let attachment = [vk::RenderingAttachmentInfo::default()
             .image_view(self.views[index])
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue { color: vk::ClearColorValue { float32: [0.0, 0.0, 0.0, 1.0] } })];
-        let area = vk::Rect2D { offset: vk::Offset2D { x: 0, y: 0 }, extent: self.extent };
-        d.cmd_begin_rendering(cb, &vk::RenderingInfo::default().render_area(area).layer_count(1).color_attachments(&attachment));
+            .clear_value(vk::ClearValue {
+                color: vk::ClearColorValue {
+                    float32: [0.0, 0.0, 0.0, 1.0],
+                },
+            })];
+        let area = vk::Rect2D {
+            offset: vk::Offset2D { x: 0, y: 0 },
+            extent: self.extent,
+        };
+        d.cmd_begin_rendering(
+            cb,
+            &vk::RenderingInfo::default()
+                .render_area(area)
+                .layer_count(1)
+                .color_attachments(&attachment),
+        );
         if self.tex.is_some() {
             // Letterbox the native raster into the window, optionally on integer scales only.
             let v = self.view;
@@ -577,11 +696,25 @@ impl Renderer {
             d.cmd_set_viewport(
                 cb,
                 0,
-                &[vk::Viewport { x: 0.0, y: 0.0, width: ew, height: eh, min_depth: 0.0, max_depth: 1.0 }],
+                &[vk::Viewport {
+                    x: 0.0,
+                    y: 0.0,
+                    width: ew,
+                    height: eh,
+                    min_depth: 0.0,
+                    max_depth: 1.0,
+                }],
             );
             d.cmd_set_scissor(cb, 0, &[area]);
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline);
-            d.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::GRAPHICS, self.pipeline_layout, 0, &[self.desc_set], &[]);
+            d.cmd_bind_descriptor_sets(
+                cb,
+                vk::PipelineBindPoint::GRAPHICS,
+                self.pipeline_layout,
+                0,
+                &[self.desc_set],
+                &[],
+            );
             let ints = [
                 v.origin.0 as i32,
                 v.origin.1 as i32,
@@ -603,16 +736,28 @@ impl Renderer {
         }
         d.cmd_end_rendering(cb);
 
-        barrier(d, cb, target, vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL, vk::ImageLayout::PRESENT_SRC_KHR,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT, vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags2::NONE, vk::AccessFlags2::NONE);
+        barrier(
+            d,
+            cb,
+            target,
+            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+            vk::ImageLayout::PRESENT_SRC_KHR,
+            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+            vk::PipelineStageFlags2::NONE,
+            vk::AccessFlags2::NONE,
+        );
     }
 }
 
 fn color_range() -> vk::ImageSubresourceRange {
-    vk::ImageSubresourceRange::default().aspect_mask(vk::ImageAspectFlags::COLOR).level_count(1).layer_count(1)
+    vk::ImageSubresourceRange::default()
+        .aspect_mask(vk::ImageAspectFlags::COLOR)
+        .level_count(1)
+        .layer_count(1)
 }
 
+// A barrier needs all of these values and a struct would only add noise.
 #[allow(clippy::too_many_arguments)]
 unsafe fn barrier(
     d: &Device,

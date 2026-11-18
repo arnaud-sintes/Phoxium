@@ -13,8 +13,8 @@ use windows::{
     Win32::{
         Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
-            BeginPaint, EndPaint, InvalidateRect, SetStretchBltMode, StretchDIBits, BITMAPINFO,
-            BITMAPINFOHEADER, COLORONCOLOR, DIB_RGB_COLORS, PAINTSTRUCT, SRCCOPY,
+            BeginPaint, EndPaint, InvalidateRect, SetStretchBltMode, StretchDIBits, BITMAPINFO, BITMAPINFOHEADER,
+            COLORONCOLOR, DIB_RGB_COLORS, PAINTSTRUCT, SRCCOPY,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -25,7 +25,7 @@ use windows::{
 };
 
 #[derive(Clone, Copy, PartialEq)]
-enum Scene {
+enum Content {
     Scene,
     Card,
     Image,
@@ -35,7 +35,7 @@ struct App {
     w: usize,
     h: usize,
     scale: usize,
-    scenes: Vec<Scene>,
+    scenes: Vec<Content>,
     current: usize,
     image: Option<art::Image>,
     buf: Vec<u32>,
@@ -74,7 +74,10 @@ fn main() {
                 i += 1;
             }
             "--scale" => {
-                scale = next.and_then(|v| v.parse().ok()).filter(|s| (1..=9).contains(s)).unwrap_or_else(|| fail("--scale expects 1 to 9"));
+                scale = next
+                    .and_then(|v| v.parse().ok())
+                    .filter(|s| (1..=9).contains(s))
+                    .unwrap_or_else(|| fail("--scale expects 1 to 9"));
                 i += 1;
             }
             "--image" => {
@@ -84,6 +87,10 @@ fn main() {
             "--scene" => {
                 first = next.unwrap_or_default();
                 i += 1;
+            }
+            "--version" => {
+                println!("pixel-demo {}", env!("CARGO_PKG_VERSION"));
+                return;
             }
             "-h" | "--help" => {
                 println!("pixel-demo [--res WxH] [--scale 1-9] [--image file.png] [--scene scene|card|image]");
@@ -95,21 +102,27 @@ fn main() {
         i += 1;
     }
 
-    let image = image_path.as_deref().map(|p| art::load_png(p).unwrap_or_else(|e| fail(&e)));
+    let image = image_path
+        .as_deref()
+        .map(|p| art::load_png(p).unwrap_or_else(|e| fail(&e)));
     if let (Some(img), false) = (&image, res_given) {
         w = img.w;
         h = img.h;
     }
-    let mut scenes = vec![Scene::Scene, Scene::Card];
+    let mut scenes = vec![Content::Scene, Content::Card];
     if image.is_some() {
-        scenes.push(Scene::Image);
+        scenes.push(Content::Image);
     }
     let current = match first.as_str() {
         "card" => 1,
         "image" if image.is_some() => 2,
         _ => 0,
     };
-    println!("pixel-demo: source {w}x{h}, scale {scale}x, window client {}x{}", w * scale, h * scale);
+    println!(
+        "pixel-demo: source {w}x{h}, scale {scale}x, window client {}x{}",
+        w * scale,
+        h * scale
+    );
 
     unsafe {
         // Physical pixels everywhere so that the captured client area is exactly w*scale by h*scale.
@@ -125,7 +138,16 @@ fn main() {
         RegisterClassW(&class);
 
         APP.with(|a| {
-            *a.borrow_mut() = Some(App { w, h, scale, scenes, current, image, buf: vec![0; w * h], start: Instant::now() });
+            *a.borrow_mut() = Some(App {
+                w,
+                h,
+                scale,
+                scenes,
+                current,
+                image,
+                buf: vec![0; w * h],
+                start: Instant::now(),
+            });
         });
 
         let (ww, wh) = window_size(w * scale, h * scale);
@@ -163,7 +185,12 @@ fn fail(msg: &str) -> ! {
 
 /// Outer window size for a given client size.
 unsafe fn window_size(cw: usize, ch: usize) -> (i32, i32) {
-    let mut r = RECT { left: 0, top: 0, right: cw as i32, bottom: ch as i32 };
+    let mut r = RECT {
+        left: 0,
+        top: 0,
+        right: cw as i32,
+        bottom: ch as i32,
+    };
     let _ = AdjustWindowRectEx(&mut r, STYLE, false, WINDOW_EX_STYLE(0));
     (r.right - r.left, r.bottom - r.top)
 }
@@ -173,9 +200,9 @@ fn update_title(hwnd: HWND) {
         let a = a.borrow();
         let a = a.as_ref().unwrap();
         let name = match a.scenes[a.current] {
-            Scene::Scene => "scene",
-            Scene::Card => "card",
-            Scene::Image => "image",
+            Content::Scene => "scene",
+            Content::Card => "card",
+            Content::Image => "image",
         };
         format!("pixel-demo | {name} {}x{} x{}", a.w, a.h, a.scale)
     });
@@ -241,9 +268,9 @@ unsafe fn paint(hwnd: HWND) {
         let t = (a.start.elapsed().as_secs_f64() * 60.0) as u32;
         let (w, h) = (a.w, a.h);
         match a.scenes[a.current] {
-            Scene::Scene => art::draw_scene(&mut a.buf, w, h, t),
-            Scene::Card => art::draw_card(&mut a.buf, w, h, t),
-            Scene::Image => {
+            Content::Scene => art::draw_scene(&mut a.buf, w, h, t),
+            Content::Card => art::draw_card(&mut a.buf, w, h, t),
+            Content::Image => {
                 if let Some(img) = &a.image {
                     art::draw_image(&mut a.buf, w, h, img);
                 }

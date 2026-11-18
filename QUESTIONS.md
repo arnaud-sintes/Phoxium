@@ -219,6 +219,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** External-memory import, HDR swapchain colour spaces and present behaviour are driver-specific. Cross-adapter capture forces a copy and complicates interop (same-adapter requirement).
 - **Who:** USER, plus SPIKE if yes.
 - **Default:** Your own GPU is the only certified target, others best effort. Single adapter only: select the Vulkan device by the capture adapter's LUID and warn on mismatch.
+- **IMPLEMENTED differently (2026-11-18):** the scaffold does not match LUIDs yet. The Direct3D capture device uses the default adapter (NVIDIA on the dev machine) and the Vulkan device is the requested `--gpu`, else an NVIDIA discrete GPU, else any discrete GPU. The two agree on the dev machine, but nothing checks it and nothing warns on a mismatch. Which GPU composes the desktop is still unmeasured.
 
 ### HW-4 Host display classes
 - **Note (2026-11-18):** with SDR output, HDR display classes drop out of scope. Rolling scan (120 Hz or more) is deferred with it.
@@ -263,6 +264,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** A CPU copy costs several ms at 4K and defeats "fully GPU". Unreliable interop on one vendor changes the architecture. For a small source the CPU copy is trivial.
 - **Who:** SPIKE (SP-1).
 - **Default:** Measure both. Sonnet and Opus favour zero-copy with CPU as a diagnostic fallback, Fable favours CPU copy first and shared textures only if latency demands. Pick after measuring the capture size you actually use.
+- **IMPLEMENTED (2026-11-18):** the CPU round trip (staging texture, mapped copy, Vulkan staging buffer), as the first working path. Windows.Graphics.Capture only delivers a frame when the window content changes. The shared-handle path is not measured yet.
 
 ### CAP-3 Bit-exactness of the captured pixels
 - **Note (2026-11-18):** output is SDR only. Desktop HDR is off on the dev machine: the owner says so and both active monitors (Dell P2418D) have no HDR. The registry showed no HDR flag either way, so this rests on the hardware. If HDR were on, the capture would be scRGB with an SDR white level, and original code values would have to be recovered.
@@ -341,12 +343,14 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** Registered hotkeys swallow the key but do not steal focus. Low-level keyboard hooks look like keyloggers to antivirus and anti-cheat. A focusless fullscreen window can lock you out of the desktop visually.
 - **Who:** USER.
 - **Default:** A small set of registered hotkeys with a configurable, rarely used chord, no low-level hooks, and a fixed panic hotkey that always returns to windowed mode.
+- **IMPLEMENTED (2026-11-18), first part:** one registered hotkey, Ctrl+Alt+Q, which quits (it does not return to windowed mode yet). No hooks. A fullscreen output refuses to start if the hotkey cannot be registered.
 
 ### OUT-6 Present mode, vsync, tearing and VRR
 - **Q:** Default present mode (FIFO, mailbox, immediate with tearing)? Is tearing ever acceptable? What happens when the frame budget is missed? Does VRR engage for an unfocused output window, and is it wanted given rolling scan needs a fixed refresh?
 - **Why:** It trades latency against tearing and pacing, and interacts with VRR and the temporal model. VRR is the cleanest answer to cadence mismatch for 60 Hz sources, but is normally tied to the foreground application and can cause OLED flicker.
 - **Who:** USER plus SPIKE (SP-10).
 - **Default:** Vsync, never tear, immediate only as an opt-in low-latency mode. On overrun, drop to a lower quality tier and report it. Do not depend on VRR.
+- **IMPLEMENTED (2026-11-18), first part:** FIFO (vsync) only. No immediate mode, no quality tiers, VRR and latency not measured.
 
 ### OUT-7 Placement and scale of the tube on the output
 - **Q:** How is the virtual tube mapped to the output: fill height, fixed 4:3, true physical size (needs panel size and viewing distance), integer scale, user-set size, black surround; and how does it behave in a resizable window?
@@ -508,6 +512,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** "All parameters tunable live" and "physical" pull apart: free independent sliders allow tubes that cannot exist.
 - **Who:** USER.
 - **Default:** Two layers. Physical tube parameters (preset, rarely touched) and the tube's own user controls (brightness, contrast, focus, colour temperature) that act through the physics. An expert mode unlocks everything.
+- **DECISION (2026-11-18):** the owner chose independent parameters (mask type is a 3-way choice, every other look parameter is independent, "impossible tubes" are allowed, possibly with warnings). The two-layer default above is superseded.
 
 ## Colour and HDR
 
@@ -619,12 +624,14 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** It affects build complexity for a single developer, hot-reload productivity on a physics-heavy project, and which GLSL features are usable.
 - **Who:** SPIKE (SP-9) plus RESEARCH.
 - **Default:** glslang or glslc at build time, runtime compilation with hot reload in development builds, precompiled SPIR-V in release, parameters generated from one declarative table.
+- **IMPLEMENTED (2026-11-18), first part:** `glslc` at build time from a fixed shader list in `build.rs`, SPIR-V embedded in the binary. No hot reload and no parameter table yet.
 
 ### TEC-4 Windowing library
 - **Q:** winit or raw Win32 via the `windows` crate for the output window?
 - **Why:** Non-activating, topmost, click-through, capture-excluded windows, mouse-activate handling, per-monitor DPI v2 and two windows need Win32 details a portable library may fight (it may activate the window on show).
 - **Who:** SPIKE (SP-2).
 - **Default:** Raw Win32 for the output window, winit only if shown to cover all needed behaviour. Per-monitor DPI v2, swapchain at physical pixel size, no OS scaling on the output.
+- **IMPLEMENTED (2026-11-18):** raw Win32 through the `windows` crate (non-activating, topmost, tool window, `MA_NOACTIVATE`, per-monitor DPI v2). Click-through and capture exclusion are not done yet.
 
 ### TEC-5 ImGui binding
 - **Q:** Which Rust binding and Vulkan renderer for Dear ImGui (imgui-rs, dear-imgui-rs, cimgui-based), given maintenance status, and can input be fed manually from a custom Win32 window without focus? Is "ImGui" Dear ImGui specifically, with a native Rust GUI as a fallback only with your agreement?

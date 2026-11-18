@@ -23,7 +23,12 @@ impl Rect {
     pub fn clamp(self, w: u32, h: u32) -> Rect {
         let x = self.x.min(w);
         let y = self.y.min(h);
-        Rect { x, y, w: self.w.min(w - x), h: self.h.min(h - y) }
+        Rect {
+            x,
+            y,
+            w: self.w.min(w - x),
+            h: self.h.min(h - y),
+        }
     }
 }
 
@@ -31,7 +36,10 @@ impl FromStr for Rect {
     type Err = String;
     /// "x,y,w,h"
     fn from_str(s: &str) -> Result<Self, String> {
-        let v: Vec<u32> = s.split(',').map(|p| p.trim().parse().map_err(|_| format!("bad number in \"{s}\""))).collect::<Result<_, _>>()?;
+        let v: Vec<u32> = s
+            .split(',')
+            .map(|p| p.trim().parse().map_err(|_| format!("bad number in \"{s}\"")))
+            .collect::<Result<_, _>>()?;
         match v[..] {
             [x, y, w, h] if w > 0 && h > 0 => Ok(Rect { x, y, w, h }),
             _ => Err("expected x,y,w,h with a non-zero size".into()),
@@ -41,14 +49,20 @@ impl FromStr for Rect {
 
 /// Parses "N" or "NXxNY" into a horizontal and vertical divisor.
 pub fn parse_divisor(s: &str) -> Result<(u32, u32), String> {
-    let parse = |p: &str| p.parse::<u32>().ok().filter(|&n| n >= 1).ok_or_else(|| format!("bad divisor \"{s}\""));
+    let parse = |p: &str| {
+        p.parse::<u32>()
+            .ok()
+            .filter(|&n| n >= 1)
+            .ok_or_else(|| format!("bad divisor \"{s}\""))
+    };
     match s.split_once('x') {
         Some((a, b)) => Ok((parse(a)?, parse(b)?)),
         None => parse(s).map(|n| (n, n)),
     }
 }
 
-/// Frames analysed before the detected divisor is locked (unless x1 is certain earlier).
+/// Informative frames analysed before the detected divisor is locked (unless x1 is certain earlier).
+/// A flat frame (a black boot screen, a fade) is not informative and does not count.
 const DETECT_FRAMES: u32 = 30;
 /// Largest upscale factor considered.
 const MAX_K: usize = 32;
@@ -68,24 +82,35 @@ pub struct Detector {
 
 impl Default for Detector {
     fn default() -> Self {
-        Detector { cand_x: [true; MAX_K + 1], cand_y: [true; MAX_K + 1], frames: 0, locked: false }
+        Detector {
+            cand_x: [true; MAX_K + 1],
+            cand_y: [true; MAX_K + 1],
+            frames: 0,
+            locked: false,
+        }
     }
 }
 
 /// Marks the factors that do not explain the run lengths `runs` (first and last run dropped,
-/// they are cut by the analysed area).
-fn eliminate(cand: &mut [bool; MAX_K + 1], runs: &[u32]) {
+/// they are cut by the analysed area). Returns false when `runs` carries no information (fewer
+/// than three runs: a flat line says nothing about the scale).
+fn eliminate(cand: &mut [bool; MAX_K + 1], runs: &[u32]) -> bool {
     if runs.len() < 3 {
-        return;
+        return false;
     }
     let runs = &runs[1..runs.len() - 1];
     let total: u64 = runs.iter().map(|&r| r as u64).sum();
-    for k in 2..=MAX_K {
-        let bad: u64 = runs.iter().filter(|&&r| r as usize % k != 0).map(|&r| r as u64).sum();
+    for (k, candidate) in cand.iter_mut().enumerate().skip(2) {
+        let bad: u64 = runs
+            .iter()
+            .filter(|&&r| !(r as usize).is_multiple_of(k))
+            .map(|&r| r as u64)
+            .sum();
         if bad as f64 > TOLERANCE * total as f64 {
-            cand[k] = false;
+            *candidate = false;
         }
     }
+    true
 }
 
 fn best(cand: &[bool; MAX_K + 1]) -> u32 {
@@ -103,7 +128,11 @@ impl Detector {
 
     /// Divisor to use: (1, 1) until the detection is locked.
     pub fn divisor(&self) -> (u32, u32) {
-        if self.locked { (best(&self.cand_x), best(&self.cand_y)) } else { (1, 1) }
+        if self.locked {
+            (best(&self.cand_x), best(&self.cand_y))
+        } else {
+            (1, 1)
+        }
     }
 
     /// Analyses `region` of a BGRA8 frame that is `frame_w` pixels wide.
@@ -119,13 +148,14 @@ impl Detector {
         let mut runs = Vec::new();
         let mut vertical = Vec::new();
         let mut vertical_run = 0u32;
+        let mut informative = false;
         for y in y0..y1 {
             let current = row(y);
             // Horizontal runs of identical pixels, evaluated per row.
             runs.clear();
             let mut run = 0u32;
-            let mut previous: Option<&[u8]> = None;
-            for px in current.chunks_exact(4) {
+            let mut previous: Option<&[u8; 4]> = None;
+            for px in current.as_chunks::<4>().0 {
                 if previous == Some(px) {
                     run += 1;
                 } else {
@@ -137,7 +167,7 @@ impl Detector {
                 }
             }
             runs.push(run);
-            eliminate(&mut self.cand_x, &runs);
+            informative |= eliminate(&mut self.cand_x, &runs);
 
             // Vertical runs of identical rows.
             if y > y0 && row(y - 1) == current {
@@ -150,8 +180,11 @@ impl Detector {
             }
         }
         vertical.push(vertical_run);
-        eliminate(&mut self.cand_y, &vertical);
+        informative |= eliminate(&mut self.cand_y, &vertical);
 
+        if !informative {
+            return;
+        }
         self.frames += 1;
         let any = (2..=MAX_K).any(|k| self.cand_x[k] || self.cand_y[k]);
         self.locked = !any || self.frames >= DETECT_FRAMES;
@@ -168,14 +201,26 @@ pub struct View {
 
 impl View {
     pub fn full(w: u32, h: u32) -> Self {
-        View { origin: (0, 0), div: (1, 1), native: (w, h) }
+        View {
+            origin: (0, 0),
+            div: (1, 1),
+            native: (w, h),
+        }
     }
 
     pub fn new(region: Rect, div: (u32, u32)) -> Self {
         let native = (region.w / div.0, region.h / div.1);
         // A divisor that leaves almost nothing (for example on a flat frame) is not credible.
-        let (div, native) = if native.0 < 8 || native.1 < 8 { ((1, 1), (region.w, region.h)) } else { (div, native) };
-        View { origin: (region.x, region.y), div, native }
+        let (div, native) = if native.0 < 8 || native.1 < 8 {
+            ((1, 1), (region.w, region.h))
+        } else {
+            (div, native)
+        };
+        View {
+            origin: (region.x, region.y),
+            div,
+            native,
+        }
     }
 }
 
@@ -201,7 +246,16 @@ mod tests {
         let (data, fw, fh) = frame(w, h, kx, ky);
         let mut d = Detector::default();
         for _ in 0..DETECT_FRAMES {
-            d.feed(&data, fw, Rect { x: 0, y: 0, w: fw, h: fh });
+            d.feed(
+                &data,
+                fw,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: fw,
+                    h: fh,
+                },
+            );
         }
         d.divisor()
     }
@@ -217,7 +271,16 @@ mod tests {
     fn native_source_locks_to_one_immediately() {
         let (data, fw, fh) = frame(64, 48, 1, 1);
         let mut d = Detector::default();
-        d.feed(&data, fw, Rect { x: 0, y: 0, w: fw, h: fh });
+        d.feed(
+            &data,
+            fw,
+            Rect {
+                x: 0,
+                y: 0,
+                w: fw,
+                h: fh,
+            },
+        );
         assert!(d.is_locked());
         assert_eq!(d.divisor(), (1, 1));
     }
@@ -237,7 +300,52 @@ mod tests {
         }
         let mut d = Detector::default();
         for _ in 0..DETECT_FRAMES {
-            d.feed(&data, fw, Rect { x: 0, y: 0, w: fw, h: fh });
+            d.feed(
+                &data,
+                fw,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: fw,
+                    h: fh,
+                },
+            );
+        }
+        assert_eq!(d.divisor(), (3, 3));
+    }
+
+    #[test]
+    fn flat_frames_never_lock() {
+        let (fw, fh) = (192u32, 144u32);
+        let data = vec![0u8; (fw * fh * 4) as usize];
+        let mut d = Detector::default();
+        for _ in 0..DETECT_FRAMES * 2 {
+            d.feed(
+                &data,
+                fw,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: fw,
+                    h: fh,
+                },
+            );
+        }
+        assert!(!d.is_locked());
+        assert_eq!(d.divisor(), (1, 1));
+        // A real frame afterwards still detects the scale.
+        let (data, fw, fh) = frame(64, 48, 3, 3);
+        for _ in 0..DETECT_FRAMES {
+            d.feed(
+                &data,
+                fw,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    w: fw,
+                    h: fh,
+                },
+            );
         }
         assert_eq!(d.divisor(), (3, 3));
     }
@@ -247,6 +355,14 @@ mod tests {
         assert_eq!(parse_divisor("3"), Ok((3, 3)));
         assert_eq!(parse_divisor("2x4"), Ok((2, 4)));
         assert!(parse_divisor("0").is_err());
-        assert_eq!("1,2,30,40".parse::<Rect>(), Ok(Rect { x: 1, y: 2, w: 30, h: 40 }));
+        assert_eq!(
+            "1,2,30,40".parse::<Rect>(),
+            Ok(Rect {
+                x: 1,
+                y: 2,
+                w: 30,
+                h: 40
+            })
+        );
     }
 }

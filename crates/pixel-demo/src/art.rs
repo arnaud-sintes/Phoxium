@@ -12,6 +12,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 }
 
 /// Fills a rectangle, clipped to the buffer.
+#[allow(clippy::too_many_arguments)] // buffer, its size, a rectangle and a colour: a struct would only add noise
 fn fill(buf: &mut [u32], w: usize, h: usize, x0: i32, y0: i32, rw: i32, rh: i32, color: u32) {
     let xa = x0.max(0);
     let ya = y0.max(0);
@@ -81,7 +82,12 @@ fn draw_sprite(buf: &mut [u32], w: usize, h: usize, rows: &[&str], x: i32, y: i3
 /// and a static HUD (useful later for burn-in tests).
 pub fn draw_scene(buf: &mut [u32], w: usize, h: usize, t: u32) {
     let ground_y = (h - (h / 5).max(16)) as i32;
-    let sky = [rgb(60, 120, 230), rgb(92, 148, 252), rgb(140, 190, 252), rgb(188, 216, 252)];
+    let sky = [
+        rgb(60, 120, 230),
+        rgb(92, 148, 252),
+        rgb(140, 190, 252),
+        rgb(188, 216, 252),
+    ];
 
     // Sky with 4x4 ordered dither between the four bands.
     for y in 0..ground_y as usize {
@@ -140,7 +146,11 @@ pub fn draw_scene(buf: &mut [u32], w: usize, h: usize, t: u32) {
     // Hero walking back and forth, hopping once per second.
     let period = 480u32;
     let tt = t % period;
-    let (pos, flip) = if tt < period / 2 { (tt, false) } else { (period - tt, true) };
+    let (pos, flip) = if tt < period / 2 {
+        (tt, false)
+    } else {
+        (period - tt, true)
+    };
     let range = (w as i32 - 32).max(1);
     let hx = 16 + range * pos as i32 / (period / 2) as i32;
     let hop = (((t % 60) as f32 / 60.0 * std::f32::consts::PI).sin() * 14.0) as i32;

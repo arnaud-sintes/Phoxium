@@ -12,3 +12,6 @@ Thumbs.db
 # Generated captures and local state
 /captures/
 /tube-state/
+
+# Release packages
+/dist/

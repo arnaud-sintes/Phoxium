@@ -84,10 +84,12 @@ impl Capture {
 
         {
             let shared = shared.clone();
-            item.Closed(&TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(move |_, _| {
-                shared.closed.store(true, Ordering::Release);
-                Ok(())
-            }))?;
+            item.Closed(&TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(
+                move |_, _| {
+                    shared.closed.store(true, Ordering::Release);
+                    Ok(())
+                },
+            ))?;
         }
 
         {
@@ -102,16 +104,21 @@ impl Capture {
                 staging: None,
                 pool_size: (size.Width, size.Height),
             });
-            pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(move |pool, _| {
-                match pool.as_ref() {
+            pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
+                move |pool, _| match pool.as_ref() {
                     Some(pool) => worker.lock().unwrap().on_frame(pool),
                     None => Ok(()),
-                }
-            }))?;
+                },
+            ))?;
         }
 
         session.StartCapture()?;
-        Ok(Self { shared, pool, session, adapter })
+        Ok(Self {
+            shared,
+            pool,
+            session,
+            adapter,
+        })
     }
 
     /// Copies the newest frame into `into` if it is newer than `into.seq`. Returns true if it did.
@@ -161,7 +168,9 @@ unsafe impl Send for Worker {}
 
 impl Worker {
     fn on_frame(&mut self, pool: &Direct3D11CaptureFramePool) -> Result<()> {
-        let Ok(frame) = pool.TryGetNextFrame() else { return Ok(()) };
+        let Ok(frame) = pool.TryGetNextFrame() else {
+            return Ok(());
+        };
         let content = frame.ContentSize()?;
         let surface = frame.Surface()?;
         let access: IDirect3DDxgiInterfaceAccess = surface.cast()?;
@@ -172,16 +181,29 @@ impl Worker {
         let (cx, cy, cw, ch) = if self.crop {
             client_crop(HWND(self.hwnd_value as *mut c_void), desc.Width, desc.Height)
         } else {
-            (0, 0, desc.Width.min(content.Width as u32), desc.Height.min(content.Height as u32))
+            (
+                0,
+                0,
+                desc.Width.min(content.Width as u32),
+                desc.Height.min(content.Height as u32),
+            )
         };
         if cw > 0 && ch > 0 {
             if self.staging.as_ref().map(|s| (s.1, s.2)) != Some((cw, ch)) {
                 self.staging = Some((create_staging(&self.device, cw, ch)?, cw, ch));
             }
             let tex = &self.staging.as_ref().unwrap().0;
-            let region = D3D11_BOX { left: cx, top: cy, front: 0, right: cx + cw, bottom: cy + ch, back: 1 };
+            let region = D3D11_BOX {
+                left: cx,
+                top: cy,
+                front: 0,
+                right: cx + cw,
+                bottom: cy + ch,
+                back: 1,
+            };
             unsafe {
-                self.context.CopySubresourceRegion(tex, 0, 0, 0, 0, &texture, 0, Some(&region));
+                self.context
+                    .CopySubresourceRegion(tex, 0, 0, 0, 0, &texture, 0, Some(&region));
                 let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
                 self.context.Map(tex, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
                 {
@@ -236,7 +258,9 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String)> {
     }
     let dxgi: IDXGIDevice = device.cast()?;
     let adapter = unsafe { dxgi.GetAdapter()?.GetDesc()? };
-    let name = String::from_utf16_lossy(&adapter.Description).trim_end_matches('\0').to_string();
+    let name = String::from_utf16_lossy(&adapter.Description)
+        .trim_end_matches('\0')
+        .to_string();
     Ok((device, context, name))
 }
 

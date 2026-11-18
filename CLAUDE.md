@@ -51,13 +51,24 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 - `CRT.md`: consolidated knowledge about real-life CRT monitors relevant to this project.
 - `QUESTIONS.md`: open questions to resolve before the project starts.
 - `README.md`: how to build and run the scaffold.
+- `ARCHITECTURE.md`: architecture and architectural decisions (languages, API, modules, data flow, target pipeline).
+- `DESIGN.md`: coding rules, design patterns, good practices, known deviations.
+- `ENV.md`: how to set up, build, test, package, deploy and publish.
+- `CHANGELOG.md`: changes per version (Keep a Changelog, Semantic Versioning, one workspace version).
+
+## Conventions
+
+- **"Publish"** means the full release procedure of `ENV.md` section 7: version update, changelog update, build, test, commit and push, package, and publish as a release on GitHub. Anything shorter (a plain commit, a push) is not a publish.
+- Commit or push only when asked. Never publish without being asked.
 
 ## Repository layout
 
 Cargo workspace, Windows only. Private GitHub repository `arnaud-sintes/ultimateCRT`.
 - `crates/pixel-demo`: demo source app (Win32 and GDI), shows a pixel-art scene or test card at an integer scale. It is the capture target.
-- `crates/ultimatecrt`: the main app. `sources.rs` finds the window, `capture.rs` captures it (Windows.Graphics.Capture, CPU copy), `output.rs` is the Win32 output window, `gpu.rs` is the Vulkan renderer (ash).
+- `crates/ultimatecrt`: the main app. `sources.rs` finds the window, `capture.rs` captures it (Windows.Graphics.Capture, CPU copy), `scaling.rs` is the pure integer-upscale detection and crop logic (unit tested), `output.rs` is the Win32 output window, `gpu.rs` is the Vulkan renderer (ash).
 - `shaders/`: GLSL, compiled to SPIR-V by `crates/ultimatecrt/build.rs` with `glslc`.
+- `scripts/`: `package.ps1` (release zip) and `release.ps1` (GitHub release).
+- `rust-toolchain.toml`, `rustfmt.toml`: pinned toolchain and formatting.
 
 ## Status
 

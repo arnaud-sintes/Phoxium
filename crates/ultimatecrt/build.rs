@@ -17,7 +17,10 @@ fn glslc() -> PathBuf {
 fn main() {
     println!("cargo:rerun-if-env-changed=VULKAN_SDK");
     let out = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap()).join("..").join("..").join("shaders");
+    let dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap())
+        .join("..")
+        .join("..")
+        .join("shaders");
     for name in SHADERS {
         let src = dir.join(name);
         println!("cargo:rerun-if-changed={}", src.display());
