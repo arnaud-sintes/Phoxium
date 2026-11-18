@@ -309,7 +309,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Default:** None until measured.
 
 ### CAP-9 Capture pixel format and precision
-- **TESTED (2026-11-18, T-46):** dark-ramp banding check (	ests/stage_output.rs, dark_ramp_banding_with_and_without_dither): source codes 0 to 31, gamma 2.4, exposure 0.5, pure 2.2 host. Without dither the band error is up to 0.55 code (rounding plus the RTX A2000's ROP fuzz of 0.05); with dither no pixel is more than 0.98 code from the exact value and band means are within 0.01 (ordered, noise). The 8-bit source codes themselves are not enough to avoid banding on their own: the dither only removes the output quantisation.
+- **TESTED (2026-11-18, T-46):** dark-ramp banding check (tests/stage_output.rs, dark_ramp_banding_with_and_without_dither): source codes 0 to 31, gamma 2.4, exposure 0.5, pure 2.2 host. Without dither the band error is up to 0.55 code (rounding plus the RTX A2000's ROP fuzz of 0.05); with dither no pixel is more than 0.98 code from the exact value and band means are within 0.01 (ordered, noise). The 8-bit source codes themselves are not enough to avoid banding on their own: the dither only removes the output quantisation.
 - **Q:** Is 8-bit BGRA capture enough, or is an FP16 path needed (HDR sources)? Does 8-bit quantisation of dark codes before the tube gamma cause visible banding?
 - **Why:** Gamma 2.4 and rolling accumulation expose banding in dark tones.
 - **Who:** SPIKE.

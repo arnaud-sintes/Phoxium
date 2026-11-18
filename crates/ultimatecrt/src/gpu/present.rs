@@ -114,16 +114,9 @@ impl Presenter {
         let formats = ctx
             .surface_fn
             .get_physical_device_surface_formats(ctx.physical, self.surface)?;
-        let chosen = formats
-            .iter()
-            .find(|f| f.format == vk::Format::B8G8R8A8_UNORM && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR)
-            .or_else(|| {
-                eprintln!(
-                    "warning: the surface does not offer B8G8R8A8_UNORM with SRGB_NONLINEAR; using the first format, passthrough is not exact"
-                );
-                formats.first()
-            })
-            .ok_or("surface has no formats")?;
+        let offered: Vec<(vk::Format, vk::ColorSpaceKHR)> = formats.iter().map(|f| (f.format, f.color_space)).collect();
+        let (format, color_space) = choose_format(&offered)?;
+        let chosen = &vk::SurfaceFormatKHR { format, color_space };
         self.format = chosen.format;
         self.ten_bit_offered = formats.iter().any(|f| {
             matches!(
@@ -256,5 +249,47 @@ impl Presenter {
         for s in self.render_done.drain(..) {
             ctx.device.destroy_semaphore(s, None);
         }
+    }
+}
+
+/// Picks the swapchain format among the `(format, colour space)` pairs the surface offers: a UNORM
+/// format with `SRGB_NONLINEAR`, preferring B8G8R8A8, then R8G8B8A8 (both are dithered at 8 bits by
+/// `encode`; the 10-bit formats are not chosen until the swapchain handles them, see
+/// [`Presenter::ten_bit_offered`]). `encode` applies the host transfer itself, so an `*_SRGB` format
+/// would encode twice and switch the dither off: it is an error, never a fallback.
+fn choose_format(offered: &[(vk::Format, vk::ColorSpaceKHR)]) -> Res<(vk::Format, vk::ColorSpaceKHR)> {
+    for want in [vk::Format::B8G8R8A8_UNORM, vk::Format::R8G8B8A8_UNORM] {
+        if let Some(&pair) = offered
+            .iter()
+            .find(|&&(f, cs)| f == want && cs == vk::ColorSpaceKHR::SRGB_NONLINEAR)
+        {
+            return Ok(pair);
+        }
+    }
+    Err(format!("the surface offers no B8G8R8A8_UNORM or R8G8B8A8_UNORM format with SRGB_NONLINEAR (offered: {offered:?}); an _SRGB format would encode the output twice").into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NL: vk::ColorSpaceKHR = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+
+    #[test]
+    fn prefers_bgra_unorm_then_rgba_unorm() {
+        let all = [
+            (vk::Format::B8G8R8A8_SRGB, NL),
+            (vk::Format::R8G8B8A8_UNORM, NL),
+            (vk::Format::B8G8R8A8_UNORM, NL),
+        ];
+        assert_eq!(choose_format(&all).unwrap().0, vk::Format::B8G8R8A8_UNORM);
+        assert_eq!(choose_format(&all[..2]).unwrap().0, vk::Format::R8G8B8A8_UNORM);
+    }
+
+    #[test]
+    fn rejects_srgb_only_and_wrong_colour_space() {
+        assert!(choose_format(&[(vk::Format::B8G8R8A8_SRGB, NL), (vk::Format::R8G8B8A8_SRGB, NL)]).is_err());
+        assert!(choose_format(&[(vk::Format::B8G8R8A8_UNORM, vk::ColorSpaceKHR::EXTENDED_SRGB_LINEAR_EXT)]).is_err());
+        assert!(choose_format(&[]).is_err());
     }
 }

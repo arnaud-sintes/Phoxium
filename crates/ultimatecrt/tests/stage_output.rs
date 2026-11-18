@@ -16,12 +16,23 @@
 //!   - 0.055) = 255 x 0.04730 = 12.06, code 12.
 //! - SMPTE-C primaries with D65 to sRGB (matrix of `crt_model::output`, hand-checked there): the first
 //!   column (the red primary) is (0.9396, 0.0178, -0.0016), the second (green) (0.0502, 0.9658, -0.0044),
-//!   and the third (blue) (0.0103, 0.0164, 1.0060). Full red gives a negative blue channel (-0.0016) and full\n//!   green too (-0.0044): two gamut-clipped pixels; full blue gives 1.0060 in blue: one pixel over panel white;\n//!   rows sum to 1.
+//!   and the third (blue) (0.0103, 0.0164, 1.0060). Full red gives a negative blue channel (-0.0016) and full
+//!   green too (-0.0044): two gamut-clipped pixels; full blue gives 1.0060 in blue: one pixel over panel white;
+//!   rows sum to 1.
 //! - Exposure: linear in E, so 0.5 halves every value.
 //! - Shoulder with knee 0.8 at x = 1: 0.8 + 0.2 (1 - exp(-1)) = 0.926424; at x = 2: 0.8 + 0.2 (1 - exp(-6))
 //!   = 0.999505.
 //! - Ordered dither of the flat value 127.5 codes: thresholds (b + 0.5) / 64, b = 0..63; floor(127.5 + t) is 128
 //!   when t >= 0.5, i.e. for b >= 32: half of the pixels, mean 127.5 exactly, each pixel within 0.5 code.
+
+//! - Ordered dither at 127.25 and 127.75 codes (the fractional part f is the share of pixels that must round
+//!   up): thresholds t_b = (b + 0.5) / 64 and floor(c + t_b) = 128 when t_b >= 1 - f. For f = 0.25 that is
+//!   t_b >= 0.75, i.e. b + 0.5 >= 48, b >= 48 (b = 47 gives 0.7422 < 0.75): 16 of 64 thresholds, share 0.25,
+//!   mean exactly 127.25. For f = 0.75: t_b >= 0.25, b + 0.5 >= 16, b >= 16 (b = 15 gives 0.2422): 48 of 64,
+//!   share 0.75, mean exactly 127.75. A 256 x 256 field holds whole 8 x 8 tiles, so the ordered mean is exact
+//!   (tolerance 1e-3 for the f32 rounding of the input). Noise: each pixel is 127 or 128, a Bernoulli of
+//!   probability f, variance f (1 - f) <= 0.1875; the mean of N = 65536 pixels has a standard deviation of
+//!   sqrt(0.1875 / N) = 0.0017, so the tolerance is 5 sigma (0.0085) plus 0.01 for the hardware rounding fuzz.
 
 mod common;
 
@@ -580,6 +591,71 @@ fn dither_statistics_determinism_and_off() {
     // A float target is never dithered.
     let r = encode(&mut gpu, &flat, &p, Transfer::Identity, TargetFormat::Rgba32F, 0);
     assert!(r.output.rgba.chunks(4).all(|px| px[0] == v));
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Flat fields at 127.25 and 127.75 codes (fractional part other than one half), ordered and noise modes:
+/// means from the hand derivation in the module doc, every code within 1 of the exact value.
+#[test]
+fn dither_fractional_codes_other_than_one_half() {
+    let Some(mut gpu) = gpu("dither_fractional_codes_other_than_one_half") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (256u32, 256u32);
+    let n = f64::from(w * h);
+    let mean = |codes: &[i32]| codes.iter().map(|c| f64::from(*c)).sum::<f64>() / n;
+    let noise_tol = 5.0 * (0.1875 / n).sqrt() + 0.01;
+    for exact in [127.25f64, 127.75] {
+        let v = (exact / 255.0) as f32;
+        let flat = image(w, h, |_, _| [v, v, v]);
+        let mut p = Params::default();
+        dither_mode(&mut p, "ordered");
+        let o = codes_of(&encode(
+            &mut gpu,
+            &flat,
+            &p,
+            Transfer::Identity,
+            TargetFormat::Bgra8Unorm,
+            0,
+        ));
+        assert!((mean(&o) - exact).abs() < 1e-3, "ordered {exact}: mean {}", mean(&o));
+        assert!(
+            o.iter().all(|k| (f64::from(*k) - exact).abs() < 1.0),
+            "ordered {exact}: error above 1"
+        );
+        for y in 0..h {
+            for x in 0..w {
+                let want = dithered_code(f64::from(v), 255.0, ordered_threshold(x, y));
+                assert_eq!(
+                    f64::from(o[(y * w + x) as usize]),
+                    want,
+                    "ordered {exact} pixel ({x}, {y})"
+                );
+            }
+        }
+        dither_mode(&mut p, "noise");
+        for frame in [0u32, 1] {
+            let c = codes_of(&encode(
+                &mut gpu,
+                &flat,
+                &p,
+                Transfer::Identity,
+                TargetFormat::Bgra8Unorm,
+                frame,
+            ));
+            assert!(
+                (mean(&c) - exact).abs() < noise_tol,
+                "noise {exact} frame {frame}: mean {} (tolerance {noise_tol})",
+                mean(&c)
+            );
+            assert!(
+                c.iter().all(|k| (f64::from(*k) - exact).abs() < 1.0),
+                "noise {exact} frame {frame}: error above 1"
+            );
+        }
+    }
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

@@ -359,12 +359,7 @@ impl Headless {
             s.image_readbacks.push(buf);
             images.push((r, size, fmt));
         }
-        let to_host = [vk::MemoryBarrier2::default()
-            .src_stage_mask(vk::PipelineStageFlags2::COPY | vk::PipelineStageFlags2::FRAGMENT_SHADER)
-            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE | vk::AccessFlags2::SHADER_STORAGE_WRITE)
-            .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
-        d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&to_host));
+        super::pipeline::barrier_to_host(d, cb, true);
 
         let fence = self.pipeline.submit(ctx, &[], &[], &[])?;
         d.wait_for_fences(&[fence], true, u64::MAX)?;
