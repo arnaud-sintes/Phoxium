@@ -30,7 +30,7 @@ Treat every [E] number as a default for a slider, never as a specification.
 5. **Host pixels are the bottleneck.** A PVM-class mask (0.25 to 0.31 mm pitch) gives only about 2.3 to 2.7 host pixels per triad on a 4K panel for a 4:3 image. At least 3 are needed. Below that the mask must be area-filtered or enlarged, otherwise host-grid moiré appears that no real tube ever showed.
 6. **Light is emitted in short pulses.** At 60 Hz a 100 cd/m² average implies about 10³ to 10⁴ cd/m² instantaneous at the beam. No panel reproduces that, so rolling-scan simulation trades peak brightness against motion clarity.
 7. **Halation is a ring, not a blur.** Light trapped in the faceplate returns at a radius of about 1.75 times the glass thickness (about 17 to 25 mm on a typical tube).
-8. **Phosphor decay is colour dependent and non-exponential.** Red is near-exponential (about 1 to 2 ms). Green and blue drop fast, then keep a 0.5 to 1 % power-law tail into the next frame.
+8. **Phosphor decay is colour dependent and non-exponential.** Red is near-exponential (about 1 to 2 ms). Green and blue drop within microseconds, then keep a heavy power-law tail (exponent about 1.1) that puts about 5 % of a frame's light into the next frame at 60 Hz (one measured monitor, see "Decay and persistence").
 9. **A real CRT does not colour-convert.** Source RGB values drive the cathodes directly and the tube's own primaries and white point define the colour. A faithful model reinterprets RGB, with a configurable source EOTF.
 10. **Almost everything about an individual consumer set is unmeasured.** Pitch, spot size, decay, curvature and glass are weakly documented. Design every one of them as a parameter with a preset, not a constant.
 
@@ -228,9 +228,13 @@ Cross-check: Sony TVL ratings match picture height / pitch to within about 15 % 
 | 21 in CCTV (Samsung) | stripe | 0.70 (about 610 triads) | [S] |
 | Panasonic 9 in tube A22JWG098X | stripe | 0.50 | [S] |
 | Unidentified 19 in arcade monitor | dot or slot | 0.81 | [S] forum |
-| 13 to 14 in TV | slot or AG | 0.45 to 0.65 | [E] |
-| 19 to 21 in TV, 19 in arcade | slot | 0.6 to 0.8 | [E] |
-| 25 to 29 in TV | slot | 0.75 to 0.9 | [E] |
+| RCA A36ACG10X, 36 cm (14V), 90° | slot, line screen | 0.66 | [S] RCA 1983 datasheet |
+| RCA A51ACG20X, A51ABU10X, A51ACC10X, 51 cm (20V), 90° and 110° | slot, line screen | 0.84 | [S] RCA 1983 datasheet |
+| RCA A66ABU10X, 66 cm (26V), 110° | slot, line screen | 0.82 | [S] RCA 1983 datasheet |
+| RCA A68ACC10X, 68 cm (27V), 110° | slot, line screen | 0.84 | [S] RCA 1983 datasheet |
+| 13 to 14 in TV | slot or AG | 0.45 to 0.66 | [E] (upper end [S] RCA) |
+| 19 to 21 in TV, 19 in arcade | slot | 0.6 to 0.85 | [E] (upper end [S] RCA) |
+| 25 to 29 in TV | slot | 0.75 to 0.9 | [E] (RCA 0.82 to 0.84 [S]) |
 | 32 to 36 in TV | slot or AG | about 0.8 to 1.0 | [E] |
 
 General ranges: PC monitors 0.22 to 0.28 (0.39 at the low end), all colour CRTs 0.22 to 0.40, up to 0.80 or more on the largest. [S]
@@ -332,7 +336,12 @@ Working defaults at screen centre (FWHM, mid drive; estimates, treat as tunable)
 
 - Space-charge repulsion at the crossover enlarges the virtual object, and spherical aberration adds a term. Best-focus voltage also shifts with current. [S]
 - Datapoints: 0.4, 0.5, 0.6 mm at 100, 200, 400 µA (exponent about 0.29). [S][D] Projection-gun rule of thumb: diameter ∝ √I, about +40 % from 1 to 2 mA. [S]
-- Model: d² = d0² + k·I^(2n), n between 0.3 and 0.5, with a non-zero floor d0 set by the gun optics. [E]
+- Colour-tube datapoints (T-63, all from patents; the measurement level is not stated unless given):
+  - Hitachi 51 cm colour monitor tube, 0.25 mm mask pitch: 0.45, 0.57, 0.70 mm at 100, 300, 500 µA cathode current (US 5,814,930). Exponent about 0.27 overall (0.22 from 100 to 300 µA, 0.40 from 300 to 500 µA). The patent calls 500 µA the "maximum allowable" current of the monitor and says moiré is not seen above 0.45 mm. [S][D]
+  - Panasonic 76 cm, 106° colour TV: smallest spot about 0.9 mm at about 0.5 mA and about 1.9 mm at 3.0 mA, each at its own optimum G2 voltage (US 6,605,898). Exponent about 0.42. [S][D]
+  - Typical bipotential colour-TV gun at 4.0 mA: centre spot "typically in the 100-140 mil range" (2.5 to 3.6 mm) with the edge at 10 % of peak current density (US 4,529,910). For a Gaussian that is about 1.4 to 2.0 mm FWHM. [S][D]
+- Apparent exponents of d against I from colour tubes span 0.22 to 0.42, consistent with the monochrome 0.29. Because the floor d0 lowers the apparent exponent, n in the model below is at least these values; the sourced span supports n = 0.2 to 0.5. [D]
+- Model: d² = d0² + k·I^(2n), n between 0.2 and 0.5 (was 0.3 to 0.5 before T-63), with a non-zero floor d0 set by the gun optics. [E][D]
 - With I ∝ V^γ, width versus video level goes roughly as V^0.7 to V^1.2 above the floor. [D]
 - Black to full white changes width by a factor of about 1.5 to 2.5 (up to 3 in poor consumer tubes). [E]
 - ABL and amplifier limits cap the growth. [S]
@@ -500,27 +509,48 @@ Published values conflict by up to about 100 times (see "Resolved conflicts" for
 | Green ZnS:Cu,Al | 35 µs (AST/APACE) or 6 ms (Sherr) | 7.5 ms | 0.95 % | 0.6 % |
 | Blue ZnS:Ag | 80 µs (AST/APACE) or 4.8 ms (Sherr) | 7.0 ms | 0.9 % | 0.5 % |
 
+- The "Time to 1 %" and residual columns come from US 5,825,124 (Sony), Table 1. The patent gives the residuals relative to "the maximum afterglow intensity peak" after excitation "by an electron beam" and states no pulse length, beam current or raster. They are therefore not fractions of an impulse-response peak (T-63). [S]
+- Its τ column is labelled "τ (1/100)" in the table but "reduced to 1/000" in the text, so the threshold of the "Time to 1 %" column is uncertain. [S]
+- The same patent adds 2 to 10 ppm Ni ("killer") to the sulfides: the 8 ms residual falls from 0.966 % to 0.220 % (2 ppm) and 0.072 % (10 ppm) for green, and from 0.885 % to 0.295 % and 0.052 % for blue, at about 10 to 14 % luminance loss (2 ppm). Tail strength therefore varies more than tenfold between phosphor batches. [S]
+- Kuhn (2002) measured a P22 VGA monitor (640×480 at 85 Hz, photomultiplier, 5 GHz sampling over 40 µs for a single pixel, 125 MHz over 2 ms for a 320-pixel line) and fitted sums of exponentials plus a power law per phosphor (table below). Times to a fraction of the impulse peak derived from that fit: green 12 µs to 10 %, 0.14 ms to 1 %, 3.5 ms to 0.03 %; blue 0.45 µs, 21 µs, 0.61 ms; red 32 µs, 0.89 ms, 2.4 ms. [S][D]
 - A red channel on an Iiyama HM204DT (Diamondtron) peaked 0.18 ms after excitation and decayed to zero within 2 ms (Elze). [S]
-- A residue of about 4 % after 20 ms was reported on some monitors (Wolf and Deubel 1997). Frame-sequential stereo crosstalk reached 8.5 % on a P22 monitor at 122.6 Hz. [S]
+- A residue of about 4 % after 20 ms was reported on some monitors (Wolf and Deubel 1997). That paper ("P31 phosphor persistence at photopic mean luminance level", Spatial Vision 10(4)) measured a P31 monochrome phosphor, not P22, so it does not bound the colour-tube trail (T-63; title and abstract seen in search results only, full text not fetched). Frame-sequential stereo crosstalk reached 8.5 % on a P22 monitor at 122.6 Hz. [S]
 - A residue of 0.5 % linear is about sRGB code 16 of 255, so a white object moving over black leaves a visible greenish-cyan trail for a frame or two. [D]
 - A tail can only be ignored once it falls below a linear level of about 0.0003. A power-law tail can stay above that for up to a second. [S]
 - Red is slower to reach 10 %. Green and blue are slower below 1 %, so both statements about "which colour trails" are true at different levels. [S][D]
 
-Recommended model per colour:
+Recommended model per colour (impulse response, sum of exponentials plus one power law):
 
 ```
-I(t) = A * exp(-t / tau) + B * (1 + t / t0) ^ (-n)
+I(t) = sum_i A_i * exp(-t / tau_i) + B * (1 + t / t0) ^ (-n)      normalised so that I(0) = 1
 ```
 
-| Channel | Fast term | Tail term (calibrate to the residual table) | Tag |
+Constants from Kuhn (2002), equations 8 to 10, measured on one P22 monitor (exact P22 variant unknown), rewritten in this form (Kuhn's terms A·exp(−2π f t) give tau = 1/(2π f); his power law a·((t + α)/1 s)^(−β) gives t0 = α, n = β, B = a·α^(−β)), then divided by I(0):
+
+| Channel | Exponential terms A_i (tau_i) | Power-law term B, t0, n | Tag |
 |---|---|---|---|
-| Red | A = 1, tau = 0.4 to 0.6 ms | none, or a weak slow component to match 0.25 % at 8 ms | [D][E] |
-| Green | tau = 0.03 to 0.1 ms | B ≈ 0.046, t0 = 1 ms, n ≈ 0.72 (fits 0.95 % at 8 ms, 0.6 % at 16 ms, 1 % at 7.3 ms) | [D] fitted to patent residuals |
-| Blue | tau = 0.03 to 0.1 ms | B ≈ 0.04 to 0.05, t0 = 1 ms, n ≈ 0.7 to 0.8 | [D] fitted to patent residuals |
+| Red | 0.0741 (442 µs), 0.0324 (99.5 µs), 0.0370 (19.9 µs), 0.0417 (6.37 µs), 0.2778 (0.227 µs), 0.5370 (0.0227 µs) | none ("decays purely exponentially") | [S] fit by Kuhn, [D] normalisation |
+| Green ZnS:Cu,Al | 0.1042 (1.061 µs), 0.2815 (0.227 µs), 0.2534 (0.0318 µs) | B = 0.3609, t0 = 5.5 µs, n = 1.1 | [S] fit by Kuhn, [D] normalisation |
+| Blue ZnS:Ag | 0.0323 (1.592 µs), 0.4309 (0.145 µs), 0.4740 (0.0398 µs) | B = 0.0627, t0 = 5 µs, n = 1.11 | [S] fit by Kuhn, [D] normalisation |
 
-- Between 8 and 16 ms the sulfide tail falls by only 0.56 to 0.63 times, a power law of about t^−0.7 to t^−0.85. [D]
-- With a red 1/e time of 0.4 ms, the visibly bright band (above 10 %) is about 1 ms tall, about 16 lines of a 262-line field. The fast sulfide component is confined to one or two lines behind the beam. [D]
-- At 60 Hz, green and blue have vanished within a few percent of the frame except for the tail. Red persists for about 6 % of the frame.
+Frame-energy ratios of these constants for a pixel excited once (E_k = integral of I over frame k, frame 0 = [0, T]): [D]
+
+| Channel | Rate | E1/E0 | E2/E0 | E3/E0 |
+|---|---|---|---|---|
+| Green | 60 Hz | 5.36 % | 2.97 % | 2.03 % |
+| Blue | 60 Hz | 4.72 % | 2.60 % | 1.78 % |
+| Red | 60 Hz | below 1e-6 | 0 | 0 |
+| Green / blue | 50 Hz | 5.19 % / 4.57 % | | |
+| Green / blue | 120 Hz | 6.09 % / 5.37 % | | |
+
+- Kuhn notes that n must exceed 1 for the emitted energy to be finite, and that his measurement "was not designed to estimate" n. His records end at 2 ms, so everything the table says beyond about 2 ms (including E1 to E3) is an extrapolation of the fitted power law. [S]
+- With n = 1.1, about 21 % (green) and 19 % (blue) of the light emitted within 1 s of an excitation comes after the first 60 Hz frame. A static image therefore gets about a fifth of its green and blue luminance from earlier frames' tails, which the frame-feedback normalisation must absorb. [D]
+- Cross-check with the patent residuals: for a rectangular excitation of length D, the residual relative to the level at the end of the excitation, from Kuhn's green fit, is 0.23 % / 0.11 % at 8 / 16 ms for D = 0.1 ms and 1.36 % / 0.66 % for D = 1 ms (blue 1.17 % / 0.56 %). The patent's 0.95 % / 0.6 % (green) and 0.9 % / 0.5 % (blue) therefore fit an excitation of somewhat under 1 ms, but not an impulse (0.012 % / 0.006 % of the impulse peak for green). [D]
+- Between 8 and 16 ms the patent residuals fall by only 0.56 to 0.63 times (a local power law of about t^−0.7 to t^−0.85), slower than Kuhn's t^−1.1. If the patent slope applies, E1/E0 is somewhat higher than the table. [D]
+- Cross-check with frame-sequential stereo: at 120 Hz the fit gives about 6 % green trail energy; the 8.5 % crosstalk measured on a P22 monitor at 122.6 Hz also includes shutter leakage and timing, so its phosphor part is below 8.5 %. Same order of magnitude, while the superseded fit below gives 31 %. [D]
+- Superseded (T-63): the earlier fit A = 1, tau = 0.03 to 0.1 ms, B ≈ 0.046, t0 = 1 ms, n ≈ 0.72 anchored the patent residuals to an impulse peak. That makes the tail about 75 times too strong relative to the fast part (0.90 % against 0.012 % of the peak at 8 ms), gives E1/E0 = 29.7 % at 60 Hz, and has n < 1 (infinite total energy). Do not use it. [D]
+- With a red 1/e time of 0.44 ms (slowest red term), the visibly bright band (above 10 % of that term) is about 1 ms tall, about 16 lines of a 262-line field. The fast sulfide components are confined to a fraction of one line behind the beam. [D]
+- At 60 Hz, red has emitted 91 % of its energy within 1 ms and practically all within 2 ms. Green and blue emit about half their first-frame energy within 0.1 ms and about three quarters within 1 ms; the rest is the power-law tail. [D]
 
 ### Saturation and ageing
 
@@ -600,6 +630,9 @@ k = Lw / (1 + b)^2.6
 
 - **ABL** senses average anode current at the flyback and reduces contrast (sometimes brightness) above a limit. It responds to the frame average with a time constant of several fields up to about a second. [S][E]
 - Threshold is about 0.5 to 2 mA average on TVs and 0.3 to 1 mA on monitors. [E]
+- Sourced TV values (T-63): RCA/Thomson average limiter activated at 1.4 mA, lowered to about 1 mA or 0.7 mA in a peak-responsive mode, with peak current about 25 % above average (US 5,313,294). [S]
+- Timing: limiting starts after about 0.1 s and reaches steady state about 0.5 s after the threshold is crossed (US 4,330,792, one RCA example); a prior-art average filter has a time constant of about 5 field periods (Sutherland US 4,689,668, as described in EP 0 394 003). [S]
+- No source found for the contrast reduction at full-field white; the 30 to 60 % figure stays an estimate.
 - Full-field white is typically 30 to 60 % of a small white window on consumer sets. PVM/BVM and good monitors have very mild ABL. [E]
 - Model: global contrast gain g = 1/(1 + k·max(0, APL_filtered − I_th)) or clipped linear, driven by a low-pass of mean beam current. [E]
 - **Raster blooming ("breathing"):** EHT sags with beam current. Raster size scales as 1/√V, so a 5 % sag enlarges the picture by about 2.5 %. [D]
@@ -623,7 +656,13 @@ k = Lw / (1 + b)^2.6
 - Refractive index n about 1.52 (CRT panel glass 1.52 to 1.54). Critical angle θc = asin(1/n) ≈ 41°. [K][D]
 - Standard panel transmittances at 546 nm through 10.16 mm of glass: 86, 73, 57, 46, 42 and 30 %. One 21 in tube lists 43 % at screen centre; another 49 ± 3 % for the bulb plus a bonded AR front panel of about 95 %. [S]
 - Rough classes: clear 85 to 90 %, grey 70 to 75 %, dark tint 40 to 55 %, extra dark 30 to 40 %. [S][E]
-- Thickness is about 10 to 14 mm at the centre on 14 to 21 in tubes (not found in a primary source). Flat-face tubes are thicker at the edges (12 to 16 mm centre, 20 to 30 mm corner, estimate). With tint, edges darken as T_edge = T_centre^(t_edge/t_centre). [E][D]
+- Centre thickness, sourced from patents (T-63): [S]
+  - LG.Philips claims 9 to 11.5 mm for 4:3 tubes of 400 to 500 mm diagonal, 10 to 12.4 mm for 4:3 tubes of 570 to 700 mm, and 11 to 13.4 mm for 16:9 tubes of 650 to 760 mm (US 7,176,611).
+  - Toshiba 26 in curved tube: 12.0 mm at the centre, 14.7 to 15.7 mm at the edge centres and corner (US 4,537,322, first example).
+  - Mitsubishi flat-outside tubes: 12 mm (41 cm) and 14 mm (50 cm) (US 6,133,686).
+  - Sony 28 in flat-face tube: 15 mm at the centre, 18 mm at the periphery (US Re. 39,739).
+- So about 9 to 13.5 mm at the centre for 400 to 760 mm diagonals, up to 15 mm on a 28 in flat-face tube. Flat-face edges are thicker (18 mm on the Sony example; 20 to 30 mm at the corners remains an estimate). With tint, edges darken as T_edge = T_centre^(t_edge/t_centre). [S][E][D]
+- RCA 1983 colour TV tube datasheets give 84 to 85.5 % light transmittance at the centre of the faceplate (clear glass) for 36 to 68 cm tubes, all with "Medium Short" persistence phosphors. [S]
 - Grey glass attenuates emitted light once and reflected ambient light twice, so ambient contrast improves by about 1/T. [S][D]
 
 ### Halation (internal reflection ring)
@@ -635,6 +674,8 @@ k = Lw / (1 + b)^2.6
 - The returned light crosses the tinted glass obliquely twice more. Relative to the direct image it is attenuated by about T^2.65. For T = 0.46 that factor is 0.13; for T = 0.86 it is 0.67. Dark glass therefore suppresses halation strongly. [D]
 - The black matrix absorbs returning light in proportion to its area fraction.
 - Amplitude: estimates range from about 1 to 5 % of the source energy in the halo (Sonnet and Opus agents) to a total stray light of 0.5 to 1 % at the centre of a dark patch inside a bright surround (Fable agent, from measured ANSI contrast). Treat as a tunable of about 0.5 to 5 %. [E]
+- Measured total veiling glare (T-63): Flynn and Badano (1999) report a glare ratio (test image with a 1 cm black spot) of 25 for a colour monitor, 89 for a monochrome monitor and 555 for film. Read as surround luminance over spot-centre luminance (the abstract does not define it further), a ratio of 25 means stray light at the centre of the spot of about 4 % of the surround; the 240 of a high-performance medical monitor means about 0.4 %. [S][D]
+- These bound all stray-light mechanisms together, halation included. No source separates the halation ring amplitude, so the 0.5 to 5 % range is kept, with 4 % total glare as a sourced upper reference for a colour monitor. [E]
 - Shader model: convolve linear emitted luminance with a kernel of annulus (r ≈ 1.74 t, width ≈ t) plus short-range diffusion, applied in linear light. [E]
 
 ### Other stray-light mechanisms (1990s medical-display research)
@@ -710,8 +751,8 @@ k = Lw / (1 + b)^2.6
 |---|---|---|
 | Spherical "1R" | Most pre-1990 TVs and monitors | R = 1.767 × effective diagonal (patent definition). A 26 in (66 cm) tube gives about 1.17 m, a 14 in (35.6 cm) tube about 0.63 m [S][D] |
 | Flatter spherical (1.5R to 2R, "FST", "flat square") | Late-1980s/90s | 1.5 to 2 times the 1R radius; the exact FST value is not confirmed. Inner surfaces range from 1.2R to 8R in patents [S] |
-| Cylindrical | Sony Trinitron, Diamondtron | Curved horizontally, flat vertically. No numeric horizontal radius was found by any agent [S] |
-| Flat outer face, curved inner face | FD Trinitron, Diamondtron NF, PureFlat, DynaFlat, Flatron, Real Flat | Outer surface flat, inner curved with a large radius; the glass is thicker at the edges; the image looks slightly concave through refraction [S][K] |
+| Cylindrical | Sony Trinitron, Diamondtron | Curved horizontally, flat vertically [S]. No Sony or Mitsubishi product radius was found. A design calculation in US 5,386,174 (individual inventor, not a product) for a 106°, 680 mm diagonal Trinitron-type panel gives an outer horizontal radius of 1594 to 2100 mm (inner 1413 to 1803 mm, about 1.3 to 1.75 times the 1R value of 1202 mm) and an outer vertical radius of 40,000 mm [S][D]. A Sony web page reportedly gives about 2,000 mm for conventional Trinitrons (search summary only, not verified) |
+| Flat outer face, curved inner face | FD Trinitron, Diamondtron NF, PureFlat, DynaFlat, Flatron, Real Flat | Outer surface flat, inner curved with a large radius; the glass is thicker at the edges; the image looks slightly concave through refraction [S][K]. Inner radius examples: about 10,000 mm on a Sony 28 in flat-face tube (US Re. 39,739); 2,300 mm horizontal on a Mitsubishi 41 cm and 2,500 mm on a 50 cm flat tube, the latter with an outer radius of 50,000 mm (US 6,133,686) [S] |
 
 - Corner sagitta s = R − √(R² − (D/2)²): [D]
 
@@ -801,7 +842,7 @@ k = Lw / (1 + b)^2.6
 
 | Host rate | What can be represented |
 |---|---|
-| 60 Hz | Only the time-integrated frame. Persistence can only appear as a frame-to-frame trail (previous frame times a colour-dependent residual of about 0.5 to 4 %) |
+| 60 Hz | Only the time-integrated frame. Persistence can only appear as a frame-to-frame trail: previous frames weighted by the per-frame energy ratios E_k/E0 of "Decay and persistence" (about 5 %, 3 %, 2 % for green and blue at k = 1, 2, 3; red below 1e-6) [D] |
 | 120 / 240 / 480 Hz | N sub-frames per CRT frame. In sub-frame k only the band of lines scanned during [k/N, (k+1)/N) is lit, plus decaying contributions from earlier bands (Blur Busters approach). Blur reduction for 60 fps content is about 50 %, 75 % and 87.5 % |
 
 - cgwg's estimate for convincing temporal emulation: 4 sub-frames at 240 Hz, 8 at 480 Hz, 16 at 960 Hz. [S]
@@ -833,7 +874,7 @@ k = Lw / (1 + b)^2.6
 | Vignetting | Oblique landing, mask grading, glass thickness | Corners 70 to 90 % of centre |
 | Colour impurity patches | Landing errors, magnetisation, doming | Mask shift 10 to 100 µm |
 | Damper-wire shadows | Wires across the aperture grille | 1 to 3 faint lines, 10 to 30 µm wires, at about 1/3 and 2/3 height |
-| Phosphor trails | Power-law sulfide afterglow, red tail | 0.5 to 4 % after one frame |
+| Phosphor trails | Power-law sulfide afterglow (green, blue) | About 5 % of a frame's green and blue energy in the next frame at 60 Hz, 3 % and 2 % in the two after (one measured monitor; Ni-killed phosphors lower); red negligible |
 | Flicker | Impulse emission | Visible below about 75 Hz on bright fields |
 | Gamma and black-level shifts | Brightness control offset in the gun law | Effective gamma 2.4 to 2.6; darker mid-tones than sRGB |
 | White-point tint | Gun gain ratios | 6500 K to 9300 K and beyond |
@@ -934,12 +975,12 @@ Other defaults:
 ```
 Gun gamma           2.4 (range 2.2 to 2.6); per-channel cutoff offset +/- 0 to 5 % of drive
 Beam shape          generalised Gaussian p = 2.0 at low drive, 2.3 to 2.8 at high drive; tail 2 to 10 % weight
-Spot growth         d^2 = d0^2 + k * I^(2n), n 0.3 to 0.5; width x1.5 to 2.5 black to white
+Spot growth         d^2 = d0^2 + k * I^(2n), n 0.2 to 0.5 (T-63); width x1.5 to 2.5 black to white
 Overscan            3 to 8 % each axis (TV); underscan available on PVM/BVM
 Convergence error   centre 0 to 0.15 mm, corners 0.2 to 0.5 mm (PC/PVM) or 0.5 to 1.5 mm (TV)
 Vignette            corners 0.7 to 0.9 of centre
 Halation            ring radius 1.74 t, total weight 0.5 to 5 %
-ABL                 threshold about 0.5 to 2 mA average; up to 30 to 50 % contrast loss at full-field white
+ABL                 threshold about 0.5 to 2 mA average (1.4 mA sourced TV example); onset about 0.1 s, settled about 0.5 s (T-63); up to 30 to 50 % contrast loss at full-field white (estimate)
 Raster blooming     +1 to 5 % size at full white (unregulated), under 1 % (regulated)
 Glass transmission  clear 0.85, grey 0.72, dark 0.45 to 0.55
 Faceplate reflect   bare 4.3 %, AR 0.5 to 2 %, etched under 1 % specular with haze
@@ -965,6 +1006,7 @@ Corner radius       15 to 40 mm
    - The model in "Decay and persistence" is fitted to the patent residuals and gives 1 % at 7.3 ms for green.
    - The Opus agent's own default table (green, t0 = 10 µs, n = 1.2) gives about 0.014 % at 16.7 ms, not the "0.5 to 2 %" it claims. The Fable-style tail parameters were adopted instead.
    - The Sonnet default (slow green term of 800 µs with weight 0.3) is inconsistent with the patent residuals and was dropped.
+   - **Revised by T-63.** The fit above was itself wrong: the patent residuals are relative to the afterglow peak after an excitation of unstated length, not to the impulse peak, and n = 0.72 gives infinite energy. Integrated over 60 Hz frames it put 29.7 % of a frame's green energy into the next frame. It is replaced by Kuhn's (2002) measured P22 impulse response (E1/E0 about 5 % green and blue at 60 Hz), which also reproduces the patent residuals for an excitation of somewhat under 1 ms.
 4. **Aperture-grille transmission.**
    - Wikipedia's "Trinitron cuts off about 25 %" is flagged citation-needed. All three agents read it as 25 % transmitted, because a three-colour mask cannot pass more than one third per beam.
    - Adopted: 20 to 27 % transmitted (geometric estimate, no primary measurement found).
@@ -989,13 +1031,13 @@ Corner radius       15 to 40 mm
 These are the places where no agent found reliable data.
 They are the main inputs for QUESTIONS.md.
 
-- **Spot size versus current for colour tubes.** Only one complete table exists, for a monochrome 21 in medical tube. No measured TV or PVM table. The growth exponent ranges from 0.29 (datasheet) to 0.5 (rule of thumb).
-- **Phosphor decay.** Per-colour curves are not verified against a phosphor handbook or measurement. The green and blue tail shape is the biggest uncertainty.
-- **Consumer TV pitch, faceplate thickness, slot bridge geometry, lit-area fractions, dot diameters.** Estimates only.
+- **Spot size versus current for colour tubes.** One complete table exists, for a monochrome 21 in medical tube. T-63 added colour-tube points from patents (a 51 cm monitor tube at three currents, a 76 cm TV at two, a typical TV gun at 4 mA), mostly without a stated measurement level. Still no PVM/BVM data and no full curve at a defined level. Apparent exponents span 0.22 to 0.42.
+- **Phosphor decay.** One measured P22 impulse response (Kuhn 2002, one monitor, records up to 2 ms) is now the default. The tail beyond 2 ms (exponent n), its variation between phosphor batches (Ni killer: more than tenfold on the 8 ms residual) and the patent's excitation length remain unknown, so E1/E0 is known to a factor of about 2, not better (estimate).
+- **Consumer TV pitch, faceplate thickness, slot bridge geometry, lit-area fractions, dot diameters.** T-63 sourced RCA 1983 pitches (0.66 to 0.84 mm, 36 to 68 cm) and patent faceplate thicknesses (9 to 15 mm centre). Slot bridge geometry, lit-area fractions, dot diameters and non-RCA consumer pitches (Philips, Toshiba, Samsung, Sony KV) remain estimates.
 - **Aperture-grille and slot-mask transmission.** Geometric estimates only.
-- **Curvature of the cylindrical Trinitron** (horizontal radius) and of the FD Trinitron inner surface. No numeric value found.
-- **Halation amplitude.** Geometry is sourced, amplitude ranges from 0.5 to 5 %.
-- **ABL threshold, time constants, consumer EHT sag, consumer convergence.** From memory.
+- **Curvature of the cylindrical Trinitron** (horizontal radius). Still no Sony product value; only a patent design calculation (1594 to 2100 mm outer for a 680 mm diagonal) and an unverified "about 2,000 mm" from a Sony page. Flat-face inner radii are now sourced for one Sony 28 in tube (about 10,000 mm) and two Mitsubishi tubes (2,300 and 2,500 mm), not for a named FD Trinitron model.
+- **Halation amplitude.** Geometry is sourced, amplitude ranges from 0.5 to 5 %. T-63 found total veiling glare (about 4 % for a colour monitor, 0.4 % for a medical one) but no ring amplitude on its own.
+- **ABL threshold, time constants, consumer EHT sag, consumer convergence.** T-63 sourced one TV threshold (1.4 mA) and one onset and settling time (0.1 s, 0.5 s) from RCA patents. Contrast loss at full white, monitor ABL, EHT sag and consumer convergence remain from memory.
 - **Vendor pitch values** for Hitachi EDP, Samsung DynaFlat, Panasonic and Toshiba monitors, and the per-vendor mapping to mask type (except Trinitron and Diamondtron = grille; CromaClear and the cited LG Flatron models = slot).
 - **Gamma value** (2.2 to 2.8 depending on black-level convention). BBC 2.35 and Poynton 2.5 not re-verified in a primary source.
 - **Video bandwidth** of consumer RGB inputs and PVM/BVM: estimates.
@@ -1016,10 +1058,59 @@ Fetched or read directly by at least one agent:
 - Elze (2010): https://sites.socsci.uci.edu/~wpsych/205b/Wk6Files/Elze2010-Monitors.pdf
 - Bach, Meigen and Strasburger (1997): https://michaelbach.de/misc/crtlimits/
 - Palme CRT phosphor tables and AST/APACE phosphor table (SLAC)
-- Patents: US 5,825,124 (afterglow), US 5,382,871 (damper wires), US 4,651,051 (18 % transmission), US 4,310,784 (halo about 3.5 t), US 4,728,856 (tint classes), US 6,960,873, US 6,160,344 and US 6,459,196 (curvature), US 5,079,477, US 4,300,157, US 5,220,239
+- Kuhn, M. G., "Optical time-domain eavesdropping risks of CRT displays", IEEE Symposium on Security and Privacy 2002 (measured P22 impulse responses, equations 8 to 10): https://www.cl.cam.ac.uk/~mgk25/ieee02-optical.pdf
+- RCA, Video Specifications 1983 (colour picture tube datasheets: trio spacing, faceplate transmittance): https://worldradiohistory.com/Archive-Catalogs/RCA/RCA-Video-Specifications-1983.pdf
+- Flynn and Badano, "Image quality degradation by light scattering in display devices", J. Digit. Imaging 12(2), 1999 (glare ratios): https://pmc.ncbi.nlm.nih.gov/articles/PMC3452495
+- Patents added by T-63 (all read on https://patents.google.com/patent/<number>): spot size US 5,814,930, US 6,605,898, US 4,529,910; ABL US 5,313,294, US 4,330,792, EP 0 394 003; faceplate US 7,176,611, US 4,537,322, US 6,133,686, US Re. 39,739 (RE39739E1); curvature model US 5,386,174
+- Patents: US 5,825,124 (afterglow; https://patents.google.com/patent/US5825124), US 5,382,871 (damper wires), US 4,651,051 (18 % transmission), US 4,310,784 (halo about 3.5 t), US 4,728,856 (tint classes), US 6,960,873, US 6,160,344 and US 6,459,196 (curvature), US 5,079,477, US 4,300,157, US 5,220,239
 - Bell System Technical Journal 40-3 (spot size); SMPTE Journal 69 (1960)
 - libretro slang-shaders: crt-royale README and settings, crt-geom, Grade; gamutthingy constants; crt-beans forum thread; "Ten years of CRT shaders" (cgwg); Megatron thread
 - Blur Busters CRT beam simulator: https://github.com/blurbusters/crt-beam-simulator
 - Sound and Vision, Toshiba 34HF84 measurements; UCF chromaticity table; Golz and MacLeod (2003)
 
 Not retrievable in this pass: Blur Busters forum phosphor-decay thread and blurbusters.com/crt (403), Jüstel CRT phosphor table (404), NIDL GDM-F500 report (403), Emulation General Wiki CRT shaders (403), r/crtgaming spec list.
+
+## Research pass T-63 results
+
+Date 2026-11-18. Published data only, no instrument. Every value below is also written, with its source and tag, in the section it belongs to.
+
+### Persistence inconsistency (resolved)
+
+- **What was wrong: the fit.** The old green fit (A = 1, tau = 0.05 ms, B = 0.046, t0 = 1 ms, n = 0.72) anchored the Sony patent residuals (0.95 % at 8 ms, 0.6 % at 16 ms) to the peak of an impulse response. The patent measures them against "the maximum afterglow intensity peak" after an excitation of unstated length. A measured P22 impulse response (Kuhn 2002) is only 0.012 % of its peak at 8 ms, so the old fit made the tail about 75 times too strong relative to the fast part. Its n < 1 also gives infinite total energy (Kuhn: the exponent must exceed 1). [S][D]
+- **The integration window was right.** E_k = integral of I(t) over [kT, (k+1)T] is the correct per-frame trail for 60 Hz frame feedback. The T-14 figure is reproduced: E1/E0 = 29.7 % for the old fit. [D]
+- **The PHY-12 range was not a sourced bound on E1/E0.** Its "0.5 to 4 %" came from residual luminances (patent 0.5 to 1 %, Wolf and Deubel 4 % at 20 ms on a P31 phosphor), not from per-frame energy ratios. [D]
+- **Corrected constants:** Kuhn's measured impulse responses (table in "Decay and persistence"). E1/E0 at 60 Hz = 5.36 % green, 4.72 % blue, below 1e-6 red; E2/E0 = 2.97 % and 2.60 %; E3/E0 = 2.03 % and 1.78 %. The same constants reproduce the patent residuals for an excitation of somewhat under 1 ms, and match the order of magnitude of the 8.5 % stereo crosstalk measured at 122.6 Hz (fit: 6.1 % at 120 Hz). [S][D]
+- **Corrected statement (proposed for PHY-12 and the T-14 / T-41 acceptance lines, not edited here):** "The green and blue power-law tails put about 5 % of a frame's energy into the next frame at 60 Hz (E1/E0 = 5.4 % green, 4.7 % blue; then about 3 % and 2 %), from one measured P22 monitor; red is negligible. The value depends on the phosphor batch (Ni-killed sulfides cut the 8 ms residual 4 to 13 times) and on the tail beyond 2 ms, which is extrapolated. The oracle test should check the Kuhn constants against these table values, not against 0.5 to 4 %."
+- **Consequences for T-41:** n = 1.1 converges slowly. About 21 % (green) and 19 % (blue) of the energy emitted within 1 s arrives after the first frame, and the extrapolated tail beyond 1 s holds about 30 % of the infinite-time green total. Truncating at 1 s, as T-41 plans, is required, and the static-image normalisation must use the truncated integral. [D]
+
+### Other topics
+
+| Topic | Result | Tag |
+|---|---|---|
+| Spot size versus current, colour tubes | 0.45 / 0.57 / 0.70 mm at 100 / 300 / 500 µA (Hitachi 51 cm monitor tube); about 0.9 mm at 0.5 mA and 1.9 mm at 3.0 mA (Panasonic 76 cm TV); 2.5 to 3.6 mm at the 10 % level at 4.0 mA (typical TV gun). Apparent exponents 0.22 to 0.42; model range widened to n = 0.2 to 0.5 | [S][D] |
+| Halation amplitude | Not resolved. Total veiling glare only: glare ratio 25 for a colour monitor (about 4 % stray light), 240 for a medical monitor (0.4 %). Range 0.5 to 5 % kept | [S][E] |
+| Consumer pitch | RCA 1983: 0.66 mm (36 cm), 0.84 mm (51 cm, three types), 0.82 mm (66 cm), 0.84 mm (68 cm); faceplate transmittance 84 to 85.5 % | [S] |
+| Faceplate thickness | 9 to 11.5 mm (400 to 500 mm diagonal) and 10 to 12.4 mm (570 to 700 mm) claimed by LG.Philips; 12.0 mm on a Toshiba 26 in; 12 / 14 mm on Mitsubishi 41 / 50 cm flat tubes; 15 mm centre, 18 mm edge on a Sony 28 in flat tube | [S] |
+| Trinitron cylindrical radius | Not resolved. Only a patent design calculation (outer horizontal 1594 to 2100 mm, 680 mm diagonal, not a product) and an unverified Sony "about 2,000 mm" | [S] weak |
+| Flat-face inner radius | About 10,000 mm (Sony 28 in); 2,300 mm and 2,500 mm horizontal (Mitsubishi 41 and 50 cm) | [S] |
+| ABL | 1.4 mA average threshold (RCA TV), lowered to 1 or 0.7 mA in a peak mode; onset about 0.1 s, steady state about 0.5 s; prior-art filter about 5 fields. Contrast loss at full white not found | [S] |
+
+### Preset values to change (input to T-64)
+
+1. **All presets (all P22):** replace the decay constants by the Kuhn red, green and blue constants of "Decay and persistence" [S][D]. If a tail-strength slider is exposed, a range of about 0.07 to 1 times the power-law term follows the patent's Ni-killer residual ratios (0.072 / 0.966). Applying that ratio to the power-law term alone is an assumption [E].
+2. **Consumer 26 in viewable TV (slot):** pitch 0.80 → 0.82 to 0.84 mm (RCA 66 cm 0.82, 68 cm 0.84) [S]; faceplate t 13 → 12 mm (Toshiba 26 in 12.0 mm; LG.Philips claim 10 to 12.4 mm) [S]; glass transmission 0.85 (RCA clear faceplates 84 to 85.5 %) [S]; ABL threshold 1.4 mA average, onset 0.1 s, settling 0.5 s [S].
+3. **Sony KV Trinitron TV:** faceplate t 13 → 12 mm (generic sourced value for the size; no Sony-specific data) [S]; ABL threshold, onset and settling as item 2 (RCA values, not Sony) [S]; horizontal radius stays an estimate (about 1.3 to 1.75 × 1R from the design calculation only) [E].
+4. **19 in arcade (slot):** faceplate t 12 → 11 mm (LG.Philips 9 to 11.5 mm for 400 to 500 mm diagonals) [S]; pitch unchanged (no arcade tube data; RCA 20V TV tubes are 0.84 mm) [E].
+5. **PVM-20M4U and BVM-20F1U:** faceplate t 12 → 11 mm (same claim range) [S].
+6. **17 to 21 in Trinitron / Diamondtron monitor (FD / NF variant):** faceplate centre t 12 to 15 mm (Mitsubishi 41 / 50 cm flat tubes 12 / 14 mm) instead of 12 to 20 mm [S]; inner horizontal radius 2,300 to 2,500 mm for Diamondtron NF-class tubes [S].
+7. **Spot growth exponent n:** monitor-class presets about 0.27 (Hitachi 51 cm), TV presets about 0.42 (Panasonic 76 cm), within the widened 0.2 to 0.5 range [S][D].
+8. **No change:** halation weights (no ring amplitude found), PVM-14L2 and 15 in VGA faceplate t = 10 mm (no sourced value below 400 mm diagonal; 10 mm stays an estimate), spot FWHM defaults (sourced colour points 0.45 to 0.70 mm on monitors and about 1.4 to 2 mm FWHM at 3 to 4 mA on TVs are consistent with them).
+
+### Still unresolved
+
+- Halation ring amplitude on its own; only total glare is sourced.
+- Cylindrical Trinitron horizontal radius for any named product.
+- Contrast loss at full white under ABL, monitor and PVM ABL constants, EHT sag.
+- The decay tail beyond 2 ms (Kuhn's records stop there) and per-batch tail variation; only a photodiode on a real tube settles them (SCP-2, SP-13).
+- Non-RCA consumer pitches (Philips, Toshiba, Samsung, Sony KV), slot bridge geometry.
+- Leads not opened (name resolution failed): Woods and Tan 2002 (Curtin, stereo ghosting per colour), Elze 2010 (UCI copy), Wolf and Deubel 1997 full text, the Sony FD Trinitron technology page, the Mitsubishi Giho 1999 Diamondtron NF paper, the 1986 Philips T8 colour tube handbook.
