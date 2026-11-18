@@ -909,7 +909,10 @@ fn screen_is_mask_times_beam() {
                 let want = f64::from(b[c]) * mask.area_mean(c, &footprint(x, y));
                 let err = (f64::from(a[c]) - want).abs();
                 assert!(
-                    err <= 1.01 * FP16_STEP * want + budget * f64::from(b[c]) + 1e-7,
+                    // The absolute floor covers the FP16 subnormal step 2^-24 = 6e-8: since T-36b the
+                    // horizontal spot has very small tails, and the beam image's own store error (one
+                    // step) is multiplied by the mask (up to 1 / stripe fill = 4) in the product.
+                    err <= 1.01 * FP16_STEP * want + budget * f64::from(b[c]) + 3e-7,
                     "{test}: pixel ({x}, {y}) channel {c}: {} vs beam {} x mask = {want}",
                     a[c],
                     b[c]
