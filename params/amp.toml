@@ -1,0 +1,80 @@
+# Video amplifier parameters (T-33, slot `amp`, ARCHITECTURE 3.7; CRT.md "Signal path", rule 1). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder.
+#
+# Model (shaders/amp.comp): the native row is a zero-order hold at the pixel clock (CRT.md "Signal path":
+# "the source is effectively zero-order-hold ... then low-passed"), filtered in the voltage domain, before
+# the gun law, by a Gaussian amplifier: every pixel edge becomes a Gaussian step response of time sigma
+# sqrt(ln 2) / (2 pi B) ~ 0.1325 / B (10-90 % rise 0.3396 / B). Rising edges use the bandwidth B, falling
+# edges a rise time scaled by `amp_fall_rise_ratio`; both start together after the input edge (10 %
+# points aligned), the slower one ends later. Defaults: PC-monitor bandwidth (amplifier not the
+# limit, no visible softening at 240p pixel clocks) so that the default chain stays the identity until a
+# tube preset (T-50) sets its own bandwidth.
+
+[[param]]
+id = "amp_bandwidth_mhz"
+stage = "amp"
+type = "f32"
+unit = "MHz"
+default = 100.0
+min = 2.0
+max = 400.0
+tag = "E"
+source = "CRT.md Signal path, RGB path table: consumer TV RGB 4 to 8 MHz, PVM-xxM2U 8 to 15 MHz, PVM/BVM high-res 20 to 30 MHz, PC monitor 100 to 400 MHz (estimates, CRT.md Open data)"
+description = "-3 dB bandwidth B of the RGB video amplifier, Gaussian model: 10-90 % rise time 0.3396 / B microseconds. Sets rising edges; falling edges are scaled by amp_fall_rise_ratio. Low values dim isolated vertical lines (filtering before the gun law). The default (PC-monitor class) leaves 240p sources visually unfiltered."
+group = "Video amplifier"
+
+[[param]]
+id = "amp_pixel_clock_mhz"
+stage = "amp"
+type = "f32"
+unit = "MHz"
+default = 5.37
+min = 4.0
+max = 230.0
+tag = "K"
+source = "CRT.md Raster timing table: 240p consoles 5.37 to 8 MHz, VGA 640x480 25.175 MHz, UXGA 1600x1200 at 85 Hz 229.5 MHz"
+description = "Pixel clock of the source video mode: one native pixel lasts 1 / f microseconds on the scan line. With the bandwidth it sets the amplifier blur in source pixels (sigma = 0.1325 f / B). Not provided by the capture: it comes from the source's video mode."
+group = "Video amplifier"
+
+[[param]]
+id = "amp_fall_rise_ratio"
+stage = "amp"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.5
+max = 3.0
+tag = "E"
+source = "CRT.md Signal path, adjacent-pixel nonlinearity (Mulligan and Stone 1989; Klein, Hu and Carney 1996; Pelli 1997): the drive amplifier slews differently up and down, the smear trails to the right; the ratio itself is an estimate"
+description = "Fall time over rise time of the amplifier (10-90 %). 1 is symmetric. Both transitions start together after an input edge and the slower one ends later, so the smear trails to the right: above 1 bright detail trails to the right; below 1 bright detail starts late and isolated bright pixels lose light."
+group = "Video amplifier"
+
+# Peaking (consumer "sharpness"), off by default. Linear and DC-preserving: the response gains
+# g (1 - G_p(f)), a Gaussian high-pass of -3 dB corner f_p, so every edge response becomes
+# (1 + g) Phi(u / sigma) - g Phi(u / sqrt(sigma^2 + sigma_p^2)) with sigma_p = 0.1325 / f_p.
+
+[[param]]
+id = "amp_peaking_gain"
+stage = "amp"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.5
+tag = "E"
+source = "CRT.md Controls table, Sharpness (consumer): peaking filter in the video path, about +3 to 8 dB around 3 to 4 MHz, 5 to 20 % overshoot; CRT.md Signal path: peaking causes 5 to 20 % overshoot after sharp edges [E]"
+description = "High-frequency boost g of the peaking filter (gain 1 + g above the corner: 0.41 is +3 dB, 1.5 is +8 dB). 0 turns peaking off. Gives an overshoot (outline) after and before horizontal edges only; flat fields are unchanged."
+group = "Video amplifier"
+
+[[param]]
+id = "amp_peaking_mhz"
+stage = "amp"
+type = "f32"
+unit = "MHz"
+default = 3.5
+min = 1.0
+max = 50.0
+tag = "E"
+source = "CRT.md Controls table, Sharpness (consumer): peaking around 3 to 4 MHz"
+description = "Corner frequency of the peaking filter: the boost starts above it (Gaussian high-pass, -3 dB corner). Only used when amp_peaking_gain is above 0."
+group = "Video amplifier"

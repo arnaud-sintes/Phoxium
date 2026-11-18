@@ -1,0 +1,142 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `amp` (T-33, ARCHITECTURE 3.7 image contract): native domain -> amp domain, voltage domain, before
+// the gun law (CRT.md rule 1: the video amplifier acts horizontally on the gamma-encoded voltage).
+//
+// Model, per channel and per native row (CRT.md "Signal path", RGB path):
+// - The source is a zero-order hold at the pixel clock f (`amp_pixel_clock_mhz`): native pixel j holds its
+//   drive voltage V_j over [j, j + 1) source px. Outside the active line the signal is at black (blanking,
+//   V = 0).
+// - The amplifier is a Gaussian low-pass of -3 dB bandwidth B (`amp_bandwidth_mhz`): time sigma
+//   sqrt(ln 2) / (2 pi B) ~ 0.1325 / B [D], so the 10-90 % rise is 2.563 sigma = 0.3396 / B. In source px:
+//   sigma_px = sigma_t * f = 0.1325 f / B.
+// - Since the hold is a sum of steps at the pixel edges, the output is a sum of step responses:
+//   v(x) = sum_j V_j (S_j(x - j) - S_{j+1}(x - j - 1)), with S_e(u) = Phi((u - d_e) / sigma_e), the
+//   Gaussian step response of edge e (between pixels e - 1 and e).
+// - Asymmetric slew (adjacent-pixel nonlinearity, CRT.md: the amplifier slews differently up and down,
+//   the smear trails to the right): per channel, a rising edge (V_e > V_{e-1}) uses sigma_rise = sigma_px,
+//   a falling edge sigma_fall = sigma_rise * `amp_fall_rise_ratio`. Both kinds of transition start
+//   together after the input edge (their 10 % points coincide) and the slower one ends later: the slower
+//   kind is delayed by d = Z10 (sigma_slow - sigma_fast), the faster kind is not (d = 0) [E]. So the
+//   smear of the slower edge trails to the right, and with equal times (ratio 1) every response is
+//   centred on its edge (zero phase): a flat field and the voltage-time area of every pulse are exact.
+//   With a ratio other than 1 an isolated pulse gains (slow fall) or loses (slow rise) the area Z10 x
+//   (sigma_fall - sigma_rise), as a slew-limited amplifier does.
+// - Optional peaking (consumer sharpness, CRT.md controls table, off by default): the response is
+//   multiplied by 1 + g (1 - G_p(f)), G_p a Gaussian low-pass of -3 dB corner f_p (`amp_peaking_mhz`), g =
+//   `amp_peaking_gain`. Every edge response becomes (1 + g) Phi(u / sigma_e) - g Phi(u / sigma_c) with
+//   sigma_c = sqrt(sigma_e^2 + sigma_p^2), sigma_p = 0.1325 f / f_p px: an overshoot after (and before)
+//   each edge, a flat field and the pulse areas unchanged (both terms are steps of unit height).
+// - Output: K samples per native pixel (K = `frame.amp_k`), point samples of v at the sample centres
+//   x = (q + 0.5) / K, so the beam sees a continuous signal. Alpha is the held pixel's alpha.
+//
+// Support: edges within 6 sigma_max + delay + 1 px of the sample (6 sigma: Phi < 1e-9), at most
+// MAX_REACH px.
+// When every edge lies beyond about 6 sigma of the sample (very high bandwidth, such as the defaults), the
+// step responses are exactly 0 or 1 in fp32 and the output is the zero-order hold bit for bit.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;                 // native domain
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out; // amp domain
+
+const float PI = 3.14159265358979;
+// Time sigma of a Gaussian low-pass times its -3 dB bandwidth: sqrt(ln 2) / (2 pi) = 0.13250... [D]
+// (|H(f)| = exp(-2 pi^2 sigma^2 f^2) = 1 / sqrt(2) at f = B).
+const float SIGMA_TIMES_BANDWIDTH = 0.8325546111576977 / (2.0 * PI);
+// Phi^-1(0.9): a Gaussian step response reaches 10 % at -Z10 sigma and 90 % at +Z10 sigma from its centre
+// (10-90 % rise = 2 Z10 sigma) [K].
+const float Z10 = 1.2815516;
+// Largest reach of the kernel in source px (cost bound; reached only for sigma_px above about 8 px, far
+// outside the soft ranges).
+const int MAX_REACH = 64;
+
+// erf(x) for x >= 0, Abramowitz and Stegun 7.1.26, |error| <= 1.5e-7 [K]. Exactly 1.0 in fp32 for
+// x above about 4 (the correction underflows below half an ulp of 1).
+float erf_pos(float x) {
+    float t = 1.0 / (1.0 + 0.3275911 * x);
+    float poly = t * (0.254829592 + t * (-0.284496736 + t * (1.421413741 + t * (-1.453152027 + t * 1.061405429))));
+    return 1.0 - poly * exp(-x * x);
+}
+
+// Gaussian step response Phi(u) = (1 + erf(u / sqrt 2)) / 2, per channel, u in units of sigma.
+vec3 step_response(vec3 u) {
+    vec3 a = abs(u) * 0.70710678118654752;
+    vec3 e = vec3(erf_pos(a.x), erf_pos(a.y), erf_pos(a.z));
+    return 0.5 + 0.5 * sign(u) * e;
+}
+
+// Response of an edge at offset u (source px, after the edge's delay), per channel, with the edge's sigma
+// and the peaking of gain `gain` (sigma_peak_sq = sigma_p^2); without peaking (gain 0) exactly
+// step_response(u / sigma).
+vec3 edge_response(vec3 u, vec3 sigma, float gain, float sigma_peak_sq) {
+    vec3 s = step_response(u / sigma);
+    if (gain != 0.0) {
+        vec3 sigma_c = sqrt(sigma * sigma + sigma_peak_sq);
+        s = (1.0 + gain) * s - gain * step_response(u / sigma_c);
+    }
+    return s;
+}
+
+// Drive voltage of native pixel j on row y; black outside the active line.
+vec4 drive(int j, int y, int width) {
+    if (j < 0 || j >= width) {
+        return vec4(0.0);
+    }
+    return texelFetch(drive_in, ivec2(j, y), 0);
+}
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(q, imageSize(drive_out)))) {
+        return;
+    }
+    int k = max(frame.amp_k, 1);
+    int width = textureSize(drive_in, 0).x;
+    int y = q.y;
+    int p = q.x / k; // native pixel under the sample (zero-order hold)
+    float x = (float(q.x) + 0.5) / float(k);
+
+    // Non-positive values would give an infinite or NaN sigma: clamp to a tiny positive value.
+    float bandwidth = max(params.amp_bandwidth_mhz, 1e-3);
+    float clock = max(params.amp_pixel_clock_mhz, 1e-3);
+    float ratio = max(params.amp_fall_rise_ratio, 1e-3);
+    float sigma_rise = SIGMA_TIMES_BANDWIDTH * clock / bandwidth;
+    float sigma_fall = sigma_rise * ratio;
+    float sigma_fast = min(sigma_rise, sigma_fall);
+    float delay_rise = Z10 * (sigma_rise - sigma_fast);
+    float delay_fall = Z10 * (sigma_fall - sigma_fast);
+    float gain = params.amp_peaking_gain;
+    float sigma_peak = SIGMA_TIMES_BANDWIDTH * clock / max(params.amp_peaking_mhz, 1e-3);
+    float sigma_peak_sq = sigma_peak * sigma_peak;
+    float sigma_max = max(sigma_rise, sigma_fall);
+    if (gain != 0.0) {
+        sigma_max = sqrt(sigma_max * sigma_max + sigma_peak_sq);
+    }
+    int reach = min(int(ceil(6.0 * sigma_max + max(delay_rise, delay_fall))) + 1, MAX_REACH);
+
+    // Walk the pixels p - reach .. p + reach; each pixel contributes V_j (S_left - S_right), the left edge's
+    // response carried over from the previous pixel's right edge.
+    vec4 prev = drive(p - reach - 1, y, width);
+    vec4 cur = drive(p - reach, y, width);
+    bvec3 falling = lessThan(cur.rgb - prev.rgb, vec3(0.0));
+    vec3 sigma = mix(vec3(sigma_rise), vec3(sigma_fall), falling);
+    vec3 delay = mix(vec3(delay_rise), vec3(delay_fall), falling);
+    vec3 s_left = edge_response(x - float(p - reach) - delay, sigma, gain, sigma_peak_sq);
+    vec3 v = vec3(0.0);
+    for (int j = p - reach; j <= p + reach; ++j) {
+        vec4 next = drive(j + 1, y, width);
+        falling = lessThan(next.rgb - cur.rgb, vec3(0.0));
+        sigma = mix(vec3(sigma_rise), vec3(sigma_fall), falling);
+        delay = mix(vec3(delay_rise), vec3(delay_fall), falling);
+        vec3 s_right = edge_response(x - float(j + 1) - delay, sigma, gain, sigma_peak_sq);
+        v += cur.rgb * (s_left - s_right);
+        s_left = s_right;
+        cur = next;
+    }
+    imageStore(drive_out, q, vec4(v, drive(p, y, width).a));
+}
