@@ -4,9 +4,8 @@
 # the emitter of a colour is the luminous shape of its phosphor elements (black-matrix opening), every edge is a
 # linear ramp whose full 0-to-1 width is centred on the nominal (half-value) edge, and the host-pixel value is
 # the area mean of the emitter over the pixel divided by the mean coverage, so flat white has mean 1.
-# T-39a implements the aperture grille. The slot-mask and delta parameters are declared here so that presets
-# (T-50) can name them; they are not read by the shader until T-39b, and selecting those types falls back to the
-# aperture grille until then.
+# T-39a implements the aperture grille, T-39b the slot mask and the delta dot mask (mask_slot_period,
+# mask_slot_bridge, mask_dot_fill; the stripe fill and the edge softness are shared by the types).
 
 [[param]]
 id = "mask_enabled"
@@ -28,7 +27,7 @@ default = "aperture_grille"
 values = ["aperture_grille", "slot_mask", "delta"]
 tag = "S"
 source = "CRT.md Colour selection structures, Types; QUESTIONS PHY-4 (the mask type is the only structural choice); default: PVM-20M4U, an aperture grille (CRT.md Starting presets)"
-description = "Colour selection structure of the tube: aperture grille (Trinitron, Diamondtron), slot mask or delta dot mask. Slot mask and delta are drawn as an aperture grille of the same pitch until T-39b."
+description = "Colour selection structure of the tube: aperture grille (Trinitron, Diamondtron), slot mask or delta dot mask."
 group = "Mask"
 
 [[param]]
@@ -67,7 +66,7 @@ min = 0.0
 max = 0.1
 tag = "E"
 source = "CRT.md Black matrix and phosphor screen: phosphor element edges are soft, about 5 to 10 % of pitch; crt-model mask.rs: full 0-to-1 ramp width centred on the half-value edge, limited to min(stripe, p/3 - stripe)"
-description = "Full width of the linear edge ramp of a phosphor element as a fraction of the pitch, centred on the nominal edge (0 = hard edges). The shader limits it to the stripe width and to 1/3 - stripe fill, so a stripe and its ramps stay inside one third of the pitch."
+description = "Full width of the linear edge ramp of a phosphor element as a fraction of the pitch (p for grille and slot mask, the diagonal P for delta), centred on the nominal edge (0 = hard edges); also the ramp of the slot-mask bridges and the radial ramp of a delta dot. The shader limits it to the stripe width and to 1/3 - stripe fill (grille, slot mask), to the bridge height and to V - bridge (slot mask), and to the dot diameter and to P / sqrt(3) - dot diameter (delta), so elements of different colours never overlap."
 group = "Mask"
 
 [[param]]
@@ -131,7 +130,7 @@ min = 0.6667
 max = 1.6
 tag = "E"
 source = "CRT.md Slot mask geometry: vertical slot period typically 2 to 3 times the stripe spacing p/3 on TVs (0.667 to 1.0 p; default 2.5 p/3 as the crt-model test tube); Starting presets: consumer 26 in slot TV about 1.6 p"
-description = "Slot mask only (T-39b): vertical slot period V as a fraction of the triad pitch. Adjacent triad columns are staggered by V / 2."
+description = "Slot mask only: vertical slot period V as a fraction of the triad pitch. Adjacent triad columns are staggered by V / 2 (even columns have their bridges centred on k V from the top of the tube rectangle, odd columns on V / 2 + k V)."
 group = "Mask"
 
 [[param]]
@@ -144,7 +143,7 @@ min = 0.1
 max = 0.2
 tag = "E"
 source = "CRT.md Slot mask geometry: bridges about 10 to 20 % of the slot period"
-description = "Slot mask only (T-39b): height of the bridge between two slots as a fraction of the slot period."
+description = "Slot mask only: height of the bridge between two slots as a fraction of the slot period."
 group = "Mask"
 
 [[param]]
@@ -157,5 +156,5 @@ min = 0.4
 max = 0.5
 tag = "E"
 source = "CRT.md Delta (dot) triad geometry: dot diameter about 0.4 to 0.5 P (below the dot spacing P / sqrt 3 because of the black matrix)"
-description = "Delta mask only (T-39b): phosphor dot diameter as a fraction of the diagonal dot pitch P, between the half-value points of its edge."
+description = "Delta mask only: phosphor dot diameter as a fraction of the diagonal dot pitch P, between the half-value points of its edge. The shader limits it to the dot spacing P / sqrt(3) = 0.577 P."
 group = "Mask"
