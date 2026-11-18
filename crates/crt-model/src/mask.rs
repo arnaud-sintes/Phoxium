@@ -13,6 +13,10 @@
 //!   (half-value) edge. With that choice the area of an element is exactly its
 //!   nominal area for stripes and bridges, and pi (R^2 + s^2 / 12) for a dot.
 //!   The ramp also makes every integral continuous in the rectangle bounds.
+//! - `edge_mm` is the full 0-to-1 ramp width as a fraction of the type's quoted
+//!   pitch (p for grille and slot, P for delta), centred on the half-value edge.
+//!   For grille and slot `validate()` caps it at p/3 - stripe (and edge <= stripe),
+//!   so the UI soft range should be min(0.10 p, p/3 - stripe).
 //! - The host-pixel value of a channel is the area mean of `e_c` over the pixel
 //!   footprint divided by the mean coverage of colour `c`, so a flat white field
 //!   has mean 1 (PHY-2 option A).
@@ -515,6 +519,14 @@ impl Mask {
     /// same value, so 1; delta, box (1.5 a) x P, the same argument with the rows
     /// j and j + 1 (shifted by 1.5 a) in the role of the two column phases, so 1.
     /// The flat-field ripple is therefore 0, under the 1.4 % Barten threshold.
+    ///
+    /// Tier C caveat: in tier C the mask vanishes entirely (no visible structure
+    /// remains), so there is a hard visual jump at 3.0 px per triad, and the
+    /// unfiltered ripple is 100 % from 2.9 to 3.05 px per triad. Renders at less
+    /// than 3 px per triad must therefore use `area_mean` over a box-filtered
+    /// footprint (see `tier_c_area_mean_box_ripple`), not the unfiltered pitch grid.
+    /// This function returns the constant 1 (damper wires aside) by construction, so
+    /// it is not evidence of the ripple; `prefilter_box_integrates_to_the_mean` is.
     pub fn prefiltered(&self, _c: usize, q: &Rect) -> f64 {
         match self {
             Mask::Grille(g) => g.damper_integral(q.y0, q.y1) / (q.y1 - q.y0),
@@ -540,7 +552,10 @@ impl Mask {
         }
     }
 
-    /// Vertical period of the x-averaged mask, the one scanlines beat against:
+    /// Vertical period of the x-averaged mask, the one scanlines beat against.
+    /// Slot: V / 2, because the half-slot stagger of adjacent columns cancels the
+    /// odd harmonics of the vertical mask frequency 1 / V once averaged over x.
+    /// Per type:
     /// none for the grille, V / 2 for the slot mask (the column stagger halves
     /// V once averaged over two columns), P / 2 for delta (row spacing). [D]
     pub fn vertical_period_mm(&self) -> Option<f64> {
@@ -574,19 +589,51 @@ pub fn alias_period_px(px_per_triad: f64, harmonic: u32) -> f64 {
     1.0 / (f - f.round()).abs()
 }
 
+/// Beat period in mm of harmonic `n` of a periodic pattern of pitch `p_line`
+/// against a second pattern of pitch `p_mask`: 1 / |n / p_line - 1 / p_mask|.
+/// For n = 1 it equals `moire_beat` (p1 p2 / |p1 - p2|), which is only a
+/// low-frequency beat when the pitches are within a factor of 2. [D]
+pub fn harmonic_beat_mm(p_line: f64, p_mask: f64, n: u32) -> f64 {
+    1.0 / (n as f64 / p_line - 1.0 / p_mask).abs()
+}
+
+/// Dominant scan-moire beat: harmonic `harmonic` of the line frequency is the
+/// one nearest the vertical mask frequency, giving the real low-frequency beat.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScanHarmonic {
+    pub harmonic: u32,
+    pub beat_mm: f64,
+}
+
 /// UI readouts of the mask against the host and the beam (PHY-2, PHY-8, UX-1).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Readouts {
     pub px_per_triad: f64,
     pub triads_per_source_px: f64,
     pub fwhm_over_pitch: f64,
-    /// FWHM >= 1.5 triad pitches.
+    /// FWHM >= 1.5 triad pitches. The pitch used is `Mask::triad_pitch_mm`; for delta
+    /// that is the horizontal triad pitch 0.866 P (not P): the spot-MTF rule applies
+    /// at the lattice's fundamental horizontal frequency 1 / (0.866 P).
     pub product_form_valid: bool,
     pub tier: Tier,
-    /// Video moire: host pixel pitch against triad pitch, p1 p2 / |p1 - p2|, in mm.
-    pub video_moire_mm: f64,
-    /// Scan moire: line pitch against the vertical mask period, in mm (none for a grille).
+    /// Host-grid moire: host pixel pitch against triad pitch, p1 p2 / |p1 - p2|, in
+    /// mm. This is the moire of the display's pixel grid, not CRT.md's video moire
+    /// (see `source_moire_mm`). Only a low-frequency beat within a factor of 2.
+    pub host_moire_mm: f64,
+    /// Video moire as in CRT.md: source pixel pitch (in tube mm) against triad
+    /// pitch, p1 p2 / |p1 - p2|. Valid as the low-frequency beat only when the two
+    /// pitches are within a factor of 2 (n = 1); otherwise use `harmonic_beat_mm`.
+    pub source_moire_mm: f64,
+    /// Host alias periods in pixels of harmonics 2 and 3 of the triad frequency,
+    /// reported only for 2 to 3 px per triad, where they dominate (at 2.9 px per
+    /// triad: 3.2 px and 29 px). `alias_period_px` is the general form.
+    pub host_harmonic_alias_px: Option<[f64; 2]>,
+    /// Scan moire: line pitch against the vertical mask period, in mm (none for a
+    /// grille). n = 1 formula, see `scan_harmonic` for the real beat.
     pub scan_moire_mm: Option<f64>,
+    /// Real scan beat from the line harmonic nearest the mask frequency (slot
+    /// 396 mm / 240 lines: 5th harmonic, 33 mm; delta 0.44 mm lines: 3rd, 3.08 mm).
+    pub scan_harmonic: Option<ScanHarmonic>,
 }
 
 /// Readouts for a mask shown at `host_px_per_mm`, a source pixel `source_px_mm`
@@ -601,17 +648,28 @@ pub fn readouts(
     let pitch = mask.triad_pitch_mm();
     let ppt = host_px_per_mm * pitch;
     let fwhm_over_pitch = spot_fwhm_mm / pitch;
+    let vertical = mask.vertical_period_mm();
     Readouts {
         px_per_triad: ppt,
         triads_per_source_px: source_px_mm / pitch,
         fwhm_over_pitch,
         product_form_valid: fwhm_over_pitch >= PRODUCT_FORM_MIN_FWHM_OVER_PITCH,
         tier: tier(ppt),
-        video_moire_mm: moire_beat(1.0 / host_px_per_mm, pitch),
-        scan_moire_mm: mask.vertical_period_mm().map(|v| moire_beat(line_pitch_mm, v)),
+        host_moire_mm: moire_beat(1.0 / host_px_per_mm, pitch),
+        source_moire_mm: moire_beat(source_px_mm, pitch),
+        host_harmonic_alias_px: (2.0..3.0)
+            .contains(&ppt)
+            .then(|| [alias_period_px(ppt, 2), alias_period_px(ppt, 3)]),
+        scan_moire_mm: vertical.map(|v| moire_beat(line_pitch_mm, v)),
+        scan_harmonic: vertical.map(|v| {
+            let n = ((line_pitch_mm / v).round() as u32).max(1);
+            ScanHarmonic {
+                harmonic: n,
+                beat_mm: harmonic_beat_mm(line_pitch_mm, v, n),
+            }
+        }),
     }
 }
-
 /// Option D: ids of the presets whose px per triad reaches `threshold` when the
 /// tube image is `host_image_width_px` wide. Presets are (id, triads across).
 pub fn option_d(presets: &[(u32, f64)], host_image_width_px: f64, threshold: f64) -> Vec<u32> {
@@ -854,20 +912,46 @@ mod tests {
         (hi - lo) / (hi + lo)
     }
 
-    /// Tier C: flat-field ripple under the 1.4 % Barten threshold for every px per
-    /// triad in [1.0, 3.0) by 0.05, all types and channels (grille away from the
-    /// damper wires). The unfiltered area mean exceeds the threshold at some of
-    /// these scales, so the prefilter is what keeps the ripple down.
+    /// Prefilter box of one period (grille p x 0.137, slot p x V, delta 1.5 a x P).
+    fn period_box(m: &Mask) -> (f64, f64) {
+        match m {
+            Mask::Grille(g) => (g.pitch_mm, 0.137),
+            Mask::Slot(s) => (s.pitch_mm, s.slot_period_mm),
+            Mask::Delta(d) => (1.5 * d.pitch_mm / 3.0_f64.sqrt(), d.pitch_mm),
+        }
+    }
+
+    /// Tier C: flat-field ripple of a genuinely area-averaged mask. Each host pixel
+    /// (triad pitch / ppt, ppt in [1.0, 3.0) by 0.05) takes `area_mean` over a one
+    /// period box centred on it, not `prefiltered()` (which is the constant 1).
+    /// Threshold 1e-6 (exact integration of whole periods; the delta dots use
+    /// quadrature, about 2e-8), far under the 1.4 % Barten threshold, so a
+    /// regression in the box-filter premise or the integrals is caught. The same
+    /// grid with the plain pixel footprint (unfiltered) must exceed Barten at some
+    /// density, so the test is not vacuous. Grille away from the damper wires.
     #[test]
-    fn tier_c_ripple_below_barten() {
+    fn tier_c_area_mean_box_ripple() {
         for m in masks() {
+            let (lx, ly) = period_box(&m);
             let mut worst_unfiltered: f64 = 0.0;
             for k in 0..40 {
                 let ppt = 1.0 + 0.05 * k as f64;
                 assert_eq!(tier(ppt), Tier::C);
+                let h = m.triad_pitch_mm() / ppt;
                 for c in 0..3 {
-                    let r = ripple(&m, c, ppt, true, 3.1, 3.3);
-                    assert!(r < BARTEN_THRESHOLD, "{m:?} ppt {ppt} c{c}: {r}");
+                    let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+                    for j in 0..24 {
+                        for i in 0..48 {
+                            let cx = 3.1 + (i as f64 + 0.5) * h;
+                            let cy = 3.3 + (j as f64 + 0.5) * h;
+                            let q = Rect::new(cx - 0.5 * lx, cy - 0.5 * ly, cx + 0.5 * lx, cy + 0.5 * ly);
+                            let v = m.area_mean(c, &q);
+                            lo = lo.min(v);
+                            hi = hi.max(v);
+                        }
+                    }
+                    let r = (hi - lo) / (hi + lo);
+                    assert!(r < 1e-6, "{m:?} ppt {ppt} c{c}: box-filtered ripple {r}");
                     if k % 8 == 3 {
                         worst_unfiltered = worst_unfiltered.max(ripple(&m, c, ppt, false, 3.1, 3.3));
                     }
@@ -876,7 +960,6 @@ mod tests {
             assert!(worst_unfiltered > BARTEN_THRESHOLD, "{m:?}: {worst_unfiltered}");
         }
     }
-
     /// The tier C derivation: the prefilter box of one period (grille p x any,
     /// slot p x V, delta 1.5 a x P) integrates to the period mean at every
     /// position, checked with the closed-form integrals (themselves checked
@@ -933,7 +1016,7 @@ mod tests {
     /// Hand: 386 / 0.31 = 1245.2 triads, 1920 / 1245.2 = 1.542 px per triad (tier C),
     /// 1245.2 / 320 = 3.891 triads per source px. FWHM 0.6 mm: 0.6 / 0.31 = 1.935
     /// (product form valid), 0.4 mm: 1.290 (not valid).
-    /// Video moire: host pitch 386 / 1920 = 0.201042 mm against 0.31 mm,
+    /// Host-grid moire: host pitch 386 / 1920 = 0.201042 mm against 0.31 mm,
     /// 0.201042 x 0.31 / 0.108958 = 0.57199 mm. No scan moire on a grille.
     #[test]
     fn readouts_pvm_20m4u() {
@@ -951,13 +1034,79 @@ mod tests {
         assert!(close(r.fwhm_over_pitch, 1.935, 0.0005));
         assert!(r.product_form_valid);
         assert_eq!(r.tier, Tier::C);
-        assert!(close(r.video_moire_mm, 0.57199, 0.00001));
+        assert!(close(r.host_moire_mm, 0.57199, 0.00001));
         assert_eq!(r.scan_moire_mm, None);
+        assert_eq!(r.scan_harmonic, None);
+        assert_eq!(r.host_harmonic_alias_px, None); // 1.542 px per triad, outside 2 to 3
         let r = readouts(&m, 1920.0 / 386.0, 386.0 / 320.0, 290.0 / 240.0, 0.4);
         assert!(close(r.fwhm_over_pitch, 1.290, 0.0005));
         assert!(!r.product_form_valid);
     }
 
+    /// Source moire (CRT.md video moire) by hand, grille p = 0.31 mm, source pixel
+    /// 0.5 mm on the tube (ratio 1.61, within a factor of 2 so n = 1 is the real
+    /// beat): 0.5 x 0.31 / |0.5 - 0.31| = 0.155 / 0.19 = 0.815789 mm. With a host
+    /// grid of 2 px/mm (0.5 mm pixels, equal to the source pitch by choice)
+    /// host_moire_mm gives the same number; with 4 px/mm (0.25 mm pixels)
+    /// 0.25 x 0.31 / 0.06 = 1.291667 mm, while source_moire_mm is unchanged.
+    #[test]
+    fn source_moire_hand_value() {
+        let m = Mask::Grille(Grille {
+            pitch_mm: 0.31,
+            stripe_mm: 0.25 * 0.31,
+            edge_mm: 0.02,
+            damper_y_mm: vec![],
+            damper_mm: 0.0,
+            damper_edge_mm: 0.0,
+        });
+        let r = readouts(&m, 2.0, 0.5, 1.0, 0.6);
+        assert!(close(r.source_moire_mm, 0.815_789, 0.000_001));
+        assert!(close(r.host_moire_mm, 0.815_789, 0.000_001));
+        let r = readouts(&m, 4.0, 0.5, 1.0, 0.6);
+        assert!(close(r.source_moire_mm, 0.815_789, 0.000_001));
+        assert!(close(r.host_moire_mm, 1.291_667, 0.000_001));
+    }
+
+    /// Harmonic aliases by hand at 2.9 px per triad (p = 2.9 mm, 1 px/mm):
+    /// n = 2: 2 / 2.9 = 0.689655 cycles per px, alias 1 - 0.689655 = 0.310345,
+    /// period 1 / 0.310345 = 3.2222 px (2.9 / 0.9); n = 3: 3 / 2.9 = 1.034483,
+    /// alias 0.034483, period 29.0 px (2.9 / 0.1). Not reported outside [2, 3).
+    #[test]
+    fn host_harmonic_aliases_hand_values() {
+        let m = Mask::Grille(Grille {
+            pitch_mm: 2.9,
+            stripe_mm: 0.7,
+            edge_mm: 0.1,
+            damper_y_mm: vec![],
+            damper_mm: 0.0,
+            damper_edge_mm: 0.0,
+        });
+        let r = readouts(&m, 1.0, 1.0, 1.0, 5.0);
+        let [a2, a3] = r.host_harmonic_alias_px.unwrap();
+        assert!(close(a2, 2.9 / 0.9, 1e-9));
+        assert!(close(a3, 29.0, 1e-9));
+        assert!(readouts(&m, 3.0 / 2.9, 1.0, 1.0, 5.0).host_harmonic_alias_px.is_none());
+        assert!(readouts(&m, 1.9 / 2.9, 1.0, 1.0, 5.0).host_harmonic_alias_px.is_none());
+    }
+
+    /// Real scan beats by hand. Slot 26 in (line 1.65 mm, V / 2 = 1/3 mm): mask
+    /// frequency 3 per mm, line harmonic n = round(1.65 / 0.3333) = round(4.95) = 5,
+    /// 5 / 1.65 = 3.030303, difference 0.030303 = 1/33, beat 33.0 mm. Delta
+    /// (line 0.44, rows P / 2 = 0.14): 1 / 0.14 = 7.142857, n = round(3.14) = 3,
+    /// 3 / 0.44 = 6.818182, difference 25 / 77 = 0.324675, beat 77 / 25 = 3.08 mm.
+    /// Grille: none.
+    #[test]
+    fn scan_harmonic_hand_values() {
+        let r = readouts(&slot(), 1920.0 / 528.0, 528.0 / 320.0, 396.0 / 240.0, 2.0);
+        let h = r.scan_harmonic.unwrap();
+        assert_eq!(h.harmonic, 5);
+        assert!(close(h.beat_mm, 33.0, 1e-9));
+        let r = readouts(&delta(), 1920.0 / 280.0, 280.0 / 640.0, 0.44, 0.5);
+        let h = r.scan_harmonic.unwrap();
+        assert_eq!(h.harmonic, 3);
+        assert!(close(h.beat_mm, 3.08, 1e-9));
+        assert!(close(harmonic_beat_mm(1.65, 1.0 / 3.0, 1), 0.41772, 0.00001));
+    }
     /// Scan moire by hand: 26 in slot TV, 396 mm / 240 lines = 1.65 mm line pitch,
     /// p = 0.8 mm, V = 2.5 x 0.8 / 3 = 0.6667 mm, x-averaged period V / 2 = 0.3333:
     /// 1.65 x 0.3333 / 1.3167 = 0.41772 mm. Delta P = 0.28 on 0.44 mm lines (15 in
@@ -1011,8 +1160,8 @@ mod tests {
     /// Triads across from CRT.md / QUESTIONS PHY-4: 1 PVM-20M4U 1245, 2 BVM-20F1U
     /// 1287, 3 KV TV 660, 4 GDM-F520 1827, 5 26 in slot 660, 6 13 in GE 440,
     /// 7 CromaClear 17 in 325 / 0.25 = 1300, 8 arcade 480, 9 15 in VGA 1157,
-    /// 10 17 in delta 325 / 0.22 = 1477. Hand px per triad: 1.54, 1.49, 2.91, 1.05,
-    /// 2.91, 4.36, 1.48, 4.00, 1.66, 1.30, so presets 3, 5, 6 and 8 reach 2.8.
+    /// 10 17 in delta 0.26 mm diagonal (PHY-4) = 0.225 mm horizontal, 325 / 0.225 = 1443.
+    /// Hand px per triad: 1.54, 1.49, 2.91, 1.05, 2.91, 4.36, 1.48, 4.00, 1.66, 1.33, so presets 3, 5, 6 and 8 reach 2.8.
     #[test]
     fn option_d_presets() {
         let presets = [
@@ -1025,7 +1174,7 @@ mod tests {
             (7, 1300.0),
             (8, 480.0),
             (9, 1157.0),
-            (10, 1477.0),
+            (10, 1443.0),
         ];
         assert_eq!(
             option_d(&presets, 1920.0, OPTION_D_THRESHOLD_PX_PER_TRIAD),
