@@ -1,0 +1,53 @@
+# Source interpretation (T-30: SRC-3, SRC-4, SRC-5). Format: crates/paramgen/src/lib.rs.
+# Each id is defined once in the whole params/ folder. Units: "1" means dimensionless.
+# Read by `decode` (source_eotf) and by the CPU placement code (src/placement.rs: the other three).
+
+[[param]]
+id = "source_eotf"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "drive_voltage"
+values = ["drive_voltage", "srgb"]
+tag = "E"
+source = "QUESTIONS SRC-5 and PLAN D-3: captured values are drive voltages by default; CRT.md rule 9 (sRGB-authored PC content is a per-profile choice)"
+description = "Meaning of a captured 8-bit value. drive_voltage: V = code / 255 goes to the gun law (consoles authored for CRT gamma). srgb: the code is decoded with the sRGB EOTF to linear light L, and the drive voltage is V = L^(1/tube gamma), so the tube shows exactly the sRGB luminance (lifted shadows compared with a real tube, CRT.md level-20 example)."
+group = "Source"
+
+[[param]]
+id = "raster_aspect"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "par"
+values = ["par", "fill_tube"]
+tag = "E"
+source = "QUESTIONS SRC-4 and CRT.md Pixel aspect ratio: the tube stretches the raster to the cabinet aspect (fill_tube); par keeps the picture aspect of the source with a pixel aspect ratio"
+description = "Shape of the picture on the tube. par: the picture aspect is source width x PAR / source height, centred in the visible area (shrunk to fit when wider than the tube). fill_tube: the raster fills the whole visible area, as on a real tube whatever the pixel count."
+group = "Source"
+
+[[param]]
+id = "source_par"
+stage = "source"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.5
+max = 2.0
+tag = "D"
+source = "CRT.md Pixel aspect ratio: NES/SNES 256-wide 8:7 = 1.1429, Genesis H40 32:35 = 0.9143, VGA 320x200 5:6 = 0.8333 (width / height of one source pixel)"
+description = "Pixel aspect ratio of a source pixel (width over height), used when raster_aspect is par. 1 is a square-pixel capture."
+group = "Source"
+
+[[param]]
+id = "line_multiplier"
+stage = "source"
+type = "i32"
+unit = "1"
+default = 1
+min = 1
+max = 2
+tag = "D"
+source = "QUESTIONS SRC-3 and CRT.md Scanline structure: lines = source rows x multiplier (1 for 240p, 2 for double-scanned 200-line VGA modes), no row resampling"
+description = "Scanlines drawn per source row: 1 for ordinary rasters, 2 for double-scanned modes. The scanline pitch is the raster height over source rows x line_multiplier, so 2 halves it."
+group = "Source"

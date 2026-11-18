@@ -163,18 +163,21 @@ Each has a recommended default so you can reply with exceptions only.
 - **Default:** Per-profile crop rectangle and integer divisor, an auto-detect "suggest" button, and a visible warning when the capture is not integer nearest-neighbour. Client area is the default crop.
 
 ### SRC-3 Mapping source rows to scanlines
+- **IMPLEMENTED (2026-11-18, T-30):** `line_multiplier` (1 or 2, `params/source.toml`): lines = source rows x multiplier, no row resampling; the scanline pitch `line_pitch_mm` of `FrameConstants` = raster height / lines (PVM-20M4U class, 240 lines: 1.208 mm; multiplier 2: 0.604 mm). Fixed modes and a free "lines" value are not offered; the multiplier is not yet part of a tube preset (T-50). The beam stage (T-36a) must draw each native row as `line_multiplier` scanlines.
 - **Q:** What defines the raster: one scanline per source row, fixed modes (240, 480, 576), double-scanned VGA 200-line modes, or a free "lines" parameter?
 - **Why:** σ/P at 240p and 480p differs by 2, which flips visible scanlines on or off. A 320×200 DOS game on a VGA monitor (paired fine lines, 70 Hz) and the same pixels on a 15 kHz TV are different pictures.
 - **Who:** USER.
 - **Default:** Raster mode is part of the tube preset, overridable per profile: lines = source rows × an integer line multiplier (1 for 240p, 2 for double-scan), no row resampling.
 
 ### SRC-4 Aspect and pixel aspect ratio
+- **IMPLEMENTED (2026-11-18, T-30):** `tube_aspect` (4:3 default, any value, 16:9 and 16:10 as later presets), `raster_aspect` (`par` default: picture aspect = width x PAR / height, shrunk to the tube width when wider; `fill_tube`: the raster stretched to the whole visible area as on a real tube) and `source_par` (NES 8:7 gives 1.219 displayed aspect). The default is `par` with PAR 1 so a square-pixel capture keeps its aspect and the pre-T-30 picture is unchanged; `fill_tube` is the real-tube behaviour. PAR does not yet feed the pixel clock of the amplifier model (T-33). No per-profile PAR storage or system presets yet (T-50, T-51 profiles).
 - **Q:** How are display aspect and PAR chosen (presets per system: NES 8:7, Genesis H40 32:35, VGA 320×200 5:6), and what happens with 16:9 pixel art (320×180) that never existed on a 4:3 tube? Are 16:9 and 16:10 tubes (BVM-D24, FW900) in scope?
 - **Why:** The tube stretches the raster to cabinet aspect regardless of pixel count, so a 1:1 capture is wrong for non-square-PAR systems. PAR also changes triads per source pixel and the pixel clock used by the bandwidth model. A 4:3 image uses only 2880 of 3840 columns on a 4K 16:9 host.
 - **Who:** USER.
 - **Default:** Selectable tube aspect (4:3 default, 16:9 and 16:10 as later presets), per-profile PAR override.
 
 ### SRC-5 Source colour and gamma interpretation
+- **IMPLEMENTED (2026-11-18, T-30):** `source_eotf` = `drive_voltage` (default, V = code / 255 into the gun law) or `srgb` (sRGB EOTF to linear light, then V = L^(1/tube gamma), so the tube shows the sRGB luminance: code 20 gives 0.006995). The tube gamma is still the `Settings::source` stand-in in `decode` until T-34 moves it into the gun stage; the V in [0, 1] contract is in `shaders/decode.comp`. Per-profile choice (PLAN D-3: Mina starts on `srgb`) comes with the profile storage (T-51 settings).
 - **Q:** What is the default meaning of a captured 8-bit value: CRT drive voltage reinterpreted with tube gamma (consoles), sRGB-authored PC content, or already-processed emulator output?
 - **Why:** `CRT.md` rule 9 and the sRGB-versus-2.4 example (level 20/255) show this changes every shadow and saturation. It is a policy choice, not physics.
 - **Who:** USER.
@@ -355,6 +358,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **IMPLEMENTED (2026-11-18), first part:** FIFO (vsync) only. No immediate mode, no quality tiers, VRR and latency not measured.
 
 ### OUT-7 Placement and scale of the tube on the output
+- **IMPLEMENTED (2026-11-18, T-30), first part:** `tube_height_fraction` (default 1.0) of the output height, black surround (the whole output outside the tube rectangle, exactly black), centred, free resize (placement is recomputed every frame), `--integer` = whole host pixels per source row when at least 1. The live px-per-triad readout and the "true physical size" mode (EDID) are not done (UI tasks, T-52 onwards).
 - **Q:** How is the virtual tube mapped to the output: fill height, fixed 4:3, true physical size (needs panel size and viewing distance), integer scale, user-set size, black surround; and how does it behave in a resizable window?
 - **Why:** It defines pixels per triad, halation radius in pixels and moiré. A small window destroys the host-pixel budget, and a 20 in tube filling a 32 in panel is a magnified tube.
 - **Who:** USER.
@@ -397,6 +401,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Default:** Automatic tiering by computed px per triad with a visible readout, area-integrated in B and C, zoom as an inspection mode, enlarged cell only on explicit request and labelled non-physical, host subpixels per HW-6.
 
 ### PHY-3 Physical scale and units of the virtual tube
+- **IMPLEMENTED (2026-11-18, T-30):** the tube is `tube_visible_height_mm` (290 for the PVM-20M4U class, CRT.md reference table) x `tube_aspect`; the CPU converts to host pixels (`px_per_mm`, `FrameConstants`, 4.966 on 2560x1440 at full height), ratios preserved when scaled. Lengths of later stages are tube mm times `px_per_mm`. Viewing distance (curvature perspective) comes with T-37.
 - **Q:** Is the tube modelled at its real size with a viewing distance, or scaled to fill the output while keeping triad count? Are parameters stored and shown in physical units (mm, kV, µA or normalised drive, MHz, ms, cd/m², CIE xy) and converted to shader units on the CPU?
 - **Why:** Halation radius (17 to 25 mm), spot FWHM and pitch only mean something relative to a tube size. Physical units make presets portable across host displays and traceable to `CRT.md`, while shader units are host-dependent.
 - **Who:** USER.

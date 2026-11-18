@@ -19,7 +19,8 @@ layout(std140, set = 0, binding = UCRT_FRAME_BINDING) uniform FrameConstants {
     layout(offset = 16) ivec2 native_size;
     // Output target size in pixels.
     layout(offset = 24) ivec2 target_size;
-    // Host pixels per tube millimetre and scanline pitch in mm; 0 until the tube is placed (T-30).
+    // Host pixels per tube millimetre and scanline pitch in mm (T-30, src/placement.rs); 0 only in the
+    // unplaced defaults of FrameConstants::new.
     layout(offset = 32) float px_per_mm;
     layout(offset = 36) float line_pitch_mm;
     // Frames rendered since the pipeline was created, and the time since the previous frame in ms.
