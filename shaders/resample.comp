@@ -1,0 +1,22 @@
+#version 450
+
+// Bypass of a slot that changes domain (ARCHITECTURE 3.7): nearest-neighbour resample of the input image
+// to the output image size, an exact copy of FP16 texels (no arithmetic on the values). Output texel q
+// takes input texel floor((q + 0.5) * in_size / out_size): native -> amp repeats each native texel K
+// times (zero-order hold), amp -> tube picks the amp sample under the host pixel centre.
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D src;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D dst;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 out_size = imageSize(dst);
+    if (any(greaterThanEqual(q, out_size))) {
+        return;
+    }
+    ivec2 in_size = textureSize(src, 0);
+    ivec2 p = ivec2(floor((vec2(q) + 0.5) * vec2(in_size) / vec2(out_size)));
+    imageStore(dst, q, texelFetch(src, min(p, in_size - 1), 0));
+}

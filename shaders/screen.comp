@@ -1,0 +1,26 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `screen` (ARCHITECTURE 3.7, image contract): amp domain (gun output, beam current) -> tube domain
+// (one texel per host pixel of the tube rectangle, tube_size), linear light emitted per channel in the
+// product form L_c = mask_eval() * beam_eval(). With the T-20b stubs (nearest amp sample, mask 1.0) it is
+// an exact identity: 1.0 * x is x.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "beam.glsl"
+#include "mask.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D current_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(q, frame.tube_size))) {
+        return;
+    }
+    vec3 l = mask_eval(q) * beam_eval(current_in, q);
+    imageStore(light_out, q, vec4(l, 1.0));
+}
