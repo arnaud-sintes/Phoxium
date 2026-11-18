@@ -6,9 +6,13 @@
 # the gun law, by a Gaussian amplifier: every pixel edge becomes a Gaussian step response of time sigma
 # sqrt(ln 2) / (2 pi B) ~ 0.1325 / B (10-90 % rise 0.3396 / B). Rising edges use the bandwidth B, falling
 # edges a rise time scaled by `amp_fall_rise_ratio`; both start together after the input edge (10 %
-# points aligned), the slower one ends later. Defaults: PC-monitor bandwidth (amplifier not the
-# limit, no visible softening at 240p pixel clocks) so that the default chain stays the identity until a
-# tube preset (T-50) sets its own bandwidth.
+# points aligned), the slower one ends later. Each of the K sub-samples per native pixel holds the exact
+# box mean of the amplifier output over its interval, clamped to the local input range (slew limiter).
+# Outside the active line the signal is black (blanking): at low bandwidth the first and last columns
+# lose some light and the slow-fall tail past the right end is cut; right for a full active line,
+# slightly spurious for a crop. Defaults: PC-monitor bandwidth (amplifier not the limit; edge sigma at
+# most 0.01 source px is treated as an ideal amplifier, exact hold) so that the default chain stays the
+# identity until a tube preset (T-50) sets its own bandwidth.
 
 [[param]]
 id = "amp_bandwidth_mhz"
@@ -46,7 +50,7 @@ min = 0.5
 max = 3.0
 tag = "E"
 source = "CRT.md Signal path, adjacent-pixel nonlinearity (Mulligan and Stone 1989; Klein, Hu and Carney 1996; Pelli 1997): the drive amplifier slews differently up and down, the smear trails to the right; the ratio itself is an estimate"
-description = "Fall time over rise time of the amplifier (10-90 %). 1 is symmetric. Both transitions start together after an input edge and the slower one ends later, so the smear trails to the right: above 1 bright detail trails to the right; below 1 bright detail starts late and isolated bright pixels lose light."
+description = "Fall time over rise time of the amplifier (10-90 %). 1 is symmetric. Both transitions start together after an input edge and the slower one ends later, so the smear trails to the right. Above 1 (slow fall) bright detail trails right and isolated bright pixels gain light (area +22.8 % at B = 4 MHz, r = 2; the B = 5 MHz vertical-line dimming goes 19.8 % at r = 1, 11.4 % at r = 2, 3.0 % at r = 3). Below 1 (slow rise) bright detail starts late and isolated bright pixels lose light (24.0 % dimming at r = 0.5, B = 5 MHz), which is what CRT.md's 'an isolated bright pixel is dimmer than one in a run' needs. Presets must pick the direction deliberately. The output stays within the local input range (slew limiter)."
 group = "Video amplifier"
 
 # Peaking (consumer "sharpness"), off by default. Linear and DC-preserving: the response gains
@@ -63,7 +67,7 @@ min = 0.0
 max = 1.5
 tag = "E"
 source = "CRT.md Controls table, Sharpness (consumer): peaking filter in the video path, about +3 to 8 dB around 3 to 4 MHz, 5 to 20 % overshoot; CRT.md Signal path: peaking causes 5 to 20 % overshoot after sharp edges [E]"
-description = "High-frequency boost g of the peaking filter (gain 1 + g above the corner: 0.41 is +3 dB, 1.5 is +8 dB). 0 turns peaking off. Gives an overshoot (outline) after and before horizontal edges only; flat fields are unchanged."
+description = "High-frequency boost g of the peaking filter. 1 + g is the asymptotic shelf gain far above the corner (0.41 is +3 dB, 1.5 is +8 dB); at the corner itself the boost is only +1.0 dB (g = 0.41) to +3.2 dB (g = 1.5). 0 turns peaking off. Gives an overshoot (outline) after and before horizontal edges only (at B = 8 MHz and a 3.5 MHz corner, about 5.8 % to 26 % over the range); flat fields are unchanged."
 group = "Video amplifier"
 
 [[param]]
