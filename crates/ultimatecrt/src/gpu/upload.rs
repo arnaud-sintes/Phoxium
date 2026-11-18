@@ -8,10 +8,10 @@ impl Renderer {
     /// # Safety
     /// The device and descriptor set must be live; the function waits for device idle before replacing the old texture.
     pub(super) unsafe fn create_texture(&mut self, width: u32, height: u32) -> Res<()> {
-        self.device.device_wait_idle()?;
+        self.ctx.device.device_wait_idle()?;
         self.destroy_texture();
 
-        let image = self.device.create_image(
+        let image = self.ctx.device.create_image(
             &vk::ImageCreateInfo::default()
                 .image_type(vk::ImageType::TYPE_2D)
                 .format(vk::Format::B8G8R8A8_UNORM)
@@ -28,15 +28,18 @@ impl Renderer {
                 .initial_layout(vk::ImageLayout::UNDEFINED),
             None,
         )?;
-        let req = self.device.get_image_memory_requirements(image);
-        let memory = self.device.allocate_memory(
+        let req = self.ctx.device.get_image_memory_requirements(image);
+        let memory = self.ctx.device.allocate_memory(
             &vk::MemoryAllocateInfo::default()
                 .allocation_size(req.size)
-                .memory_type_index(self.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?),
+                .memory_type_index(
+                    self.ctx
+                        .memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?,
+                ),
             None,
         )?;
-        self.device.bind_image_memory(image, memory, 0)?;
-        let view = self.device.create_image_view(
+        self.ctx.device.bind_image_memory(image, memory, 0)?;
+        let view = self.ctx.device.create_image_view(
             &vk::ImageViewCreateInfo::default()
                 .image(image)
                 .view_type(vk::ImageViewType::TYPE_2D)
@@ -46,32 +49,33 @@ impl Renderer {
         )?;
 
         let bytes = width as u64 * height as u64 * 4;
-        let staging = self.device.create_buffer(
+        let staging = self.ctx.device.create_buffer(
             &vk::BufferCreateInfo::default()
                 .size(bytes)
                 .usage(vk::BufferUsageFlags::TRANSFER_SRC),
             None,
         )?;
-        let sreq = self.device.get_buffer_memory_requirements(staging);
-        let staging_memory = self.device.allocate_memory(
+        let sreq = self.ctx.device.get_buffer_memory_requirements(staging);
+        let staging_memory = self.ctx.device.allocate_memory(
             &vk::MemoryAllocateInfo::default()
                 .allocation_size(sreq.size)
-                .memory_type_index(self.memory_type(
+                .memory_type_index(self.ctx.memory_type(
                     sreq.memory_type_bits,
                     vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT,
                 )?),
             None,
         )?;
-        self.device.bind_buffer_memory(staging, staging_memory, 0)?;
+        self.ctx.device.bind_buffer_memory(staging, staging_memory, 0)?;
         let mapped =
-            self.device
+            self.ctx
+                .device
                 .map_memory(staging_memory, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty())? as *mut u8;
 
         let image_info = [vk::DescriptorImageInfo::default()
             .sampler(self.sampler)
             .image_view(view)
             .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        self.device.update_descriptor_sets(
+        self.ctx.device.update_descriptor_sets(
             &[vk::WriteDescriptorSet::default()
                 .dst_set(self.desc_set)
                 .dst_binding(0)
@@ -99,12 +103,12 @@ impl Renderer {
     /// The GPU must have finished every use of the texture (device idle).
     pub(super) unsafe fn destroy_texture(&mut self) {
         if let Some(t) = self.tex.take() {
-            self.device.unmap_memory(t.staging_memory);
-            self.device.destroy_buffer(t.staging, None);
-            self.device.free_memory(t.staging_memory, None);
-            self.device.destroy_image_view(t.view, None);
-            self.device.destroy_image(t.image, None);
-            self.device.free_memory(t.memory, None);
+            self.ctx.device.unmap_memory(t.staging_memory);
+            self.ctx.device.destroy_buffer(t.staging, None);
+            self.ctx.device.free_memory(t.staging_memory, None);
+            self.ctx.device.destroy_image_view(t.view, None);
+            self.ctx.device.destroy_image(t.image, None);
+            self.ctx.device.free_memory(t.memory, None);
         }
     }
 }

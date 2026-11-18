@@ -7,7 +7,7 @@ use super::*;
 /// Push constants of the passthrough pipeline, laid out as the GLSL `push_constant` block.
 #[repr(C)]
 #[derive(Clone, Copy)]
-struct PushConstants {
+pub(super) struct PushConstants {
     /// Destination rectangle in NDC: min x, min y, max x, max y.
     rect: [f32; 4],
     /// Source origin (x, y), divisor (x, y), native size (w, h).
@@ -52,7 +52,7 @@ impl Renderer {
         let blend = vk::PipelineColorBlendStateCreateInfo::default().attachments(&attachments);
         let dynamic_states = [vk::DynamicState::VIEWPORT, vk::DynamicState::SCISSOR];
         let dynamic = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dynamic_states);
-        let formats = [self.format];
+        let formats = [self.presenter.format()];
         let mut rendering = vk::PipelineRenderingCreateInfo::default().color_attachment_formats(&formats);
         let info = vk::GraphicsPipelineCreateInfo::default()
             .stages(&stages)
@@ -66,10 +66,11 @@ impl Renderer {
             .layout(self.pipeline_layout)
             .push_next(&mut rendering);
         let result = self
+            .ctx
             .device
             .create_graphics_pipelines(vk::PipelineCache::null(), &[info], None);
-        self.device.destroy_shader_module(vert, None);
-        self.device.destroy_shader_module(frag, None);
+        self.ctx.device.destroy_shader_module(vert, None);
+        self.ctx.device.destroy_shader_module(frag, None);
         self.pipeline = result.map_err(|(_, e)| e)?[0];
         Ok(())
     }
@@ -81,24 +82,18 @@ impl Renderer {
     pub(super) unsafe fn shader_module(&self, spv: &[u8]) -> Res<vk::ShaderModule> {
         let words = ash::util::read_spv(&mut Cursor::new(spv))?;
         Ok(self
+            .ctx
             .device
             .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)?)
-    }
-
-    pub(super) fn memory_type(&self, bits: u32, flags: vk::MemoryPropertyFlags) -> Res<u32> {
-        let props = unsafe { self.instance.get_physical_device_memory_properties(self.physical) };
-        (0..props.memory_type_count)
-            .find(|&i| bits & (1 << i) != 0 && props.memory_types[i as usize].property_flags.contains(flags))
-            .ok_or_else(|| "no suitable memory type".into())
     }
 
     /// Records the frame command buffer for swapchain image `index`.
     ///
     /// # Safety
     /// `index` must be an acquired swapchain image, `cmd` must not be in use by the GPU (fence waited) and the pipeline must exist.
-    pub(super) unsafe fn record(&mut self, index: usize) {
+    pub(super) unsafe fn record(&mut self, index: u32) {
         let cb = self.cmd;
-        let d = &self.device;
+        let d = &self.ctx.device;
 
         if self.upload_pending {
             if let Some(t) = self.tex.as_mut() {
@@ -146,7 +141,7 @@ impl Renderer {
             self.upload_pending = false;
         }
 
-        let target = self.images[index];
+        let target = self.presenter.image(index);
         barrier(
             d,
             cb,
@@ -160,7 +155,7 @@ impl Renderer {
         );
 
         let attachment = [vk::RenderingAttachmentInfo::default()
-            .image_view(self.views[index])
+            .image_view(self.presenter.view(index))
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
             .load_op(vk::AttachmentLoadOp::CLEAR)
             .store_op(vk::AttachmentStoreOp::STORE)
@@ -171,7 +166,7 @@ impl Renderer {
             })];
         let area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
-            extent: self.extent,
+            extent: self.presenter.extent(),
         };
         d.cmd_begin_rendering(
             cb,
@@ -184,7 +179,7 @@ impl Renderer {
             // Letterbox the native raster into the window, optionally on integer scales only.
             let v = self.view;
             let (nw, nh) = (v.native.0 as f32, v.native.1 as f32);
-            let (ew, eh) = (self.extent.width as f32, self.extent.height as f32);
+            let (ew, eh) = (area.extent.width as f32, area.extent.height as f32);
             let mut scale = (ew / nw).min(eh / nh);
             if self.integer_scale && scale >= 1.0 {
                 scale = scale.floor();

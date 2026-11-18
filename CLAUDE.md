@@ -65,7 +65,7 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 
 Cargo workspace, Windows only. Private GitHub repository `arnaud-sintes/ultimateCRT`.
 - `crates/pixel-demo`: demo source app (Win32 and GDI), shows a pixel-art scene or test card at an integer scale. It is the capture target.
-- `crates/ultimatecrt`: the main app. `sources.rs` finds the window, `capture.rs` captures it (Windows.Graphics.Capture, CPU copy), `scaling.rs` is the pure integer-upscale detection and crop logic (unit tested), `output.rs` is the Win32 output window, `gpu.rs` is the Vulkan renderer (ash).
+- `crates/ultimatecrt`: the main app. `sources.rs` finds the window, `capture.rs` captures it (Windows.Graphics.Capture, CPU copy), `scaling.rs` is the pure integer-upscale detection and crop logic (unit tested), `output.rs` is the Win32 output window, `gpu/` is the Vulkan renderer (ash): `context`, `present`, `upload`, `passthrough`, `Renderer` facade in `mod.rs`.
 - `shaders/`: GLSL, compiled to SPIR-V by `crates/ultimatecrt/build.rs` with `glslc`.
 - `scripts/`: `package.ps1` (release zip) and `release.ps1` (GitHub release).
 - `rust-toolchain.toml`, `rustfmt.toml`: pinned toolchain and formatting.
