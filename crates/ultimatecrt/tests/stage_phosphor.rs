@@ -35,7 +35,7 @@
 //! The power law is not geometric: its trail t_k (k = 1 .. 59 at 60 Hz, the 1 s window) is fitted by four
 //! geometric terms, exact at k = 1, 2, 3 (Vandermonde solve) and within about 1.2 % relative up to 1 s at 60 Hz (2.5 % at 120 Hz)
 //! (`crt_model::phosphor::DecayFit::frame_feedback`, rates by search). A sum of exponentials cannot stop at
-//! 1 s: the fit rolls off smoothly after the window, so its total trail is 13 to 17 % above the 1 s
+//! 1 s: the fit rolls off smoothly after the window, so its total trail is 10.9 to 16.8 % above the 1 s
 //! truncated sum (the infinite power-law total is about 3 times larger). The normalisation uses the
 //! realised total (steady state exactly 1), so w0 is about 3 % below the truncated-integral value
 //! E[0, T] / E[0, 1 s] (green 60 Hz: 0.7628 against 0.7881, blue 0.7883 against 0.8109; recorded by `step_response`).
@@ -46,9 +46,17 @@
 //!
 //! # Tolerances
 //!
-//! The output image is FP16 and FP16 stores truncate on the dev GPU: one value is within 2^-10 relative
-//! (one FP16 step), a ratio of two within 2 x 2^-10, hence 2.5e-3 relative for the exact ratios. The
+//! The output image is FP16, stored through `round_f16` (round to nearest): one value is within 2^-11
+//! relative (half an FP16 step), a ratio of two within 2^-10, plus 1e-5 for the FP32 arithmetic. The
 //! history is FP32.
+//!
+//! # Cleared history
+//!
+//! A cleared history is primed to the steady state of the first frame's input x: S_j = c_j x / (1 - rho_j),
+//! so y = w0 (x + sum_j c_j x / (1 - rho_j)) = x at once, and S_j <- rho_j S_j + c_j x = S_j: a static
+//! picture shows no fade-in. A black first frame primes it to 0 (the impulse tests start with one). If the
+//! picture changes after the clear, the trail is that of the first frame as if shown forever before (the
+//! real past is unknown; acceptable).
 
 mod common;
 
@@ -166,8 +174,11 @@ fn step_response() {
     let p = params(true, 60.0, [1.0; 3]);
     let t = frame_period_ms(60.0);
     let pic = picture(W, H);
-    let mut out = vec![run(&mut gpu, &p, &pic)];
     let zero = black(W, H);
+    // A black first frame primes the cleared history to 0 (a cleared history is primed to the steady
+    // state of its first frame), so the picture is a single excitation.
+    assert_eq!(run(&mut gpu, &p, &zero), zero);
+    let mut out = vec![run(&mut gpu, &p, &pic)];
     for _ in 1..60 {
         out.push(run(&mut gpu, &p, &zero));
     }
@@ -199,7 +210,7 @@ fn step_response() {
                 let ratio = yk / y0;
                 if k <= 3 {
                     assert!(
-                        rel(ratio, oracle[k - 1]) < 2.5 * FP16,
+                        rel(ratio, oracle[k - 1]) < FP16 + 1e-5,
                         "{name} k {k}: {ratio} vs oracle {}",
                         oracle[k - 1]
                     );
@@ -270,6 +281,7 @@ fn frame_rate_rows() {
     ] {
         let p = params(true, hz, [1.0; 3]);
         gpu.clear_history();
+        let _ = run(&mut gpu, &p, &black(W, H));
         let y0 = run(&mut gpu, &p, &pic);
         let y1 = run(&mut gpu, &p, &black(W, H));
         let t = frame_period_ms(f64::from(hz));
@@ -282,7 +294,7 @@ fn frame_rate_rows() {
                 oracle * 100.0
             );
             assert!(
-                rel(ratio, oracle) < 2.5 * FP16,
+                rel(ratio, oracle) < FP16 + 1e-5,
                 "{hz} Hz channel {ch}: {ratio} vs {oracle}"
             );
             assert!(
@@ -296,9 +308,10 @@ fn frame_rate_rows() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// A static picture converges to the no-persistence picture (steady-state gain 1, within one FP16 step
-/// plus 1e-4 after 400 frames); at frame 120 it is still short by the predicted remainder of the
-/// fitted tail, w0 sum_{k > 120} t_k, taken from the crt-model fit (about 1 %, see the module doc).
+/// A static picture after a clear equals the no-persistence picture from frame 0 on (the cleared history
+/// is primed to the steady state; within half an FP16 step plus FP32 arithmetic), every frame for 200
+/// frames, after an explicit clear too. Moving content after a clear: the second frame b shows
+/// w0 b + (1 - w0) a (the primed history of the first frame a, then the trail), per channel.
 #[test]
 fn static_picture_keeps_its_brightness() {
     let Some(mut gpu) = common::gpu_or_skip("static_picture_keeps_its_brightness") else {
@@ -308,30 +321,36 @@ fn static_picture_keeps_its_brightness() {
     let p = params(true, 60.0, [1.0; 3]);
     let t = frame_period_ms(60.0);
     let pic = picture(W, H);
-    let mut y = ImageF32 {
-        width: 0,
-        height: 0,
-        rgba: Vec::new(),
-    };
-    for n in 0..400 {
-        y = run(&mut gpu, &p, &pic);
-        if n == 120 {
-            for (ch, (name, fit)) in fits().into_iter().enumerate() {
-                let fb = fit.frame_feedback(t, TRAIL_HORIZON_MS);
-                let short: f64 = fb.w0 * (121..5000).map(|k| fb.trail(k)).sum::<f64>();
-                let got = f64::from(y.rgba[ch]) / f64::from(pic.rgba[ch]);
-                println!("{name} at frame 120: {got:.5}, predicted {:.5}", 1.0 - short);
-                assert!((got - (1.0 - short)).abs() <= FP16 + 1e-5, "{name} frame 120");
-            }
+    let check = |y: &ImageF32, what: &str| {
+        for (i, (&got, &x)) in y.rgba.iter().zip(&pic.rgba).enumerate() {
+            assert!(
+                rel(f64::from(got), f64::from(x)) <= FP16 / 2.0 + 1e-5,
+                "{what}: texel {} channel {}: {got} vs {x}",
+                i / 4,
+                i % 4
+            );
         }
+    };
+    for n in 0..200 {
+        check(&run(&mut gpu, &p, &pic), &format!("frame {n}"));
     }
-    for (i, (&got, &x)) in y.rgba.iter().zip(&pic.rgba).enumerate() {
-        assert!(
-            rel(f64::from(got), f64::from(x)) <= FP16 + 1e-4,
-            "texel {} channel {}: {got} vs {x}",
-            i / 4,
-            i % 4
-        );
+    gpu.clear_history();
+    for n in 0..3 {
+        check(&run(&mut gpu, &p, &pic), &format!("frame {n} after clear_history"));
+    }
+    // Moving content after a clear.
+    gpu.clear_history();
+    let a = image(W, H, |_, _| [1.0, 1.0, 1.0]);
+    let b = image(W, H, |_, _| [0.25, 0.5, 2.0]);
+    let _ = run(&mut gpu, &p, &a);
+    let y = run(&mut gpu, &p, &b);
+    for (ch, (name, fit)) in fits().into_iter().enumerate() {
+        let w0 = fit.frame_feedback(t, TRAIL_HORIZON_MS).w0;
+        let (xa, xb) = (f64::from(a.rgba[ch]), f64::from(b.rgba[ch]));
+        let want = w0 * xb + (1.0 - w0) * xa;
+        let got = f64::from(y.rgba[ch]);
+        println!("{name}: frame after a change following a clear {got:.5}, predicted {want:.5}");
+        assert!(rel(got, want) <= FP16 / 2.0 + 1e-5, "{name}: {got} vs {want}");
     }
     drop(gpu);
     common::assert_no_validation_messages(&counter);

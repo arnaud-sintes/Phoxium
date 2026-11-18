@@ -21,5 +21,5 @@ void main() {
         return;
     }
     vec4 x = texelFetch(light_in, p, 0);
-    imageStore(light_out, p, vec4(phosphor_saturate(x.rgb), x.a));
+    imageStore(light_out, p, round_f16(vec4(phosphor_saturate(x.rgb), x.a)));
 }

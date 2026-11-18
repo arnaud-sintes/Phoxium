@@ -253,7 +253,7 @@ pub const TRAIL_HORIZON_MS: f64 = 1000.0;
 /// Frame-feedback recurrence of one channel (T-41). With x[m] the frame-integrated excitation
 /// of frame m (the no-persistence light) and S_j the history of term j:
 ///
-/// y[m] = w0 (x[m] + sum_j S_j[m]),  S_j[m + 1] = rho_j S_j[m] + c_j x[m],  S_j = 0 at reset.
+/// y[m] = w0 (x[m] + sum_j S_j[m]),  S_j[m + 1] = rho_j S_j[m] + c_j x[m],  S_j = 0 at reset (the GPU stage primes a cleared history to the steady state of its first frame instead, S_j = c_j x / (1 - rho_j), so a static picture shows y = x at once).
 ///
 /// Unrolled, y[m] = w0 (x[m] + sum_{k >= 1} t_k x[m - k]) with t_k = sum_j c_j rho_j^(k - 1)
 /// ([`FrameFeedback::trail`]), the fitted E_k / E_0; a constant x gives y = w0 (1 + sum_k t_k) x = x.
@@ -389,7 +389,7 @@ fn trail_cost(rho: [f64; 4], c: [f64; 4], r: &[f64], total: f64) -> f64 {
 /// horizon only. A sum of exponentials cannot stop at 1 s: forcing its total to the truncated sum
 /// costs about 16 % relative error on the last frames of the window, while the unconstrained fit is
 /// within about 1 % over the whole window and rolls off smoothly after it (its total exceeds the
-/// truncated sum by 13 to 17 %, see the tests). The steady state stays exactly 1 either way.
+/// truncated sum by 10.9 to 16.8 %, see the tests). The steady state stays exactly 1 either way.
 const SUM_WEIGHT: f64 = 0.0;
 
 /// Four-term fit of the trail `r` (see [`DecayFit::frame_feedback`]): grid search of the time

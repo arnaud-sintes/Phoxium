@@ -305,6 +305,10 @@ fn interaction_with_persistence() {
     let fits: [DecayFit<'static>; 3] = [KUHN_RED, KUHN_GREEN, KUHN_BLUE];
     let x = [2.0_f32, 3.0, 3.0];
     let pic = uniform(8, 4, x);
+    // One black frame first: a history clear primes the history to the steady state of its first frame
+    // (T-41 review fix), so a black first frame leaves the history empty and the excitation then is a
+    // single impulse.
+    run(&mut gpu, &p, &uniform(8, 4, [0.0; 3]));
     let mut out = vec![run(&mut gpu, &p, &pic)];
     for _ in 0..3 {
         out.push(run(&mut gpu, &p, &uniform(8, 4, [0.0; 3])));
@@ -355,10 +359,10 @@ fn interaction_with_persistence() {
     let off = params(false, S, true);
     let first = run(&mut gpu, &off, &pic);
     for ch in 0..3 {
-        // w0 x only: the history was dropped.
-        let w0 = fits[ch].frame_feedback(t, TRAIL_HORIZON_MS).w0;
+        // The history was dropped and primed to the steady state of this first frame (T-41 review fix):
+        // a static picture shows its own value at once, x (saturation off), not w0 x.
         assert!(
-            rel(texel(&first, 0, 0, ch), w0 * f64::from(x[ch])) <= 2.5 * FP16,
+            rel(texel(&first, 0, 0, ch), f64::from(x[ch])) <= 2.5 * FP16,
             "ch {ch}: first frame after the switch"
         );
     }
