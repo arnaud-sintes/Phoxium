@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/pixel-demo", "crates/ultimatecrt"]
+members = ["crates/pixel-demo", "crates/ultimatecrt", "crates/paramgen"]
 
 [workspace.package]
 version = "0.1.0"

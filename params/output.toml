@@ -1,0 +1,15 @@
+# Output stage parameters (ARCHITECTURE section 5, step 7). Format: crates/paramgen/src/lib.rs.
+# Each id is defined once in the whole params/ folder. Units: "1" means dimensionless.
+
+[[param]]
+id = "exposure"
+stage = "output"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.05
+max = 8.0
+tag = "E"
+source = "QUESTIONS COL-1 and SCP-8: honest exposure control, 1 maps tube white to panel white; no hidden compensation"
+description = "Scale factor from the tube's linear light to the host panel's linear light, before the SDR encode. Values above 1 clip highlights."
+group = "Output"

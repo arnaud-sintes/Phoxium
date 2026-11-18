@@ -16,6 +16,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Pinned toolchain (`rust-toolchain.toml`) and formatting rules (`rustfmt.toml`).
 - `scripts/package.ps1` (fmt, clippy, build, tests, licence check, zip with checksum and commit record) and `scripts/release.ps1` (GitHub release from the changelog section, with safety checks).
 - Documents: `CLAUDE.md`, `CRT.md`, `QUESTIONS.md`, `ARCHITECTURE.md`, `DESIGN.md`, `ENV.md`, `README.md`.
+- Declarative parameter table `params/*.toml` (units, soft ranges, confidence tags, sources) and the `paramgen` build-time generator of the Rust `Params` struct, its metadata and std140 bytes, and the matching GLSL uniform block. First entries: `exposure` and the tube primaries and white point.
 
 ### Changed
 - A fullscreen output now refuses to start when the Ctrl+Alt+Q hotkey cannot be registered, and an unknown `--monitor` index is an error (it used to fall back to a default rectangle).

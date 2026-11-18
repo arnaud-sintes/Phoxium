@@ -26,6 +26,8 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `crates/pixel-demo` | Demo source app (Win32 and GDI). Procedural NES-style scene, test card, PNG display. It is the capture target for development and tests. |
 | `crates/ultimatecrt` | The main application. |
 | `shaders/` | GLSL 450 sources, compiled to SPIR-V by `crates/ultimatecrt/build.rs`. |
+| `params/` | The declarative parameter table, one TOML file per stage (see 3.6). |
+| `crates/paramgen` | Build-time generator: reads `params/*.toml`, writes the Rust and GLSL parameter code (see 3.6). |
 | `scripts/` | `package.ps1` (checks, build, tests, release zip), `release.ps1` (GitHub release). |
 | `rust-toolchain.toml`, `rustfmt.toml` | Pinned toolchain, formatting rules. |
 | `CRT.md`, `QUESTIONS.md` | Physics knowledge base, decisions and open questions. |
@@ -42,6 +44,7 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `scaling.rs` | Pure logic: `Rect`, divisor parsing, `Detector` (integer-upscale detection), `View` (crop, divisor, native size). No OS calls. Unit tested. | none |
 | `output.rs` | The output window (raw Win32): windowed or fullscreen non-activating, monitor choice, global quit hotkey, message pump. | Win32 |
 | `gpu.rs` | Vulkan renderer: device choice, swapchain, texture upload, pipeline, per-frame command recording. | `ash`, `scaling::View` |
+| `params.rs` | Generated `Params` struct, parameter metadata, std140 serialisation (see 3.6). | `paramgen` (build time) |
 | `shaders/*.vert, *.frag` | `fullscreen.vert` draws the quad. `passthrough.frag` reads the native pixel from the captured frame. | built by `build.rs` |
 
 ### 3.2 Per-frame data flow (Implemented)
@@ -70,6 +73,16 @@ Raw Win32, not winit, because the behaviour needed (non-activating, topmost, too
 ### 3.5 Device choice
 
 The Direct3D capture device uses the default adapter. The Vulkan device is chosen separately: the requested `--gpu` index, else an NVIDIA discrete GPU, else any discrete GPU, else the first one that is Vulkan 1.3 and can present to the window. On a hybrid-graphics machine this may imply a cross-adapter copy (risk HW-3).
+
+### 3.6 Parameter table (Implemented, not yet used by a shader)
+
+Every CRT parameter is defined once (DESIGN section 8), in `params/<stage>.toml`: id, stage, type (f32, i32, bool, enum, vec2, vec3, vec4), unit, default, soft range, confidence tag (S, D, K, E), source, description, UI group, enum values. One file per stage, so stage tasks do not edit the same file. The format is documented in `crates/paramgen/src/lib.rs`.
+
+`build.rs` calls `crates/paramgen` (a build dependency, `serde` and `toml`), which validates the files and writes to `OUT_DIR`:
+- `params.rs`, included by `src/params.rs`: the `Params` struct with the table defaults, `PARAMS_META` (all metadata, for the UI, presets and documentation), `write_std140` and `to_std140` (the uniform buffer bytes), `get` and `set` by id, one `u32` constant per enum value;
+- `params.glsl`: the same constants and a `Params` uniform block (instance `params`, set and binding 0 unless `UCRT_PARAMS_SET` and `UCRT_PARAMS_BINDING` are defined) whose members carry explicit `layout(offset = N)`. `build.rs` compiles a shader that includes it with `glslc`.
+
+The std140 layout is computed once, in declaration order (production files sorted by name), and written into both outputs. Parameters live in a uniform buffer, not push constants (128 bytes minimum limit). A duplicate id, an out-of-range default, an unknown key or a missing field fails the build with a message naming the file and the id. Test-only entries (`params/_test.toml`, every type) are placed after the production entries and exist only in non-release builds (`cfg(ucrt_test_params)`). Stage-specific ids are added by their stage tasks; today the table holds `exposure` (output) and the shared tube colorimetry (`colour.toml`: primaries and white in CIE xy).
 
 ## 4. Architectural decisions
 

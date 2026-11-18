@@ -5,6 +5,7 @@ pub mod capture;
 pub mod cli;
 pub mod gpu;
 pub mod output;
+pub mod params;
 pub mod scaling;
 pub mod sources;
 
