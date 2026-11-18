@@ -6,6 +6,7 @@ pub mod cli;
 pub mod diag;
 pub mod gpu;
 pub mod output;
+pub mod params;
 pub mod patterns;
 pub mod scaling;
 pub mod source;

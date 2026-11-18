@@ -1,0 +1,56 @@
+# Shared tube colorimetry, read by the gun stage (T-34) and the output stage (T-46). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder.
+# Defaults: SMPTE-C primaries with a D65 white (CRT.md, "Chromaticity (CIE 1931 xy)" and "White point").
+# Presets override them with measured tube sets (CRT.md lists several).
+
+[[param]]
+id = "tube_red_xy"
+stage = "colour"
+type = "vec2"
+unit = "CIE 1931 xy"
+default = [0.630, 0.340]
+min = 0.0
+max = 0.9
+tag = "S"
+source = "CRT.md Chromaticity: SMPTE-C (RP 145 / 170M) red"
+description = "Chromaticity of the red phosphor."
+group = "Colour"
+
+[[param]]
+id = "tube_green_xy"
+stage = "colour"
+type = "vec2"
+unit = "CIE 1931 xy"
+default = [0.310, 0.595]
+min = 0.0
+max = 0.9
+tag = "S"
+source = "CRT.md Chromaticity: SMPTE-C (RP 145 / 170M) green"
+description = "Chromaticity of the green phosphor."
+group = "Colour"
+
+[[param]]
+id = "tube_blue_xy"
+stage = "colour"
+type = "vec2"
+unit = "CIE 1931 xy"
+default = [0.155, 0.070]
+min = 0.0
+max = 0.9
+tag = "S"
+source = "CRT.md Chromaticity: SMPTE-C (RP 145 / 170M) blue"
+description = "Chromaticity of the blue phosphor."
+group = "Colour"
+
+[[param]]
+id = "tube_white_xy"
+stage = "colour"
+type = "vec2"
+unit = "CIE 1931 xy"
+default = [0.3127, 0.3290]
+min = 0.0
+max = 0.9
+tag = "S"
+source = "CRT.md White point: D65"
+description = "Chromaticity of the tube white (all three guns at full drive after white balance). PC monitors often shipped at 9300 K (0.2831, 0.2971)."
+group = "Colour"

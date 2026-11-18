@@ -1,0 +1,79 @@
+# Test-only entries (debug builds only, never in release builds). They exercise every type of the table so the
+# generated Rust and GLSL are compiled with mixed members. Format: crates/paramgen/src/lib.rs.
+# Test files are placed after every production file. The first entry is a vec4 (16-byte aligned), so the
+# offsets below it, relative to it, do not depend on how many production parameters exist.
+
+[[param]]
+id = "test_vec4"
+stage = "_test"
+type = "vec4"
+unit = "1"
+default = [0.5, 0.5, 0.5, 1.0]
+min = 0.0
+max = 1.0
+tag = "E"
+source = "test"
+description = "Test-only vec4."
+group = "Test"
+
+[[param]]
+id = "test_scalar"
+stage = "_test"
+type = "f32"
+unit = "mm"
+default = 0.25
+min = 0.0
+max = 1.0
+tag = "E"
+source = "test"
+description = "Test-only float."
+group = "Test"
+
+[[param]]
+id = "test_vec3"
+stage = "_test"
+type = "vec3"
+unit = "1"
+default = [1.0, 2.0, 3.0]
+min = -4.0
+max = 4.0
+tag = "D"
+source = "test"
+description = "Test-only vec3, followed by an int that fills its fourth slot."
+group = "Test"
+
+[[param]]
+id = "test_count"
+stage = "_test"
+type = "i32"
+unit = "1"
+default = -2
+min = -5
+max = 5
+tag = "K"
+source = "test"
+description = "Test-only int."
+group = "Test"
+
+[[param]]
+id = "test_flag"
+stage = "_test"
+type = "bool"
+unit = "1"
+default = true
+tag = "S"
+source = "test"
+description = "Test-only bool."
+group = "Test"
+
+[[param]]
+id = "test_mode"
+stage = "_test"
+type = "enum"
+unit = "1"
+default = "second"
+values = ["first", "second", "third"]
+tag = "E"
+source = "test"
+description = "Test-only enum."
+group = "Test"
