@@ -41,7 +41,7 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `capture.rs` | Windows.Graphics.Capture session. Crops to the client area, copies to a CPU buffer, publishes the newest frame. | `windows`, Direct3D 11 |
 | `scaling.rs` | Pure logic: `Rect`, divisor parsing, `Detector` (integer-upscale detection), `View` (crop, divisor, native size). No OS calls. Unit tested. | none |
 | `output.rs` | The output window (raw Win32): windowed or fullscreen non-activating, monitor choice, global quit hotkey, message pump. | Win32 |
-| `gpu/` | Vulkan renderer. `context.rs`: instance, device choice, queue (with or without a window). `present.rs`: `Presenter` (surface, swapchain, per-image semaphores), one per window. `upload.rs`: frame texture and staging. `passthrough.rs`: pipeline and per-frame command recording. `mod.rs`: `Renderer` facade. | `ash`, `scaling::View` |
+| `gpu/` | Vulkan renderer. `context.rs`: instance, device choice, queue (with or without a window). `present.rs`: `Presenter` (surface, swapchain, per-image semaphores), one per window. `upload.rs`: frame texture and staging. `passthrough.rs`: pipeline and per-frame command recording. `mod.rs`: `Renderer` facade. `headless.rs`: `Headless`, offscreen RGBA16F/RGBA32F render and readback without a window (tests). With validation, `context.rs` installs a debug-utils messenger that prints and counts messages (`ValidationCounter`); headless contexts also enable synchronization validation. | `ash`, `scaling::View` |
 | `shaders/*.vert, *.frag` | `fullscreen.vert` draws the quad. `passthrough.frag` reads the native pixel from the captured frame. | built by `build.rs` |
 
 ### 3.2 Per-frame data flow (Implemented)
@@ -90,7 +90,7 @@ The Direct3D capture device uses the default adapter. The Vulkan device is chose
 | A13 | Presets are data files (up to 10 well-known models), tagged by confidence | Planned (PHY-4) | Starting points the user edits. No code per model. | None. |
 | A14 | Area-averaged mask by default, coarser tube preset as an alternative | Planned (PHY-2) | The host (2560×1440) gives 1.5 to 4 px per triad. | Host subpixels (HW-6) deferred. |
 | A15 | Optional modules, off by default: composite video, interlace, ageing and burn-in | Planned (PHY-9, SRC-7, PHY-14) | In scope by owner decision. Burn-in needs a persistent per-colour wear map. | After the first usable version. |
-| A16 | Headless renderer and analytic tests from `CRT.md` | Planned (TEC-7, SCP-3) | A physical model cannot be validated by eye. | None. |
+| A16 | Headless renderer and analytic tests from `CRT.md` | Headless renderer and GPU test harness implemented (T-09); analytic stage tests planned (TEC-7, SCP-3) | A physical model cannot be validated by eye. | None. |
 | A17 | Dear ImGui for live tuning, as a settings menu inside the output window (F12) plus an optional read-only overlay | Planned (OUT-3, TEC-5, owner decision 2026-11-18) | Output does not take focus while it displays; the menu takes it while open and returns it on close. | Another UI toolkit only with the owner's agreement. |
 | A18 | No GPL code, permissive dependencies only | Policy (PRJ-2) | Personal project that may become public. Inspiration from existing shaders is allowed, copying is not. | None. |
 

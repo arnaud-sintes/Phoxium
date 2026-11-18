@@ -6,6 +6,7 @@
 //! Modules: `context` (instance, device choice, queue; with or without a window), `present`
 //! (one `Presenter` per window), `upload` (frame texture and staging), `passthrough` (current
 //! pipeline and command recording). `Renderer` is the facade used by the application.
+//! `headless` renders into an offscreen image and reads it back, without any window (tests).
 
 use ash::vk;
 
@@ -14,11 +15,14 @@ use crate::scaling::View;
 use crate::Res;
 
 mod context;
+mod headless;
 mod passthrough;
 mod present;
 mod upload;
 
 pub use context::{list_gpus, Context, GpuInfo};
+pub use context::{validation_layer_available, ValidationCounter};
+pub use headless::{Headless, ImageF32, TargetFormat};
 pub use present::Presenter;
 
 /// Renders the captured frame into one output window.
@@ -117,13 +121,7 @@ impl Renderer {
         )?;
 
         // Descriptor set: one combined image sampler (the captured frame).
-        let bindings = [vk::DescriptorSetLayoutBinding::default()
-            .binding(0)
-            .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)
-            .stage_flags(vk::ShaderStageFlags::FRAGMENT)];
-        self.set_layout = device
-            .create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bindings), None)?;
+        self.set_layout = passthrough::create_set_layout(device)?;
         let sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
             .descriptor_count(1)];
@@ -137,26 +135,8 @@ impl Renderer {
                 .descriptor_pool(self.desc_pool)
                 .set_layouts(&set_layouts),
         )?[0];
-        self.sampler = device.create_sampler(
-            &vk::SamplerCreateInfo::default()
-                .mag_filter(vk::Filter::NEAREST)
-                .min_filter(vk::Filter::NEAREST)
-                .address_mode_u(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_v(vk::SamplerAddressMode::CLAMP_TO_EDGE)
-                .address_mode_w(vk::SamplerAddressMode::CLAMP_TO_EDGE),
-            None,
-        )?;
-
-        let push = [vk::PushConstantRange::default()
-            .stage_flags(vk::ShaderStageFlags::VERTEX | vk::ShaderStageFlags::FRAGMENT)
-            .offset(0)
-            .size(size_of::<passthrough::PushConstants>() as u32)];
-        self.pipeline_layout = device.create_pipeline_layout(
-            &vk::PipelineLayoutCreateInfo::default()
-                .set_layouts(&set_layouts)
-                .push_constant_ranges(&push),
-            None,
-        )?;
+        self.sampler = passthrough::create_sampler(device)?;
+        self.pipeline_layout = passthrough::create_pipeline_layout(device, self.set_layout)?;
         Ok(())
     }
 

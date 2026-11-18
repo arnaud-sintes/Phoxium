@@ -4,9 +4,94 @@
 //! to present to it) or without any surface ([`Context::new_headless`], offline rendering and
 //! tests). Device selection lives only here.
 
-use ash::{khr, vk, Device, Entry, Instance};
+use std::ffi::{c_void, CStr};
+use std::io::Write;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
+
+use ash::{ext, khr, vk, Device, Entry, Instance};
 
 use super::Res;
+
+const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
+
+/// True when the Vulkan loader is present and lists `VK_LAYER_KHRONOS_validation` (Vulkan SDK).
+pub fn validation_layer_available() -> bool {
+    // SAFETY: loading the Vulkan loader library has no precondition beyond it being a real loader.
+    let Ok(entry) = (unsafe { Entry::load() }) else {
+        return false;
+    };
+    layer_present(&entry)
+}
+
+fn layer_present(entry: &Entry) -> bool {
+    // SAFETY: global command, no handle involved.
+    unsafe { entry.enumerate_instance_layer_properties() }
+        .map(|layers| layers.iter().any(|l| l.layer_name_as_c_str() == Ok(VALIDATION_LAYER)))
+        .unwrap_or(false)
+}
+
+fn layer_has_extension(entry: &Entry, name: &CStr) -> bool {
+    // SAFETY: global command, no handle involved.
+    unsafe { entry.enumerate_instance_extension_properties(Some(VALIDATION_LAYER)) }
+        .map(|exts| exts.iter().any(|e| e.extension_name_as_c_str() == Ok(name)))
+        .unwrap_or(false)
+}
+
+/// Shared count of the validation and performance warnings and errors reported by the validation
+/// layer through the context's debug-utils messenger. Cloning shares the count, so a test can read
+/// it after the context is dropped (messages raised while destroying the device count too).
+#[derive(Clone, Default)]
+pub struct ValidationCounter(Arc<AtomicU32>);
+
+impl ValidationCounter {
+    /// Messages counted so far.
+    pub fn count(&self) -> u32 {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// Debug-utils callback: prints every message to stderr and counts validation and performance
+/// warnings and errors in the `AtomicU32` that `user` points to.
+///
+/// # Safety
+/// Called by the Vulkan loader only: `data` is null or a valid callback-data struct, and `user` is
+/// null or the `AtomicU32` of a [`ValidationCounter`] still owned by the context.
+unsafe extern "system" fn on_message(
+    severity: vk::DebugUtilsMessageSeverityFlagsEXT,
+    types: vk::DebugUtilsMessageTypeFlagsEXT,
+    data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
+    user: *mut c_void,
+) -> vk::Bool32 {
+    let counted = types
+        .intersects(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE)
+        && severity
+            .intersects(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR);
+    if counted && !user.is_null() {
+        (*(user as *const AtomicU32)).fetch_add(1, Ordering::SeqCst);
+    }
+    let msg = if data.is_null() || (*data).p_message.is_null() {
+        std::borrow::Cow::Borrowed("")
+    } else {
+        CStr::from_ptr((*data).p_message).to_string_lossy()
+    };
+    // No panic may unwind into the loader: ignore a failed write.
+    let _ = writeln!(std::io::stderr(), "vulkan {severity:?} {types:?}: {msg}");
+    vk::FALSE
+}
+
+/// Messenger create info for warnings and errors of every type, counting into `counter`.
+fn messenger_info(counter: &ValidationCounter) -> vk::DebugUtilsMessengerCreateInfoEXT<'static> {
+    vk::DebugUtilsMessengerCreateInfoEXT::default()
+        .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING | vk::DebugUtilsMessageSeverityFlagsEXT::ERROR)
+        .message_type(
+            vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+        )
+        .pfn_user_callback(Some(on_message))
+        .user_data(Arc::as_ptr(&counter.0) as *mut c_void)
+}
 
 pub struct GpuInfo {
     pub index: usize,
@@ -79,11 +164,31 @@ pub struct Context {
     pub gpu: GpuInfo,
     /// True when the device was created with `VK_KHR_swapchain` (window context).
     pub can_present: bool,
+    /// Debug-utils messenger, present when validation is on. Destroyed in `Drop`, before the instance.
+    messenger: Option<(ext::debug_utils::Instance, vk::DebugUtilsMessengerEXT)>,
+    /// Count of validation messages; its `AtomicU32` is the messenger's user data, so it must
+    /// outlive the instance (the field drops after `Drop::drop` destroyed the instance).
+    validation: ValidationCounter,
 }
 
 impl Context {
+    /// Shared count of validation messages (always 0 when validation is off).
+    pub fn validation_counter(&self) -> ValidationCounter {
+        self.validation.clone()
+    }
+
+    /// True when the validation layer and the counting messenger are enabled.
+    pub fn validation_enabled(&self) -> bool {
+        self.messenger.is_some()
+    }
+
     /// Creates a surface-less context (no window, no swapchain extension): NVIDIA discrete, else
     /// any discrete, else the first Vulkan 1.3 device with a graphics queue.
+    ///
+    /// With `validation`, the Khronos validation layer must be installed (else an error), every
+    /// message is printed to stderr and counted (see [`Context::validation_counter`]), and
+    /// synchronization validation is enabled too when the layer offers `VK_EXT_validation_features`
+    /// (headless contexts only: the window path has not been checked against it yet).
     pub fn new_headless(validation: bool) -> Res<Self> {
         // SAFETY: no window handle is involved; `create` owns or destroys everything it creates.
         unsafe { Self::create(None, None, validation).map(|(ctx, _)| ctx) }
@@ -114,26 +219,69 @@ impl Context {
         validation: bool,
     ) -> Res<(Self, Option<vk::SurfaceKHR>)> {
         let entry = Entry::load()?;
+        if validation && !layer_present(&entry) {
+            return Err("validation needs VK_LAYER_KHRONOS_validation: install the Vulkan SDK".into());
+        }
         let app = vk::ApplicationInfo::default()
             .application_name(c"ultimatecrt")
             .api_version(vk::API_VERSION_1_3);
         // Surface extensions are always enabled so that presenters can be added for new windows.
-        let exts = [khr::surface::NAME.as_ptr(), khr::win32_surface::NAME.as_ptr()];
-        let layers = [c"VK_LAYER_KHRONOS_validation".as_ptr()];
+        let mut exts = vec![khr::surface::NAME.as_ptr(), khr::win32_surface::NAME.as_ptr()];
+        let sync_validation =
+            validation && window.is_none() && layer_has_extension(&entry, ext::validation_features::NAME);
+        if validation {
+            exts.push(ext::debug_utils::NAME.as_ptr());
+        }
+        if sync_validation {
+            exts.push(ext::validation_features::NAME.as_ptr());
+        }
+        let layers = [VALIDATION_LAYER.as_ptr()];
+        let counter = ValidationCounter::default();
+        // Chained into the instance create info, this messenger also reports messages raised by
+        // vkCreateInstance and vkDestroyInstance.
+        let mut instance_messenger = messenger_info(&counter);
+        let enables = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+        let mut features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&enables);
         let mut info = vk::InstanceCreateInfo::default()
             .application_info(&app)
             .enabled_extension_names(&exts);
         if validation {
-            info = info.enabled_layer_names(&layers);
+            info = info.enabled_layer_names(&layers).push_next(&mut instance_messenger);
+        }
+        if sync_validation {
+            info = info.push_next(&mut features);
         }
         let instance = entry.create_instance(&info, None)?;
         let surface_fn = khr::surface::Instance::new(&entry, &instance);
+
+        let messenger = if validation {
+            let du = ext::debug_utils::Instance::new(&entry, &instance);
+            match du.create_debug_utils_messenger(&messenger_info(&counter), None) {
+                Ok(m) => Some((du, m)),
+                Err(e) => {
+                    instance.destroy_instance(None);
+                    return Err(e.into());
+                }
+            }
+        } else {
+            None
+        };
+        // Destroys what was created so far, on an error path.
+        let abandon = |surface: Option<vk::SurfaceKHR>| {
+            if let Some(s) = surface {
+                surface_fn.destroy_surface(s, None);
+            }
+            if let Some((du, m)) = &messenger {
+                du.destroy_debug_utils_messenger(*m, None);
+            }
+            instance.destroy_instance(None);
+        };
 
         let surface = match window {
             Some((hwnd, hinstance)) => match create_win32_surface(&entry, &instance, hwnd, hinstance) {
                 Ok(s) => Some(s),
                 Err(e) => {
-                    instance.destroy_instance(None);
+                    abandon(None);
                     return Err(e);
                 }
             },
@@ -153,14 +301,13 @@ impl Context {
                     queue,
                     gpu,
                     can_present: surface.is_some(),
+                    messenger,
+                    validation: counter,
                 };
                 Ok((ctx, surface))
             }
             Err(e) => {
-                if let Some(s) = surface {
-                    surface_fn.destroy_surface(s, None);
-                }
-                instance.destroy_instance(None);
+                abandon(surface);
                 Err(e)
             }
         }
@@ -259,11 +406,15 @@ unsafe fn create_device(
 
 impl Drop for Context {
     fn drop(&mut self) {
-        // SAFETY: the device and instance are owned by self and destroyed once, device first; the
-        // owners of child objects destroy them before dropping the context (see the type doc).
+        // SAFETY: the device, messenger and instance are owned by self and destroyed once, device
+        // first, instance last; the owners of child objects destroy them before dropping the
+        // context (see the type doc). The counter the messenger writes to drops after this body.
         unsafe {
             let _ = self.device.device_wait_idle();
             self.device.destroy_device(None);
+            if let Some((du, m)) = self.messenger.take() {
+                du.destroy_debug_utils_messenger(m, None);
+            }
             self.instance.destroy_instance(None);
         }
     }
@@ -307,11 +458,57 @@ mod tests {
         assert_eq!(choose_device(&[nv], Some(1)), None);
     }
 
-    /// Needs a Vulkan 1.3 driver; no window is created.
+    /// The messenger counts validation and performance warnings and errors, not general ones.
+    /// Needs the validation layer and a Vulkan 1.3 device; skipped without them unless
+    /// `UCRT_REQUIRE_GPU=1`.
+    #[test]
+    fn messenger_counts_validation_messages() {
+        let require = std::env::var("UCRT_REQUIRE_GPU").as_deref() == Ok("1");
+        if !validation_layer_available() {
+            assert!(!require, "UCRT_REQUIRE_GPU=1 but the validation layer is not installed");
+            eprintln!("messenger_counts_validation_messages skipped: no validation layer");
+            return;
+        }
+        let ctx = match Context::new_headless(true) {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                assert!(!require, "UCRT_REQUIRE_GPU=1 but no headless Vulkan device: {e}");
+                eprintln!("messenger_counts_validation_messages skipped: {e}");
+                return;
+            }
+        };
+        assert!(ctx.validation_enabled());
+        let counter = ctx.validation_counter();
+        let (du, _) = ctx.messenger.as_ref().expect("messenger");
+        let send = |types: vk::DebugUtilsMessageTypeFlagsEXT| {
+            let data = vk::DebugUtilsMessengerCallbackDataEXT::default()
+                .message(c"ultimatecrt messenger self-test (expected, ignore)");
+            // SAFETY: the instance has VK_EXT_debug_utils enabled (validation on) and is live.
+            unsafe { du.submit_debug_utils_message(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR, types, &data) };
+        };
+        send(vk::DebugUtilsMessageTypeFlagsEXT::GENERAL);
+        assert_eq!(counter.count(), 0);
+        send(vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION);
+        send(vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE);
+        assert_eq!(counter.count(), 2);
+        drop(ctx);
+        assert_eq!(counter.count(), 2, "destroying a clean context reports nothing");
+    }
+
+    /// Needs a Vulkan 1.3 driver; no window is created. Skips without one unless
+    /// `UCRT_REQUIRE_GPU=1` (same rule as `tests/common/mod.rs`).
     #[test]
     fn headless_device() {
-        let ctx = Context::new_headless(false).expect("headless Vulkan device");
+        let ctx = match Context::new_headless(false) {
+            Ok(ctx) => ctx,
+            Err(e) if std::env::var("UCRT_REQUIRE_GPU").as_deref() != Ok("1") => {
+                eprintln!("headless_device skipped: no Vulkan 1.3 device ({e})");
+                return;
+            }
+            Err(e) => panic!("UCRT_REQUIRE_GPU=1 but no headless Vulkan device: {e}"),
+        };
         assert!(!ctx.gpu.name.is_empty());
         assert!(!ctx.can_present);
+        assert!(!ctx.validation_enabled());
     }
 }

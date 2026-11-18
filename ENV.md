@@ -42,7 +42,18 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-`cargo test` runs the unit tests of `scaling` (integer-upscale detection including flat frames and rounded corners, option parsing). There is no automated test of capture, output or Vulkan, and no CI yet: a hosted runner has no GPU and cannot capture windows.
+`cargo test` runs the unit tests (scaling, patterns, sources, diagnostics, device choice) and the headless GPU tests (`crates/ultimatecrt/tests/gpu_*.rs`, no window is opened). On the dev machine, run them with the GPU required:
+
+```
+$env:UCRT_REQUIRE_GPU = '1'; cargo test
+```
+
+- The GPU tests create a surface-less Vulkan 1.3 device, render into an offscreen RGBA16F or RGBA32F image and read it back. When `VK_LAYER_KHRONOS_validation` is installed (Vulkan SDK) it is enabled with synchronization validation, every message is printed on stderr, and any validation or performance warning or error fails the test.
+- Without a Vulkan 1.3 device a GPU test prints `<test> skipped: ...` (visible with `cargo test -- --nocapture`) and passes. With `UCRT_REQUIRE_GPU=1`, a missing device or a missing validation layer fails the test instead (a count of 0 proves nothing without the layer).
+- `gpu_passthrough` checks that every 8-bit code k of a BGRA8 ramp reads back with `round(v * 255) == k`. FP16 cannot hold k/255 exactly, and the NVIDIA driver converts to FP16 toward zero (254 reads 253.879), so the FP16 tolerance is one FP16 step.
+- Software Vulkan for a future CI (report only, unverified on Windows): Mesa lavapipe (llvmpipe Vulkan driver, Vulkan 1.3; Windows builds exist from third parties such as mesa-dist-win) and Google SwiftShader are candidates. Installing either as an ICD (`VK_DRIVER_FILES` pointing at its JSON manifest) would let a GPU-less runner run these tests with `UCRT_REQUIRE_GPU=1`. Neither has been tried here; check its Vulkan 1.3, dynamic rendering and synchronization2 support and its licence first.
+
+There is no automated test of capture or output, and no CI yet: a hosted runner has no GPU and cannot capture windows.
 
 ### Manual end-to-end test
 
