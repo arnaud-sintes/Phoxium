@@ -801,7 +801,7 @@ fn amp_col(fc: &FrameConstants, x: u32) -> u32 {
 /// Bypass. With the mask switched off, with the tube not placed (px per mm 0) and with the `screen` slot
 /// off, the tube image is exactly the beam image: here the amp sample under each host pixel, bit for bit
 /// (the currents are FP16 values), although the mask parameters ask for a resolved grille with wires.
-/// Slot mask and delta are drawn as the grille until T-39b.
+/// Slot mask and delta differ from the grille (T-39b).
 #[test]
 fn bypass_is_an_exact_identity() {
     let test = "stage_mask_grille bypass";
@@ -860,11 +860,13 @@ fn bypass_is_an_exact_identity() {
         "defaults, tier C"
     );
 
-    // T-39b replaces this: the two other types are drawn as the grille.
+    // T-39b: the two other types have their own masks (no fallback to the grille any more), and switching
+    // type and back leaves the grille image unchanged (stage_mask_slot_delta.rs tests them).
     for other in [MASK_TYPE_SLOT_MASK, MASK_TYPE_DELTA] {
         let p = Params { mask_type: other, ..on };
-        assert_eq!(run(&mut gpu, &["screen"], fc, &p, &amp).rgba, masked.rgba);
+        assert_ne!(run(&mut gpu, &["screen"], fc, &p, &amp).rgba, masked.rgba);
     }
+    assert_eq!(run(&mut gpu, &["screen"], fc, &on, &amp).rgba, masked.rgba);
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
