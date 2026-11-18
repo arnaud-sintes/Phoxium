@@ -11,13 +11,18 @@
 #include "beam.glsl"
 #include "mask.glsl"
 
-layout(local_size_x = 8, local_size_y = 8) in;
+// One workgroup per beam tile (standard quality shares the line profiles of the tile, beam.glsl T-36c);
+// the dispatch uses the same size (gpu/stages/screen.rs SCREEN_GROUP).
+layout(local_size_x = BEAM_TILE_W, local_size_y = BEAM_TILE_H) in;
 
 layout(set = 0, binding = 2) uniform sampler2D current_in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
 
 void main() {
     ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    // The whole workgroup evaluates the standard-quality beam (barriers) before any invocation returns;
+    // beam_eval then gives its result for q.
+    beam_eval_workgroup(current_in, q);
     if (any(greaterThanEqual(q, frame.tube_size))) {
         return;
     }

@@ -182,13 +182,29 @@ impl ComputePass {
         push: &[u8],
         size: (u32, u32),
     ) {
+        self.dispatch_group(d, cb, set, push, size, (GROUP, GROUP));
+    }
+
+    /// [`ComputePass::dispatch`] for a shader whose workgroup is `group` (`local_size_x`, `local_size_y`).
+    ///
+    /// # Safety
+    /// As [`Stage::record`].
+    pub unsafe fn dispatch_group(
+        &self,
+        d: &ash::Device,
+        cb: vk::CommandBuffer,
+        set: vk::DescriptorSet,
+        push: &[u8],
+        size: (u32, u32),
+        group: (u32, u32),
+    ) {
         debug_assert_eq!(push.len() as u32, self.push_size);
         d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::COMPUTE, self.pipeline);
         d.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::COMPUTE, self.layout, 0, &[set], &[]);
         if !push.is_empty() {
             d.cmd_push_constants(cb, self.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
         }
-        d.cmd_dispatch(cb, size.0.div_ceil(GROUP), size.1.div_ceil(GROUP), 1);
+        d.cmd_dispatch(cb, size.0.div_ceil(group.0), size.1.div_ceil(group.1), 1);
     }
 
     /// Destroys the objects (null ones are no-ops) and resets them to null.

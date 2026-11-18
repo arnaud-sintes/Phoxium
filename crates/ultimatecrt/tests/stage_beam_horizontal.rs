@@ -49,7 +49,7 @@ use crt_model::beam::{AmpRaster, BeamOracle, Spot, SpotGrowth, MID_DRIVE_CURRENT
 use crt_model::units::{fwhm_from_sigma, sigma_from_fwhm};
 use std::f64::consts::PI;
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
-use ultimatecrt::params::Params;
+use ultimatecrt::params::{Params, BEAM_QUALITY_REFERENCE};
 
 /// A tube of `cols` x `rows` native pixels at `n` host px per native pixel, `ppm` px per mm, line pitch
 /// `n / ppm` mm, `k` amp samples per native pixel.
@@ -101,10 +101,15 @@ fn currents(fc: &FrameConstants, f: impl Fn(u32, u32) -> [f32; 3]) -> ImageF32 {
     }
 }
 
-/// Runs `screen` alone on `amp` injected after `gun`; returns the tube image.
+/// Runs `screen` alone on `amp` injected after `gun`, with the exact form of the beam (`beam_quality =
+/// reference`; the standard quality is tested against it in `stage_beam_fast`); returns the tube image.
 fn screen(gpu: &mut Headless, fc: FrameConstants, params: &Params, amp: &ImageF32) -> ImageF32 {
     gpu.enable_only(&["screen"]).unwrap();
     let settings = Settings::identity();
+    let params = &Params {
+        beam_quality: BEAM_QUALITY_REFERENCE,
+        ..*params
+    };
     let run = StageRun {
         input: StageInput::Image {
             after: "gun",
@@ -552,7 +557,8 @@ fn convergence_hook_off_is_identity_and_arbitrary_currents_match_the_oracle() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// Indicative GPU time of `screen` (PLAN gate 10; printed, not asserted): a 256 x 240 raster on 1440 host
+/// Indicative GPU time of `screen` with the exact reference form (PLAN gate 10; printed, not asserted; the
+/// standard quality and the per-pattern table are in `stage_beam_fast`): a 256 x 240 raster on 1440 host
 /// rows (1536 x 1440 tube, 6 px per line, K = 4, 4.966 px per mm), full white (one run of equal samples
 /// per line) and every sample distinct (the worst case: no run to merge, no dark sample to skip),
 /// defaults (growth on) without and with a 5 % tail. The GPU may be shared with other work and the

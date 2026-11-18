@@ -68,3 +68,15 @@ tag = "E"
 source = "CRT.md Spot growth with beam current (d^2 = d0^2 + k I^(2n), n 0.2 to 0.5; projection-gun rule d ~ sqrt(I); black to full white x1.5 to 2.5). 0.5 is the only value of the range that gives the 0.45 -> 0.8 mm defaults a real floor with a black-to-white ratio near 2.5 (0.8 / 0.317 = 2.53); below n = 0.346 they would need a negative floor"
 description = "Exponent n of the spot growth law FWHM^2 = d0^2 + k I^(2n) (I the normalised beam current). The floor d0 and k follow from the FWHM at mid drive and at peak. When the two widths would need a negative floor (peak / mid > 0.1895^-n), n is raised to the smallest value that gives a zero floor (pure power law)."
 group = "Beam"
+
+[[param]]
+id = "beam_quality"
+stage = "beam"
+type = "enum"
+unit = "1"
+default = "standard"
+values = ["standard", "reference"]
+tag = "D"
+source = "PLAN T-36c (beam cost) and T-48 (quality tiers change only approximation, never physics; MAE <= 1 % of white between tiers); tests/stage_beam_fast.rs (tolerance contract and measured cost)"
+description = "How the beam spot is summed. standard: separable per workgroup tile (exact horizontal profile of each line per column, then the vertical spread with one Gaussian per line and column whose variance is the energy-weighted mean of the samples' variances); plus the second-order term in the spread of those variances; exact without spot growth and on flat stretches, within 0.5 % of white mean and 2.5 % max of the exact form on the test patterns (measured MAE <= 0.01 %). reference: the exact 2D sum of every sample's own round spot per host pixel (slow)."
+group = "Beam"

@@ -42,7 +42,7 @@ mod common;
 use crt_model::beam::{AmpRaster, BeamOracle, ScanlineProfile, Spot};
 use crt_model::units::fwhm_from_sigma;
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
-use ultimatecrt::params::Params;
+use ultimatecrt::params::{Params, BEAM_QUALITY_REFERENCE};
 
 /// A tube of `cols` x `rows` native pixels at `n` host pixels per line, `ppm` px per mm, line pitch
 /// `n / ppm` mm.
@@ -85,10 +85,15 @@ fn currents(fc: &FrameConstants, f: impl Fn(u32, u32) -> [f32; 3]) -> ImageF32 {
     }
 }
 
-/// Runs `screen` alone on `amp` injected after `gun`; returns the tube image.
+/// Runs `screen` alone on `amp` injected after `gun`, with the exact form of the beam (`beam_quality =
+/// reference`; the standard quality is tested against it in `stage_beam_fast`); returns the tube image.
 fn screen(gpu: &mut Headless, fc: FrameConstants, params: &Params, amp: &ImageF32) -> ImageF32 {
     gpu.enable_only(&["screen"]).unwrap();
     let settings = Settings::identity();
+    let params = &Params {
+        beam_quality: BEAM_QUALITY_REFERENCE,
+        ..*params
+    };
     let run = StageRun {
         input: StageInput::Image {
             after: "gun",
