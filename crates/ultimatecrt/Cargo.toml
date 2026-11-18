@@ -8,6 +8,8 @@ description = "Captures a window, runs it through a virtual CRT tube and present
 [dependencies]
 ash = "0.38"
 png = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse", "display"] }
 windows = { version = "0.62", features = [
     "Foundation",
     "Graphics_Capture",

@@ -9,6 +9,7 @@ pub mod output;
 pub mod params;
 pub mod patterns;
 pub mod scaling;
+pub mod settings;
 pub mod source;
 pub mod sources;
 
