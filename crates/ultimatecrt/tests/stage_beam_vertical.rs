@@ -63,6 +63,7 @@ fn params(s: f64, pitch_mm: f64, tail_weight: f64, tail_ratio: f64) -> Params {
         beam_fwhm_peak_mm: fwhm,
         beam_tail_weight: tail_weight as f32,
         beam_tail_sigma_ratio: tail_ratio as f32,
+        mask_enabled: false,
         ..Params::default()
     }
 }
@@ -357,11 +358,23 @@ fn pvm_240p_on_1440_px_ripple_is_area_integrated() {
     fc.line_pitch_mm = 290.0 / 240.0;
     let pitch_mm = 290.0 / 240.0;
     let amp = currents(&fc, |_, _| FLAT);
-    let s_default = f64::from(Params::default().beam_fwhm_mid_mm) / fwhm_from_sigma(1.0) / pitch_mm;
+    let s_default = f64::from(
+        Params {
+            mask_enabled: false,
+            ..Params::default()
+        }
+        .beam_fwhm_mid_mm,
+    ) / fwhm_from_sigma(1.0)
+        / pitch_mm;
     assert!((s_default - 0.158_150).abs() < 1e-6, "default sigma/P {s_default}");
     // The default FWHM at mid drive, growth off (T-36b: FWHM at peak = at mid).
     let default_no_growth = Params {
-        beam_fwhm_peak_mm: Params::default().beam_fwhm_mid_mm,
+        beam_fwhm_peak_mm: Params {
+            mask_enabled: false,
+            ..Params::default()
+        }
+        .beam_fwhm_mid_mm,
+        mask_enabled: false,
         ..Params::default()
     };
     for (s, p, m_want, half) in [

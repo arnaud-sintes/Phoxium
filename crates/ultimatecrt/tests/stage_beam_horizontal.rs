@@ -70,6 +70,7 @@ fn beam(mid: f64, peak: f64, n: f64, tail_weight: f64) -> Params {
         beam_growth_exponent: n as f32,
         beam_tail_weight: tail_weight as f32,
         beam_tail_sigma_ratio: 3.0,
+        mask_enabled: false,
         ..Params::default()
     }
 }
@@ -231,7 +232,10 @@ fn isolated_pixel_energy_centroid_and_spot_width() {
     let counter = gpu.validation_counter();
     let fc = tube(16, 12, 16, 10.0, 4);
     let amp = currents(&fc, |x, y| if y == 5 && x / 4 == 7 { FLAT } else { [0.0; 3] });
-    let defaults = Params::default();
+    let defaults = Params {
+        mask_enabled: false,
+        ..Params::default()
+    };
     assert_eq!(
         (
             defaults.beam_fwhm_mid_mm,
@@ -322,7 +326,10 @@ fn spot_growth_ratio_on_isolated_lines() {
         17 => [1.0; 3],
         _ => [0.0; 3],
     });
-    let p = Params::default();
+    let p = Params {
+        mask_enabled: false,
+        ..Params::default()
+    };
     let out = screen(&mut gpu, fc, &p, &amp);
     for c in 0..3 {
         let (d_mid, e_mid) = line_fwhm_mm(&out, c, 128, 104, 10.0);
@@ -484,7 +491,16 @@ fn flat_field_is_unchanged() {
     let counter = gpu.validation_counter();
     let fc = tube(16, 32, 8, 6.0, 4);
     let amp = currents(&fc, |_, _| FLAT);
-    for (name, p) in [("defaults", Params::default()), ("tail", beam(0.45, 0.8, 0.5, 0.1))] {
+    for (name, p) in [
+        (
+            "defaults",
+            Params {
+                mask_enabled: false,
+                ..Params::default()
+            },
+        ),
+        ("tail", beam(0.45, 0.8, 0.5, 0.1)),
+    ] {
         let out = screen(&mut gpu, fc, &p, &amp);
         let what = format!("{test} {name}");
         for (c, &i) in FLAT.iter().enumerate() {
@@ -559,9 +575,23 @@ fn screen_gpu_time_indicative() {
     let v = |x: u32, y: u32, k: u32| 0.2 + 0.05 * ((x * k + y * 3 + k) % 13) as f32;
     let busy = currents(&fc, |x, y| [v(x, y, 5), v(x, y, 7), v(x, y, 2)]);
     for (name, p, amp) in [
-        ("white, defaults", Params::default(), &white),
+        (
+            "white, defaults",
+            Params {
+                mask_enabled: false,
+                ..Params::default()
+            },
+            &white,
+        ),
         ("white, tail 5 %", beam(0.45, 0.8, 0.5, 0.05), &white),
-        ("every sample distinct, defaults", Params::default(), &busy),
+        (
+            "every sample distinct, defaults",
+            Params {
+                mask_enabled: false,
+                ..Params::default()
+            },
+            &busy,
+        ),
         ("every sample distinct, tail 5 %", beam(0.45, 0.8, 0.5, 0.05), &busy),
     ] {
         let mut ms = Vec::new();
