@@ -6,3 +6,7 @@ publish.workspace = true
 description = "Pure f64 reference model of the CRT physics (the oracle for GPU tests)"
 
 [dependencies]
+
+[dev-dependencies]
+# PNG writer for the early_look example only (MIT OR Apache-2.0), already in the tree.
+png = "0.18"

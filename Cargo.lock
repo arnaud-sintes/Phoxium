@@ -41,6 +41,9 @@ dependencies = [
 [[package]]
 name = "crt-model"
 version = "0.1.0"
+dependencies = [
+ "png",
+]
 
 [[package]]
 name = "equivalent"
