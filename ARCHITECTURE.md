@@ -41,7 +41,7 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `capture.rs` | Windows.Graphics.Capture session. Crops to the client area, copies to a CPU buffer, publishes the newest frame. | `windows`, Direct3D 11 |
 | `scaling.rs` | Pure logic: `Rect`, divisor parsing, `Detector` (integer-upscale detection), `View` (crop, divisor, native size). No OS calls. Unit tested. | none |
 | `output.rs` | The output window (raw Win32): windowed or fullscreen non-activating, monitor choice, global quit hotkey, message pump. | Win32 |
-| `gpu.rs` | Vulkan renderer: device choice, swapchain, texture upload, pipeline, per-frame command recording. | `ash`, `scaling::View` |
+| `gpu/` | Vulkan renderer. `context.rs`: instance, device choice, queue (with or without a window). `present.rs`: `Presenter` (surface, swapchain, per-image semaphores), one per window. `upload.rs`: frame texture and staging. `passthrough.rs`: pipeline and per-frame command recording. `mod.rs`: `Renderer` facade. | `ash`, `scaling::View` |
 | `shaders/*.vert, *.frag` | `fullscreen.vert` draws the quad. `passthrough.frag` reads the native pixel from the captured frame. | built by `build.rs` |
 
 ### 3.2 Per-frame data flow (Implemented)

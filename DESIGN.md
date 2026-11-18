@@ -26,7 +26,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 
 ## 4. Resource lifetime
 
-- A type that owns a GPU or OS resource implements `Drop` and releases it, or is destroyed explicitly by the type that owns it (`Texture` by `Renderer`). Destroy in the reverse order of creation.
+- A type that owns a GPU or OS resource implements `Drop` and releases it, or is destroyed explicitly by the type that owns it (`Texture` and `Presenter` by `Renderer`). Destroy in the reverse order of creation.
 - Call `device_wait_idle` before destroying or recreating anything the GPU may still use (swapchain, texture, pipeline).
 - Capture sessions and frame pools are closed in `Drop`.
 
@@ -47,7 +47,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 
 - Vulkan 1.3 core only: dynamic rendering and synchronization2. No render passes, no framebuffers, no extension unless needed.
 - Every barrier names its source and destination stage and access. Image layouts are tracked explicitly (`Texture.layout`).
-- Run with `--validation` before committing any change to `gpu.rs` or the shaders. The layer must stay silent. **(manual)**
+- Run with `--validation` before committing any change to `gpu/` or the shaders. The layer must stay silent. **(manual)**
 - Shaders are GLSL 450 compiled by `build.rs` with `glslc -O --target-env=vulkan1.3`. A shader error fails the build.
 - A push-constant block must be declared identically in every stage that uses it, and its size must match the pipeline layout range (40 bytes today, the minimum guaranteed limit is 128).
 - Sampling a captured frame uses `texelFetch` on exact texels. Filtering is a modelled stage, never an accident of the sampler.
@@ -67,7 +67,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 | Pattern | Where | Rule |
 |---|---|---|
 | Producer and consumer with a single-slot mailbox | `Capture` and the main loop | Latest wins, swap buffers. |
-| RAII | `Renderer`, `Capture`, `Output` | Acquire in `new`, release in `Drop`. The renderer's `Texture` has no `Drop` of its own: `Renderer` destroys it after `device_wait_idle`. |
+| RAII | `Context`, `Renderer`, `Capture`, `Output` | Acquire in `new`, release in `Drop`. The renderer's `Texture` and `Presenter` have no `Drop` of their own (they do not own the device): `Renderer` destroys them after `device_wait_idle`, before its `Context` drops. |
 | State machine | `scaling::Detector` | `Default` then `feed` until locked. `reset` on any change of frame size or crop. |
 | Plain data handed across modules | `Frame`, `View`, `Rect` | Copyable or swappable, no behaviour. |
 | Builder style | `ash` create-info structs | Fill every field you rely on, do not rely on defaults you have not checked. |
@@ -94,11 +94,9 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 
 ## 12. Known deviations (to fix when touched)
 
-- `gpu.rs` declares most methods `unsafe fn` and does not yet document per-method preconditions.
-- `Renderer::record` builds a small `Vec` for push-constant bytes every frame.
 - The renderer keeps one frame in flight and waits for the fence before every frame, which caps pipelining.
 - The frame path is GPU, CPU, GPU (decision A3).
 - `pixel-demo` uses `unwrap` and `expect` on window-system calls at start-up.
 - `capture.rs` unwraps the out-parameters of `D3D11CreateDevice` and the texture creation after the call returned success. The invariant holds but is not commented.
 - There is no continuous integration, and no `cargo-deny` check of licences (`package.ps1` only checks the declared licences of dependencies).
-- There is no automated test of `capture`, `output` or `gpu`.
+- There is no automated test of `capture` or `output`; `gpu` only has a headless device-creation test and unit tests of the device choice.
