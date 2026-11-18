@@ -500,6 +500,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** They need a frame-wide average (a reduction pass, a frame of latency or an estimate), a time constant, and temporal state, with constants from memory, and they fight the host panel's own ABL.
 - **Who:** USER.
 - **Default:** Not in the first version. The architecture keeps a per-frame global state for them.
+- **SETTLED (2026-11-18, T-35) for ABL and raster breathing:** implemented, off by default (`abl_enable`, `abl_breathing` = 0). GPU reduction of the frame mean beam current, low-pass on real frame times, gain applied with one frame of latency, state kept on the GPU (no readback). Constants from CRT.md (T-63): threshold 1.4 mA [S], tau = 0.5 s / 3 [D] (settling 0.5 s), full-white current 2.8 mA [E] chosen so the onset of a black-to-white step is tau ln 2 = 0.116 s (CRT.md: about 0.1 s), full white 50 % of a small window [E]. DC-restoration errors remain open.
 
 ### PHY-14 Second-order effects
 - **DECISION (2026-11-18):** ageing and burn-in are in scope, opt-in and off by default:

@@ -23,10 +23,10 @@ use ultimatecrt::gpu::{
 use ultimatecrt::params::{ParamValue, Params, SOURCE_EOTF_SRGB};
 use ultimatecrt::scaling::View;
 
-const SLOTS: [&str; 6] = ["signal", "amp", "gun", "screen", "phosphor", "optics"];
+const SLOTS: [&str; 7] = ["signal", "amp", "gun", "abl", "screen", "phosphor", "optics"];
 /// The slots that are still identity placeholders or copies. `screen` is excluded since T-36a: with the
 /// tube placed (T-30) it draws scanlines, so it is no longer an identity (its tests are `stage_beam_*`).
-const PASSTHROUGH: [&str; 5] = ["signal", "amp", "gun", "phosphor", "optics"];
+const PASSTHROUGH: [&str; 6] = ["signal", "amp", "gun", "abl", "phosphor", "optics"];
 const W: u32 = 256;
 const H: u32 = 4;
 
@@ -337,7 +337,7 @@ fn injected_image_through_a_stage_subset() {
     };
     let r = gpu.render_stages(&run).expect("render_stages");
     let names: Vec<&str> = r.stages.iter().map(|(n, _)| *n).collect();
-    assert_eq!(names, ["screen", "phosphor", "optics"]);
+    assert_eq!(names, ["abl", "screen", "phosphor", "optics"]);
     assert_eq!(r.native.width, 0, "decode did not run");
     let screen = r.stage("screen").unwrap();
     assert_eq!((screen.width, screen.height), (16, 8));

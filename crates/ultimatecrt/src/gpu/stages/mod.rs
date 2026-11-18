@@ -45,6 +45,7 @@ use crate::Res;
 pub(super) mod decode;
 pub(super) mod encode;
 
+pub(super) mod abl;
 pub(super) mod amp;
 pub(super) mod gun;
 pub(super) mod optics;
@@ -61,6 +62,7 @@ pub(super) const CHAIN: &[Registration] = &[
     signal::SLOT,
     amp::SLOT,
     gun::SLOT,
+    abl::SLOT,
     screen::SLOT,
     phosphor::SLOT,
     optics::SLOT,
