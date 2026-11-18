@@ -175,8 +175,10 @@ pub struct Context {
     /// Count of validation messages; its `AtomicU32` is the messenger's user data, so it must
     /// outlive the instance (the field drops after `Drop::drop` destroyed the instance).
     validation: ValidationCounter,
-    /// True when synchronization validation (and its shader-access heuristic) is on.
+    /// True when synchronization validation is on (`VK_EXT_validation_features` enabled).
     sync_validation: bool,
+    /// True when the `syncval_shader_accesses_heuristic` layer setting was passed to the layer.
+    shader_accesses: bool,
 }
 
 impl Context {
@@ -190,10 +192,22 @@ impl Context {
         self.messenger.is_some()
     }
 
-    /// True when synchronization validation is active, with the shader-access heuristic: needs the
-    /// layer to offer VK_EXT_validation_features and VK_EXT_layer_settings, else it is silently off.
+    /// True when synchronization validation is active: needs the layer to offer
+    /// VK_EXT_validation_features, else it is silently off. Without
+    /// [`Context::shader_accesses_enabled`] it ignores the accesses made by shaders.
     pub fn sync_validation_enabled(&self) -> bool {
         self.sync_validation
+    }
+
+    /// True when the `syncval_shader_accesses_heuristic` layer setting was applied, so that
+    /// synchronization validation also checks the accesses shaders make through descriptors. The
+    /// setting is passed through VK_EXT_layer_settings, which the layer must offer (else it is not
+    /// passed and this is false). The layer's settings are not enumerable through the Vulkan API, but
+    /// a layer that does not know a setting reports it as a warning at `vkCreateInstance` (verified
+    /// against SDK 1.4.363 with a made-up setting name): when that happens the instance is created
+    /// again without the setting and this is false.
+    pub fn shader_accesses_enabled(&self) -> bool {
+        self.shader_accesses
     }
 
     /// Creates a surface-less context (no window, no swapchain extension): NVIDIA discrete, else
@@ -240,53 +254,23 @@ impl Context {
         let app = vk::ApplicationInfo::default()
             .application_name(c"ultimatecrt")
             .api_version(vk::API_VERSION_1_3);
-        // Surface extensions are always enabled so that presenters can be added for new windows.
-        let mut exts = vec![khr::surface::NAME.as_ptr(), khr::win32_surface::NAME.as_ptr()];
         let sync_validation =
             validation && window.is_none() && layer_has_extension(&entry, ext::validation_features::NAME);
-        if validation {
-            exts.push(ext::debug_utils::NAME.as_ptr());
-        }
-        if sync_validation {
-            exts.push(ext::validation_features::NAME.as_ptr());
-        }
         // Synchronization validation ignores the accesses that shaders make through descriptors unless
         // `syncval_shader_accesses_heuristic` is set (validation layer 1.4.3xx, off by default): without
         // it, a missing barrier between two shader stages is not reported (checked in T-20a).
-        let shader_accesses = sync_validation && layer_has_extension(&entry, vk::EXT_LAYER_SETTINGS_NAME);
-        if shader_accesses {
-            exts.push(vk::EXT_LAYER_SETTINGS_NAME.as_ptr());
+        let mut shader_accesses = sync_validation && layer_has_extension(&entry, vk::EXT_LAYER_SETTINGS_NAME);
+        let mut counter = ValidationCounter::default();
+        let mut instance = create_instance(&entry, &app, validation, sync_validation, shader_accesses, &counter)?;
+        if shader_accesses && counter.count() > 0 {
+            // A layer that offers VK_EXT_layer_settings but predates the setting reports it as unknown
+            // (a counted warning, checked against the installed layer): create the instance again
+            // without it, and `shader_accesses_enabled` tells the callers.
+            instance.destroy_instance(None);
+            shader_accesses = false;
+            counter = ValidationCounter::default();
+            instance = create_instance(&entry, &app, validation, sync_validation, shader_accesses, &counter)?;
         }
-        let heuristic_on: vk::Bool32 = vk::TRUE;
-        let mut heuristic = vk::LayerSettingEXT::default()
-            .layer_name(VALIDATION_LAYER)
-            .setting_name(c"syncval_shader_accesses_heuristic")
-            .ty(vk::LayerSettingTypeEXT::BOOL32);
-        // One VkBool32 value (the `values` builder would count bytes, not values).
-        heuristic.value_count = 1;
-        heuristic.p_values = (&heuristic_on as *const vk::Bool32).cast();
-        let layer_settings = [heuristic];
-        let mut settings = vk::LayerSettingsCreateInfoEXT::default().settings(&layer_settings);
-        let layers = [VALIDATION_LAYER.as_ptr()];
-        let counter = ValidationCounter::default();
-        // Chained into the instance create info, this messenger also reports messages raised by
-        // vkCreateInstance and vkDestroyInstance.
-        let mut instance_messenger = messenger_info(&counter);
-        let enables = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
-        let mut features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&enables);
-        let mut info = vk::InstanceCreateInfo::default()
-            .application_info(&app)
-            .enabled_extension_names(&exts);
-        if validation {
-            info = info.enabled_layer_names(&layers).push_next(&mut instance_messenger);
-        }
-        if sync_validation {
-            info = info.push_next(&mut features);
-        }
-        if shader_accesses {
-            info = info.push_next(&mut settings);
-        }
-        let instance = entry.create_instance(&info, None)?;
         let surface_fn = khr::surface::Instance::new(&entry, &instance);
 
         let messenger = if validation {
@@ -338,7 +322,8 @@ impl Context {
                     can_present: surface.is_some(),
                     messenger,
                     validation: counter,
-                    sync_validation: sync_validation && shader_accesses,
+                    sync_validation,
+                    shader_accesses,
                 };
                 Ok((ctx, surface))
             }
@@ -359,6 +344,60 @@ impl Context {
     }
 }
 
+/// Creates the instance with the surface extensions and, as asked, the validation layer with its
+/// counting messenger, synchronization validation and the shader-access heuristic setting.
+///
+/// # Safety
+/// `entry` is a loaded Vulkan entry; the extensions asked for are offered by the layer.
+unsafe fn create_instance(
+    entry: &Entry,
+    app: &vk::ApplicationInfo<'_>,
+    validation: bool,
+    sync_validation: bool,
+    shader_accesses: bool,
+    counter: &ValidationCounter,
+) -> Res<Instance> {
+    // Surface extensions are always enabled so that presenters can be added for new windows.
+    let mut exts = vec![khr::surface::NAME.as_ptr(), khr::win32_surface::NAME.as_ptr()];
+    if validation {
+        exts.push(ext::debug_utils::NAME.as_ptr());
+    }
+    if sync_validation {
+        exts.push(ext::validation_features::NAME.as_ptr());
+    }
+    if shader_accesses {
+        exts.push(vk::EXT_LAYER_SETTINGS_NAME.as_ptr());
+    }
+    let heuristic_on: vk::Bool32 = vk::TRUE;
+    let mut heuristic = vk::LayerSettingEXT::default()
+        .layer_name(VALIDATION_LAYER)
+        .setting_name(c"syncval_shader_accesses_heuristic")
+        .ty(vk::LayerSettingTypeEXT::BOOL32);
+    // One VkBool32 value (the `values` builder would count bytes, not values).
+    heuristic.value_count = 1;
+    heuristic.p_values = (&heuristic_on as *const vk::Bool32).cast();
+    let layer_settings = [heuristic];
+    let mut settings = vk::LayerSettingsCreateInfoEXT::default().settings(&layer_settings);
+    let layers = [VALIDATION_LAYER.as_ptr()];
+    // Chained into the instance create info, this messenger also reports messages raised by
+    // vkCreateInstance and vkDestroyInstance.
+    let mut instance_messenger = messenger_info(counter);
+    let enables = [vk::ValidationFeatureEnableEXT::SYNCHRONIZATION_VALIDATION];
+    let mut features = vk::ValidationFeaturesEXT::default().enabled_validation_features(&enables);
+    let mut info = vk::InstanceCreateInfo::default()
+        .application_info(app)
+        .enabled_extension_names(&exts);
+    if validation {
+        info = info.enabled_layer_names(&layers).push_next(&mut instance_messenger);
+    }
+    if sync_validation {
+        info = info.push_next(&mut features);
+    }
+    if shader_accesses {
+        info = info.push_next(&mut settings);
+    }
+    Ok(entry.create_instance(&info, None)?)
+}
 /// Creates a Win32 Vulkan surface.
 ///
 /// # Safety

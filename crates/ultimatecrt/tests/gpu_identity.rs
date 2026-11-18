@@ -364,3 +364,198 @@ fn native_size_changes_and_surround_with_silent_validation() {
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
+
+/// Code (r, g, b) of pixel (x, y) in the cropped and scaled cases: every neighbour differs in every
+/// channel, so an off-by-one in the origin, the block centre or the resampling shows.
+fn pix(x: u32, y: u32) -> [u8; 3] {
+    [
+        (x * 17 + y * 3) as u8,
+        (x * 5 + y * 29 + 40) as u8,
+        (x * 11 + y * 7 + 100) as u8,
+    ]
+}
+
+/// A `w` x `h` BGRA8 image of [`pix`].
+fn pix_image(w: u32, h: u32) -> Vec<u8> {
+    let mut v = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = pix(x, y);
+            v.extend_from_slice(&[b, g, r, 255]);
+        }
+    }
+    v
+}
+
+/// Renders `bgra` (`w` x `h`) with identity transfers into an 8-bit target and returns the output.
+fn render_pix(
+    gpu: &mut Headless,
+    frame: Option<(u32, u32)>,
+    view: View,
+    settings: &Settings,
+    target: (u32, u32),
+) -> Rendered {
+    let bgra = frame.map(|(w, h)| pix_image(w, h));
+    gpu.render(
+        frame
+            .zip(bgra.as_deref())
+            .map(|((width, height), bgra)| SourceFrame { width, height, bgra }),
+        view,
+        settings,
+        &Params::default(),
+        target,
+        TargetFormat::Bgra8Unorm,
+    )
+    .expect("headless render")
+}
+
+/// Cropped views (non-zero `View.origin`): native pixel p is read at `origin + p * div + div / 2`.
+/// Source 14x9; origin (3, 2).
+/// - divisor 1, native 5x3: native (x, y) = source (3 + x, 2 + y);
+/// - divisor 2, native 4x3: native (x, y) = source (3 + 2x + 1, 2 + 2y + 1) (block centres).
+///
+/// The second frame of each view reuses the upload (no new frame).
+#[test]
+fn cropped_views_read_the_source_at_the_origin() {
+    let test = "gpu_identity cropped view";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let settings = Settings::identity();
+    let a = View {
+        origin: (3, 2),
+        div: (1, 1),
+        native: (5, 3),
+    };
+    let b = View {
+        origin: (3, 2),
+        div: (2, 2),
+        native: (4, 3),
+    };
+    for (view, name, expect) in [
+        (a, "divisor 1", (|x, y| pix(3 + x, 2 + y)) as fn(u32, u32) -> [u8; 3]),
+        (b, "divisor 2", |x, y| pix(3 + 2 * x + 1, 2 + 2 * y + 1)),
+    ] {
+        let first = render_pix(&mut gpu, Some((14, 9)), view, &settings, view.native);
+        let again = render_pix(&mut gpu, None, view, &settings, view.native);
+        assert_eq!(first.output, again.output, "{name}: reused upload");
+        assert_eq!(
+            (first.native.width, first.native.height),
+            view.native,
+            "{name}: native size"
+        );
+        assert_frame(&first.output, view.native, 0, expect);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Native 4x3 raster into larger targets, every chain slot off (bypassed: the tube image is the nearest
+/// resample of the native raster, see `resample.comp`). The tube pixel q of a tube rectangle takes the
+/// amp texel floor((q + 0.5) * 16 / tube_w) (native -> amp repeats each texel K = 4 times) and the native
+/// texel amp / 4 horizontally, and the native row floor((q + 0.5) * 3 / tube_h).
+///
+/// - 2x (integer scale on a 10x8 target): tube rectangle 8x6 at (1, 1); column q = native q / 2 and row
+///   q = native q / 2, since the amp texel is 2q + 1.
+/// - 4.5x (18x20 target, not integer): tube rectangle 18 wide, round(13.5) = 14 high at x0 = 0,
+///   y0 = (20 - 14) / 2 = 3. Amp texel of column q = floor((2q + 1) * 4 / 9) = 0, 1, 2, 3, 4, 4, 5, 6, 7,
+///   8, 9, 10, 11, 12, 12, 13, 14, 15 for q = 0..17 (q = 4 and 13 sit exactly on a texel boundary, the
+///   upper texel wins), so the native columns are 0 x4, 1 x5, 2 x4, 3 x5. Row of q = floor((2q + 1) * 3 / 28)
+///   = 0 x5, 1 x4, 2 x5 for q = 0..13.
+#[test]
+fn scaled_targets_resample_the_native_raster() {
+    let test = "gpu_identity scaled target";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&[]).expect("bypass every slot");
+    let view = View::full(4, 3);
+
+    let integer = Settings {
+        integer_scale: true,
+        ..Settings::identity()
+    };
+    let r = render_pix(&mut gpu, Some((4, 3)), view, &integer, (10, 8));
+    assert_scaled(&r.output, (1, 1, 8, 6), |q| q / 2, |q| q / 2);
+
+    let fractional = Settings::identity();
+    let cols = [0, 0, 0, 0, 1, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 3];
+    let rows = [0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 2];
+    let r = render_pix(&mut gpu, Some((4, 3)), view, &fractional, (18, 20));
+    assert_scaled(&r.output, (0, 3, 18, 14), |q| cols[q as usize], |q| rows[q as usize]);
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Asserts that `out` holds [`pix`] of native (`col(qx)`, `row(qy)`) at tube pixel (qx, qy) of the tube
+/// rectangle (x0, y0, w, h), and black elsewhere.
+fn assert_scaled(
+    out: &ultimatecrt::gpu::ImageF32,
+    rect: (u32, u32, u32, u32),
+    col: impl Fn(u32) -> u32,
+    row: impl Fn(u32) -> u32,
+) {
+    let (x0, y0, w, h) = rect;
+    for y in 0..out.height {
+        for x in 0..out.width {
+            let p = out.pixel(x, y);
+            let got = [p[0], p[1], p[2]].map(|v| (v * 255.0).round() as u8);
+            let inside = x >= x0 && x < x0 + w && y >= y0 && y < y0 + h;
+            let want = if inside {
+                pix(col(x - x0), row(y - y0))
+            } else {
+                [0, 0, 0]
+            };
+            assert_eq!(got, want, "pixel ({x}, {y}), inside the tube: {inside}");
+        }
+    }
+}
+
+/// A power-law exponent that is not finite and positive is refused (the shaders would compute
+/// `pow(l, 1 / g)`), and the refusal loses nothing: the frame staged by the refused call is still
+/// uploaded by the next valid one.
+#[test]
+fn invalid_power_exponent_is_refused_and_keeps_the_staged_frame() {
+    let test = "gpu_identity invalid exponent";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let view = View::full(5, 4);
+    for g in [0.0, -2.2, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e-45] {
+        for (source, host) in [
+            (Transfer::Power(g), Transfer::Identity),
+            (Transfer::Identity, Transfer::Power(g)),
+        ] {
+            let s = Settings {
+                source,
+                host,
+                integer_scale: false,
+            };
+            assert!(s.validate().is_err(), "exponent {g} accepted");
+            let bgra = pix_image(5, 4);
+            let frame = SourceFrame {
+                width: 5,
+                height: 4,
+                bgra: &bgra,
+            };
+            let r = gpu.render(
+                Some(frame),
+                view,
+                &s,
+                &Params::default(),
+                (5, 4),
+                TargetFormat::Bgra8Unorm,
+            );
+            assert!(r.is_err(), "exponent {g}: frame rendered");
+        }
+    }
+    assert!(Settings::default().validate().is_ok());
+    // No new upload: the frame of a refused call was not lost.
+    let r = render_pix(&mut gpu, None, view, &Settings::identity(), (5, 4));
+    assert_frame(&r.output, (5, 4), 0, pix);
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}

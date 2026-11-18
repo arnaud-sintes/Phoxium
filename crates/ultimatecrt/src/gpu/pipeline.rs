@@ -69,6 +69,17 @@ pub enum Transfer {
 }
 
 impl Transfer {
+    /// Rejects a power law whose exponent is not a finite positive number whose inverse is finite
+    /// (the shaders compute `pow(l, 1 / gamma)`).
+    pub fn validate(self) -> Res<()> {
+        match self {
+            Transfer::Power(g) if !(g > 0.0 && g.is_finite() && g.recip().is_finite()) => {
+                Err(format!("transfer: power-law exponent {g} must be finite and greater than 0").into())
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// The `TRANSFER_*` constant and the exponent passed to the shaders.
     pub(super) fn shader_pair(self) -> (u32, f32) {
         match self {
@@ -106,6 +117,12 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Checks both transfers ([`Transfer::validate`]); every frame is refused with an invalid one.
+    pub fn validate(&self) -> Res<()> {
+        self.source.validate()?;
+        self.host.validate()
+    }
+
     /// Identity transfers on both sides: the output codes equal the captured codes (passthrough).
     pub fn identity() -> Self {
         Self {
@@ -207,7 +224,32 @@ pub(super) struct Img {
     write: vk::AccessFlags2,
 }
 
+/// The tracked access state of an [`Img`], saved before a frame is recorded.
+#[derive(Clone, Copy, Default)]
+struct Track {
+    /// The image the state belongs to: a reallocated image keeps its fresh `UNDEFINED` state.
+    image: vk::Image,
+    layout: vk::ImageLayout,
+    stages: vk::PipelineStageFlags2,
+    write: vk::AccessFlags2,
+}
+
 impl Img {
+    fn track(&self) -> Track {
+        Track {
+            image: self.gpu.image,
+            layout: self.layout,
+            stages: self.stages,
+            write: self.write,
+        }
+    }
+
+    fn restore(&mut self, t: Track) {
+        if t.image == self.gpu.image {
+            (self.layout, self.stages, self.write) = (t.layout, t.stages, t.write);
+        }
+    }
+
     /// Recreates the image (the device is idle), state reset to `UNDEFINED`.
     ///
     /// # Safety
@@ -408,6 +450,24 @@ pub struct Pipeline {
     plan: Vec<(usize, Mode, ImgRef)>,
     frame_index: u32,
     last_frame: Option<Instant>,
+    /// Access state of `src`, `native`, `inject` and every chain output before the frame being
+    /// recorded; restored when that frame is abandoned or its submission fails.
+    saved: Vec<Track>,
+    /// A frame was recorded and is neither submitted nor abandoned.
+    recorded: bool,
+    /// The recorded frame copies a staged frame to `src`: [`Pipeline::submit`] then marks `src` valid
+    /// and the slot's staging buffer consumed.
+    uploads: bool,
+}
+
+/// What [`Pipeline::plan_frame`] decided for a frame.
+#[derive(Clone, Copy)]
+struct Planned {
+    staged: bool,
+    have_source: bool,
+    encode_pipeline: vk::Pipeline,
+    /// The image `encode` reads (meaningful with `have_source`).
+    last: ImgRef,
 }
 
 /// Checks the image contract of a chain: the first slot reads the native domain, each slot reads the
@@ -475,6 +535,9 @@ impl Pipeline {
             plan: Vec::with_capacity(chain.len()),
             frame_index: 0,
             last_frame: None,
+            saved: Vec::with_capacity(chain.len() + 3),
+            recorded: false,
+            uploads: false,
         };
         match p.create(ctx) {
             Ok(()) => Ok(p),
@@ -836,6 +899,25 @@ impl Pipeline {
         self.record_with(ctx, view, fc, settings, params, target)
     }
 
+    /// Does the fallible preparation of the frame [`Pipeline::record`] will record for a target of
+    /// `extent` and `format`: validation of the settings, `encode` pipeline, (re)allocation of the
+    /// images, descriptor sets. The window renderer calls it before acquiring a swapchain image, so that
+    /// those failures never leave an acquired image unpresented. `record` repeats it at no cost.
+    ///
+    /// # Safety
+    /// `ctx` is the pipeline's context and [`Pipeline::wait_slot`] was called for the current slot.
+    pub(super) unsafe fn prepare(
+        &mut self,
+        ctx: &Context,
+        view: View,
+        settings: &Settings,
+        extent: vk::Extent2D,
+        format: vk::Format,
+    ) -> Res<()> {
+        let fc = FrameConstants::new(view.native, (extent.width, extent.height), settings.integer_scale);
+        self.plan_frame(ctx, view, &fc, settings, format).map(|_| ())
+    }
+
     /// As [`Pipeline::record`] with the given `FrameConstants` (stage tests inject theirs). The image
     /// sizes follow `fc` (image contract); `fc.native_size` must equal `view.native` unless an injected
     /// image replaces the `decode` output or a later one.
@@ -851,9 +933,53 @@ impl Pipeline {
         params: &Params,
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
+        // A frame recorded but never submitted nor abandoned: its image states are rolled back.
+        self.abandon();
         let cur = self.current;
-        // Taken now: an injection is used by this frame or dropped with it (on an error below).
+        let planned = self.plan_frame(ctx, view, &fc, settings, target.format);
+        // An injection is used by this frame or dropped with it (on an error).
         let inject_at = self.slots[cur].inject_at.take();
+        let Planned {
+            staged,
+            have_source,
+            encode_pipeline,
+            last,
+            ..
+        } = planned?;
+        self.record_commands(
+            ctx,
+            view,
+            &fc,
+            settings,
+            params,
+            target,
+            inject_at,
+            staged,
+            have_source,
+            encode_pipeline,
+            last,
+        )
+    }
+
+    /// Everything a frame needs before its commands are recorded, none of it recorded: the validity of
+    /// the settings and constants, the `encode` pipeline for `target_format`, the routing of the chain,
+    /// the (re)allocation of the images and the descriptor sets. Idempotent for a given slot, `view`,
+    /// constants and format, so that [`Pipeline::prepare`] can run it before the swapchain image is
+    /// acquired and [`Pipeline::record_with`] again after.
+    ///
+    /// # Safety
+    /// As [`Pipeline::record`].
+    unsafe fn plan_frame(
+        &mut self,
+        ctx: &Context,
+        view: View,
+        fc: &FrameConstants,
+        settings: &Settings,
+        target_format: vk::Format,
+    ) -> Res<Planned> {
+        settings.validate()?;
+        let cur = self.current;
+        let inject_at = self.slots[cur].inject_at;
         let staged = self.slots[cur].upload;
         let native = fc.domain_size(Domain::Native);
         let have_source = inject_at.is_some() || ((self.src_valid || staged) && native.0 > 0 && native.1 > 0);
@@ -863,7 +989,7 @@ impl Pipeline {
         if fc.amp_k < 1 {
             return Err("pipeline: amp_k (K) must be at least 1".into());
         }
-        let encode_pipeline = self.encode.pipeline(&ctx.device, target.format)?;
+        let encode_pipeline = self.encode.pipeline(&ctx.device, target_format)?;
 
         // Routing and image sizes, decided before recording (descriptor sets are written before the
         // command buffer binds them).
@@ -958,12 +1084,40 @@ impl Pipeline {
                 s.encode_bound = last;
             }
         }
+        Ok(Planned {
+            staged,
+            have_source,
+            encode_pipeline,
+            last: input,
+        })
+    }
 
+    /// Writes the constants and records the commands of a planned frame.
+    ///
+    /// # Safety
+    /// As [`Pipeline::record`], after [`Pipeline::plan_frame`] succeeded for the same arguments.
+    // The plan's values travel as arguments: a struct would only repeat `Planned`.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn record_commands(
+        &mut self,
+        ctx: &Context,
+        view: View,
+        fc: &FrameConstants,
+        settings: &Settings,
+        params: &Params,
+        target: &Target,
+        inject_at: Option<usize>,
+        staged: bool,
+        have_source: bool,
+        encode_pipeline: vk::Pipeline,
+        input: ImgRef,
+    ) -> Res<vk::CommandBuffer> {
+        let cur = self.current;
         let s = &mut self.slots[cur];
         // SAFETY: FrameConstants is #[repr(C)] with 4-byte fields only (no padding); both buffers are
         // mapped, host coherent, at least as large as what is copied, and not in use (fence waited).
         std::ptr::copy_nonoverlapping(
-            (&fc as *const FrameConstants).cast::<u8>(),
+            (fc as *const FrameConstants).cast::<u8>(),
             s.frame_ubo.mapped,
             size_of::<FrameConstants>(),
         );
@@ -976,6 +1130,16 @@ impl Pipeline {
             cb,
             &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
         )?;
+
+        // From here nothing fails, but the frame only counts once submitted: save the access state of
+        // every image so that an unsubmitted frame can be rolled back ([`Pipeline::abandon`]).
+        self.saved.clear();
+        self.saved.push(self.src.track());
+        self.saved.push(self.native.track());
+        self.saved.push(self.inject.track());
+        self.saved.extend(self.chain.iter().map(|l| l.out.track()));
+        self.recorded = true;
+        self.uploads = staged;
 
         if staged {
             self.src.use_for_write(
@@ -992,8 +1156,6 @@ impl Pipeline {
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                 &[full_copy(self.src.size)],
             );
-            self.slots[cur].upload = false;
-            self.src_valid = true;
         }
         if inject_at.is_some() {
             self.inject.use_for_write(
@@ -1112,23 +1274,68 @@ impl Pipeline {
         signal: &[vk::Semaphore],
     ) -> Res<vk::Fence> {
         let d = &ctx.device;
-        let s = &self.slots[self.current];
-        d.end_command_buffer(s.cmd)?;
-        d.reset_fences(&[s.fence])?;
-        let cmds = [s.cmd];
-        d.queue_submit(
+        let cur = self.current;
+        let (cmd, fence) = (self.slots[cur].cmd, self.slots[cur].fence);
+        if let Err(e) = d.end_command_buffer(cmd) {
+            self.abandon();
+            return Err(e.into());
+        }
+        if let Err(e) = d.reset_fences(&[fence]) {
+            self.abandon();
+            return Err(e.into());
+        }
+        let cmds = [cmd];
+        if let Err(e) = d.queue_submit(
             ctx.queue,
             &[vk::SubmitInfo::default()
                 .wait_semaphores(wait)
                 .wait_dst_stage_mask(wait_stages)
                 .command_buffers(&cmds)
                 .signal_semaphores(signal)],
-            s.fence,
-        )?;
-        let fence = s.fence;
+            fence,
+        ) {
+            // The fence was reset and nothing will signal it: replace it by a signalled one, or the next
+            // `wait_slot` of this slot would never return.
+            d.destroy_fence(fence, None);
+            self.slots[cur].fence = d
+                .create_fence(
+                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                    None,
+                )
+                .unwrap_or_default();
+            self.abandon();
+            return Err(e.into());
+        }
+        // The frame is on the GPU: its upload counts now.
+        if std::mem::take(&mut self.uploads) {
+            self.slots[cur].upload = false;
+            self.src_valid = true;
+        }
+        self.recorded = false;
         self.current = (self.current + 1) % FRAMES_IN_FLIGHT;
         self.frame_index = self.frame_index.wrapping_add(1);
         Ok(fence)
+    }
+
+    /// Gives up the frame recorded by the last [`Pipeline::record`] that is not submitted: the tracked
+    /// access state of every image goes back to what it was before (the commands never ran), and the
+    /// staged frame, if any, stays staged for the next record. No-op without such a frame. Called by
+    /// [`Pipeline::submit`] on failure and by [`Pipeline::record_with`] for a forgotten frame; its
+    /// callers call it when they fail between `record` and `submit`.
+    pub(super) fn abandon(&mut self) {
+        if !std::mem::take(&mut self.recorded) {
+            return;
+        }
+        self.uploads = false;
+        let mut saved = self.saved.iter().copied();
+        let imgs = [&mut self.src, &mut self.native, &mut self.inject]
+            .into_iter()
+            .chain(self.chain.iter_mut().map(|l| &mut l.out));
+        for img in imgs {
+            if let Some(t) = saved.next() {
+                img.restore(t);
+            }
+        }
     }
 
     /// Index of the current frame slot, in `0..FRAMES_IN_FLIGHT`.
@@ -1313,6 +1520,20 @@ mod tests {
         // A chain that breaks the contract is refused.
         assert!(check_chain(&stages::CHAIN[..3]).is_err());
         assert!(check_chain(&[stages::signal::SLOT, stages::screen::SLOT]).is_err());
+    }
+
+    #[test]
+    fn power_exponents_are_validated() {
+        for g in [2.4, 1.0, 0.5, 1e-3, 100.0] {
+            assert!(Transfer::Power(g).validate().is_ok(), "{g}");
+        }
+        for g in [0.0, -0.0, -1.0, f32::NAN, f32::INFINITY, f32::NEG_INFINITY, 1e-45] {
+            assert!(Transfer::Power(g).validate().is_err(), "{g}");
+        }
+        assert!(Transfer::Identity.validate().is_ok());
+        assert!(Transfer::Srgb.validate().is_ok());
+        assert!(Settings::default().validate().is_ok());
+        assert!(Settings::identity().validate().is_ok());
     }
 
     #[test]
