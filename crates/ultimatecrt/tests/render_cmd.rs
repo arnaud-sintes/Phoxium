@@ -92,6 +92,19 @@ fn png_matches_the_pipeline_formula() {
         TargetFormat::Bgra8Unorm,
     )
     .unwrap();
+    // The formula is the decode and encode path: since T-36b the beam's spot (horizontal blur, spot
+    // growth) changes pixel values even at 1 px per source pixel, so it is checked with every slot
+    // bypassed (an exact identity, A11); the PNG is checked against the full render. The gun stays on
+    // (it carries the tube gamma since T-34), only the beam/mask `screen` slot is bypassed.
+    gpu.set_stage_enabled("screen", false).expect("bypass the beam");
+    let plain = render_source(
+        &mut gpu,
+        &ramp_source(),
+        &Params::default(),
+        None,
+        TargetFormat::Bgra8Unorm,
+    )
+    .unwrap();
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 
@@ -121,12 +134,13 @@ fn png_matches_the_pipeline_formula() {
                     (expected.pixel(x, y)[c] * 255.0).round(),
                     "pixel ({x}, {y}) ch {c}"
                 );
-                // And the hand-derived formula (src is BGRA: channel c of RGB is byte 2 - c).
+                // And the hand-derived formula (src is BGRA: channel c of RGB is byte 2 - c), beam bypassed.
                 let code = f64::from(src[i * 4 + 2 - c]);
                 let want = (255.0 * (code / 255.0).powf(2.4 / 2.2)).round();
+                let plain = f64::from((plain.pixel(x, y)[c] * 255.0).round());
                 assert!(
-                    (f64::from(got) - want).abs() <= 1.0,
-                    "pixel ({x}, {y}) ch {c}: code {code} -> {got}, formula {want}"
+                    (plain - want).abs() <= 1.0,
+                    "pixel ({x}, {y}) ch {c}: code {code} -> {plain}, formula {want}"
                 );
             }
         }

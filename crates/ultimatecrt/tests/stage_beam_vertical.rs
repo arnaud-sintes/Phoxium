@@ -28,10 +28,18 @@
 //!   are 0.105094, 0.770754, 2.124152, 2.124152, 0.770754, 0.105094, Michelson 90.571 %; at sigma/P 0.25
 //!   (CRT.md 240p example) 0.524285, 0.988105, 1.487610 (mirrored), Michelson 47.881 % (57 % point-
 //!   sampled: area integration at 6 px per line removes about 9 points).
+//!
+//! T-36b (horizontal spot, spot growth): every test here runs with growth off (FWHM at peak = FWHM at mid,
+//! PLAN T-36a "growth off"), so the hand-derived numbers above are unchanged. The beam now also blurs each
+//! line horizontally with the same round spot over the held amp samples, so the oracle is the 2D
+//! [`BeamOracle`] (the amp sample j covers [j a, (j + 1) a), a = tube width / amp width) and the checks of
+//! x-flat fields read interior columns: the tubes are 8 to 16 native columns wide (was 1 to 3), so that
+//! the spot does not reach the raster's left and right ends there (at least 8 sigma away); for an x-flat
+//! field the horizontal factor is then exactly 1 and the values are those of T-36a.
 
 mod common;
 
-use crt_model::beam::{scanline_row_mean, ScanlineProfile};
+use crt_model::beam::{AmpRaster, BeamOracle, ScanlineProfile, Spot};
 use crt_model::units::fwhm_from_sigma;
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::Params;
@@ -47,10 +55,12 @@ fn tube(cols: u32, rows: u32, n: u32, ppm: f32) -> FrameConstants {
     fc
 }
 
-/// Parameters for a core sigma of `s` line pitches (pitch `pitch_mm`) and a tail.
+/// Parameters for a core sigma of `s` line pitches (pitch `pitch_mm`) and a tail, spot growth off.
 fn params(s: f64, pitch_mm: f64, tail_weight: f64, tail_ratio: f64) -> Params {
+    let fwhm = fwhm_from_sigma(s * pitch_mm) as f32;
     Params {
-        beam_fwhm_mid_mm: fwhm_from_sigma(s * pitch_mm) as f32,
+        beam_fwhm_mid_mm: fwhm,
+        beam_fwhm_peak_mm: fwhm,
         beam_tail_weight: tail_weight as f32,
         beam_tail_sigma_ratio: tail_ratio as f32,
         ..Params::default()
@@ -92,21 +102,26 @@ fn screen(gpu: &mut Headless, fc: FrameConstants, params: &Params, amp: &ImageF3
     r.stage("screen").expect("screen ran").clone()
 }
 
-/// Amp column under the centre of host column `x` (image contract, ARCHITECTURE 3.7: amp -> tube takes the
-/// amp sample under the host pixel centre; T-36b replaces it by the horizontal spot).
+/// Amp column under the centre of host column `x` (image contract, ARCHITECTURE 3.7: the unplaced fallback
+/// takes the amp sample under the host pixel centre).
 fn amp_col(fc: &FrameConstants, x: u32) -> u32 {
     let (aw, _) = fc.domain_size(Domain::Amp);
     (((f64::from(x) + 0.5) * f64::from(aw) / f64::from(fc.tube_size[0] as u32)).floor() as u32).min(aw - 1)
 }
 
 /// Every row of the tube equals the oracle: native rows x `mult` lines of pitch `pitch` px centred from
-/// `pitch / 2`, line k drawing native row k / `mult`, current from the amp column under the pixel. Checked
-/// on the first and last host columns and on the first host column of every amp column (the oracle is
-/// slow in debug builds). Tolerance: FP16 storage (relative 2^-11, taken as 1e-3), the shader's erf
-/// (absolute 1.5e-7 per call, within the 1e-4 floor) and the shader's truncation of the line sum at
-/// +/- 4 sigma (PLAN T-36a), which the oracle does not do: the dropped lines on one side carry at most
-/// I_max P (phi(4) / sigma + (1 - Phi(4)) / P) with phi(4) = 1.338e-4 and 1 - Phi(4) = 3.17e-5 [K]
-/// (sigma = core sigma, conservative when a tail widens the reach), counted twice for both sides.
+/// `pitch / 2`, line k drawing native row k / `mult`; along the line the amp samples held over
+/// [j a, (j + 1) a), a = tube width / amp width, blurred by the same spot (T-36b, [`BeamOracle`], spot
+/// growth off: sigma = `profile.sigma` at every current). Checked on the first and last host columns
+/// and on the first host column of the first four, the last four and the middle amp columns (the oracle
+/// is slow in debug builds). Tolerance:
+/// FP16 storage (relative 2^-11, taken as 1e-3), the shader's erf (absolute 1.5e-7 per call, within the
+/// 1e-4 floor) and the shader's truncation of the sums at +/- 4 sigma (PLAN T-36a), which the oracle
+/// does not do: the dropped lines on one side carry at most I_max P (phi(4) / sigma + (1 - Phi(4)) / P)
+/// with phi(4) = 1.338e-4 and 1 - Phi(4) = 3.17e-5 [K] (sigma = core sigma, conservative when a tail
+/// widens the reach), counted twice for both sides; the dropped samples on one side lie beyond 4 sigma
+/// of the pixel, so they carry at most (1 - Phi(4)) I_max of the pixel's horizontal factor, times the
+/// vertical factor of the row (the row mean of a unit flat field, from the oracle), twice.
 fn assert_matches_oracle(
     what: &str,
     fc: &FrameConstants,
@@ -117,24 +132,57 @@ fn assert_matches_oracle(
 ) {
     let rows = fc.native_size[1] as u32;
     let pitch = f64::from(fc.tube_size[1]) / f64::from(rows * mult);
-    let checked = (0..out.width).filter(|&x| x == 0 || x == out.width - 1 || amp_col(fc, x) != amp_col(fc, x - 1));
-    for x in checked {
-        let col = amp_col(fc, x);
-        for c in 0..3 {
-            let line_currents: Vec<f64> = (0..rows * mult)
-                .map(|k| f64::from(amp.pixel(col, k / mult)[c]))
-                .collect();
-            let i_max = line_currents.iter().cloned().fold(0.0, f64::max);
-            let truncation = 2.0 * i_max * (pitch * 1.338e-4 / profile.sigma + 3.17e-5);
+    let samples = amp.width as usize;
+    let a = f64::from(fc.tube_size[0]) / f64::from(amp.width);
+    let sigma = |_: f64| profile.sigma;
+    let spot = Spot {
+        sigma_px: &sigma,
+        tail_weight: profile.tail_weight,
+        tail_ratio: profile.tail_ratio,
+    };
+    let ones = vec![1.0; samples * rows as usize];
+    let unit = BeamOracle::new(
+        AmpRaster {
+            currents: &ones,
+            samples,
+            sample_width: a,
+            first: pitch / 2.0,
+            pitch,
+            mult: mult as usize,
+        },
+        &spot,
+    );
+    // Amp columns near both ends (where the spot meets the raster's ends) and the middle one.
+    let near_end = |k: u32| k < 4 || k + 4 >= amp.width || k == amp.width / 2;
+    let checked: Vec<u32> = (0..out.width)
+        .filter(|&x| x == 0 || x == out.width - 1 || (amp_col(fc, x) != amp_col(fc, x - 1) && near_end(amp_col(fc, x))))
+        .collect();
+    // Vertical factor of each row (horizontal factor <= 1 at every column, 1 in the middle).
+    let mid = f64::from(out.width / 2);
+    let vertical: Vec<f64> = (0..out.height)
+        .map(|y| unit.pixel_mean((0.0, 0.0), (mid, mid + 1.0), (f64::from(y), f64::from(y + 1))))
+        .collect();
+    for c in 0..3 {
+        let currents: Vec<f64> = amp.rgba.chunks(4).map(|p| f64::from(p[c])).collect();
+        let i_max = currents.iter().cloned().fold(0.0, f64::max);
+        let oracle = BeamOracle::new(
+            AmpRaster {
+                currents: &currents,
+                samples,
+                sample_width: a,
+                first: pitch / 2.0,
+                pitch,
+                mult: mult as usize,
+            },
+            &spot,
+        );
+        let line_truncation = 2.0 * i_max * (pitch * 1.338e-4 / profile.sigma + 3.17e-5);
+        for &x in &checked {
+            let px = (f64::from(x), f64::from(x + 1));
             for y in 0..out.height {
-                let want = scanline_row_mean(
-                    &line_currents,
-                    pitch / 2.0,
-                    pitch,
-                    profile,
-                    f64::from(y),
-                    f64::from(y + 1),
-                );
+                let py = (f64::from(y), f64::from(y + 1));
+                let want = oracle.pixel_mean((0.0, 0.0), px, py);
+                let truncation = line_truncation + 2.0 * 3.17e-5 * i_max * vertical[y as usize].max(1.0);
                 let got = f64::from(out.pixel(x, y)[c]);
                 assert!(
                     (got - want).abs() <= 1e-3 * want.abs() + 1e-4 + truncation,
@@ -165,7 +213,7 @@ fn scanline_michelson_matches_the_crt_md_table() {
         return;
     };
     let counter = gpu.validation_counter();
-    let fc = tube(1, 16, 32, 4.0);
+    let fc = tube(8, 16, 32, 4.0);
     let amp = currents(&fc, |_, _| FLAT);
     for (s, table, tol) in [
         (0.15, 0.98, 0.015),
@@ -178,10 +226,10 @@ fn scanline_michelson_matches_the_crt_md_table() {
     ] {
         let p = params(s, 8.0, 0.0, 3.0);
         let out = screen(&mut gpu, fc, &p, &amp);
-        assert_eq!((out.width, out.height), (32, 512));
+        assert_eq!((out.width, out.height), (256, 512));
         let what = format!("{test} sigma/P {s}");
         for c in 0..3 {
-            let m = michelson(&out, 13, c, 128..384);
+            let m = michelson(&out, 128, c, 128..384);
             println!("{what}: channel {c} Michelson {m:.5} (table {table})");
             assert!((m - table).abs() <= tol, "{what}: channel {c} Michelson {m} vs {table}");
         }
@@ -200,7 +248,7 @@ fn flat_field_mean_does_not_depend_on_sigma_or_tail() {
         return;
     };
     let counter = gpu.validation_counter();
-    let fc = tube(1, 32, 16, 4.0);
+    let fc = tube(16, 32, 16, 4.0);
     let amp = currents(&fc, |_, _| FLAT);
     for (w, r) in [(0.0, 3.0), (0.1, 3.0)] {
         for i in 0..10 {
@@ -210,7 +258,7 @@ fn flat_field_mean_does_not_depend_on_sigma_or_tail() {
             for (c, want) in FLAT.iter().enumerate() {
                 let rows = 160..352;
                 let n = f64::from(rows.end - rows.start);
-                let mean = rows.map(|y| f64::from(out.pixel(5, y)[c])).sum::<f64>() / n;
+                let mean = rows.map(|y| f64::from(out.pixel(128, y)[c])).sum::<f64>() / n;
                 let rel = mean / f64::from(*want) - 1.0;
                 assert!(rel.abs() <= 0.005, "{what}: channel {c} mean {mean} vs {want}");
             }
@@ -237,7 +285,7 @@ fn isolated_line_energy_position_and_width() {
         return;
     };
     let counter = gpu.validation_counter();
-    let fc = tube(1, 16, 32, 4.0);
+    let fc = tube(8, 16, 32, 4.0);
     let amp = currents(&fc, |_, y| if y == 8 { FLAT } else { [0.0; 3] });
     let sigma = 0.3 * 32.0;
     for w in [0.0, 0.05, 0.1] {
@@ -245,7 +293,7 @@ fn isolated_line_energy_position_and_width() {
         let out = screen(&mut gpu, fc, &p, &amp);
         let what = format!("{test} tail {w}");
         for (c, &i) in FLAT.iter().enumerate() {
-            let col: Vec<f64> = (0..out.height).map(|y| f64::from(out.pixel(9, y)[c])).collect();
+            let col: Vec<f64> = (0..out.height).map(|y| f64::from(out.pixel(128, y)[c])).collect();
             let energy: f64 = col.iter().sum();
             let centroid = col.iter().enumerate().map(|(y, v)| (y as f64 + 0.5) * v).sum::<f64>() / energy;
             let var = col
@@ -305,14 +353,19 @@ fn pvm_240p_on_1440_px_ripple_is_area_integrated() {
         return;
     };
     let counter = gpu.validation_counter();
-    let mut fc = tube(2, 240, 6, 1440.0 / 290.0);
+    let mut fc = tube(4, 240, 6, 1440.0 / 290.0);
     fc.line_pitch_mm = 290.0 / 240.0;
     let pitch_mm = 290.0 / 240.0;
     let amp = currents(&fc, |_, _| FLAT);
     let s_default = f64::from(Params::default().beam_fwhm_mid_mm) / fwhm_from_sigma(1.0) / pitch_mm;
     assert!((s_default - 0.158_150).abs() < 1e-6, "default sigma/P {s_default}");
+    // The default FWHM at mid drive, growth off (T-36b: FWHM at peak = at mid).
+    let default_no_growth = Params {
+        beam_fwhm_peak_mm: Params::default().beam_fwhm_mid_mm,
+        ..Params::default()
+    };
     for (s, p, m_want, half) in [
-        (s_default, Params::default(), 0.90571, [0.105_094, 0.770_754, 2.124_152]),
+        (s_default, default_no_growth, 0.90571, [0.105_094, 0.770_754, 2.124_152]),
         (
             0.25,
             params(0.25, pitch_mm, 0.0, 3.0),
@@ -321,10 +374,10 @@ fn pvm_240p_on_1440_px_ripple_is_area_integrated() {
         ),
     ] {
         let out = screen(&mut gpu, fc, &p, &amp);
-        assert_eq!((out.width, out.height), (12, 1440));
+        assert_eq!((out.width, out.height), (24, 1440));
         let what = format!("{test} sigma/P {s:.6}");
         for (c, &i) in FLAT.iter().enumerate() {
-            let m = michelson(&out, 4, c, 600..840);
+            let m = michelson(&out, 12, c, 600..840);
             println!("{what}: channel {c} Michelson {m:.5} (hand-derived {m_want})");
             assert!(
                 (m - m_want).abs() <= 0.01,
@@ -332,7 +385,7 @@ fn pvm_240p_on_1440_px_ripple_is_area_integrated() {
             );
             let want = [half[0], half[1], half[2], half[2], half[1], half[0]];
             for (j, w) in want.iter().enumerate() {
-                let got = f64::from(out.pixel(4, 720 + j as u32)[c]) / f64::from(i);
+                let got = f64::from(out.pixel(12, 720 + j as u32)[c]) / f64::from(i);
                 assert!(
                     (got / w - 1.0).abs() <= 0.005,
                     "{what}: channel {c} pixel {j}: {got} vs {w}"
@@ -346,7 +399,7 @@ fn pvm_240p_on_1440_px_ripple_is_area_integrated() {
 }
 
 /// Arbitrary linear currents (gun-independent), distinct per amp column, row and channel, with a 5 % tail:
-/// every pixel matches the oracle with the nearest amp column per host column; doubling the currents
+/// every checked pixel matches the 2D oracle (horizontal spot over the amp samples); doubling the currents
 /// doubles the light; line multiplier 2 (half the line pitch) draws each native row twice; with the tube
 /// not placed (px per mm 0) the beam falls back to the nearest amp sample.
 #[test]

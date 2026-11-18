@@ -74,6 +74,8 @@ mod tests {
             gpu.stage_names(),
             ["signal", "amp", "gun", "screen", "dummy", "phosphor", "optics"]
         );
+        // The beam is not an identity (T-36b: the spot spills past the raster's ends): bypassed.
+        gpu.set_stage_enabled("screen", false).unwrap();
         let (w, h) = (256u32, 2u32);
         let mut bgra = Vec::new();
         for _ in 0..h {

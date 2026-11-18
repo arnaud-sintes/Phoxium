@@ -383,6 +383,9 @@ fn native_size_changes_and_surround_with_silent_validation() {
         return;
     };
     let counter = gpu.validation_counter();
+    // Decode and encode only: since T-36b the beam's spot spills past the raster's ends (stage tests
+    // `stage_beam_*`), so every slot is bypassed (an exact identity, A11).
+    gpu.enable_only(&[]).expect("bypass every slot");
     let params = Params::identity_gun();
     let settings = Settings::identity();
     let mut render = |w: u32, h: u32, bgra: Option<&[u8]>, view: View, target: (u32, u32)| {
@@ -503,6 +506,8 @@ fn cropped_views_read_the_source_at_the_origin() {
     // These tests are about decode and encode: the beam (T-36a) has its own tests.
     gpu.set_stage_enabled("screen", false).expect("bypass the beam");
     let counter = gpu.validation_counter();
+    // Decode and encode only: the beam (T-36b: spot spill at the raster's ends) has its own tests.
+    gpu.enable_only(&[]).expect("bypass every slot");
     let settings = Settings::identity();
     let a = View {
         origin: (3, 2),
