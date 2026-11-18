@@ -12,6 +12,7 @@
 pub mod beam;
 pub mod colour;
 pub mod geometry;
+pub mod mask;
 pub mod optics;
 pub mod phosphor;
 pub mod units;
