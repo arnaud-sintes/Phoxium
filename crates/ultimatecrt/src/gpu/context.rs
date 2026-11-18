@@ -188,7 +188,8 @@ impl Context {
     /// With `validation`, the Khronos validation layer must be installed (else an error), every
     /// message is printed to stderr and counted (see [`Context::validation_counter`]), and
     /// synchronization validation is enabled too when the layer offers `VK_EXT_validation_features`
-    /// (headless contexts only: the window path has not been checked against it yet).
+    /// (headless contexts only: the window path has not been checked against it yet), including the
+    /// accesses shaders make through descriptors when it offers `VK_EXT_layer_settings`.
     pub fn new_headless(validation: bool) -> Res<Self> {
         // SAFETY: no window handle is involved; `create` owns or destroys everything it creates.
         unsafe { Self::create(None, None, validation).map(|(ctx, _)| ctx) }
@@ -235,6 +236,23 @@ impl Context {
         if sync_validation {
             exts.push(ext::validation_features::NAME.as_ptr());
         }
+        // Synchronization validation ignores the accesses that shaders make through descriptors unless
+        // `syncval_shader_accesses_heuristic` is set (validation layer 1.4.3xx, off by default): without
+        // it, a missing barrier between two shader stages is not reported (checked in T-20a).
+        let shader_accesses = sync_validation && layer_has_extension(&entry, vk::EXT_LAYER_SETTINGS_NAME);
+        if shader_accesses {
+            exts.push(vk::EXT_LAYER_SETTINGS_NAME.as_ptr());
+        }
+        let heuristic_on: vk::Bool32 = vk::TRUE;
+        let mut heuristic = vk::LayerSettingEXT::default()
+            .layer_name(VALIDATION_LAYER)
+            .setting_name(c"syncval_shader_accesses_heuristic")
+            .ty(vk::LayerSettingTypeEXT::BOOL32);
+        // One VkBool32 value (the `values` builder would count bytes, not values).
+        heuristic.value_count = 1;
+        heuristic.p_values = (&heuristic_on as *const vk::Bool32).cast();
+        let layer_settings = [heuristic];
+        let mut settings = vk::LayerSettingsCreateInfoEXT::default().settings(&layer_settings);
         let layers = [VALIDATION_LAYER.as_ptr()];
         let counter = ValidationCounter::default();
         // Chained into the instance create info, this messenger also reports messages raised by
@@ -250,6 +268,9 @@ impl Context {
         }
         if sync_validation {
             info = info.push_next(&mut features);
+        }
+        if shader_accesses {
+            info = info.push_next(&mut settings);
         }
         let instance = entry.create_instance(&info, None)?;
         let surface_fn = khr::surface::Instance::new(&entry, &instance);

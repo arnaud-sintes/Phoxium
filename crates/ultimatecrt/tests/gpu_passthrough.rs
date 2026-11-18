@@ -77,6 +77,14 @@ fn ramp_round_trips_through_rgba16f() {
 
 #[test]
 fn ramp_round_trips_through_rgba32f() {
-    // UNORM to float conversion is exact to within a few ULP of f32.
-    check(TargetFormat::Rgba32F, 1e-3);
+    // The pipeline keeps the native raster in FP16 (A10, T-20a), so an FP32 target carries the same
+    // FP16 error as above: below 255 * 2^-11 = 0.1245 on v * 255.
+    check(TargetFormat::Rgba32F, 0.125);
+}
+
+#[test]
+fn ramp_round_trips_through_bgra8_unorm() {
+    // The swapchain format: the float to UNORM conversion rounds to the nearest code, so the FP16
+    // error (< 0.125 of a code) disappears and every code comes back exactly.
+    check(TargetFormat::Bgra8Unorm, 0.0);
 }

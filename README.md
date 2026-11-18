@@ -2,7 +2,7 @@
 
 A physically based CRT shader for Windows. It captures a window, runs it through a virtual CRT tube on the GPU and shows the result in a separate output window. See `CLAUDE.md` for the vision, `CRT.md` for the physics and `QUESTIONS.md` for decisions and open questions.
 
-Current state: the pipeline duplicates the captured window (passthrough shader). The CRT model comes next.
+Current state: the pipeline core runs (decode to an FP16 native raster, encode with an explicit host EOTF: tube gamma 2.4 as a stand-in for the gun law, host pure 2.2), with no CRT stage yet. The CRT model comes next.
 
 ## Requirements
 

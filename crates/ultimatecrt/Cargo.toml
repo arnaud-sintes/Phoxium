@@ -34,3 +34,7 @@ windows = { version = "0.62", features = [
 
 [build-dependencies]
 paramgen = { path = "../paramgen" }
+
+[dev-dependencies]
+# The analytic oracle of the GPU tests (TEC-7); workspace crate, no third-party dependency.
+crt-model = { path = "../crt-model" }

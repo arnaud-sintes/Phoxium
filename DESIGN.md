@@ -49,7 +49,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 - Every barrier names its source and destination stage and access. Image layouts are tracked explicitly (`Texture.layout`).
 - Run with `--validation` before committing any change to `gpu/` or the shaders. The layer must stay silent. **(manual)**
 - Shaders are GLSL 450 compiled by `build.rs` with `glslc -O --target-env=vulkan1.3`. A shader error fails the build.
-- A push-constant block must be declared identically in every stage that uses it, and its size must match the pipeline layout range (40 bytes today, the minimum guaranteed limit is 128).
+- A push-constant block must be declared identically in every stage that uses it, and its size must match the pipeline layout range (24 bytes for `decode`, 8 for `encode`; the minimum guaranteed limit is 128). Each stage mirrors its block in a `#[repr(C)]` struct with a size test.
 - Sampling a captured frame uses `texelFetch` on exact texels. Filtering is a modelled stage, never an accident of the sampler.
 
 ## 8. Physical model rules (apply from the first CRT shader)
@@ -95,10 +95,9 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 
 ## 12. Known deviations (to fix when touched)
 
-- The renderer keeps one frame in flight and waits for the fence before every frame, which caps pipelining.
 - The frame path is GPU, CPU, GPU (decision A3).
 - `pixel-demo` uses `unwrap` and `expect` on window-system calls at start-up.
 - `capture.rs` unwraps the out-parameters of `D3D11CreateDevice` and the texture creation after the call returned success. The invariant holds but is not commented.
 - There is no continuous integration, and no `cargo-deny` check of licences (`package.ps1` only checks the declared licences of dependencies).
-- There is no automated test of `capture` or `output`; `gpu` has headless tests of device creation, the validation messenger and the passthrough pass, but none of presentation.
+- There is no automated test of `capture` or `output`; `gpu` has headless tests of device creation, the validation messenger and the pipeline (decode and encode, frames in flight), but none of presentation.
 - Synchronization validation is enabled for headless contexts only; the window path (`--validation`) has not been run against it yet.

@@ -1,19 +1,25 @@
-//! Headless renderer: runs the GPU passes without any window or swapchain, into an offscreen
-//! floating-point image, and reads the result back to the CPU (TEC-7, ARCHITECTURE A16).
+//! Headless renderer: runs the GPU pipeline without any window or swapchain, into an offscreen
+//! image, and reads the result back to the CPU (TEC-7, ARCHITECTURE A16).
 //!
-//! Used by the GPU tests (`tests/gpu_*.rs`) and, later, by offline renders. Every call is
-//! synchronous: it records one command buffer, submits it, waits for its fence and returns the
-//! pixels. It allocates its scratch images and buffers per call, which is fine off the render loop.
+//! Used by the GPU tests (`tests/gpu_*.rs`) and, later, by offline renders. It drives the same
+//! [`Pipeline`] as the window renderer (same stages, frames in flight, reallocation). Every call is
+//! synchronous: it submits one frame (or a burst of frames in flight), waits for the last fence and
+//! returns the pixels. It allocates its targets and readback buffers per call, which is fine off the
+//! render loop.
 
+use super::pipeline::{full_copy, Pipeline, Settings, Target};
 use super::*;
+use crate::params::Params;
 
-/// Format of the offscreen target. Both are mandatory colour-attachment formats in Vulkan.
+/// Format of the offscreen target.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TargetFormat {
-    /// `R16G16B16A16_SFLOAT`, the planned internal format of the pipeline (A10).
+    /// `R16G16B16A16_SFLOAT`, the internal format of the pipeline (A10).
     Rgba16F,
     /// `R32G32B32A32_SFLOAT`, for tests that need more precision than FP16.
     Rgba32F,
+    /// `B8G8R8A8_UNORM`, the swapchain format (A7): values read back as `code / 255`.
+    Bgra8Unorm,
 }
 
 impl TargetFormat {
@@ -21,6 +27,7 @@ impl TargetFormat {
         match self {
             TargetFormat::Rgba16F => vk::Format::R16G16B16A16_SFLOAT,
             TargetFormat::Rgba32F => vk::Format::R32G32B32A32_SFLOAT,
+            TargetFormat::Bgra8Unorm => vk::Format::B8G8R8A8_UNORM,
         }
     }
 
@@ -28,6 +35,7 @@ impl TargetFormat {
         match self {
             TargetFormat::Rgba16F => 8,
             TargetFormat::Rgba32F => 16,
+            TargetFormat::Bgra8Unorm => 4,
         }
     }
 }
@@ -49,46 +57,31 @@ impl ImageF32 {
     }
 }
 
+/// Result of one headless frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Rendered {
+    /// The output target, as written by `encode`.
+    pub output: ImageF32,
+    /// The native raster written by `decode` (RGBA16F, converted exactly to `f32`).
+    pub native: ImageF32,
+}
+
 /// Offscreen renderer on a surface-less [`Context`].
-///
-/// Every Vulkan handle starts null and is filled in by `new`, so `Drop` releases whatever was
-/// created even when `new` fails half way (destroying a null handle is a no-op in Vulkan).
 pub struct Headless {
-    pool: vk::CommandPool,
-    cmd: vk::CommandBuffer,
-    fence: vk::Fence,
-    set_layout: vk::DescriptorSetLayout,
-    pipeline_layout: vk::PipelineLayout,
-    desc_pool: vk::DescriptorPool,
-    desc_set: vk::DescriptorSet,
-    sampler: vk::Sampler,
-    /// Passthrough pipelines, created on first use for each target format.
-    pipelines: Vec<(vk::Format, vk::Pipeline)>,
+    pipeline: Pipeline,
     /// Destroyed last, by the field drop after `Drop for Headless`.
     ctx: Context,
 }
 
 impl Headless {
-    /// Creates a headless context ([`Context::new_headless`]) and the objects of the passthrough pass.
+    /// Creates a headless context ([`Context::new_headless`]) and the pipeline.
     /// With `validation`, the validation layer must be installed and its messages are counted
     /// ([`Headless::validation_counter`]).
     pub fn new(validation: bool) -> Res<Self> {
         let ctx = Context::new_headless(validation)?;
-        let mut h = Self {
-            pool: vk::CommandPool::null(),
-            cmd: vk::CommandBuffer::null(),
-            fence: vk::Fence::null(),
-            set_layout: vk::DescriptorSetLayout::null(),
-            pipeline_layout: vk::PipelineLayout::null(),
-            desc_pool: vk::DescriptorPool::null(),
-            desc_set: vk::DescriptorSet::null(),
-            sampler: vk::Sampler::null(),
-            pipelines: Vec::new(),
-            ctx,
-        };
-        // SAFETY: called once on fresh null handles of a live device.
-        unsafe { h.create_objects()? };
-        Ok(h)
+        // SAFETY: `ctx` is live; `Drop for Headless` destroys the pipeline before the context.
+        let pipeline = unsafe { Pipeline::new(&ctx)? };
+        Ok(Self { pipeline, ctx })
     }
 
     /// The Vulkan context (device, queue, chosen GPU).
@@ -101,239 +94,112 @@ impl Headless {
         self.ctx.validation_counter()
     }
 
-    /// # Safety
-    /// Called once, from `new`, while the handles are still null.
-    unsafe fn create_objects(&mut self) -> Res<()> {
-        let d = &self.ctx.device;
-        self.pool = d.create_command_pool(
-            &vk::CommandPoolCreateInfo::default()
-                .queue_family_index(self.ctx.queue_family)
-                .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER),
-            None,
-        )?;
-        self.cmd = d.allocate_command_buffers(
-            &vk::CommandBufferAllocateInfo::default()
-                .command_pool(self.pool)
-                .level(vk::CommandBufferLevel::PRIMARY)
-                .command_buffer_count(1),
-        )?[0];
-        self.fence = d.create_fence(&vk::FenceCreateInfo::default(), None)?;
-        self.set_layout = passthrough::create_set_layout(d)?;
-        let sizes = [vk::DescriptorPoolSize::default()
-            .ty(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-            .descriptor_count(1)];
-        self.desc_pool = d.create_descriptor_pool(
-            &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes),
-            None,
-        )?;
-        let set_layouts = [self.set_layout];
-        self.desc_set = d.allocate_descriptor_sets(
-            &vk::DescriptorSetAllocateInfo::default()
-                .descriptor_pool(self.desc_pool)
-                .set_layouts(&set_layouts),
-        )?[0];
-        self.sampler = passthrough::create_sampler(d)?;
-        self.pipeline_layout = passthrough::create_pipeline_layout(d, self.set_layout)?;
-        Ok(())
-    }
-
-    /// Passthrough pipeline for `format`, created on first use.
-    ///
-    /// # Safety
-    /// The device and `pipeline_layout` must be live (true after `new`).
-    unsafe fn pipeline(&mut self, format: vk::Format) -> Res<vk::Pipeline> {
-        if let Some(&(_, p)) = self.pipelines.iter().find(|(f, _)| *f == format) {
-            return Ok(p);
-        }
-        let p = passthrough::create_pipeline(&self.ctx.device, self.pipeline_layout, format)?;
-        self.pipelines.push((format, p));
-        Ok(p)
-    }
-
-    /// Uploads a BGRA8 (UNORM) image, as captured, runs the passthrough pass over its full raster
-    /// (no crop, divisor 1) into a `format` target of the same size, and reads the target back.
-    ///
-    /// The values are the shader output unchanged: code k becomes k / 255 (rounded to FP16 for
-    /// [`TargetFormat::Rgba16F`]), alpha is 1.
+    /// Uploads a BGRA8 (UNORM) image, as captured, runs the pipeline with identity transfers over its
+    /// full raster (no crop, divisor 1) into a `format` target of the same size, and reads the target
+    /// back. Code k becomes k / 255 (rounded to the target format), alpha is 1.
     pub fn passthrough(&mut self, width: u32, height: u32, bgra: &[u8], format: TargetFormat) -> Res<ImageF32> {
-        if width == 0 || height == 0 {
-            return Err("headless passthrough: empty image".into());
-        }
-        let in_bytes = width as usize * height as usize * 4;
-        if bgra.len() < in_bytes {
-            return Err(format!(
-                "headless passthrough: {} bytes given, {width}x{height} BGRA8 needs {in_bytes}",
-                bgra.len()
-            )
-            .into());
+        let frame = SourceFrame { width, height, bgra };
+        let r = self.render(
+            Some(frame),
+            View::full(width, height),
+            &Settings::identity(),
+            &Params::default(),
+            (width, height),
+            format,
+        )?;
+        Ok(r.output)
+    }
+
+    /// Runs one frame of the pipeline: uploads `frame` if given (otherwise the previous upload is
+    /// reused), decodes the native raster of `view`, encodes into a `target`-sized image of `format`,
+    /// and reads back the target and the native raster.
+    pub fn render(
+        &mut self,
+        frame: Option<SourceFrame<'_>>,
+        view: View,
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        self.render_burst(&[(frame, view)], settings, params, target, format)
+    }
+
+    /// Runs `frames` back to back like the window loop: each frame waits only for its own frame slot
+    /// ([`super::FRAMES_IN_FLIGHT`] frames in flight), into its own target image; only the last frame
+    /// is read back (target and native raster). Exercises the synchronisation between frames in
+    /// flight under the validation layer.
+    pub fn render_burst(
+        &mut self,
+        frames: &[(Option<SourceFrame<'_>>, View)],
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        if target.0 == 0 || target.1 == 0 || frames.is_empty() {
+            return Err("headless render: empty target or no frame".into());
         }
         let mut s = Scratch::default();
-        // SAFETY: every handle is created on `self.ctx.device`. `run` waits for the fence of its
-        // only submission before returning Ok; on any path the device is idled before `s` is
-        // destroyed, so the GPU no longer uses the scratch objects.
+        // SAFETY: every handle is created on `self.ctx.device`. `run` waits for the fence of its last
+        // submission before returning Ok; on any path the device is idled before `s` is destroyed, so
+        // the GPU no longer uses the scratch objects.
         unsafe {
-            let out = self.run(&mut s, width, height, &bgra[..in_bytes], format);
+            let out = self.run(&mut s, frames, settings, params, target, format);
             let _ = self.ctx.device.device_wait_idle();
             s.destroy(&self.ctx.device);
             out
         }
     }
 
-    /// Body of [`Headless::passthrough`]; every object it creates goes into `s`.
+    /// Body of [`Headless::render_burst`]; every object it creates goes into `s`.
     ///
     /// # Safety
     /// `s` must be empty (null handles); the caller idles the device and destroys `s` afterwards.
     unsafe fn run(
         &mut self,
         s: &mut Scratch,
-        width: u32,
-        height: u32,
-        bgra: &[u8],
+        frames: &[(Option<SourceFrame<'_>>, View)],
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
         format: TargetFormat,
-    ) -> Res<ImageF32> {
-        let pipeline = self.pipeline(format.vk())?;
+    ) -> Res<Rendered> {
         let ctx = &self.ctx;
         let d = &ctx.device;
-        let extent = vk::Extent2D { width, height };
-        let out_bytes = width as usize * height as usize * format.bytes_per_pixel();
-
-        s.src = GpuImage::create(
-            ctx,
-            extent,
-            vk::Format::B8G8R8A8_UNORM,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-        )?;
-        s.dst = GpuImage::create(
-            ctx,
-            extent,
-            format.vk(),
-            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
-        )?;
-        s.upload = HostBuffer::create(ctx, bgra.len(), vk::BufferUsageFlags::TRANSFER_SRC)?;
-        s.readback = HostBuffer::create(ctx, out_bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
-        // Host writes before vkQueueSubmit are visible to the device (implicit host write ordering).
-        std::ptr::copy_nonoverlapping(bgra.as_ptr(), s.upload.mapped, bgra.len());
-
-        let image_info = [vk::DescriptorImageInfo::default()
-            .sampler(self.sampler)
-            .image_view(s.src.view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        // The set is not in use: the previous call waited for its fence.
-        d.update_descriptor_sets(
-            &[vk::WriteDescriptorSet::default()
-                .dst_set(self.desc_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                .image_info(&image_info)],
-            &[],
-        );
-
-        let cb = self.cmd;
-        d.reset_command_buffer(cb, vk::CommandBufferResetFlags::empty())?;
-        d.begin_command_buffer(
-            cb,
-            &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
-        )?;
-
-        // Upload: staging buffer -> source image, then make it readable by the fragment shader.
-        barrier(
-            d,
-            cb,
-            s.src.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::PipelineStageFlags2::NONE,
-            vk::AccessFlags2::NONE,
-            vk::PipelineStageFlags2::COPY,
-            vk::AccessFlags2::TRANSFER_WRITE,
-        );
-        d.cmd_copy_buffer_to_image(
-            cb,
-            s.upload.buffer,
-            s.src.image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            &[buffer_image_copy(extent)],
-        );
-        barrier(
-            d,
-            cb,
-            s.src.image,
-            vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-            vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-            vk::PipelineStageFlags2::COPY,
-            vk::AccessFlags2::TRANSFER_WRITE,
-            vk::PipelineStageFlags2::FRAGMENT_SHADER,
-            vk::AccessFlags2::SHADER_SAMPLED_READ,
-        );
-
-        // Draw the full raster into the target.
-        barrier(
-            d,
-            cb,
-            s.dst.image,
-            vk::ImageLayout::UNDEFINED,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::PipelineStageFlags2::NONE,
-            vk::AccessFlags2::NONE,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-        );
-        let attachment = [vk::RenderingAttachmentInfo::default()
-            .image_view(s.dst.view)
-            .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
-            .load_op(vk::AttachmentLoadOp::CLEAR)
-            .store_op(vk::AttachmentStoreOp::STORE)
-            .clear_value(vk::ClearValue {
-                color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 0.0],
-                },
-            })];
-        let area = vk::Rect2D {
-            offset: vk::Offset2D { x: 0, y: 0 },
-            extent,
+        let extent = vk::Extent2D {
+            width: target.0,
+            height: target.1,
         };
-        d.cmd_begin_rendering(
-            cb,
-            &vk::RenderingInfo::default()
-                .render_area(area)
-                .layer_count(1)
-                .color_attachments(&attachment),
-        );
-        d.cmd_set_viewport(
-            cb,
-            0,
-            &[vk::Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: width as f32,
-                height: height as f32,
-                min_depth: 0.0,
-                max_depth: 1.0,
-            }],
-        );
-        d.cmd_set_scissor(cb, 0, &[area]);
-        d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
-        d.cmd_bind_descriptor_sets(
-            cb,
-            vk::PipelineBindPoint::GRAPHICS,
-            self.pipeline_layout,
-            0,
-            &[self.desc_set],
-            &[],
-        );
-        passthrough::PushConstants::new([-1.0, -1.0, 1.0, 1.0], View::full(width, height)).push(
-            d,
-            cb,
-            self.pipeline_layout,
-        );
-        d.cmd_draw(cb, 4, 1, 0, 0);
-        d.cmd_end_rendering(cb);
+        let out_bytes = target.0 as usize * target.1 as usize * format.bytes_per_pixel();
+        s.readback = HostBuffer::create(ctx, out_bytes, vk::BufferUsageFlags::TRANSFER_DST)?;
 
-        // Read back: target -> host-visible buffer, then make the copy visible to host reads.
+        // Every frame but the last: recorded and submitted without waiting for the GPU.
+        let (last, earlier) = frames.split_last().expect("frames is not empty");
+        for (frame, view) in earlier {
+            let t = self.next_target(s, extent, format)?;
+            self.pipeline.wait_slot(ctx)?;
+            if let Some(f) = frame {
+                self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
+            }
+            self.pipeline.record(ctx, *view, settings, params, &t)?;
+            self.pipeline.submit(ctx, &[], &[], &[])?;
+        }
+
+        let (frame, view) = last;
+        let t = self.next_target(s, extent, format)?;
+        self.pipeline.wait_slot(ctx)?;
+        if let Some(f) = frame {
+            self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
+        }
+        let cb = self.pipeline.record(ctx, *view, settings, params, &t)?;
+        let dst = t.image;
+
+        // Read back the target: -> transfer source, copy to a host-visible buffer.
         barrier(
             d,
             cb,
-            s.dst.image,
+            dst,
             vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
@@ -343,108 +209,161 @@ impl Headless {
         );
         d.cmd_copy_image_to_buffer(
             cb,
-            s.dst.image,
+            dst,
             vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
             s.readback.buffer,
-            &[buffer_image_copy(extent)],
+            &[full_copy(target)],
         );
-        let to_host = [vk::BufferMemoryBarrier2::default()
+        // Read back the native raster too (the next frame's decode discards it after this copy).
+        let native = self.pipeline.native_image();
+        if let Some((image, size)) = native {
+            s.native_readback = HostBuffer::create(
+                ctx,
+                size.0 as usize * size.1 as usize * 8,
+                vk::BufferUsageFlags::TRANSFER_DST,
+            )?;
+            barrier(
+                d,
+                cb,
+                image,
+                vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::PipelineStageFlags2::FRAGMENT_SHADER,
+                vk::AccessFlags2::NONE,
+                vk::PipelineStageFlags2::COPY,
+                vk::AccessFlags2::TRANSFER_READ,
+            );
+            d.cmd_copy_image_to_buffer(
+                cb,
+                image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                s.native_readback.buffer,
+                &[full_copy(size)],
+            );
+        }
+        let to_host = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::COPY)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
             .dst_stage_mask(vk::PipelineStageFlags2::HOST)
-            .dst_access_mask(vk::AccessFlags2::HOST_READ)
-            .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
-            .buffer(s.readback.buffer)
-            .offset(0)
-            .size(vk::WHOLE_SIZE)];
-        d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().buffer_memory_barriers(&to_host));
-        d.end_command_buffer(cb)?;
+            .dst_access_mask(vk::AccessFlags2::HOST_READ)];
+        d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&to_host));
 
-        let cmds = [cb];
-        d.queue_submit(
-            ctx.queue,
-            &[vk::SubmitInfo::default().command_buffers(&cmds)],
-            self.fence,
-        )?;
-        let waited = d.wait_for_fences(&[self.fence], true, u64::MAX);
-        d.reset_fences(&[self.fence])?;
-        waited?;
+        let fence = self.pipeline.submit(ctx, &[], &[], &[])?;
+        d.wait_for_fences(&[fence], true, u64::MAX)?;
 
-        // The readback memory is HOST_COHERENT: after the HOST_READ barrier and the fence wait,
-        // the copy is visible to the host without an invalidate.
+        // The readback memory is HOST_COHERENT: after the HOST_READ barrier and the fence wait, the
+        // copies are visible to the host without an invalidate.
         let bytes = std::slice::from_raw_parts(s.readback.mapped as *const u8, out_bytes);
         let rgba = match format {
-            TargetFormat::Rgba16F => bytes
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|&b| f16_to_f32(u16::from_le_bytes(b)))
-                .collect(),
+            TargetFormat::Rgba16F => half_to_f32(bytes),
             TargetFormat::Rgba32F => bytes
                 .as_chunks::<4>()
                 .0
                 .iter()
                 .map(|&b| f32::from_le_bytes(b))
                 .collect(),
+            TargetFormat::Bgra8Unorm => bytes
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .flat_map(|p| [p[2], p[1], p[0], p[3]].map(|c| f32::from(c) / 255.0))
+                .collect(),
         };
-        Ok(ImageF32 { width, height, rgba })
+        let output = ImageF32 {
+            width: target.0,
+            height: target.1,
+            rgba,
+        };
+        let native = match native {
+            Some((_, (w, h))) => ImageF32 {
+                width: w,
+                height: h,
+                rgba: half_to_f32(std::slice::from_raw_parts(
+                    s.native_readback.mapped as *const u8,
+                    w as usize * h as usize * 8,
+                )),
+            },
+            None => ImageF32 {
+                width: 0,
+                height: 0,
+                rgba: Vec::new(),
+            },
+        };
+        Ok(Rendered { output, native })
     }
+}
+
+/// A captured frame handed to [`Headless::render`]: BGRA8, rows top to bottom, tightly packed.
+#[derive(Clone, Copy, Debug)]
+pub struct SourceFrame<'a> {
+    pub width: u32,
+    pub height: u32,
+    pub bgra: &'a [u8],
+}
+
+/// Little-endian binary16 values to `f32`, exactly.
+fn half_to_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&b| f16_to_f32(u16::from_le_bytes(b)))
+        .collect()
 }
 
 impl Drop for Headless {
     fn drop(&mut self) {
-        // SAFETY: after `device_wait_idle` the GPU uses none of these objects. They are destroyed
-        // in reverse order of creation, null ones (a failed `new`) are no-ops, and the device and
+        // SAFETY: after `device_wait_idle` the GPU uses none of the pipeline's objects; the device and
         // instance go last with the field drop of `ctx`.
         unsafe {
-            let d = &self.ctx.device;
-            let _ = d.device_wait_idle();
-            for (_, p) in self.pipelines.drain(..) {
-                d.destroy_pipeline(p, None);
-            }
-            d.destroy_pipeline_layout(self.pipeline_layout, None);
-            d.destroy_sampler(self.sampler, None);
-            d.destroy_descriptor_pool(self.desc_pool, None);
-            d.destroy_descriptor_set_layout(self.set_layout, None);
-            d.destroy_fence(self.fence, None);
-            d.destroy_command_pool(self.pool, None);
+            let _ = self.ctx.device.device_wait_idle();
+            self.pipeline.destroy(&self.ctx);
         }
     }
 }
 
-/// Copy region covering a whole tightly packed 2D colour image.
-fn buffer_image_copy(extent: vk::Extent2D) -> vk::BufferImageCopy {
-    vk::BufferImageCopy::default()
-        .image_subresource(
-            vk::ImageSubresourceLayers::default()
-                .aspect_mask(vk::ImageAspectFlags::COLOR)
-                .layer_count(1),
-        )
-        .image_extent(vk::Extent3D {
-            width: extent.width,
-            height: extent.height,
-            depth: 1,
-        })
+impl Headless {
+    /// Creates a new target image of `extent` and `format` in `s` and returns it.
+    ///
+    /// # Safety
+    /// `s` is destroyed by the caller once the GPU no longer uses it.
+    unsafe fn next_target(&self, s: &mut Scratch, extent: vk::Extent2D, format: TargetFormat) -> Res<Target> {
+        let image = GpuImage::create(
+            &self.ctx,
+            extent,
+            format.vk(),
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
+        )?;
+        let t = Target {
+            image: image.image,
+            view: image.view,
+            extent,
+            format: format.vk(),
+        };
+        s.targets.push(image);
+        Ok(t)
+    }
 }
 
 /// Objects of one headless call. Null handles by default; `destroy` releases what was created.
 #[derive(Default)]
 struct Scratch {
-    src: GpuImage,
-    dst: GpuImage,
-    upload: HostBuffer,
+    /// One target image per frame (frames in flight never share a target).
+    targets: Vec<GpuImage>,
     readback: HostBuffer,
+    native_readback: HostBuffer,
 }
 
 impl Scratch {
     /// # Safety
     /// The GPU must have finished every use of the objects (device idle).
     unsafe fn destroy(&mut self, d: &ash::Device) {
+        self.native_readback.destroy(d);
         self.readback.destroy(d);
-        self.upload.destroy(d);
-        self.dst.destroy(d);
-        self.src.destroy(d);
+        for t in &mut self.targets {
+            t.destroy(d);
+        }
+        self.targets.clear();
     }
 }
 

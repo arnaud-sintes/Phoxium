@@ -44,23 +44,23 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `scaling.rs` | Pure logic: `Rect`, divisor parsing, `Detector` (integer-upscale detection), `View` (crop, divisor, native size). No OS calls. Unit tested. | none |
 | `output.rs` | The output window (raw Win32): windowed or fullscreen non-activating, monitor choice, global quit hotkey, message pump. | Win32 |
 | `params.rs` | Generated `Params` struct, parameter metadata, std140 serialisation (see 3.6). | `paramgen` (build time) |
-| `gpu/` | Vulkan renderer. `context.rs`: instance, device choice, queue (with or without a window). `present.rs`: `Presenter` (surface, swapchain, per-image semaphores), one per window. `upload.rs`: frame texture and staging. `passthrough.rs`: pipeline and per-frame command recording. `mod.rs`: `Renderer` facade. `headless.rs`: `Headless`, offscreen RGBA16F/RGBA32F render and readback without a window (tests). With validation, `context.rs` installs a debug-utils messenger that prints and counts messages (`ValidationCounter`); headless contexts also enable synchronization validation. | `ash`, `scaling::View` |
-| `shaders/*.vert, *.frag` | `fullscreen.vert` draws the quad. `passthrough.frag` reads the native pixel from the captured frame. | built by `build.rs` |
+| `gpu/` | Vulkan renderer. `context.rs`: instance, device choice, queue (with or without a window). `present.rs`: `Presenter` (surface, swapchain, per-image semaphores), one per window. `pipeline.rs`: `Pipeline`, the stage chain, its images and frames in flight (see 3.7). `stages/`: one module per stage (`decode`, `encode`). `mod.rs`: `Renderer` facade. `headless.rs`: `Headless`, the same pipeline into an offscreen RGBA16F/RGBA32F/BGRA8 image with readback, without a window (tests). With validation, `context.rs` installs a debug-utils messenger that prints and counts messages (`ValidationCounter`); headless contexts also enable synchronization validation. | `ash`, `scaling::View` |
+| `shaders/*.vert, *.frag, *.comp` | `fullscreen.vert` draws one triangle over the target. `decode.comp` and `encode.frag` are the stages of 3.7. `include/common.glsl`: `FrameConstants` block and transfer functions. | built by `build.rs` (every shader, `shaders/include` and the generated `params.glsl` on the include path) |
 
 ### 3.2 Per-frame data flow (Implemented)
 
 1. **Capture thread** (thread-pool thread of the free-threaded frame pool). `Worker::on_frame` receives the frame texture, computes the client area inside it (`DwmGetWindowAttribute(EXTENDED_FRAME_BOUNDS)` against `ClientToScreen`), copies that region into a staging texture, maps it and copies the rows into `Shared.frame` (a `Mutex<Frame>`), incrementing a sequence number. If the content size changed, it recreates the frame pool.
 2. **Main thread** pumps Win32 messages, then `take_frame` swaps the newest frame's buffer into the renderer's `Frame` (latest frame wins, no queue, no allocation once sizes are stable).
 3. `scaling::Detector::feed` analyses the frame until its divisor is locked (30 informative frames, or earlier when the source is native). A flat frame, such as a black boot screen, is not informative and does not count. The result and the optional `--crop` form a `View`.
-4. `Renderer::render` copies the frame into a persistently mapped staging buffer, records a buffer-to-image copy into a `B8G8R8A8_UNORM` texture, then draws a 4-vertex triangle strip letterboxed into the swapchain. Push constants carry the NDC rectangle and the `origin`, `div` and `native` integers (40 bytes, vertex and fragment stages).
-5. `passthrough.frag` fetches the texel at `origin + p * div + div / 2` for native pixel `p` (the centre of each block), so no separate downscale pass exists.
-6. Present with FIFO (vsync). The swapchain is `B8G8R8A8_UNORM`, so the values written are the values displayed.
+4. `Renderer::render` waits for its frame slot, copies a new frame into the slot's persistently mapped staging buffer, and records the `Pipeline` (3.7): buffer-to-image copy into the `B8G8R8A8_UNORM` source image, `decode`, `encode` into the swapchain image.
+5. `decode.comp` fetches the texel at `origin + p * div + div / 2` for native pixel `p` (the centre of each block), so no separate downscale pass exists.
+6. Present with FIFO (vsync). The swapchain is `B8G8R8A8_UNORM`: `encode` writes display code values, encoded explicitly with the host EOTF.
 
 ### 3.3 Threading and synchronisation
 
 - Two threads touch frames: the capture callback (producer) and the main loop (consumer). They share only `Shared`: a `Mutex<Frame>`, an `AtomicBool` for the closed-window event and an `AtomicU64` frame counter.
 - The Direct3D device is created with multithread protection. The immediate context is used only inside the callback, inside `Worker`, which is moved there (`unsafe impl Send` with that invariant).
-- Vulkan is used from the main thread only. There is one frame in flight: one fence, one image-available semaphore, one render-finished semaphore per swapchain image. The swapchain is rebuilt on size change or `OUT_OF_DATE`.
+- Vulkan is used from the main thread only. There are two frames in flight (3.7): per frame slot one fence, one command buffer, one image-available semaphore; one render-finished semaphore per swapchain image. The swapchain is rebuilt on size change or `OUT_OF_DATE`.
 
 ### 3.4 Output window (Implemented)
 
@@ -74,7 +74,7 @@ Raw Win32, not winit, because the behaviour needed (non-activating, topmost, too
 
 The Direct3D capture device uses the default adapter. The Vulkan device is chosen separately: the requested `--gpu` index, else an NVIDIA discrete GPU, else any discrete GPU, else the first one that is Vulkan 1.3 and can present to the window. On a hybrid-graphics machine this may imply a cross-adapter copy (risk HW-3).
 
-### 3.6 Parameter table (Implemented, not yet used by a shader)
+### 3.6 Parameter table (Implemented; `exposure` is read by `encode`)
 
 Every CRT parameter is defined once (DESIGN section 8), in `params/<stage>.toml`: id, stage, type (f32, i32, bool, enum, vec2, vec3, vec4), unit, default, soft range, confidence tag (S, D, K, E), source, description, UI group, enum values. One file per stage, so stage tasks do not edit the same file. The format is documented in `crates/paramgen/src/lib.rs`.
 
@@ -83,6 +83,24 @@ Every CRT parameter is defined once (DESIGN section 8), in `params/<stage>.toml`
 - `params.glsl`: the same constants and a `Params` uniform block (instance `params`, set and binding 0 unless `UCRT_PARAMS_SET` and `UCRT_PARAMS_BINDING` are defined) whose members carry explicit `layout(offset = N)`. `build.rs` compiles a shader that includes it with `glslc`.
 
 The std140 layout is computed once, in declaration order (production files sorted by name), and written into both outputs. Parameters live in a uniform buffer, not push constants (128 bytes minimum limit). A duplicate id, an out-of-range default, an unknown key or a missing field fails the build with a message naming the file and the id. Test-only entries (`params/_test.toml`, every type) are placed after the production entries and exist only in non-release builds (`cfg(ucrt_test_params)`). Stage-specific ids are added by their stage tasks; today the table holds `exposure` (output) and the shared tube colorimetry (`colour.toml`: primaries and white in CIE xy).
+
+### 3.7 Pipeline core (Implemented, T-20a)
+
+`gpu/pipeline.rs` owns the fixed ordered chain of stages (A11, TEC-6), the images between them and the frames in flight. The window `Renderer` and the headless renderer run the same `Pipeline`.
+
+Chain today: upload (captured BGRA8 to the `src` image) -> `decode` (compute) -> `encode` (fragment) -> target (swapchain image or headless image).
+
+| Stage | Kind | Reads | Writes |
+|---|---|---|---|
+| `decode` | compute, 8x8 groups | `src` (`B8G8R8A8_UNORM`, capture size), at block centres `origin + p * div + div / 2` of the `View` | `native` (`R16G16B16A16_SFLOAT`, native size): `T(code / 255)` with the `source` transfer |
+| `encode` | fragment, one triangle over the target | `native` (nearest: T-20a has no screen stage) | target: inside the tube rectangle `exposure * L`, clipped to [0, 1], encoded with the inverse of the `host` transfer; black surround outside |
+
+- **Transfers** (`Transfer`: identity, pure power, piecewise sRGB) are named functions in `shaders/include/common.glsl` (DESIGN 8). Defaults (`Settings`): `source` = power 2.4, `host` = power 2.2. The `source` transfer stands in for the gun law until the `gun` stage exists: T-20b sets it to identity (the native raster then holds code values, drive voltages, as the voltage-domain stages need) and the gun slot carries the tube gamma. Both transfers move into the parameter table with T-30 (`source_eotf`), T-34 (`tube_gamma`) and T-46 (host EOTF).
+- **Stage contract** (`gpu/stages/mod.rs`): set 0, binding 0 `Params` (T-10), binding 1 `FrameConstants`, bindings 2 and up the stage's images (inputs as combined image samplers read with `texelFetch`, compute outputs as storage images). Settings that are not yet parameters go in a small push-constant block.
+- **`FrameConstants`** (std140, 48 bytes, `common.glsl`; a Rust test checks the offsets): tube rectangle in target pixels (x0, y0, x1, y1), native size, target size, px per mm and line pitch in mm (0 until T-30 places the tube), frame index, time since the previous frame in ms. Until T-30, the tube rectangle is the native raster letterboxed into the target (integer factors with `--integer`).
+- **Frames in flight:** 2 slots. Each slot has its own command buffer, fence, staging upload buffer, `FrameConstants` and `Params` uniform buffers and descriptor sets; the CPU writes a slot only after waiting for its fence. The images are shared: each frame records barriers against the previous frame's use (upload after the previous decode reads, decode after the previous encode reads or test readback), which order frames on the single queue. A headless burst test submits overlapping frames under synchronization validation.
+- **Reallocation:** `src` and the staging buffers follow the capture size, `native` the native size of the `View`. A change idles the device, recreates the image and rewrites the descriptor sets of every slot. A new image starts `UNDEFINED`: history is cleared on a mode change (SRC-8); later history images follow the same rule.
+- **Seam for T-20b:** a new stage is a module in `gpu/stages/` with its shader, created and destroyed by `Pipeline`, recorded between `decode` and `encode` in `Pipeline::record` with a barrier on each image it reads or writes; its image goes between `native` and the `encode` input (binding 2 of `encode`).
 
 ## 4. Architectural decisions
 
@@ -94,10 +112,10 @@ The std140 layout is computed once, in declaration order (production files sorte
 | A4 | Vulkan 1.3 through `ash`, dynamic rendering and synchronization2 | Implemented | Owner's stack choice, explicit control of present and external memory, no render-pass boilerplate. | Direct3D 12 if SP-1 (interop) or SP-2 (no-focus present) is painful (TEC-1). Slang or HLSL if a backend switch must stay cheap. |
 | A5 | GLSL compiled to SPIR-V at build time with `glslc` | Implemented | Fails the build on shader errors, no runtime compiler. | Runtime compilation with hot reload in development builds (TEC-3, planned). |
 | A6 | Raw Win32 output window | Implemented | See 3.4. | winit only if it proves able to do the same (TEC-4). |
-| A7 | Swapchain `B8G8R8A8_UNORM`, FIFO | Implemented | Exact passthrough today. Vsync, no tearing (OUT-6). | A 10-bit or FP16 swapchain when SDR banding shows (COL-4). |
+| A7 | Swapchain `B8G8R8A8_UNORM`, FIFO | Implemented | No implicit conversion: the `encode` stage applies the host EOTF explicitly. Vsync, no tearing (OUT-6). | A 10-bit or FP16 swapchain when SDR banding shows (COL-4). |
 | A8 | Source integer scaling by detection or `--divisor`, sampled at block centres in the shader | Implemented | The model needs the native raster (scanlines are native rows). Only integer nearest-neighbour upscales are handled, by owner decision (SRC-2). | A native-resolution entry plus resampling for non-integer sources, not planned. |
 | A9 | One workspace version, tags `vX.Y.Z`, Keep a Changelog | Implemented | One product, two binaries released together. | None. |
-| A10 | SDR output, linear-light FP16 internal pipeline | Planned (COL-1) | Accurate gamma, mask sampling, halation and afterglow need unclamped linear values. HDR output is out of scope. | HDR output later behind the present interface. |
+| A10 | SDR output, linear-light FP16 internal pipeline | Implemented in part (T-20a: FP16 native raster, explicit host EOTF in `encode`; no dither yet, T-46) (COL-1) | Accurate gamma, mask sampling, halation and afterglow need unclamped linear values. HDR output is out of scope. | HDR output later behind the present interface. |
 | A11 | Fixed ordered pipeline of physical stages | Planned (TEC-6) | The physics has an order (see 5). | A data-driven pass graph is explicitly not wanted. |
 | A12 | Mask type is a 3-way choice, all other look parameters independent, in physical units | Planned (PHY-4, PHY-16) | Freedom of emulation. Each type has its own geometry parameters. Warnings, not hard limits, for impossible tubes. | None. |
 | A13 | Presets are data files (up to 10 well-known models), tagged by confidence | Planned (PHY-4) | Starting points the user edits. No code per model. | None. |
