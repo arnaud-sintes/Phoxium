@@ -45,6 +45,84 @@ pub fn small_ripple_modulation(sigma_over_p: f64) -> f64 {
     2.0 * (-2.0 * PI * PI * sigma_over_p * sigma_over_p).exp()
 }
 
+/// Fraction of a unit-area Gaussian of sigma `sigma`, centred at 0, that lies between `a` and `b`
+/// (any length unit, a <= b): (erf(b / (sigma sqrt 2)) - erf(a / (sigma sqrt 2))) / 2. [K]
+///
+/// # Panics
+/// Unless `sigma` > 0 and a <= b (all finite).
+pub fn gaussian_fraction(a: f64, b: f64, sigma: f64) -> f64 {
+    assert!(
+        sigma.is_finite() && sigma > 0.0 && a.is_finite() && b.is_finite() && a <= b,
+        "gaussian_fraction: sigma = {sigma}, [{a}, {b}]"
+    );
+    let k = 1.0 / (sigma * 2.0_f64.sqrt());
+    0.5 * (erf(b * k) - erf(a * k))
+}
+
+/// Vertical profile of one scanline (T-36a, CRT.md "Spot profile"): a unit-area Gaussian core of
+/// sigma `sigma` plus a wider unit-area Gaussian tail of sigma `tail_ratio * sigma` and weight
+/// `tail_weight` (0 = pure Gaussian), mixed so the total stays one. [K][E]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ScanlineProfile {
+    /// Core sigma (same length unit as the positions it is used with).
+    pub sigma: f64,
+    /// Fraction of the energy in the tail, 0 to 1.
+    pub tail_weight: f64,
+    /// Tail sigma over core sigma.
+    pub tail_ratio: f64,
+}
+
+impl ScanlineProfile {
+    /// A pure Gaussian of sigma `sigma`.
+    pub fn gaussian(sigma: f64) -> Self {
+        Self {
+            sigma,
+            tail_weight: 0.0,
+            tail_ratio: 1.0,
+        }
+    }
+
+    /// Fraction of the line's energy between `a` and `b` (a <= b), measured from the line centre.
+    ///
+    /// # Panics
+    /// As [`gaussian_fraction`], or unless 0 <= `tail_weight` <= 1 and `tail_ratio` > 0.
+    pub fn fraction(&self, a: f64, b: f64) -> f64 {
+        assert!(
+            (0.0..=1.0).contains(&self.tail_weight) && self.tail_ratio > 0.0,
+            "scanline profile: {self:?}"
+        );
+        let core = gaussian_fraction(a, b, self.sigma);
+        if self.tail_weight == 0.0 {
+            return core;
+        }
+        let tail = gaussian_fraction(a, b, self.sigma * self.tail_ratio);
+        (1.0 - self.tail_weight) * core + self.tail_weight * tail
+    }
+}
+
+/// Area-mean light over the host row [`y0`, `y1`) of a finite scanline raster (T-36a): line n
+/// (0-based) is centred at `first + n * pitch` and carries the beam current `currents[n]`. Each
+/// line deposits its current times `pitch` per unit length (one line pitch of screen per line),
+/// spread vertically by `profile`; every line is summed (no truncation). A flat field of current I
+/// therefore has a mean light of I over a line period, whatever the spot width. Lengths in one
+/// unit (host pixels in the GPU tests). [D]
+///
+/// # Panics
+/// Unless `pitch` > 0 and `y0` < `y1`, or as [`ScanlineProfile::fraction`].
+pub fn scanline_row_mean(currents: &[f64], first: f64, pitch: f64, profile: &ScanlineProfile, y0: f64, y1: f64) -> f64 {
+    assert!(pitch > 0.0 && y0 < y1, "scanline_row_mean: pitch {pitch}, [{y0}, {y1})");
+    let sum: f64 = currents
+        .iter()
+        .enumerate()
+        .filter(|(_, &i)| i != 0.0)
+        .map(|(n, &i)| {
+            let c = first + n as f64 * pitch;
+            i * profile.fraction(y0 - c, y1 - c)
+        })
+        .sum();
+    sum * pitch / (y1 - y0)
+}
+
 /// Spot FWHM against beam current: d^2 = d0^2 + k I^(2n). [E]
 /// `d0_mm` is the floor set by the gun optics, n between 0.3 and 0.5.
 pub fn spot_fwhm_mm(current_ua: f64, d0_mm: f64, k: f64, n: f64) -> f64 {
@@ -239,6 +317,129 @@ mod tests {
     #[should_panic(expected = "y = ")]
     fn scanline_infinite_y_panics() {
         scanline_sum(0.3, f64::INFINITY);
+    }
+
+    /// Normal-distribution masses: +/- 1 sigma 0.682689, +/- 2 sigma 0.954500, half 0.5. [K]
+    #[test]
+    fn gaussian_fraction_known_masses() {
+        assert!(close(gaussian_fraction(-1.0, 1.0, 1.0), 0.682_689_492, 1e-9));
+        assert!(close(gaussian_fraction(-4.0, 4.0, 2.0), 0.954_499_736, 1e-9));
+        assert!(close(gaussian_fraction(0.0, 100.0, 3.0), 0.5, 1e-15));
+        assert_eq!(gaussian_fraction(0.5, 0.5, 1.0), 0.0);
+    }
+
+    #[test]
+    #[should_panic(expected = "gaussian_fraction")]
+    fn gaussian_fraction_reversed_interval_panics() {
+        gaussian_fraction(1.0, 0.0, 1.0);
+    }
+
+    /// The tail moves energy outwards but keeps the total: the whole line is 1 for every weight, and
+    /// the +/- 1 sigma mass is (1 - w) 0.682689 + w erf(1 / (r sqrt 2)) (r = 3: erf(0.2357) = 0.261117).
+    #[test]
+    fn tail_conserves_energy() {
+        for w in [0.0, 0.02, 0.1, 0.5] {
+            let p = ScanlineProfile {
+                sigma: 2.0,
+                tail_weight: w,
+                tail_ratio: 3.0,
+            };
+            assert!(close(p.fraction(-200.0, 200.0), 1.0, 1e-12), "w {w}");
+            let want = (1.0 - w) * 0.682_689_492 + w * 0.261_117_319;
+            assert!(close(p.fraction(-2.0, 2.0), want, 1e-8), "w {w}");
+        }
+    }
+
+    /// Flat field of unit current, 6 host pixels per line, line n centred at (n + 0.5) 6: the six pixel
+    /// means of one period, derived independently (pixel [a, b): 6 sum_k (Phi((b - c_k) / sigma) -
+    /// Phi((a - c_k) / sigma)), series erf, recorded in the T-36a report). sigma/P = 0.25 (CRT.md 240p
+    /// example) and 0.158150 (PVM-20M4U: FWHM 0.45 mm / 2.35482 / (290 / 240) mm). Each period
+    /// averages to 1: the flat-field mean does not depend on sigma.
+    #[test]
+    fn flat_field_pixel_means_at_6_px_per_line() {
+        let ones = vec![1.0; 41];
+        for (s, half) in [
+            (0.25, [0.524_285, 0.988_105, 1.487_610]),
+            (
+                sigma_from_fwhm(0.45) / (290.0 / 240.0),
+                [0.105_094, 0.770_754, 2.124_152],
+            ),
+        ] {
+            let p = ScanlineProfile::gaussian(s * 6.0);
+            let px: Vec<f64> = (120..126)
+                .map(|j| scanline_row_mean(&ones, 3.0, 6.0, &p, f64::from(j), f64::from(j + 1)))
+                .collect();
+            let want = [half[0], half[1], half[2], half[2], half[1], half[0]];
+            for (j, (g, w)) in px.iter().zip(want).enumerate() {
+                assert!(close(*g, w, 2e-6), "sigma/P {s}: pixel {j} {g} vs {w}");
+            }
+            assert!(
+                close(px.iter().sum::<f64>() / 6.0, 1.0, 1e-9),
+                "sigma/P {s}: period mean"
+            );
+        }
+    }
+
+    /// A vanishing pixel at a line centre gives the point profile: P / (sigma sqrt(2 pi)) times the
+    /// unit-peak sum of the CRT.md table oracle ([`scanline_sum`]).
+    #[test]
+    fn row_mean_tends_to_the_point_profile() {
+        let ones = vec![1.0; 81];
+        for s in [0.15, 0.3, 0.5] {
+            let p = ScanlineProfile::gaussian(s * 10.0);
+            let c = 40.5 * 10.0;
+            for (y, at) in [(c, 0.0), (c + 5.0, 0.5)] {
+                let got = scanline_row_mean(&ones, 5.0, 10.0, &p, y - 1e-4, y + 1e-4);
+                let want = 1.0 / (s * (2.0 * PI).sqrt()) * scanline_sum(s, at);
+                assert!(close(got, want, 1e-6 * want), "sigma/P {s}, y {at}: {got} vs {want}");
+            }
+        }
+    }
+
+    /// Area-integrated Michelson at 32 px per line (line centres on pixel boundaries), derived
+    /// independently like the 6 px case: 0.98341, 0.83466, 0.57072, 0.33574, 0.17703, 0.08445 for
+    /// sigma/P 0.15 to 0.40 and 0.01429 at 0.50, each within 0.6 points of the point-sampled CRT.md
+    /// table (98, 84, 57, 34, 18, 8.5, 1.4).
+    #[test]
+    fn area_michelson_at_32_px_per_line() {
+        let ones = vec![1.0; 41];
+        for (s, want) in [
+            (0.15, 0.98341),
+            (0.20, 0.83466),
+            (0.25, 0.57072),
+            (0.30, 0.33574),
+            (0.35, 0.17703),
+            (0.40, 0.08445),
+            (0.50, 0.01429),
+        ] {
+            let p = ScanlineProfile::gaussian(s * 32.0);
+            let px: Vec<f64> = (640..672)
+                .map(|j| scanline_row_mean(&ones, 16.0, 32.0, &p, f64::from(j), f64::from(j + 1)))
+                .collect();
+            let (max, min) = px.iter().fold((f64::MIN, f64::MAX), |(a, b), &v| (a.max(v), b.min(v)));
+            let m = (max - min) / (max + min);
+            assert!(close(m, want, 1e-5), "sigma/P {s}: {m} vs {want}");
+            assert!(close(m, scanline_michelson(s), 0.006), "sigma/P {s}: vs point table");
+        }
+    }
+
+    /// Linear in the currents (superposition) and a dark raster is dark.
+    #[test]
+    fn row_mean_is_linear_in_current() {
+        let p = ScanlineProfile {
+            sigma: 3.0,
+            tail_weight: 0.05,
+            tail_ratio: 3.0,
+        };
+        let a = [0.2, 1.0, 0.0, 0.7, 0.3];
+        let b = [0.5, 0.0, 0.9, 0.1, 0.4];
+        let ab: Vec<f64> = a.iter().zip(&b).map(|(x, y)| 2.0 * x + 3.0 * y).collect();
+        for j in 0..40 {
+            let (y0, y1) = (f64::from(j), f64::from(j + 1));
+            let f = |c: &[f64]| scanline_row_mean(c, 4.0, 8.0, &p, y0, y1);
+            assert!(close(f(&ab), 2.0 * f(&a) + 3.0 * f(&b), 1e-12), "row {j}");
+            assert_eq!(f(&[0.0; 5]), 0.0);
+        }
     }
 
     #[test]

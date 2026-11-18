@@ -216,7 +216,8 @@ fn pattern(w: u32, h: u32) -> ImageF32 {
 
 /// The stage-test helper: an amp-domain image injected after `gun` with injected constants (K = 2, a
 /// tube twice the native size), only `screen` enabled: the screen output is the nearest amp sample per
-/// host pixel (the beam stub), exactly, and the slots before the injection point are absent.
+/// host pixel (the beam fallback while the tube is not placed, px per mm and line pitch 0, T-36a),
+/// exactly, and the slots before the injection point are absent.
 #[test]
 fn injected_image_through_a_stage_subset() {
     let test = "gpu_stages injection";
@@ -227,8 +228,7 @@ fn injected_image_through_a_stage_subset() {
     let (nw, nh) = (8u32, 4u32);
     let mut fc = FrameConstants::new((nw, nh), (2 * nw, 2 * nh), false);
     fc.amp_k = 2;
-    fc.px_per_mm = 4.966;
-    fc.line_pitch_mm = 1.208;
+    assert_eq!((fc.px_per_mm, fc.line_pitch_mm), (0.0, 0.0), "tube not placed");
     assert_eq!(fc.domain_size(Domain::Amp), (16, 4));
     assert_eq!(fc.domain_size(Domain::Tube), (16, 8));
     let amp = pattern(16, 4);

@@ -460,6 +460,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** Only one spot-versus-current table exists (a monochrome medical tube), the exponent ranges from 0.29 to 0.5, and each term costs shader time and exposes unvalidated parameters. Absolute current invites false precision.
 - **Who:** USER plus RESEARCH.
 - **Default:** Gaussian y-profile with current-dependent width (d² = d0² + k·I^(2n)), normalised drive with FWHM at mid and at peak per preset, optional tail. Position dependence and convergence in a second phase.
+- **IMPLEMENTED, vertical part (2026-11-18, T-36a):** Gaussian y-profile plus an optional wide Gaussian tail (`beam_fwhm_mid_mm`, `beam_tail_weight`, `beam_tail_sigma_ratio` in `params/beam.toml`), area-integrated over each host pixel with erf, lines summed within ±4 σ, energy normalised so the flat-field mean does not depend on σ. Spot growth with current, the horizontal kernel and convergence follow in T-36b.
 
 ### PHY-8 Mask formulation
 - **Q:** Is the product form L = M × B accepted (valid when the spot covers at least 1.5 pitches), or must the mask integrate beam energy over each aperture? Analytic procedural mask with area integration, or precomputed textures? Are mask-to-screen parallax, pitch magnification toward the edges and variable-pitch grilles (FW900 0.23 to 0.27) in scope?
