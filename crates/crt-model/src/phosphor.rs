@@ -155,6 +155,297 @@ impl DecayFit<'_> {
         );
         1.0 - self.energy(0.0, frame_ms) / self.energy(0.0, horizon_ms)
     }
+
+    /// The same impulse response with the power-law amplitude B scaled by `scale` (the "tail
+    /// strength" of T-41; CRT.md T-63: about 0.07 to 1 from the Ni-killer residual ratios, an
+    /// assumption [E]). The exponential terms and I(0) normalisation of the fast part are unchanged.
+    ///
+    /// # Panics
+    /// If `scale` is negative or not finite.
+    pub fn with_tail_scale(&self, scale: f64) -> Self {
+        assert!(scale.is_finite() && scale >= 0.0, "tail scale {scale}");
+        Self {
+            exp_terms: self.exp_terms,
+            tail: self.tail.map(|p| PowerTail { b: p.b * scale, ..p }),
+        }
+    }
+
+    /// Per-frame trail ratios r_k = E_k / E_0 for k = 1 .. K - 1, K = round(`horizon_ms` /
+    /// `frame_ms`) frames in the truncation horizon (index 0 holds k = 1). [D]
+    ///
+    /// # Panics
+    /// Unless 0 < `frame_ms` <= `horizon_ms` < inf, or if a term is invalid.
+    pub fn trail_ratios(&self, frame_ms: f64, horizon_ms: f64) -> Vec<f64> {
+        assert!(
+            frame_ms.is_finite() && frame_ms > 0.0 && horizon_ms.is_finite() && frame_ms <= horizon_ms,
+            "frame {frame_ms}, horizon {horizon_ms}"
+        );
+        let frames = (horizon_ms / frame_ms).round().max(1.0) as u32;
+        let e0 = self.energy(0.0, frame_ms);
+        (1..frames)
+            .map(|k| {
+                let k = f64::from(k);
+                self.energy(k * frame_ms, (k + 1.0) * frame_ms) / e0
+            })
+            .collect()
+    }
+
+    /// Frame-feedback recurrence (60 Hz persistence, T-41) of this impulse response for a frame
+    /// period `frame_ms`, with the trail truncated at `horizon_ms` (CRT.md: 1 s). [D]
+    ///
+    /// Purely exponential response (no tail, or B = 0): every exponential term is exact, term i
+    /// gives rho_i = exp(-T / tau_i) and c_i = A_i tau_i (1 - rho_i) rho_i / E_0 (its E_k / E_0 is
+    /// c_i rho_i^(k - 1)); terms with c_i below 1e-15 are dropped (below FP32 resolution), the
+    /// [`FEEDBACK_TERMS`] largest are kept.
+    ///
+    /// With a power-law tail: the trail r_k = E_k / E_0 (all terms, k = 1 .. K - 1) is fitted by
+    /// [`FEEDBACK_TERMS`] geometric sequences, exact at k = 1, 2, 3 (a Vandermonde system, the fourth
+    /// amplitude free, see [`fit_amplitudes`]), the rates chosen by a grid search then a coordinate
+    /// refinement that minimises the mean squared relative error over k = 4 .. K - 1 (plus
+    /// `SUM_WEIGHT` times the squared relative error of the total against the 1 s truncated sum, 0:
+    /// see its comment); negative amplitudes are rejected (the trail stays positive and decreasing).
+    /// Beyond the window the fitted terms keep decaying (soft truncation instead of a hard cut at 1 s).
+    ///
+    /// Normalisation: w0 = 1 / (1 + sum_j c_j / (1 - rho_j)), the exact steady-state gain 1 of the
+    /// realised recurrence.
+    ///
+    /// # Panics
+    /// Unless 0 < `frame_ms` <= `horizon_ms` < inf, or if a term is invalid.
+    pub fn frame_feedback(&self, frame_ms: f64, horizon_ms: f64) -> FrameFeedback {
+        let r = self.trail_ratios(frame_ms, horizon_ms);
+        let has_tail = self.tail.is_some_and(|p| p.b > 0.0);
+        let mut fb = FrameFeedback::IDENTITY;
+        if !has_tail {
+            let e0 = self.energy(0.0, frame_ms);
+            let mut terms: Vec<(f64, f64)> = self
+                .exp_terms
+                .iter()
+                .map(|e| {
+                    let rho = (-frame_ms / e.tau_ms).exp();
+                    (rho, e.a * e.tau_ms * (1.0 - rho) * rho / e0)
+                })
+                .filter(|&(_, c)| c > 1e-15)
+                .collect();
+            terms.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (j, &(rho, c)) in terms.iter().take(FEEDBACK_TERMS).enumerate() {
+                fb.rho[j] = rho;
+                fb.c[j] = c;
+            }
+        } else if r.len() >= 3 && r[0] > 0.0 {
+            let (rho, c) = fit_trail(&r);
+            fb.rho = rho;
+            fb.c = c;
+        }
+        fb.w0 = 1.0 / (1.0 + fb.trail_sum());
+        fb
+    }
+}
+
+/// Number of geometric terms of the frame-feedback recurrence (on the GPU: 4 terms x 3 channels in
+/// three RGBA32F history images).
+pub const FEEDBACK_TERMS: usize = 4;
+
+/// Truncation horizon of the trail in ms: the static-image normalisation uses the integral over
+/// the first second (CRT.md "Consequences for T-41"; n close to 1 makes the infinite total
+/// diverge or converge very slowly). [D]
+pub const TRAIL_HORIZON_MS: f64 = 1000.0;
+
+/// Frame-feedback recurrence of one channel (T-41). With x[m] the frame-integrated excitation
+/// of frame m (the no-persistence light) and S_j the history of term j:
+///
+/// y[m] = w0 (x[m] + sum_j S_j[m]),  S_j[m + 1] = rho_j S_j[m] + c_j x[m],  S_j = 0 at reset.
+///
+/// Unrolled, y[m] = w0 (x[m] + sum_{k >= 1} t_k x[m - k]) with t_k = sum_j c_j rho_j^(k - 1)
+/// ([`FrameFeedback::trail`]), the fitted E_k / E_0; a constant x gives y = w0 (1 + sum_k t_k) x = x.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FrameFeedback {
+    /// Weight of the current frame (and of the whole recurrence).
+    pub w0: f64,
+    /// Per-frame decay ratio of each term, in [0, 1).
+    pub rho: [f64; FEEDBACK_TERMS],
+    /// Amplitude of each term relative to E_0 (its contribution to t_1).
+    pub c: [f64; FEEDBACK_TERMS],
+}
+
+impl FrameFeedback {
+    /// No persistence: y = x.
+    pub const IDENTITY: Self = Self {
+        w0: 1.0,
+        rho: [0.0; FEEDBACK_TERMS],
+        c: [0.0; FEEDBACK_TERMS],
+    };
+
+    /// Realised trail t_k = y_k / y_0 after a single excitation, k >= 1.
+    pub fn trail(&self, k: u32) -> f64 {
+        assert!(k >= 1, "trail index starts at 1");
+        self.rho
+            .iter()
+            .zip(self.c)
+            .map(|(&rho, c)| c * rho.powi(k as i32 - 1))
+            .sum()
+    }
+
+    /// Total realised trail sum_{k >= 1} t_k = sum_j c_j / (1 - rho_j).
+    pub fn trail_sum(&self) -> f64 {
+        self.rho.iter().zip(self.c).map(|(&rho, c)| c / (1.0 - rho)).sum()
+    }
+}
+
+/// Amplitudes c of three geometric terms with distinct rates `rho`, exact at the first three
+/// samples: sum_j c_j rho_j^(k - 1) = r_k, k = 1, 2, 3. Lagrange form of the Vandermonde solve:
+/// c_j = (r_3 - (rho_a + rho_b) r_2 + rho_a rho_b r_1) / ((rho_j - rho_a)(rho_j - rho_b)), with a, b
+/// the two other terms.
+fn vandermonde3(rho: [f64; 3], r: [f64; 3]) -> [f64; 3] {
+    let mut c = [0.0; 3];
+    for j in 0..3 {
+        let (a, b) = (rho[(j + 1) % 3], rho[(j + 2) % 3]);
+        c[j] = (r[2] - (a + b) * r[1] + a * b * r[0]) / ((rho[j] - a) * (rho[j] - b));
+    }
+    c
+}
+
+/// Best amplitudes of four geometric terms with distinct rates `rho` for the trail `r` (r[0] =
+/// t_1), exact at k = 1, 2, 3, and their cost: mean squared relative error over k = 4 .. K - 1
+/// plus the squared relative error of the total trail energy against `total`.
+///
+/// The exact amplitudes form a line c(alpha) = c_p + alpha n: c_p solves the first three terms
+/// alone (c_p[3] = 0, [`vandermonde3`]), and n_j = 1 / prod_{m != j} (rho_j - rho_m) spans the null
+/// space of the 3 x 4 Vandermonde rows rho^0, rho^1, rho^2 (the third divided difference of a
+/// polynomial of degree 2 vanishes). The cost is quadratic in alpha: its minimum, clamped to the
+/// interval where every amplitude is >= 0. `None` when the rates coincide or no alpha keeps the
+/// amplitudes non-negative.
+fn fit_amplitudes(rho: [f64; 4], r: &[f64], total: f64) -> Option<(f64, [f64; 4])> {
+    for i in 0..4 {
+        for j in i + 1..4 {
+            if (rho[i] - rho[j]).abs() < 1e-9 {
+                return None;
+            }
+        }
+    }
+    let p3 = vandermonde3([rho[0], rho[1], rho[2]], [r[0], r[1], r[2]]);
+    let cp = [p3[0], p3[1], p3[2], 0.0];
+    let n: [f64; 4] =
+        std::array::from_fn(|j| 1.0 / (0..4).filter(|&m| m != j).map(|m| rho[j] - rho[m]).product::<f64>());
+    // Quadratic cost a2 alpha^2 + 2 a1 alpha + a0 (a0 not needed for the minimiser).
+    let (mut a2, mut a1) = (0.0, 0.0);
+    let weight = 1.0 / (r.len().saturating_sub(3).max(1) as f64);
+    let mut pow = rho.map(|x| x * x * x);
+    for &target in &r[3..] {
+        let tp: f64 = (0..4).map(|j| cp[j] * pow[j]).sum();
+        let tn: f64 = (0..4).map(|j| n[j] * pow[j]).sum();
+        let w = weight / (target * target);
+        a2 += w * tn * tn;
+        a1 += w * (tp - target) * tn;
+        for j in 0..4 {
+            pow[j] *= rho[j];
+        }
+    }
+    let sp: f64 = (0..4).map(|j| cp[j] / (1.0 - rho[j])).sum();
+    let sn: f64 = (0..4).map(|j| n[j] / (1.0 - rho[j])).sum();
+    a2 += SUM_WEIGHT * sn * sn / (total * total);
+    a1 += SUM_WEIGHT * (sp - total) * sn / (total * total);
+    let (mut lo, mut hi) = (f64::NEG_INFINITY, f64::INFINITY);
+    for j in 0..4 {
+        if n[j] > 0.0 {
+            lo = lo.max(-cp[j] / n[j]);
+        } else if n[j] < 0.0 {
+            hi = hi.min(-cp[j] / n[j]);
+        } else if cp[j] < 0.0 {
+            return None;
+        }
+    }
+    if lo.is_nan() || hi.is_nan() || lo > hi {
+        return None;
+    }
+    let alpha = if a2 > 0.0 {
+        (-a1 / a2).clamp(lo, hi)
+    } else {
+        lo.max(0.0).min(hi)
+    };
+    let c: [f64; 4] = std::array::from_fn(|j| (cp[j] + alpha * n[j]).max(0.0));
+    if c.iter().any(|x| !x.is_finite()) {
+        return None;
+    }
+    Some((trail_cost(rho, c, r, total), c))
+}
+
+/// Mean squared relative error of the trail over k = 4 .. K - 1 plus the squared relative error
+/// of the total (see [`fit_amplitudes`]).
+fn trail_cost(rho: [f64; 4], c: [f64; 4], r: &[f64], total: f64) -> f64 {
+    let mut pow = rho.map(|x| x * x * x);
+    let mut err = 0.0;
+    for &target in &r[3..] {
+        let fit: f64 = (0..4).map(|j| c[j] * pow[j]).sum();
+        err += ((fit - target) / target).powi(2);
+        for j in 0..4 {
+            pow[j] *= rho[j];
+        }
+    }
+    let sum: f64 = (0..4).map(|j| c[j] / (1.0 - rho[j])).sum();
+    err / (r.len().saturating_sub(3).max(1) as f64) + SUM_WEIGHT * ((sum - total) / total).powi(2)
+}
+
+/// Weight of the total-energy error in the fit cost: 0, the fit follows the trail inside the
+/// horizon only. A sum of exponentials cannot stop at 1 s: forcing its total to the truncated sum
+/// costs about 16 % relative error on the last frames of the window, while the unconstrained fit is
+/// within about 1 % over the whole window and rolls off smoothly after it (its total exceeds the
+/// truncated sum by 13 to 17 %, see the tests). The steady state stays exactly 1 either way.
+const SUM_WEIGHT: f64 = 0.0;
+
+/// Four-term fit of the trail `r` (see [`DecayFit::frame_feedback`]): grid search of the time
+/// constants kappa (frames, rho = exp(-1 / kappa), log-spaced from 0.1 to 2 K), then coordinate
+/// refinement in log space with a shrinking step.
+fn fit_trail(r: &[f64]) -> ([f64; 4], [f64; 4]) {
+    let total: f64 = r.iter().sum();
+    let k_max = 2.0 * (r.len() + 1) as f64;
+    const N: usize = 24;
+    let grid: Vec<f64> = (0..N)
+        .map(|i| 0.1 * (k_max / 0.1).powf(i as f64 / (N - 1) as f64))
+        .collect();
+    let eval = |kappa: [f64; 4]| fit_amplitudes(kappa.map(|k| (-1.0 / k).exp()), r, total);
+    let mut best: Option<(f64, [f64; 4])> = None;
+    for a in 0..N {
+        for b in a + 1..N {
+            for c in b + 1..N {
+                for d in c + 1..N {
+                    let kappa = [grid[a], grid[b], grid[c], grid[d]];
+                    if let Some((cost, _)) = eval(kappa) {
+                        if best.is_none_or(|(b, _)| cost < b) {
+                            best = Some((cost, kappa));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let Some((mut cost, mut kappa)) = best else {
+        // No non-negative four-term solution: one geometric term through t_1 and t_2.
+        let rho = (r[1] / r[0]).clamp(0.0, 0.999);
+        return ([rho, 0.0, 0.0, 0.0], [r[0], 0.0, 0.0, 0.0]);
+    };
+    let mut step = (k_max / 0.1).powf(1.0 / (N - 1) as f64);
+    for _ in 0..200 {
+        let mut improved = false;
+        for j in 0..4 {
+            for f in [step, 1.0 / step] {
+                let mut k = kappa;
+                k[j] *= f;
+                if let Some((c, _)) = eval(k) {
+                    if c < cost {
+                        (cost, kappa, improved) = (c, k, true);
+                    }
+                }
+            }
+        }
+        if !improved {
+            step = step.sqrt();
+            if step < 1.0 + 1e-6 {
+                break;
+            }
+        }
+    }
+    let (_, c) = eval(kappa).expect("the refined fit is valid");
+    (kappa.map(|k| (-1.0 / k).exp()), c)
 }
 
 #[cfg(test)]
@@ -307,6 +598,79 @@ mod tests {
         };
         let g = old.frame_energy_ratios(frame_period_ms(60.0));
         assert!(close(g[0] * 100.0, 29.7, 0.05), "old green E1/E0 = {} %", g[0] * 100.0);
+    }
+
+    /// T-41 frame feedback of the Kuhn green and blue fits (tail strength 1 and 0.07) at 50, 60 and
+    /// 120 Hz: the realised trail equals the closed-form E_k / E_0 at k = 1, 2, 3 (1e-9 relative),
+    /// stays within 3 % of it from k = 4 to the end of the 1 s window (measured 1.0 to 1.2 % at 50 and
+    /// 60 Hz, 2.5 % at 120 Hz), and the
+    /// steady state is exactly 1. Recorded deviation (design choice, see `SUM_WEIGHT`): the fitted
+    /// tail continues after 1 s, so its total exceeds the 1 s truncated sum by 11 to 17 % and w0 is
+    /// 1.5 to 3.5 % below the truncated-integral value 1 - (fraction after the first frame)
+    /// (green 60 Hz: 0.7628 against 0.7881); bounds 20 % and 5 %.
+    ///
+    /// Tail strength s scales only B: E_k for k >= 1 is s times the tail part (the exponential terms
+    /// are 0 after one frame at these rates), E_0 = E0_exp + s E0_tail, so the trail shape, hence the
+    /// fitted rates, do not depend on s and the amplitudes scale with r_1.
+    #[test]
+    fn frame_feedback_kuhn_tails() {
+        for hz in [50.0, 60.0, 120.0] {
+            let t = frame_period_ms(hz);
+            for (name, fit) in [("green", KUHN_GREEN), ("blue", KUHN_BLUE)] {
+                for s in [1.0, 0.07] {
+                    let f = fit.with_tail_scale(s);
+                    let fb = f.frame_feedback(t, TRAIL_HORIZON_MS);
+                    let r = f.trail_ratios(t, TRAIL_HORIZON_MS);
+                    let oracle = f.frame_energy_ratios(t);
+                    for k in 1..=3u32 {
+                        let o = oracle[k as usize - 1];
+                        assert!(
+                            rel(fb.trail(k), o) < 1e-9,
+                            "{name} {hz} Hz s {s} k {k}: {} vs {o}",
+                            fb.trail(k)
+                        );
+                    }
+                    let max_err = (4..r.len() as u32 + 1)
+                        .map(|k| rel(fb.trail(k), r[k as usize - 1]))
+                        .fold(0.0, f64::max);
+                    let total: f64 = r.iter().sum();
+                    let sum_err = rel(fb.trail_sum(), total);
+                    let w0_oracle = 1.0 - f.fraction_after_first_frame(t, t * (r.len() + 1) as f64);
+                    println!(
+                        "{name} {hz} Hz s {s}: w0 {:.5} (oracle {w0_oracle:.5}) rho {:?} c {:?} max rel err k>=4 {max_err:.4} sum err {sum_err:.5}",
+                        fb.w0, fb.rho, fb.c
+                    );
+                    assert!(close(fb.w0 * (1.0 + fb.trail_sum()), 1.0, 1e-12));
+                    assert!(max_err < 0.03, "{name} {hz} Hz s {s}: fit error {max_err}");
+                    assert!(sum_err < 0.20, "{name} {hz} Hz s {s}: total error {sum_err}");
+                    assert!(
+                        rel(fb.w0, w0_oracle) < 0.05,
+                        "{name} {hz} Hz: w0 {} vs {w0_oracle}",
+                        fb.w0
+                    );
+                }
+            }
+        }
+    }
+
+    /// Red has no tail: its exponential terms are exact (t_1 = E_1 / E_0 below 1e-6 at 60 Hz).
+    #[test]
+    fn frame_feedback_red_is_exact() {
+        for hz in [50.0, 60.0, 120.0] {
+            let t = frame_period_ms(hz);
+            let fb = KUHN_RED.frame_feedback(t, TRAIL_HORIZON_MS);
+            let o = KUHN_RED.frame_energy_ratios(t);
+            println!("red {hz} Hz: {fb:?}, oracle {o:?}");
+            // E_1 / E_0 is about 4e-17 at 60 Hz: below FP32 resolution, the terms are dropped (1e-15).
+            assert!((fb.trail(1) - o[0]).abs() < 1e-15, "{} vs {}", fb.trail(1), o[0]);
+            assert!(fb.trail(2) <= 1e-15 && fb.w0 > 1.0 - 1e-8);
+        }
+        assert!(
+            KUHN_RED
+                .frame_feedback(frame_period_ms(60.0), TRAIL_HORIZON_MS)
+                .trail(1)
+                < 1e-6
+        );
     }
 
     #[test]

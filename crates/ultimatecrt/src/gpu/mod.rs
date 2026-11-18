@@ -226,6 +226,14 @@ impl Renderer {
     pub fn timing_names(&self) -> Vec<&'static str> {
         self.pipeline.as_ref().map(Pipeline::timing_names).unwrap_or_default()
     }
+
+    /// Clears the history of the stages that keep one (persistence, T-41): called on a source size
+    /// change or a new capture session (`lifecycle::SizeWatch::take_history_clear`, SRC-8).
+    pub fn clear_history(&mut self) {
+        if let Some(p) = self.pipeline.as_mut() {
+            p.clear_history();
+        }
+    }
 }
 
 fn color_range() -> vk::ImageSubresourceRange {

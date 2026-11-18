@@ -766,6 +766,14 @@ impl Pipeline {
         self.chain.iter().find(|l| l.reg.name == name).map(|l| l.enabled)
     }
 
+    /// Clears the history of every stage that keeps one (T-41, SRC-8): the next frame shows no
+    /// afterglow of the frames before it.
+    pub(super) fn clear_history(&mut self) {
+        for l in &mut self.chain {
+            l.stage.clear_history();
+        }
+    }
+
     /// Waits until the current frame slot is free (its previous submission finished). The CPU may then
     /// write the slot's buffers.
     ///
@@ -1057,6 +1065,11 @@ impl Pipeline {
             last,
             ..
         } = planned?;
+        // Stage-owned resources (history images, T-41), once the routing of the frame is known.
+        for i in 0..self.chain.len() {
+            let runs = have_source && self.plan.iter().any(|&(j, m, _)| j == i && m == Mode::Run);
+            self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
+        }
         self.record_commands(
             ctx,
             view,

@@ -256,6 +256,10 @@ pub fn run() -> Res<()> {
             }
         }
         let upload = fresh.then_some((frame.width, frame.height, frame.data.as_slice()));
+        // SRC-8: a source size change or a new capture session clears the persistence history (T-41).
+        if size_watch.take_history_clear() {
+            renderer.clear_history();
+        }
         renderer.render(upload, view, output::client_size(win.hwnd))?;
         fresh = false;
         renders += 1;

@@ -1,0 +1,72 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `phosphor` (ARCHITECTURE 3.7, image contract; T-41, CRT.md rule 8 and "Decay and persistence",
+// QUESTIONS PHY-12): tube domain -> tube domain, linear light. Persistence as a frame feedback at the output
+// frame rate: the input x is the light a frame would emit without persistence (frame-integrated), the
+// output adds the afterglow of the previous frames.
+//
+// Per channel, four geometric terms j with per-frame ratio rho_j and amplitude c_j (computed on the CPU by
+// crt_model::phosphor::DecayFit::frame_feedback, see src/gpu/stages/phosphor.rs), history S_j:
+//   y   = w0 (x + sum_j S_j)
+//   S_j <- rho_j S_j + c_j x            (the history of the next frame)
+// so a single excitation x at frame 0 gives y_k / y_0 = sum_j c_j rho_j^(k - 1) = E_k / E_0 for k >= 1, and a
+// constant x gives y = w0 (1 + sum_j c_j / (1 - rho_j)) x = x (w0 is chosen for that).
+//
+// History: three RGBA32F storage images owned by the stage (set 1), read and written in place by the same
+// invocation (each texel by one invocation only). Term j < 3 is in image j (rgb), term 3 in the alpha of
+// image `channel`. mode 1: the history was cleared (new images, size change, explicit clear, stage not run
+// on the previous frame), the images are not read. A term below 2^-24 (the smallest FP16 value, the
+// output could not show it) is flushed to exactly 0, so a black picture ends exactly black.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+layout(set = 1, binding = 0, rgba32f) uniform image2D history0;
+layout(set = 1, binding = 1, rgba32f) uniform image2D history1;
+layout(set = 1, binding = 2, rgba32f) uniform image2D history2;
+
+// std430, 116 bytes, mirrored by `Push` in src/gpu/stages/phosphor.rs.
+layout(push_constant) uniform Persistence {
+    vec4 w0;     // rgb: weight per channel
+    vec4 rho[3]; // [channel]: rho of terms 0 to 3
+    vec4 c[3];   // [channel]: c of terms 0 to 3
+    uint mode;   // 0: history valid, 1: history cleared
+} pc;
+
+const float FLUSH = 5.9604645e-8; // 2^-24
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(light_out)))) {
+        return;
+    }
+    vec4 x = texelFetch(light_in, p, 0);
+    vec4 h0 = vec4(0.0);
+    vec4 h1 = vec4(0.0);
+    vec4 h2 = vec4(0.0);
+    if (pc.mode == 0u) {
+        h0 = imageLoad(history0, p);
+        h1 = imageLoad(history1, p);
+        h2 = imageLoad(history2, p);
+    }
+    vec4 s[3];
+    s[0] = vec4(h0.r, h1.r, h2.r, h0.a);
+    s[1] = vec4(h0.g, h1.g, h2.g, h1.a);
+    s[2] = vec4(h0.b, h1.b, h2.b, h2.a);
+    vec3 y;
+    for (int ch = 0; ch < 3; ++ch) {
+        vec4 t = s[ch];
+        y[ch] = pc.w0[ch] * (x[ch] + ((t.x + t.y) + (t.z + t.w)));
+        vec4 n = pc.rho[ch] * t + pc.c[ch] * x[ch];
+        s[ch] = mix(n, vec4(0.0), lessThan(abs(n), vec4(FLUSH)));
+    }
+    imageStore(light_out, p, vec4(y, x.a));
+    imageStore(history0, p, vec4(s[0].x, s[1].x, s[2].x, s[0].w));
+    imageStore(history1, p, vec4(s[0].y, s[1].y, s[2].y, s[1].w));
+    imageStore(history2, p, vec4(s[0].z, s[1].z, s[2].z, s[2].w));
+}
