@@ -15,7 +15,7 @@
 //!   (y + 1) / sigma]. This only lines up the two lattices (no drift over many rows); everything else differs
 //!   by O(1e-7) relative. Dot diameter = f32(fill x P), edge = f32(softness x P).
 //!
-//! Tolerance: FP16 storage window measured per device ([`Stored::detect`]), several beam currents, plus an
+//! Tolerance: FP16 storage window, nearest since T-fp16 ([`Stored::detect`] asserts it), several beam currents, plus an
 //! f32 budget ([`f32_budget`]): positions of a pixel inside its period are known to a few f32 ulp of the
 //! period (2e-7 period), which moves a value by at most 4e-7 x period in px x the peak value 1 / coverage
 //! (slot: horizontal and vertical periods; delta: the cell width); the dot areas are differences of
@@ -96,23 +96,20 @@ struct Stored {
 }
 
 impl Stored {
-    /// Measures the FP16 store rounding of the device (as in `stage_mask_grille.rs`).
+    /// Checks the FP16 store rounding (as in `stage_mask_grille.rs`): nearest on any device since T-fp16.
     fn detect(gpu: &mut Headless) -> Self {
         let mut fc = tube(4, 2, 1.0);
         fc.px_per_mm = 0.0;
         let amp = currents(&fc, |_, _| [1.0 + 0.75 / 1024.0; 3]);
         let stored = run(gpu, &["screen"], fc, &Params::default(), &amp).pixel(0, 0)[0];
-        if stored == 1.0 {
-            Self {
-                lo: -FP16_STEP,
-                hi: 0.0,
-            }
-        } else {
-            assert_eq!(stored, 1.0 + 1.0 / 1024.0, "unexpected FP16 rounding");
-            Self {
-                lo: -FP16_STEP / 2.0,
-                hi: FP16_STEP / 2.0,
-            }
+        assert_eq!(
+            stored,
+            1.0 + 1.0 / 1024.0,
+            "FP16 stage stores must round to nearest (T-fp16)"
+        );
+        Self {
+            lo: -FP16_STEP / 2.0,
+            hi: FP16_STEP / 2.0,
         }
     }
 

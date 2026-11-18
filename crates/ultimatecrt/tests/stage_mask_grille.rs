@@ -15,14 +15,14 @@
 //! (the picture is centred in the visible area, T-30).
 //!
 //! Tolerance. Chain images are FP16 (11 significant bits, one step = 2^-10 of the value at most). How a
-//! float is rounded when a stage stores it is left to the device, so every test measures it first
-//! ([`Stored::detect`]): to nearest, stored / computed - 1 lies in [-2^-11, 2^-11]; toward zero (the dev
-//! machine), in [-2^-10, 0]. On top of that the shader's own f32 arithmetic gets a budget
+//! float is rounded when a stage stores it was left to the device (the dev machine truncated); since
+//! T-fp16 every stage stores `round_f16(value)`, to nearest on any device, and [`Stored::detect`] asserts
+//! it: stored / computed - 1 lies in [-2^-11, 2^-11] (it was [-2^-10, 0] on the dev machine). On top of that the shader's own f32 arithmetic gets a budget
 //! ([`f32_budget`]): the ends of a pixel inside its triad are known to about 2e-7 triad (a few f32 ulp of
 //! 1), which moves an area mean by at most that over (pixel width x fill), 4e-7 x px per triad / fill; a
 //! damper wire is placed with the rounding of its row coordinate, 2^-22 of the visible height in px,
 //! times the stripe peak 1 / fill; plus 2e-6. Each oracle comparison is repeated with several beam
-//! currents, so that the FP16 grid falls differently each time and the one-sided FP16 window cannot hide
+//! currents, so that the FP16 grid falls differently each time and the FP16 window cannot hide
 //! an error of its own size; the plan's acceptance (+/- 0.5 %) is five times wider than one FP16 step.
 //!
 //! Hand derivations (CRT.md sections in brackets; an independent model re-derives them):
@@ -94,27 +94,24 @@ struct Stored {
 }
 
 impl Stored {
-    /// Measures the rounding: the current 1 + 0.75 x 2^-10 lies three quarters of the way from 1 to the
+    /// Checks the rounding: the current 1 + 0.75 x 2^-10 lies three quarters of the way from 1 to the
     /// next FP16 value. With the tube not placed `screen` is an identity (beam fallback, mask 1), so the
-    /// stored value is 1 + 2^-10 when the device rounds to nearest and 1 when it rounds toward zero.
+    /// stored value is 1 + 2^-10 when the store rounds to nearest. Since T-fp16 every stage store does
+    /// (`round_f16`, whatever the device does), so the window is the symmetric nearest one on any device;
+    /// a device or shader that truncated would fail here instead of being tolerated.
     fn detect(gpu: &mut Headless) -> Self {
         let mut fc = tube(4, 2, 1.0);
         fc.px_per_mm = 0.0;
         let amp = currents(&fc, |_, _| [1.0 + 0.75 / 1024.0; 3]);
         let stored = run(gpu, &["screen"], fc, &Params::default(), &amp).pixel(0, 0)[0];
-        if stored == 1.0 {
-            println!("FP16 stores round toward zero on this device");
-            Self {
-                lo: -FP16_STEP,
-                hi: 0.0,
-            }
-        } else {
-            assert_eq!(stored, 1.0 + 1.0 / 1024.0, "unexpected FP16 rounding");
-            println!("FP16 stores round to nearest on this device");
-            Self {
-                lo: -FP16_STEP / 2.0,
-                hi: FP16_STEP / 2.0,
-            }
+        assert_eq!(
+            stored,
+            1.0 + 1.0 / 1024.0,
+            "FP16 stage stores must round to nearest (T-fp16)"
+        );
+        Self {
+            lo: -FP16_STEP / 2.0,
+            hi: FP16_STEP / 2.0,
         }
     }
 

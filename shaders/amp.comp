@@ -140,7 +140,7 @@ void main() {
     float sigma_peak_sq = sigma_peak * sigma_peak;
     float sigma_max = max(sigma_rise, sigma_fall);
     if (gain == 0.0 && sigma_max <= SIGMA_IDEAL) {
-        imageStore(drive_out, q, drive(p, y, width)); // ideal amplifier: exact hold
+        imageStore(drive_out, q, round_f16(drive(p, y, width))); // ideal amplifier: exact hold
         return;
     }
     if (gain != 0.0) {
@@ -173,5 +173,5 @@ void main() {
     }
     vec3 margin = gain * (hi - lo);
     v = clamp(v, lo - margin, hi + margin);
-    imageStore(drive_out, q, vec4(v, drive(p, y, width).a));
+    imageStore(drive_out, q, round_f16(vec4(v, drive(p, y, width).a)));
 }

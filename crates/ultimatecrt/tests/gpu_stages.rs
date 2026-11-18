@@ -115,7 +115,7 @@ fn host_inverse(t: Transfer, l: f64) -> f64 {
 }
 
 /// With `gun` off the drive voltage V reaches `encode` unchanged: the output code is the host inverse
-/// EOTF of V, within the FP16 truncation of V (relative 2^-10, at most 0.13 of a code) and the rounding
+/// EOTF of V, within the FP16 rounding of V (relative 2^-11, at most 0.0623 of a code) and the rounding
 /// to the 8-bit target (0.5 of a code).
 fn assert_drive_through_host(r: &Rendered, t: Transfer, what: &str) {
     for y in 0..H {
@@ -125,7 +125,7 @@ fn assert_drive_through_host(r: &Rendered, t: Transfer, what: &str) {
                 let got = f64::from(p[c]) * 255.0;
                 let want = 255.0 * host_inverse(t, drive(t, k));
                 assert!(
-                    (got - want).abs() <= 0.65,
+                    (got - want).abs() <= 0.57,
                     "{what}: pixel ({x}, {y}) channel {c}: code {k} -> {got}, oracle {want}"
                 );
             }

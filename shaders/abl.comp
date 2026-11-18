@@ -26,11 +26,11 @@ void main() {
     float x = abl_state.apl_f;
     float g = params.abl_enable ? abl_gain(x) : 1.0;
     if (params.abl_probe && p == ivec2(0)) {
-        imageStore(current_out, p, vec4(g, x, abl_raster_scale(x), abl_state.apl_frame));
+        imageStore(current_out, p, round_f16(vec4(g, x, abl_raster_scale(x), abl_state.apl_frame)));
         return;
     }
     if (params.abl_enable) {
         c.rgb *= g;
     }
-    imageStore(current_out, p, c);
+    imageStore(current_out, p, round_f16(c));
 }

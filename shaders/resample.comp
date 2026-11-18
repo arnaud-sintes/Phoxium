@@ -1,9 +1,12 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 
 // Bypass of a slot that changes domain (ARCHITECTURE 3.7): nearest-neighbour resample of the input image
-// to the output image size, an exact copy of FP16 texels (no arithmetic on the values). Output texel q
+// to the output image size, an exact copy of FP16 texels (no arithmetic on the values; round_f16 of an FP16 value is the identity, the call only keeps every chain store on the same rule). Output texel q
 // takes input texel floor((q + 0.5) * in_size / out_size): native -> amp repeats each native texel K
 // times (zero-order hold), amp -> tube picks the amp sample under the host pixel centre.
+
+#include "common.glsl"
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
@@ -18,5 +21,5 @@ void main() {
     }
     ivec2 in_size = textureSize(src, 0);
     ivec2 p = ivec2(floor((vec2(q) + 0.5) * vec2(in_size) / vec2(out_size)));
-    imageStore(dst, q, texelFetch(src, min(p, in_size - 1), 0));
+    imageStore(dst, q, round_f16(texelFetch(src, min(p, in_size - 1), 0)));
 }

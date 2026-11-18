@@ -55,5 +55,5 @@ void main() {
     }
     ivec2 texel = clamp(pc.origin + p * pc.div + pc.div / 2, ivec2(0), textureSize(src, 0) - 1);
     vec3 v = drive_voltage(texelFetch(src, texel, 0).rgb);
-    imageStore(native_out, p, vec4(transfer_to_linear(v, pc.transfer, pc.gamma), 1.0));
+    imageStore(native_out, p, round_f16(vec4(transfer_to_linear(v, pc.transfer, pc.gamma), 1.0)));
 }

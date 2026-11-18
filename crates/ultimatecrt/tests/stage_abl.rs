@@ -5,7 +5,7 @@
 //! `f32`) is compared with the `crt_model::abl` oracle (f64, written from `CRT.md` "ABL, blooming and EHT
 //! regulation"). Patterns are the `window` test patterns of `ultimatecrt::patterns` (code 255 -> current 1,
 //! 0 -> 0, the pure 2.4 power law of the gun maps them so), at K = 1. The GPU error against the oracle is
-//! the FP16 storage of the result (truncation, relative 2^-10) plus `f32` arithmetic (`exp`, the FP32 sum);
+//! the FP16 storage of the result (round to nearest, relative 2^-11) plus `f32` arithmetic (`exp`, the FP32 sum);
 //! `tol` covers both. The probe (`abl_probe`) writes the state into texel (0, 0): (g, filtered APL x,
 //! raster_scale, last frame APL); it is one frame old in the apply pass, like the gain.
 //!
@@ -68,7 +68,7 @@ fn oracle(p: &Params) -> Abl {
 
 /// Tolerance of an FP16 result of `want`, with room for the `f32` arithmetic.
 fn tol(want: f64) -> f64 {
-    want.abs() * (2f64.powi(-10) + 1e-5) + 1e-6
+    want.abs() * (2f64.powi(-11) + 1e-5) + 1e-6
 }
 
 /// The window pattern of `apl` percent as beam currents (code / 255), and its exact APL.
