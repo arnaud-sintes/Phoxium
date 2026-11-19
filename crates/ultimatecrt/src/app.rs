@@ -213,7 +213,6 @@ pub fn run() -> Res<()> {
     }
     let win = output::create(&output::Options {
         fullscreen: args.fullscreen,
-        no_activate: args.no_activate,
         monitor: args.monitor,
         follow,
         client_size: (frame.width as i32 * scale, frame.height as i32 * scale),
@@ -266,14 +265,8 @@ pub fn run() -> Res<()> {
         adapters: topology.entries(),
         setting: stored.global.gpu.adapter.clone(),
     });
-    println!(
-        "quit: Ctrl+Alt+Q{}",
-        if args.fullscreen || args.no_activate {
-            ""
-        } else {
-            " or Esc in the output window"
-        }
-    );
+    // The output never takes the keyboard (OUT-2), so Esc cannot reach it; only the quit hotkey works.
+    println!("quit: Ctrl+Alt+Q");
     println!("hotkeys: {}", win.hotkeys.summary());
 
     let mut log = args

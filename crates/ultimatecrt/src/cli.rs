@@ -18,7 +18,7 @@ Usage: ultimatecrt [options]
                        output covers)
   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
   --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
-  --no-activate        windowed output that never takes focus (Esc cannot reach it)
+  --no-activate        accepted for older scripts, no effect: every output is non-activating
   --no-crop            capture the whole window instead of its client area
   --crop <x,y,w,h>     part of the captured client area that is the source (default: all of it)
   --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
@@ -76,6 +76,7 @@ pub struct Args {
     pub gpu: Option<usize>,
     pub fullscreen: bool,
     pub monitor: Option<usize>,
+    /// `--no-activate`: kept for older scripts, no effect (every output is non-activating, OUT-2).
     pub no_activate: bool,
     pub no_crop: bool,
     pub crop: Option<scaling::Rect>,

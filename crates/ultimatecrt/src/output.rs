@@ -1,14 +1,18 @@
 //! The output window (raw Win32).
 //!
-//! Two modes:
-//! - windowed: a normal resizable window, Esc closes it (when it is activating);
-//! - fullscreen: borderless, topmost, non-activating, covering one monitor, never takes focus.
+//! Two modes, both non-activating except while the settings menu is open (OUT-2, OUT-3):
+//! - windowed: a resizable framed window; it can be moved and resized by its title bar and frame, a click does
+//!   not activate it (Esc closes it only after a drop to a window, T-56, which is activating);
+//! - fullscreen: borderless, topmost, covering one monitor.
 //!
-//! F11 switches between them at run time ([`apply_placement`], decided by `modes::ModeState`); the framed
-//! window reached that way is non-activating too, except while the settings menu is open (T-57).
+//! F11 switches between them at run time ([`apply_placement`], decided by `modes::ModeState`).
+//!
+//! Moving or resizing the framed window: Windows activates it for its modal move loop whatever the styles; the
+//! hand-back then waits for `WM_EXITSIZEMOVE` ([`on_activate`]), so the drag works and the foreground returns
+//! when the button is released.
 //!
 //! Activation: [`sync_activation`] is the only code that sets `WS_EX_NOACTIVATE` and the hand-back flag, from
-//! the mode (fullscreen, `--no-activate`, F11) and the menu state ([`effective_no_activate`]: the open menu
+//! the mode (every mode except a drop to a window) and the menu state ([`effective_no_activate`]: the open menu
 //! always makes the output activating, closing it restores the mode's behaviour).
 //!
 //! The hotkeys (T-54) are `RegisterHotKey` registrations on this window ([`hotkeys`]): Ctrl+Alt+Q always quits,
@@ -67,8 +71,8 @@ static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
 static HIDE_CURSOR: AtomicBool = AtomicBool::new(false);
 /// The output currently is the borderless fullscreen one (it ignores `WM_DPICHANGED`).
 static FULLSCREEN: AtomicBool = AtomicBool::new(false);
-/// The window mode wants a non-activating output (fullscreen, `--no-activate`, any mode reached with F11);
-/// false for the plain framed window and after a drop to a window (T-56). See [`sync_activation`].
+/// The window mode wants a non-activating output (every mode, set by [`create`] and [`apply_placement`]);
+/// false only after a drop to a window (T-56). See [`sync_activation`].
 static MODE_NO_ACTIVATE: AtomicBool = AtomicBool::new(false);
 /// The settings menu is open (T-52a): input goes to the UI and the output may be active.
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
@@ -208,6 +212,8 @@ static OWN: AtomicIsize = AtomicIsize::new(0);
 static SOURCE: AtomicIsize = AtomicIsize::new(0);
 /// The last foreground window that was not the output, sampled at every [`pump`].
 static LAST_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+/// Between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`: the user moves or resizes the framed output.
+static IN_SIZE_MOVE: AtomicBool = AtomicBool::new(false);
 /// Activations handed back so far (reported by [`take_handbacks`]).
 static HANDBACKS: AtomicU32 = AtomicU32::new(0);
 
@@ -229,6 +235,89 @@ pub fn hand_back_target(
     [from, last, source].into_iter().find(|&h| h != 0 && h != own)
 }
 
+/// What the window procedure does with `WM_ACTIVATE`.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum OnActivate {
+    /// `DefWindowProc`: the output may be active (activating mode, open menu), a deactivation, or no target.
+    Default,
+    /// Hand the foreground to this window at once, without `DefWindowProc` (the keyboard focus stays away).
+    HandBack(isize),
+    /// The user is moving or resizing the non-activating output by its title bar or frame (Windows activates the
+    /// window for its modal loop): no `DefWindowProc`, the hand-back happens at `WM_EXITSIZEMOVE`; moving the
+    /// foreground in the middle of the loop would end the drag.
+    AfterSizeMove,
+}
+
+/// The `WM_ACTIVATE` decision ([`hand_back_target`] for the target), `in_size_move` between `WM_ENTERSIZEMOVE`
+/// and `WM_EXITSIZEMOVE`. Pure.
+pub fn on_activate(
+    no_activate: bool,
+    activated: bool,
+    in_size_move: bool,
+    own: isize,
+    from: isize,
+    last: isize,
+    source: isize,
+) -> OnActivate {
+    if no_activate && activated && in_size_move {
+        return OnActivate::AfterSizeMove;
+    }
+    hand_back_target(no_activate, activated, own, from, last, source).map_or(OnActivate::Default, OnActivate::HandBack)
+}
+
+/// Hit-test codes of the title bar and the frame (`WM_NCHITTEST`).
+const HT_CAPTION: u32 = 2;
+const HT_LEFT: u32 = 10;
+const HT_RIGHT: u32 = 11;
+const HT_TOP: u32 = 12;
+const HT_TOPLEFT: u32 = 13;
+const HT_TOPRIGHT: u32 = 14;
+const HT_BOTTOM: u32 = 15;
+const HT_BOTTOMLEFT: u32 = 16;
+const HT_BOTTOMRIGHT: u32 = 17;
+
+/// Whether a left press on this hit-test code starts a move (title bar) or a resize (frame edge or corner) that
+/// the output runs itself ([`drag_rect`]) instead of Windows' modal loop, which activates the window. Pure.
+pub fn self_drag_hit(hit: u32) -> bool {
+    hit == HT_CAPTION || (HT_LEFT..=HT_BOTTOMRIGHT).contains(&hit)
+}
+
+/// The outer rectangle during a drag started on `hit` with the window at `start`, the pointer moved by
+/// (`dx`, `dy`): the title bar moves the window, an edge or corner moves only its sides, the size never going
+/// below `min` (the opposite side stays put). Pure.
+pub fn drag_rect(hit: u32, start: IRect, dx: i32, dy: i32, min: (i32, i32)) -> IRect {
+    if hit == HT_CAPTION {
+        return IRect::new(start.left + dx, start.top + dy, start.right + dx, start.bottom + dy);
+    }
+    let mut r = start;
+    if matches!(hit, HT_LEFT | HT_TOPLEFT | HT_BOTTOMLEFT) {
+        r.left = (start.left + dx).min(start.right - min.0);
+    }
+    if matches!(hit, HT_RIGHT | HT_TOPRIGHT | HT_BOTTOMRIGHT) {
+        r.right = (start.right + dx).max(start.left + min.0);
+    }
+    if matches!(hit, HT_TOP | HT_TOPLEFT | HT_TOPRIGHT) {
+        r.top = (start.top + dy).min(start.bottom - min.1);
+    }
+    if matches!(hit, HT_BOTTOM | HT_BOTTOMLEFT | HT_BOTTOMRIGHT) {
+        r.bottom = (start.bottom + dy).max(start.top + min.1);
+    }
+    r
+}
+
+/// A move or resize of the non-activating framed output in progress: the hit-test code, the pointer and the
+/// outer rectangle at the press.
+#[derive(Clone, Copy)]
+struct Drag {
+    hit: u32,
+    from: (i32, i32),
+    start: IRect,
+}
+
+thread_local! {
+    static DRAG: std::cell::Cell<Option<Drag>> = const { std::cell::Cell::new(None) };
+}
+
 /// Activations handed back since the last call (for a console line).
 pub fn take_handbacks() -> u32 {
     HANDBACKS.swap(0, Ordering::Relaxed)
@@ -236,7 +325,6 @@ pub fn take_handbacks() -> u32 {
 
 pub struct Options {
     pub fullscreen: bool,
-    pub no_activate: bool,
     /// Index into the monitor list, or the monitor nearest to `follow` if `None`.
     pub monitor: Option<usize>,
     /// Source window, used to pick the monitor to cover.
@@ -405,7 +493,11 @@ fn monitor_rect(m: HMONITOR) -> Option<RECT> {
 }
 
 pub fn create(opts: &Options) -> Result<Output> {
-    MODE_NO_ACTIVATE.store(opts.no_activate || opts.fullscreen, Ordering::Relaxed);
+    // Every mode starts non-activating (OUT-2, OUT-3), the default framed window included: starting, clicking or
+    // dragging the output leaves the foreground and the keyboard focus on the captured window. Only the settings
+    // menu activates it, and a drop to a window after a lost source (T-56, `drop_to_windowed`).
+    MODE_NO_ACTIVATE.store(true, Ordering::Relaxed);
+    IN_SIZE_MOVE.store(false, Ordering::Relaxed);
     MENU_OPEN.store(false, Ordering::Relaxed);
     // No window yet: only the flag the window procedure reads during the creation.
     sync_activation(HWND::default());
@@ -456,7 +548,8 @@ pub fn create(opts: &Options) -> Result<Output> {
                 bottom: opts.client_size.1,
             };
             let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
-            let ex = if opts.no_activate {
+            // Non-activating like every mode (OUT-2); `sync_activation` below keeps the bit in step with the menu.
+            let ex = if NO_ACTIVATE.load(Ordering::Relaxed) {
                 WS_EX_NOACTIVATE
             } else {
                 WINDOW_EX_STYLE(0)
@@ -617,23 +710,89 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_MOUSEACTIVATE if NO_ACTIVATE.load(Ordering::Relaxed) => LRESULT(MA_NOACTIVATE as isize),
         WM_ACTIVATE => {
-            let target = hand_back_target(
+            match on_activate(
                 NO_ACTIVATE.load(Ordering::Relaxed),
                 (wparam.0 & 0xFFFF) as u32 != WA_INACTIVE,
+                IN_SIZE_MOVE.load(Ordering::Relaxed),
                 hwnd.0 as isize,
                 lparam.0,
                 LAST_FOREGROUND.load(Ordering::Relaxed),
                 SOURCE.load(Ordering::Relaxed),
-            );
-            match target {
+            ) {
                 // Answered without DefWindowProc, which would move the keyboard focus to the output.
-                Some(h) => {
+                OnActivate::HandBack(h) => {
                     let _ = SetForegroundWindow(HWND(h as *mut std::ffi::c_void));
                     HANDBACKS.fetch_add(1, Ordering::Relaxed);
                     LRESULT(0)
                 }
-                None => DefWindowProcW(hwnd, msg, wparam, lparam),
+                OnActivate::AfterSizeMove => LRESULT(0),
+                OnActivate::Default => DefWindowProcW(hwnd, msg, wparam, lparam),
             }
+        }
+        // Moving or resizing the non-activating framed output: run here, not in Windows' modal loop, which would
+        // activate the window and give it the keyboard focus (OUT-2). Aero snap and the keyboard move do not apply.
+        WM_NCLBUTTONDOWN
+            if NO_ACTIVATE.load(Ordering::Relaxed)
+                && !FULLSCREEN.load(Ordering::Relaxed)
+                && self_drag_hit(wparam.0 as u32) =>
+        {
+            let mut p = windows::Win32::Foundation::POINT::default();
+            let _ = GetCursorPos(&mut p);
+            DRAG.set(Some(Drag {
+                hit: wparam.0 as u32,
+                from: (p.x, p.y),
+                start: outer_rect(hwnd),
+            }));
+            SetCapture(hwnd);
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE if DRAG.get().is_some() => {
+            if let Some(d) = DRAG.get() {
+                let mut p = windows::Win32::Foundation::POINT::default();
+                let _ = GetCursorPos(&mut p);
+                let min = (GetSystemMetrics(SM_CXMINTRACK), GetSystemMetrics(SM_CYMINTRACK));
+                let r = drag_rect(d.hit, d.start, p.x - d.from.0, p.y - d.from.1, min);
+                let _ = SetWindowPos(
+                    hwnd,
+                    None,
+                    r.left,
+                    r.top,
+                    r.width(),
+                    r.height(),
+                    SWP_NOZORDER | SWP_NOACTIVATE,
+                );
+            }
+            LRESULT(0)
+        }
+        WM_LBUTTONUP if DRAG.get().is_some() => {
+            DRAG.set(None);
+            let _ = ReleaseCapture();
+            LRESULT(0)
+        }
+        WM_CAPTURECHANGED => {
+            DRAG.set(None);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_ENTERSIZEMOVE => {
+            IN_SIZE_MOVE.store(true, Ordering::Relaxed);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+        WM_EXITSIZEMOVE => {
+            IN_SIZE_MOVE.store(false, Ordering::Relaxed);
+            // The drag is over: the foreground the move loop gave the output goes back (no-op if it has none).
+            let target = hand_back_target(
+                NO_ACTIVATE.load(Ordering::Relaxed),
+                GetForegroundWindow() == hwnd,
+                hwnd.0 as isize,
+                0,
+                LAST_FOREGROUND.load(Ordering::Relaxed),
+                SOURCE.load(Ordering::Relaxed),
+            );
+            if let Some(h) = target {
+                let _ = SetForegroundWindow(HWND(h as *mut std::ffi::c_void));
+                HANDBACKS.fetch_add(1, Ordering::Relaxed);
+            }
+            DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_ERASEBKGND => LRESULT(1),
         WM_KEYDOWN if wparam.0 == 0x1B => {
@@ -683,15 +842,66 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 #[cfg(test)]
 mod tests {
-    use super::{effective_no_activate, hand_back_target};
+    use super::{drag_rect, effective_no_activate, hand_back_target, on_activate, self_drag_hit, OnActivate};
+    use crate::modes::IRect;
+
+    #[test]
+    fn the_title_bar_and_the_frame_are_dragged_by_the_output_itself() {
+        assert!(self_drag_hit(2)); // HTCAPTION
+        assert!((10..=17).all(self_drag_hit)); // HTLEFT .. HTBOTTOMRIGHT
+        assert!(!self_drag_hit(1)); // HTCLIENT
+        assert!(!self_drag_hit(20)); // HTCLOSE: the caption buttons keep the default handling
+        assert!(!self_drag_hit(9)); // HTMAXBUTTON
+    }
+
+    #[test]
+    fn a_drag_moves_by_the_title_bar_and_resizes_by_the_frame_within_the_minimum() {
+        let s = IRect::new(100, 100, 900, 700);
+        let min = (136, 39);
+        assert_eq!(drag_rect(2, s, 120, 80, min), IRect::new(220, 180, 1020, 780));
+        assert_eq!(drag_rect(17, s, 100, 60, min), IRect::new(100, 100, 1000, 760)); // bottom-right
+        assert_eq!(drag_rect(13, s, -50, -20, min), IRect::new(50, 80, 900, 700)); // top-left
+        assert_eq!(drag_rect(10, s, 30, 999, min), IRect::new(130, 100, 900, 700)); // left: no vertical change
+        assert_eq!(drag_rect(15, s, 999, -30, min), IRect::new(100, 100, 900, 670)); // bottom only
+                                                                                     // Never below the minimum size; the opposite side stays where it was.
+        assert_eq!(drag_rect(11, s, -5000, 0, min), IRect::new(100, 100, 236, 700));
+        assert_eq!(drag_rect(12, s, 0, 5000, min), IRect::new(100, 661, 900, 700));
+    }
+
+    #[test]
+    fn a_drag_of_the_framed_output_defers_the_hand_back_to_the_end_of_the_move() {
+        // Activated by Windows' move loop: wait (no DefWindowProc), the hand-back comes at WM_EXITSIZEMOVE.
+        assert_eq!(
+            on_activate(true, true, true, OWN, FROM, LAST, SOURCE),
+            OnActivate::AfterSizeMove
+        );
+        // Outside a drag: at once, as before.
+        assert_eq!(
+            on_activate(true, true, false, OWN, FROM, LAST, SOURCE),
+            OnActivate::HandBack(FROM)
+        );
+        // The open menu (activating) and deactivations keep the default handling, drag or not.
+        assert_eq!(
+            on_activate(false, true, true, OWN, FROM, LAST, SOURCE),
+            OnActivate::Default
+        );
+        assert_eq!(
+            on_activate(true, false, true, OWN, FROM, LAST, SOURCE),
+            OnActivate::Default
+        );
+        // No known target: default handling.
+        assert_eq!(on_activate(true, true, false, OWN, 0, 0, 0), OnActivate::Default);
+        // At the end of the drag (`from` unknown): the last foreground window, else the source.
+        assert_eq!(hand_back_target(true, true, OWN, 0, LAST, SOURCE), Some(LAST));
+    }
 
     #[test]
     fn the_open_menu_makes_any_mode_activating_and_closing_it_restores_the_mode() {
-        // Fullscreen, --no-activate or a mode reached with F11: non-activating while the menu is closed.
+        // Every mode (windowed default included): non-activating while the menu is closed.
         assert!(effective_no_activate(true, false));
         // The menu open (before or after an F11): activating, no hand-back.
         assert!(!effective_no_activate(true, true));
-        // The plain framed window (or a drop to a window) is activating with or without the menu.
+        // A drop to a window (T-56) is activating with or without the menu.
         assert!(!effective_no_activate(false, false));
         assert!(!effective_no_activate(false, true));
         // The hand-back follows: none while the menu is open.
