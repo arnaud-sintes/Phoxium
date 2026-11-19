@@ -150,7 +150,9 @@ foreach ($mode in $Modes) {
     $injected = [DateTime]::Now
     $ucrtArgs = @('--window', 'pixel-demo', '--validation', '--exit-after', $run)
     if ($mode -eq 'fullscreen') { $ucrtArgs += '--fullscreen' }
-    $up = Start-Process -FilePath $ucrt -ArgumentList $ucrtArgs -PassThru -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    # -NoNewWindow: without it Windows opens a console window (Windows Terminal) for ultimatecrt that takes
+    # the foreground and becomes the menu's restore target (seen live 2026-11-19).
+    $up = Start-Process -FilePath $ucrt -ArgumentList $ucrtArgs -PassThru -NoNewWindow -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     Start-Sleep -Milliseconds 3000
     # The independent poll starts once the output exists: from here on every change is counted.
     $job = Start-Job -ScriptBlock {
