@@ -13,7 +13,7 @@ pub const fn rgb(r: u8, g: u8, b: u8) -> u32 {
 
 /// Fills a rectangle, clipped to the buffer.
 #[allow(clippy::too_many_arguments)] // buffer, its size, a rectangle and a colour: a struct would only add noise
-fn fill(buf: &mut [u32], w: usize, h: usize, x0: i32, y0: i32, rw: i32, rh: i32, color: u32) {
+pub(crate) fn fill(buf: &mut [u32], w: usize, h: usize, x0: i32, y0: i32, rw: i32, rh: i32, color: u32) {
     let xa = x0.max(0);
     let ya = y0.max(0);
     let xb = (x0 + rw).min(w as i32);
