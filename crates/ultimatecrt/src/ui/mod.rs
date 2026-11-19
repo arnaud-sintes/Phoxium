@@ -31,6 +31,7 @@
 pub mod input;
 pub mod menu;
 pub mod overlay;
+pub mod theme;
 
 use std::time::Instant;
 
@@ -161,7 +162,9 @@ pub struct Ui {
     rects: MenuRects,
     overlay_rect: [[f32; 2]; 2],
     cursor: Option<MouseCursor>,
+    /// UI scale: the DPI scale of the output's monitor (1 at 96 dpi).
     dpi: f32,
+    fonts: theme::Fonts,
     last: Option<Instant>,
     /// Dropped last (declared last, and `Drop for Ui` shuts the renderer down before).
     imgui: ImContext,
@@ -181,6 +184,9 @@ impl Ui {
         // Keyboard navigation (arrows, Enter, Tab between widgets) inside the menu.
         let flags = imgui.io().config_flags() | ConfigFlags::NAV_ENABLE_KEYBOARD;
         imgui.io_mut().set_config_flags(flags);
+        // The theme (colours, metrics at 100 %) and its fonts, before the renderer sees the atlas.
+        let fonts = theme::load_fonts(&mut imgui);
+        theme::apply(imgui.style_mut(), 1.0);
         // SAFETY: the pool is created on the live device of `ctx` and destroyed in `Drop for Ui` after the
         // renderer's shutdown (device idle), or below when the renderer cannot be created.
         let pool = unsafe {
@@ -240,6 +246,7 @@ impl Ui {
             overlay_rect: [[0.0; 2]; 2],
             cursor: None,
             dpi: 1.0,
+            fonts,
             last: None,
             imgui,
         };
@@ -418,11 +425,21 @@ impl Ui {
         self.cursor = None;
     }
 
+    /// Sets the UI scale (sizes and fonts; 1 at 96 dpi). The live app follows the output's monitor DPI by
+    /// itself (`GetDpiForWindow` at creation, `WM_DPICHANGED`); headless callers (tests, previews) set it here.
+    pub fn set_ui_scale(&mut self, scale: f32) {
+        self.set_dpi_scale(scale);
+    }
+
+    /// The UI scale in effect.
+    pub fn ui_scale(&self) -> f32 {
+        self.dpi
+    }
+
     fn set_dpi_scale(&mut self, scale: f32) {
         if scale > 0.0 && scale.is_finite() && (scale - self.dpi).abs() > 1e-3 {
-            let style = self.imgui.style_mut();
-            style.scale_all_sizes(scale / self.dpi);
-            style.set_font_scale_dpi(scale);
+            // The theme writes every size from its tokens at the new scale (nothing accumulates).
+            theme::apply(self.imgui.style_mut(), scale);
             self.dpi = scale;
         }
     }
@@ -498,7 +515,8 @@ impl UiPass for Ui {
         if self.overlay {
             let last = self.overlay_rect;
             let size = [last[1][0] - last[0][0], last[1][1] - last[0][1]];
-            overlay_rect = Some(overlay::build(ui, &overlay::lines(&self.state), display, size));
+            let rows = overlay::lines(&self.state);
+            overlay_rect = Some(overlay::build(ui, &rows, &self.fonts, display, size));
         }
         if open {
             let focus = std::mem::take(&mut self.focus_menu);
@@ -513,6 +531,7 @@ impl UiPass for Ui {
                     key: &self.menu_key,
                     hotkey_problems: &self.hotkey_problems,
                     focus,
+                    fonts: self.fonts,
                 },
             ));
         }
