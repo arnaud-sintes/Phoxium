@@ -1016,12 +1016,7 @@ impl Pipeline {
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
         let now = Instant::now();
-        let mut fc = FrameConstants::placed(
-            view.native,
-            (target.extent.width, target.extent.height),
-            settings.integer_scale,
-            params,
-        );
+        let mut fc = self.live_constants(view, settings, params, target.extent);
         fc.frame_index = self.frame_index;
         fc.frame_time_ms = self
             .last_frame
@@ -1042,11 +1037,38 @@ impl Pipeline {
         ctx: &Context,
         view: View,
         settings: &Settings,
+        params: &Params,
         extent: vk::Extent2D,
         format: vk::Format,
     ) -> Res<()> {
-        let fc = FrameConstants::new(view.native, (extent.width, extent.height), settings.integer_scale);
+        // The same constants as `record` (image sizes included), so its plan reallocates nothing.
+        let fc = self.live_constants(view, settings, params, extent);
         self.plan_frame(ctx, view, &fc, settings, format).map(|_| ())
+    }
+
+    /// The `FrameConstants` of a live frame (before its index and time): the tube placed from the
+    /// parameters ([`FrameConstants::placed`]), grown by the spot's skirt margin
+    /// ([`FrameConstants::with_skirt_margin`], T-37) when the beam draws the tube image: the `screen` slot
+    /// runs (enabled, written, and not skipped by an injection after it). Otherwise the `screen` slot is
+    /// bypassed by the nearest-neighbour resample, which would stretch the raster over the margin, so the tube
+    /// image stays the raster rectangle. `with_skirt_margin` itself leaves unplaced constants unchanged
+    /// (beam_eval's nearest-sample fallback has no skirt either).
+    fn live_constants(&self, view: View, settings: &Settings, params: &Params, extent: vk::Extent2D) -> FrameConstants {
+        let fc = FrameConstants::placed(
+            view.native,
+            (extent.width, extent.height),
+            settings.integer_scale,
+            params,
+        );
+        let inject_at = self.slots.get(self.current).and_then(|s| s.inject_at);
+        let screen_runs = self.chain.iter().enumerate().any(|(i, l)| {
+            l.reg.name == "screen" && l.enabled && l.stage.pass().is_some() && inject_at.is_none_or(|at| at <= i)
+        });
+        if screen_runs {
+            fc.with_skirt_margin(params)
+        } else {
+            fc
+        }
     }
 
     /// As [`Pipeline::record`] with the given `FrameConstants` (stage tests inject theirs). The image

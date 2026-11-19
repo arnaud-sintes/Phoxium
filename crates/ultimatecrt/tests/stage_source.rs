@@ -254,7 +254,9 @@ fn tube_rectangle_and_black_surround_in_the_output() {
     };
     let counter = gpu.validation_counter();
     // The test is about where the tube rectangle is: bypass the beam (T-36a), which would modulate the
-    // white field with scanlines; a bypassed screen slot copies the amp image into the tube rectangle.
+    // white field with scanlines; a bypassed screen slot copies the amp image into the tube rectangle. A
+    // bypassed beam has no skirt, so the live pipeline adds no margin (T-37): the tube rectangle is the
+    // raster's (the margin with the beam on: `skirt_margin_in_the_output_when_the_beam_runs`).
     gpu.set_stage_enabled("screen", false).unwrap();
     let target = (2560, 1440);
     let lit = |r: &Rendered, x: u32, y: u32| r.output.pixel(x, y)[..3].iter().all(|&v| v == 1.0);
@@ -289,6 +291,82 @@ fn tube_rectangle_and_black_surround_in_the_output() {
     assert!(black(&r, 319, 700) && lit(&r, 320, 700), "left edge");
     assert!(lit(&r, 2239, 700) && black(&r, 2240, 700), "right edge");
     assert!(lit(&r, 1000, 0) && lit(&r, 1000, 1439), "full height");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The skirt margin in the live output (T-37, `FrameConstants::with_skirt_margin`, applied by
+/// `Pipeline::record` only when the `screen` slot runs): `fill_tube` on 2560 x 1440 places the 1920 x 1440
+/// raster at x0 = 320 (previous test). With the beam on, the tube image grows by m px on the left and the
+/// right (none vertically: the raster fills the target height), m = ceil(4 sigma_max px_per_mm) with sigma_max
+/// the spot sigma (mm) at twice the peak current (`BEAM_REACH_CURRENT`), from the crt-model spot growth law
+/// (oracle, independent of `with_skirt_margin`; default parameters: no tail, no misconvergence). The output's
+/// tube rectangle is the grown one: the spot's skirt lights the column just left of the raster (319) and
+/// just right of it (2240) on a scanline, and the black surround starts m px further out.
+#[test]
+fn skirt_margin_in_the_output_when_the_beam_runs() {
+    let test = "stage_source skirt margin";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let target = (2560, 1440);
+    let mut params = Params::default();
+    assert!(params.set("raster_aspect", ParamValue::Enum(RASTER_ASPECT_FILL_TUBE)));
+    assert_eq!((params.beam_tail_weight, params.geometry_conv_red_dx_mm), (0.0, 0.0));
+    let fc = FrameConstants::placed((64, 32), target, false, &params);
+    assert_eq!(fc.tube_rect_px, [320.0, 0.0, 2240.0, 1440.0]);
+    let growth = crt_model::beam::SpotGrowth {
+        fwhm_mid: f64::from(params.beam_fwhm_mid_mm),
+        fwhm_peak: f64::from(params.beam_fwhm_peak_mm),
+        n: f64::from(params.beam_growth_exponent),
+    };
+    let sigma_mm = crt_model::units::sigma_from_fwhm(growth.fwhm(2.0).max(growth.fwhm(0.0)));
+    let m = (4.0 * sigma_mm * f64::from(fc.px_per_mm)).ceil() as u32;
+    assert!((1..320).contains(&m), "margin {m}");
+    assert_eq!(fc.with_skirt_margin(&params).raster_margin, [m as i32, 0]);
+
+    // Line 0 of the 32-line raster is centred on row 1440 / 32 / 2 = 22.5.
+    let y = 22;
+    let any = |r: &Rendered, x: u32| r.output.pixel(x, y)[..3].iter().any(|&v| v > 0.0);
+    let black = |r: &Rendered, x: u32| r.output.pixel(x, y)[..3].iter().all(|&v| v == 0.0);
+    let r = render(
+        &mut gpu,
+        &white(64, 32),
+        (64, 32),
+        Transfer::Power(2.4),
+        &params,
+        target,
+    );
+    let screen = r.stage("screen").unwrap();
+    assert_eq!(
+        (screen.width, screen.height),
+        (1920 + 2 * m, 1440),
+        "tube image grown by the margin"
+    );
+    assert!(any(&r, 319) && any(&r, 2240), "skirt drawn past the raster's ends");
+    assert!(
+        black(&r, 320 - m - 1) && black(&r, 2240 + m),
+        "black surround past the margin"
+    );
+
+    // The same frame with `screen` bypassed: no margin (a nearest resample would stretch the raster).
+    gpu.set_stage_enabled("screen", false).unwrap();
+    let r = render(
+        &mut gpu,
+        &white(64, 32),
+        (64, 32),
+        Transfer::Power(2.4),
+        &params,
+        target,
+    );
+    let screen = r.stage("screen").unwrap();
+    assert_eq!(
+        (screen.width, screen.height),
+        (1920, 1440),
+        "no margin with the beam bypassed"
+    );
+    assert!(black(&r, 319) && black(&r, 2240), "surround at the raster's ends");
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

@@ -158,14 +158,17 @@ impl FrameConstants {
     /// the tail's sigma when a tail is on) plus the largest misconvergence (static plus radial, mm), rounded
     /// up to whole pixels, per side and per axis, limited by the target on each axis (the raster stays
     /// centred). The beam is then evaluated over the margin, so the skirt past the raster's ends is drawn
-    /// instead of cut; `raster_margin` tells the shaders where the raster is. Unplaced constants are
+    /// instead of cut; `raster_margin` tells the shaders where the raster is. Unplaced constants (px per mm
+    /// or line pitch not positive: the beam falls back to the nearest amp sample, which has no skirt) are
     /// returned unchanged.
     ///
-    /// Not yet applied by `Pipeline::record` (T-37 report): with the `screen` slot bypassed, the
-    /// nearest-neighbour resample would stretch the raster over the margin, and the surround tests of
-    /// `gpu_identity` and `stage_source` check the tube rectangle without margin. Tests inject it.
+    /// The live pipeline applies it only when the `screen` slot runs (`Pipeline::record`): a bypassed
+    /// `screen` is a nearest-neighbour resample that would stretch the raster over the margin. The tube
+    /// rectangle `tube_rect_px` grows with the image, so `encode` draws the margin (the skirt) and the black
+    /// surround starts past it.
     pub fn with_skirt_margin(mut self, params: &Params) -> Self {
-        if self.px_per_mm.is_nan() || self.px_per_mm <= 0.0 {
+        let positive = |v: f32| v > 0.0; // false for NaN
+        if !positive(self.px_per_mm) || !positive(self.line_pitch_mm) {
             return self;
         }
         let growth = crt_model::beam::SpotGrowth {

@@ -124,6 +124,7 @@ impl Renderer {
                 &self.ctx,
                 view,
                 &self.settings,
+                &self.params,
                 self.presenter.extent(),
                 self.presenter.format(),
             )?;

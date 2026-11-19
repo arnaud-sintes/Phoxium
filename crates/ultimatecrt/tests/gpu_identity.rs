@@ -391,7 +391,8 @@ fn native_size_changes_and_surround_with_silent_validation() {
     };
     let counter = gpu.validation_counter();
     // Decode and encode only: since T-36b the beam's spot spills past the raster's ends (stage tests
-    // `stage_beam_*`), so every slot is bypassed (an exact identity, A11).
+    // `stage_beam_*`), so every slot is bypassed (an exact identity, A11). With `screen` bypassed the live
+    // pipeline adds no skirt margin (T-37, `Pipeline::record`): the surround starts at the raster's ends.
     gpu.enable_only(&[]).expect("bypass every slot");
     let params = Params::identity_gun();
     let settings = Settings::identity();
@@ -545,7 +546,7 @@ fn cropped_views_read_the_source_at_the_origin() {
 }
 
 /// Native 4x3 raster into larger targets, every chain slot off (bypassed: the tube image is the nearest
-/// resample of the native raster, see `resample.comp`). The tube pixel q of a tube rectangle takes the
+/// resample of the native raster, see `resample.comp`; no skirt margin without the beam, T-37). The tube pixel q of a tube rectangle takes the
 /// amp texel floor((q + 0.5) * 16 / tube_w) (native -> amp repeats each texel K = 4 times) and the native
 /// texel amp / 4 horizontally, and the native row floor((q + 0.5) * 3 / tube_h).
 ///
