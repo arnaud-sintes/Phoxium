@@ -159,7 +159,9 @@ pub struct ExternalMemoryProbe {
 pub struct VulkanReport {
     /// Every physical device, in enumeration order, with its external-memory probe.
     pub gpus: Vec<(GpuInfo, ExternalMemoryProbe)>,
-    /// `GpuInfo::index` of the device the renderer picks today without `--gpu` (a window context).
+    /// `GpuInfo::index` of the candidates (Vulkan 1.3 with a graphics queue), in enumeration order.
+    pub usable: Vec<usize>,
+    /// `GpuInfo::index` of the device [`DeviceRequest::Default`] picks (a window context).
     pub picked: Option<usize>,
 }
 
@@ -183,8 +185,12 @@ pub fn vulkan_report() -> Res<VulkanReport> {
             .filter(|((g, _), &pd)| unsafe { usable_family(&instance, pd, g.api_version, None) }.is_some())
             .map(|((g, _), _)| g.clone())
             .collect();
-        let picked = choose_device(&usable, None).map(|p| usable[p].index);
-        Ok(VulkanReport { gpus, picked })
+        let picked = choose_device(&usable, DeviceRequest::Default).map(|p| usable[p].index);
+        Ok(VulkanReport {
+            gpus,
+            usable: usable.iter().map(|g| g.index).collect(),
+            picked,
+        })
     })();
     unsafe { instance.destroy_instance(None) };
     out
@@ -239,12 +245,26 @@ fn gpu_info(instance: &Instance, pd: vk::PhysicalDevice, index: usize) -> GpuInf
     }
 }
 
-/// Picks a device among the usable candidates: the requested `--gpu` index if usable, else NVIDIA
-/// discrete, else any discrete, else the first. Returns a position in `candidates`.
-fn choose_device(candidates: &[GpuInfo], requested: Option<usize>) -> Option<usize> {
+/// Which Vulkan device the renderer should run on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeviceRequest {
+    /// NVIDIA discrete, else any discrete, else the first usable device (the choice before `gpu.adapter`).
+    #[default]
+    Default,
+    /// A Vulkan enumeration index (`--gpu`, `--list-gpus`).
+    Index(usize),
+    /// A Windows adapter LUID, matched against `VkPhysicalDeviceIDProperties::deviceLUID` (bytes as Vulkan
+    /// reports them, see `adapters::Luid::to_vulkan`).
+    Luid([u8; 8]),
+}
+
+/// Picks a device among the usable candidates: the requested index or LUID if usable, else (no request)
+/// NVIDIA discrete, else any discrete, else the first. Returns a position in `candidates`.
+fn choose_device(candidates: &[GpuInfo], requested: DeviceRequest) -> Option<usize> {
     match requested {
-        Some(i) => candidates.iter().position(|g| g.index == i),
-        None => candidates
+        DeviceRequest::Index(i) => candidates.iter().position(|g| g.index == i),
+        DeviceRequest::Luid(l) => candidates.iter().position(|g| g.luid == Some(l)),
+        DeviceRequest::Default => candidates
             .iter()
             .position(|g| g.vendor_id == NVIDIA && g.kind == vk::PhysicalDeviceType::DISCRETE_GPU)
             .or_else(|| {
@@ -321,7 +341,7 @@ impl Context {
     /// accesses shaders make through descriptors when it offers `VK_EXT_layer_settings`.
     pub fn new_headless(validation: bool) -> Res<Self> {
         // SAFETY: no window handle is involved; `create` owns or destroys everything it creates.
-        unsafe { Self::create(None, None, validation).map(|(ctx, _)| ctx) }
+        unsafe { Self::create(None, DeviceRequest::Default, validation).map(|(ctx, _)| ctx) }
     }
 
     /// Creates a context whose device can present to the window `hwnd`, and returns the Vulkan
@@ -334,7 +354,7 @@ impl Context {
     pub unsafe fn with_window(
         hwnd: isize,
         hinstance: isize,
-        gpu: Option<usize>,
+        gpu: DeviceRequest,
         validation: bool,
     ) -> Res<(Self, vk::SurfaceKHR)> {
         let (ctx, surface) = Self::create(Some((hwnd, hinstance)), gpu, validation)?;
@@ -345,7 +365,7 @@ impl Context {
     /// As [`Context::with_window`] when `window` is `Some`.
     unsafe fn create(
         window: Option<(isize, isize)>,
-        gpu: Option<usize>,
+        gpu: DeviceRequest,
         validation: bool,
     ) -> Res<(Self, Option<vk::SurfaceKHR>)> {
         let entry = Entry::load()?;
@@ -555,7 +575,7 @@ unsafe fn create_device(
     instance: &Instance,
     surface_fn: &khr::surface::Instance,
     surface: Option<vk::SurfaceKHR>,
-    gpu: Option<usize>,
+    gpu: DeviceRequest,
 ) -> Res<(GpuInfo, vk::PhysicalDevice, u32, Device)> {
     let mut infos = Vec::new();
     let mut handles = Vec::new();
@@ -566,11 +586,29 @@ unsafe fn create_device(
             handles.push((pd, f));
         }
     }
-    let chosen = choose_device(&infos, gpu).ok_or(if surface.is_some() {
-        "no Vulkan 1.3 device can present to the output window (see --list-gpus)"
-    } else {
-        "no usable Vulkan 1.3 device with a graphics queue (see --list-gpus)"
-    })?;
+    // A LUID comes from the adapter selection (`adapters::select`); when that device cannot present to the
+    // window (or vanished), the default choice is used and the caller sees it in `Context::gpu`.
+    let chosen = choose_device(&infos, gpu)
+        .or_else(|| match gpu {
+            DeviceRequest::Luid(l) => {
+                eprintln!(
+                    "warning: no usable Vulkan device with LUID {}{}; using the default device",
+                    crate::adapters::Luid::from_vulkan(l),
+                    if surface.is_some() {
+                        " can present to the output window"
+                    } else {
+                        ""
+                    }
+                );
+                choose_device(&infos, DeviceRequest::Default)
+            }
+            _ => None,
+        })
+        .ok_or(if surface.is_some() {
+            "no Vulkan 1.3 device can present to the output window (see --list-gpus)"
+        } else {
+            "no usable Vulkan 1.3 device with a graphics queue (see --list-gpus)"
+        })?;
     let (physical, queue_family) = handles[chosen];
     let g = infos.swap_remove(chosen);
 
@@ -633,13 +671,14 @@ mod tests {
         let intel = info(0, 0x8086, vk::PhysicalDeviceType::INTEGRATED_GPU);
         let amd = info(1, 0x1002, vk::PhysicalDeviceType::DISCRETE_GPU);
         let nv = info(2, NVIDIA, vk::PhysicalDeviceType::DISCRETE_GPU);
-        assert_eq!(choose_device(&[intel, amd, nv], None), Some(2));
+        let d = DeviceRequest::Default;
+        assert_eq!(choose_device(&[intel, amd, nv], d), Some(2));
         let intel = info(0, 0x8086, vk::PhysicalDeviceType::INTEGRATED_GPU);
         let amd = info(1, 0x1002, vk::PhysicalDeviceType::DISCRETE_GPU);
-        assert_eq!(choose_device(&[intel, amd], None), Some(1));
+        assert_eq!(choose_device(&[intel, amd], d), Some(1));
         let intel = info(0, 0x8086, vk::PhysicalDeviceType::INTEGRATED_GPU);
-        assert_eq!(choose_device(&[intel], None), Some(0));
-        assert_eq!(choose_device(&[], None), None);
+        assert_eq!(choose_device(&[intel], d), Some(0));
+        assert_eq!(choose_device(&[], d), None);
     }
 
     #[test]
@@ -647,9 +686,27 @@ mod tests {
         let intel = info(0, 0x8086, vk::PhysicalDeviceType::INTEGRATED_GPU);
         let nv = info(3, NVIDIA, vk::PhysicalDeviceType::DISCRETE_GPU);
         // The requested value is the Vulkan enumeration index, not the candidate position.
-        assert_eq!(choose_device(&[intel, nv], Some(0)), Some(0));
+        assert_eq!(choose_device(&[intel, nv], DeviceRequest::Index(0)), Some(0));
         let nv = info(3, NVIDIA, vk::PhysicalDeviceType::DISCRETE_GPU);
-        assert_eq!(choose_device(&[nv], Some(1)), None);
+        assert_eq!(choose_device(&[nv], DeviceRequest::Index(1)), None);
+    }
+
+    #[test]
+    fn choice_by_luid_takes_the_matching_device_even_if_integrated() {
+        let mut intel = info(0, 0x8086, vk::PhysicalDeviceType::INTEGRATED_GPU);
+        intel.luid = Some([0x26, 0x74, 1, 0, 0, 0, 0, 0]);
+        let mut nv = info(1, NVIDIA, vk::PhysicalDeviceType::DISCRETE_GPU);
+        nv.luid = Some([1, 0x78, 1, 0, 0, 0, 0, 0]);
+        let c = [intel, nv];
+        assert_eq!(
+            choose_device(&c, DeviceRequest::Luid([0x26, 0x74, 1, 0, 0, 0, 0, 0])),
+            Some(0)
+        );
+        assert_eq!(
+            choose_device(&c, DeviceRequest::Luid([1, 0x78, 1, 0, 0, 0, 0, 0])),
+            Some(1)
+        );
+        assert_eq!(choose_device(&c, DeviceRequest::Luid([9; 8])), None);
     }
 
     /// The messenger counts validation and performance warnings and errors, not general ones.

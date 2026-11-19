@@ -72,6 +72,28 @@ pub struct OutputState {
     pub windowed: Option<[i32; 4]>,
 }
 
+/// The value of `gpu.adapter` that means the automatic choice.
+pub const GPU_ADAPTER_AUTO: &str = "auto";
+
+/// GPU choice (HW-3): the adapter that runs the whole chain (capture device and Vulkan renderer). Read at start
+/// only; a change needs a restart. `--gpu` wins over it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GpuSettings {
+    /// `auto` (the adapter owning the monitor the output covers), an adapter LUID (`00000000:00017801`, as
+    /// `--list-adapters` prints it), or a case-insensitive part of the adapter name (`RTX`, `Intel`). Parsed by
+    /// `adapters::AdapterSpec::parse`.
+    pub adapter: String,
+}
+
+impl Default for GpuSettings {
+    fn default() -> Self {
+        Self {
+            adapter: GPU_ADAPTER_AUTO.to_string(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Global {
@@ -84,6 +106,8 @@ pub struct Global {
     pub ui: UiState,
     /// Windowed output rectangle (T-57).
     pub output: OutputState,
+    /// The adapter that runs the chain (`[global.gpu] adapter`, HW-3).
+    pub gpu: GpuSettings,
 }
 
 impl Default for Global {
@@ -94,6 +118,7 @@ impl Default for Global {
             hotkeys: default_hotkeys(),
             ui: UiState::default(),
             output: OutputState::default(),
+            gpu: GpuSettings::default(),
         }
     }
 }
@@ -626,6 +651,18 @@ mod tests {
         // A file without the table keeps working.
         let s = Settings::from_toml("version = 1\n").unwrap();
         assert_eq!(s.global.output, OutputState::default());
+    }
+
+    #[test]
+    fn gpu_adapter_defaults_to_auto_and_round_trips() {
+        assert_eq!(Settings::default().global.gpu.adapter, "auto");
+        // A file without the table keeps working and means auto.
+        let s = Settings::from_toml("version = 1\n").unwrap();
+        assert_eq!(s.global.gpu.adapter, GPU_ADAPTER_AUTO);
+        let s = Settings::from_toml("version = 1\n[global.gpu]\nadapter = \"00000000:00017801\"\n").unwrap();
+        assert_eq!(s.global.gpu.adapter, "00000000:00017801");
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.global.gpu.adapter, "00000000:00017801");
     }
 
     #[test]

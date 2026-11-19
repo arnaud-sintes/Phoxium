@@ -23,10 +23,10 @@ use windows::{
     Win32::{
         Foundation::{HMODULE, HWND, POINT, RECT},
         Graphics::{
-            Direct3D::D3D_DRIVER_TYPE_HARDWARE,
+            Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_DRIVER_TYPE_UNKNOWN},
             Direct3D11::*,
             Dwm::{DwmGetWindowAttribute, DWMWA_EXTENDED_FRAME_BOUNDS},
-            Dxgi::{Common::*, IDXGIAdapter, IDXGIDevice},
+            Dxgi::{Common::*, CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIDevice, IDXGIFactory1},
             Gdi::ClientToScreen,
         },
         System::WinRT::{
@@ -64,9 +64,11 @@ pub struct Capture {
 }
 
 impl Capture {
-    /// Starts capturing `hwnd`. With `crop`, only the client area is kept (no title bar, no borders).
-    pub fn start(hwnd: HWND, crop: bool) -> Result<Self> {
-        let (device, context, adapter, adapter_luid) = create_device()?;
+    /// Starts capturing `hwnd`. With `crop`, only the client area is kept (no title bar, no borders). The
+    /// Direct3D 11 device is created on the adapter with the LUID `on` (the renderer's, HW-3), else on the
+    /// default adapter; [`Capture::adapter_luid`] tells which one it got.
+    pub fn start(hwnd: HWND, crop: bool, on: Option<Luid>) -> Result<Self> {
+        let (device, context, adapter, adapter_luid) = create_device(on)?;
         let direct3d_device = to_winrt_device(&device)?;
 
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
@@ -237,20 +239,54 @@ impl Worker {
     }
 }
 
-/// Name and LUID of the adapter the capture's Direct3D 11 device is created on (the default adapter, see
+/// Name and LUID of the adapter the capture's Direct3D 11 device is created on when asked for `on` (see
 /// [`create_device`]), found by creating and dropping such a device: no window, no capture session.
-pub fn capture_adapter() -> Result<(String, Luid)> {
-    let (_device, _context, name, luid) = create_device()?;
+pub fn capture_adapter(on: Option<Luid>) -> Result<(String, Luid)> {
+    let (_device, _context, name, luid) = create_device(on)?;
     Ok((name, luid))
 }
 
-fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String, Luid)> {
+/// The DXGI adapter with this LUID (`EnumAdapters1`), `None` when no adapter has it.
+fn adapter_by_luid(luid: Luid) -> Result<Option<IDXGIAdapter1>> {
+    // SAFETY: plain COM calls on a factory created here.
+    unsafe {
+        let factory: IDXGIFactory1 = CreateDXGIFactory1()?;
+        let mut i = 0;
+        while let Ok(adapter) = factory.EnumAdapters1(i) {
+            if Luid::from_windows(adapter.GetDesc1()?.AdapterLuid) == luid {
+                return Ok(Some(adapter));
+            }
+            i += 1;
+        }
+    }
+    Ok(None)
+}
+
+/// Creates the capture's Direct3D 11 device on the adapter with the LUID `on` (HW-3: the adapter the Vulkan
+/// renderer runs on), else on the default adapter. A LUID that no adapter has prints a warning and uses the
+/// default adapter; the caller sees it in the returned LUID.
+fn create_device(on: Option<Luid>) -> Result<(ID3D11Device, ID3D11DeviceContext, String, Luid)> {
+    let adapter = match on {
+        Some(l) => {
+            let a = adapter_by_luid(l)?;
+            if a.is_none() {
+                eprintln!("warning: capture: no DXGI adapter with LUID {l}; using the default adapter");
+            }
+            a
+        }
+        None => None,
+    };
     let mut device = None;
     let mut context = None;
     unsafe {
         D3D11CreateDevice(
-            None::<&IDXGIAdapter>,
-            D3D_DRIVER_TYPE_HARDWARE,
+            adapter.as_ref().map(|a| a.cast::<IDXGIAdapter>()).transpose()?.as_ref(),
+            // An explicit adapter needs the unknown driver type (D3D11CreateDevice contract).
+            if adapter.is_some() {
+                D3D_DRIVER_TYPE_UNKNOWN
+            } else {
+                D3D_DRIVER_TYPE_HARDWARE
+            },
             HMODULE::default(),
             D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             None,

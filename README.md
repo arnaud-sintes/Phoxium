@@ -34,7 +34,7 @@ cargo build --release
 2. Start the CRT app: `target\release\ultimatecrt.exe`
    - It captures the first window whose title starts with `pixel-demo` (else contains it) and shows it in a second window. Esc closes a windowed output.
    - `--fullscreen` covers the source's monitor with a borderless, topmost, non-activating window. It never takes focus, so quit with Ctrl+Alt+Q. `--monitor N` picks another monitor, `--no-activate` makes a windowed output that never takes focus (Esc then cannot reach it).
-   - `--window "text"` captures another window, `--list-windows` and `--list-gpus` list candidates, `--list-adapters` prints the GPU and monitor topology (adapters, LUIDs, capture and render adapter, verdict; opens no window), `--gpu N` picks the Vulkan device.
+   - `--window "text"` captures another window, `--list-windows` and `--list-gpus` list candidates, `--list-adapters` prints the GPU and monitor topology (adapters, LUIDs, the chosen adapter marked `<- CHOSEN`, the capture adapter, verdict and warnings; opens no window), `--gpu N` picks the Vulkan device by index (see GPU choice below).
    - `--divisor N` (or `NxM`) tells it the source is an integer upscale by N, `1` meaning native. `--crop x,y,w,h` selects the part of the client area that is the source. Without `--divisor` the factor is detected automatically.
    - `--no-crop` captures the whole window instead of its client area.
    - `--stats` prints capture and render rates once per second, followed by a GPU line: the mean whole-frame GPU time and one value per timed segment (`upload`, `decode`, every chain slot, `encode`, `ui` for the settings menu and overlay) in ms, from Vulkan timestamp queries (`gpu 3.4 ms | upload 0.097 | decode 0.023 | signal - | amp 0.061 (bypass) | ...`). `-` is a segment that did not run in the second (an off or placeholder slot that keeps its domain, an upload without a new frame); `(bypass)` is an off slot that changes the domain (`amp`, `screen`) and runs the cheap resample copy, so its value is that copy's cost. The numbers are read when a frame slot is reused, so they lag the CPU by at most two frames and never stall it. A device without timestamp support prints `gpu timings unavailable: <reason>` once. `--save-capture out.png` saves the first captured frame and exits, `--exit-after SECS` quits by itself, `--integer` restricts to integer scales, `--validation` enables the Vulkan validation layer.
@@ -43,6 +43,23 @@ cargo build --release
    - `--image file.png` shows a still PNG (any colour type, alpha flattened over black, divisor 1) instead of capturing. It is exclusive with `--pattern`.
    - `--help` prints all options, `--version` the version.
 3. Offline render, no window: `ultimatecrt render (--pattern name[:args] [--pattern-size WxH] | --image f.png) [--set id=value]... [--size WxH] --out out.png|out.pfm`. It runs one frame through the same GPU pipeline headless (default transfer settings and parameters of the live path, `--set` overrides a parameter by id: numbers, `a,b` for vectors, `true`/`false`, enum value names). `--size` is the output size (default: the source size). A `.png` is 8-bit RGB (the codes the output window would show); a `.pfm` is 32-bit float RGB (little-endian, no dependency) holding the same encoded values unquantised, in [0, 1], not linear light. `--validation` enables the validation layer. `--preset <id|file.toml>` applies a tube preset before the `--set` overrides. `render` has no `--gpu` option.
+
+## GPU choice (HW-3)
+
+One GPU runs the whole chain: the capture's Direct3D 11 device and the Vulkan renderer are created on the same adapter. It is chosen at start from the settings file:
+
+```toml
+[global.gpu]
+adapter = "auto"   # or a LUID such as "00000000:00017801", or part of the adapter name such as "RTX" or "Intel"
+```
+
+- `auto` (the default, also when the key or the table is missing): the adapter that drives the monitor the output window covers (the one holding most of the window). When that cannot be told, or that adapter has no usable Vulkan 1.3 device, the earlier default is used: an NVIDIA discrete GPU, else any discrete GPU, else the first.
+- A LUID or a name part forces an adapter (copy the LUID from `--list-adapters`). A name part is matched case-insensitively against the DXGI and the Vulkan names; when it matches several, the first is used and a warning names them all.
+- `--gpu N` (Vulkan index from `--list-gpus`) wins over the setting.
+- Changing the adapter needs a restart (the settings menu will offer a list later).
+- At start the console prints `gpu: <adapter> (Vulkan [i], LUID ...; <reason>)`. A `warning: gpu: ...` line appears when a configured adapter or `--gpu` index is not found (the automatic choice is used instead), when the chosen adapter does not drive the monitor the output covers (every presented frame then crosses adapters, done by Windows), when the renderer had to fall back to another device, or when the capture device could not be created on the renderer's adapter.
+- The choice is made once: moving the output to a monitor of another GPU later (F11, a drag) does not change it or warn. Restart to re-choose.
+- `--list-adapters` shows what the setting selects without opening a window. Without a window it only knows the output rectangle with `--fullscreen --monitor N` or a remembered windowed rectangle; otherwise it lists, per monitor, what `auto` would pick.
 
 ## Hotkeys and output modes (T-54, T-57)
 
@@ -113,5 +130,5 @@ How the source is mapped to the output, adaptive to any host monitor (no resolut
 ## Known limits of the scaffold
 
 - Frames go GPU to CPU to GPU (CAP-2, CPU copy path). A shared-handle path is a later spike.
-- The Direct3D capture device uses the default adapter and the Vulkan device is chosen separately (NVIDIA discrete by default). On hybrid-graphics laptops this may imply a cross-adapter copy (see HW-3 in `QUESTIONS.md`).
+- Capture and render run on one chosen adapter (see GPU choice), but the captured game and the monitor the output covers may sit on other GPUs (hybrid-graphics laptops, monitors split across GPUs); Windows then copies across adapters. That cost is not measured (see HW-3 in `QUESTIONS.md`).
 - The window is found by title, not by executable or class.
