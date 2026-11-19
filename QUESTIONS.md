@@ -27,18 +27,36 @@ Answers from the project owner to the blocking table. They override the defaults
 | PRJ-1, PRJ-2 | Personal project. No GPL shader code is reused, inspiration only. |
 | SCP-5 | The wording "each source RGB pixel becomes RGB light sources" is shorthand for the beam-and-phosphor model. `CLAUDE.md` is updated. |
 | TEC-1 | Vulkan, GLSL, Rust and ImGui are the owner's own guess, not hard constraints. Counter-proposals welcome, decided after the spikes. |
-| OUT-3, OUT-5 (2026-11-18, planning) | No separate control window. F11 toggles fullscreen and a resizable windowed output. F12 opens and closes the ImGui settings menu inside the output window; the menu takes the focus while open and gives it back to the source on close. Output otherwise stays non-activating. F11 and F12 are global hotkeys, configurable. |
+| OUT-3, OUT-5 (2026-11-18, planning) | No separate control window. F11 toggles fullscreen and a resizable windowed output. F12 (default changed to F10 on 2026-11-19, D-17) opens and closes the ImGui settings menu inside the output window; the menu takes the focus while open and gives it back to the source on close. Output otherwise stays non-activating. F11 and F12 are global hotkeys, configurable. |
 | SRC-1, SRC-2 (2026-11-18, planning) | Mina the Hollower is not on the dev machine. A stand-in pixel-art game is used during development; Mina is the final acceptance test on the owner's other machine (PLAN.md T-83). First usable version keeps all 3 mask types. |
 
 Still open:
-- Which GPU drives the monitors: the Intel iGPU or the NVIDIA GPU (see HW-3, new hybrid-graphics finding).
-- Nothing else blocking.
+- Which GPU drives the monitors: answered by a setting (default `auto` picks the adapter of the covered monitor, see the decision gate below and HW-3).
+- Nothing else blocking. The owner's decisions of 2026-11-19 are in the "Owner decisions" block of the decision gate below.
 - OUT-2, OUT-3 (no-focus window and menu placement): defaults stand, decided by SP-2.
 - TIM-1 (latency), PHY-12 (temporal scope): defaults stand.
 
-## Decision gate T-13 (draft 2026-11-19, awaiting owner approval)
+## Decision gate (the first-phase review; drafted and decided 2026-11-19)
 
-DRAFT by the T-13 task for the owner. Nothing below is decided: the owner approves, amends or rejects each proposal, and only then do `ARCHITECTURE.md` (statuses now read "Proposed (T-13 draft)"), `PLAN.md` and `CLAUDE.md` change. Numbers are quoted from the entries cited; none is new, except where marked. The "535 tests" figure comes from the T-13 brief and is not written in any repo document (re-run `cargo test` to confirm). T-03 (adapter topology) and T-04 (shared-handle spike) were not run; T-26 depends on T-04's question.
+### Owner decisions (2026-11-19)
+
+The owner answered the draft proposals below. The draft text stays underneath as the record of the evidence; where an answer differs from a proposal, the answer wins.
+
+| Topic | Decision | Entries |
+|---|---|---|
+| Stack | **Decided:** keep Rust, Vulkan (through `ash`) and GLSL, the "winner combo". No move to Direct3D 12. | TEC-1, TEC-2, A1, A4, A5 |
+| Capture path | **Decided:** keep the simple CPU copy, because it is the most universal. The zero-copy path (a shared handle between the capture texture and Vulkan) is not cancelled: it becomes a later, optional performance setting, to study once the features work ("study later as an extra performance option, don't forget it"). What is known: the adapter check found that both Vulkan devices can import Direct3D 11 textures (extension queries only, untested), and the two monitors are split across the RTX and the Intel iGPU, so a cross-adapter case exists. | CAP-2, A3 |
+| Settings menu | **Decided:** Dear ImGui, inside the output window. It takes the focus while open (accepted) and gives it back on close. Default key F10, reassignable. The owner wants a modern custom look: done (`ui/theme.rs`, Inter font). | TEC-5, A17, OUT-3, D-7, D-17 |
+| GPU | **Decided:** which GPU runs the whole chain is a setting, default `auto` = the adapter of the monitor the output covers. Implemented as `[global.gpu] adapter` (see CHANGELOG). | HW-3 |
+| One screen | **Decided (conditional GO):** a single screen must work, at least when the third-party game is not in exclusive fullscreen. If it fails on a real game, debug then. | OUT-1, CAP-4, D-1 |
+| Performance | **Decided:** 60 fps is a target, not a hard requirement. Features first; optimise after they work. Offer quality and performance settings. The 4.2 ms budget stays a goal, not a gate. | PRF-1, PRF-2 |
+| First-version scope | **Decided:** all three mask types in; halation off in the first usable version; persistence, saturation and automatic beam limiting off by default. | PRJ-6, D-5, D-6 |
+| Hotkeys | **Decided:** F11 (fullscreen) is a default binding and can be reassigned; the menu key defaults to F10; the quit chord stays fixed. | OUT-5, D-17 |
+| Early-look renders | **Still open, non-blocking.** In plain words: look at `tv26_grille_2p9_montage.png` at 100 %; is the difference between the physical render (left) and the scanlines-only render (right) worth the project? | SCP-7, PHY-2 |
+
+### Draft proposals (2026-11-19, kept as evidence)
+
+Written by the gate task for the owner; the table above records the owner's answers. `ARCHITECTURE.md` statuses read "Decided 2026-11-19" where the owner decided. Numbers are quoted from the entries cited; none is new, except where marked. The "535 tests" figure comes from the T-13 brief and is not written in any repo document (re-run `cargo test` to confirm). T-03 (adapter topology) and T-04 (shared-handle spike) were not run; T-26 depends on T-04's question.
 
 ### Spike pass/fail lines
 
