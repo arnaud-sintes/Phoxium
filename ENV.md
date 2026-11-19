@@ -34,7 +34,7 @@ cargo build --release    # optimised, target\release
 
 On Windows an `.exe` cannot be replaced while it runs: close `pixel-demo` and `ultimatecrt` before rebuilding ("Access is denied" on the exe).
 
-**Disk space:** a Cargo `target` folder (debug plus release, with the test binaries) takes about 1 to 3 GB, and every git worktree or spike workspace has its own. Build with `$env:CARGO_INCREMENTAL = '0'` (no incremental cache, which is a large part of that size) and delete the `target` folders of worktrees and of `spikes\imgui-spike` when done (`Remove-Item -Recurse -Force target`), or share one with `CARGO_TARGET_DIR`.
+**Disk space:** a Cargo `target` folder (debug plus release, with the test binaries) takes about 1 to 3 GB, and every git worktree or spike workspace has its own. Build with `$env:CARGO_INCREMENTAL = '0'` (no incremental cache, which is a large part of that size) and delete the `target` folders of worktrees and of `spikes\imgui-spike` when done (`Remove-Item -Recurse -Force target`), or share one with `CARGO_TARGET_DIR` (`scripts\impact.ps1` and `check.ps1` do, see Test policy).
 
 ## 3. Static checks and tests
 
@@ -56,15 +56,66 @@ $env:UCRT_REQUIRE_GPU = '1'; cargo test
 - `gpu_identity` (T-20a) runs decode then encode with the same transfer on both sides (pure 2.4, pure 2.2, sRGB, identity): every code comes back exact on an RGBA16F and a BGRA8 target, the native raster matches the `crt-model` oracle within FP16 precision, and the FP16 subnormals of the dark codes (1 to 4 at gamma 2.4) are not flushed to zero. It also changes the native size (256x240, 320x240, back), decodes a 2x upscale at block centres, checks the black surround, and submits a burst of frames that overlap on the GPU (two frames in flight) so synchronization validation sees the cross-frame accesses.
 - Software Vulkan for a future CI (report only, unverified on Windows): Mesa lavapipe (llvmpipe Vulkan driver, Vulkan 1.3; Windows builds exist from third parties such as mesa-dist-win) and Google SwiftShader are candidates. Installing either as an ICD (`VK_DRIVER_FILES` pointing at its JSON manifest) would let a GPU-less runner run these tests with `UCRT_REQUIRE_GPU=1`. Neither has been tried here; check its Vulkan 1.3, dynamic rendering and synchronization2 support and its licence first.
 
-`scripts/check.ps1` runs all of the above in one go (fmt, clippy `-D warnings`, tests with `UCRT_REQUIRE_GPU=1`, licence check) and exits non-zero on the first failure. `-Smoke` adds a 10 s live run (`--pattern ramp --exit-after 10 --validation`, opens a window) that fails on any validation line on stderr. The licence check runs `cargo deny check licenses` against `deny.toml` when cargo-deny is installed (`cargo install cargo-deny --locked`), else warns, and always runs the declared-licence check shared in policy with `package.ps1`.
+`scripts/check.ps1 -Full` runs all of the above in one go (fmt, clippy `-D warnings`, tests with `UCRT_REQUIRE_GPU=1`, licence check) and exits non-zero on the first failure. `-Smoke` adds a 10 s live run (`--pattern ramp --exit-after 10 --validation`, opens a window) that fails on any validation line on stderr. The licence check runs `cargo deny check licenses` against `deny.toml` when cargo-deny is installed (`cargo install cargo-deny --locked`), else warns, and always runs the declared-licence check shared in policy with `package.ps1`.
 
 There is no automated test of capture or output, and no CI yet: a hosted runner has no GPU and cannot capture windows.
 
+### Test policy
+
+Running the whole gate (fmt, clippy, 600+ tests in 34 test programs, many on the GPU, about 7 minutes) after every change is wasted time when a change touches one module. `scripts\impact.ps1` analyses the change and runs only what it can affect.
+
+| Gate | When |
+|---|---|
+| The impact plan: `scripts\impact.ps1 -Run` (or `scripts\check.ps1`, which calls it by default) | Every task and every commit. The plan is the gate of the task. |
+| The full gate: `scripts\check.ps1 -Full` (or `scripts\impact.ps1 -Full -Run`) | Before a merge to `main`, before a push, before a release (`package.ps1` and `release.ps1` run their own full checks), when the plan says FULL, and whenever you are unsure. |
+
+How to use it:
+
+```
+.\scripts\impact.ps1                    # prints the plan only: commands, cost class, reasons
+.\scripts\impact.ps1 -Explain           # also why each test program was selected
+.\scripts\impact.ps1 -Run               # executes the plan; stops at the first failure (-KeepGoing: runs on)
+.\scripts\impact.ps1 -Files a.rs,b.glsl # plan for an explicit list of files
+.\scripts\impact.ps1 -Rev <commit>      # plan for one commit (what a merge brought in)
+.\scripts\impact.ps1 -Full -Run         # the whole gate
+.\scripts\impact.ps1 -SelfTest          # fixture tests of the model itself
+.\scripts\impact.ps1 -Validate 5        # plans of the last 5 first-parent commits plus a miss check
+```
+
+The changed files are the committed changes since the merge base with `exec/integration` (else `HEAD~1`; on a clean `exec/integration` that is the last commit), plus uncommitted and untracked files. `-Base <ref>` overrides the base.
+
+What the model decides (derived from the repository at every run, nothing hard-coded except the package names and the `gpu/stages` layout):
+
+| Change | Runs |
+|---|---|
+| Docs (`*.md`, `*.txt`), `.gitignore`, an asset recipe | Format check only. |
+| `scripts\*.ps1` | Format check and a PowerShell parse of the changed scripts. No cargo tests. |
+| `crates/pixel-demo/**` | `cargo test -p pixel-demo` and clippy on it. Integration tests of `ultimatecrt` only when `options.rs` changed and a test references pixel-demo; the live `scripts\check-*.ps1` are never run by the plan. |
+| `crates/crt-model/src/<module>` | `cargo test -p crt-model`, every `ultimatecrt` test file referencing `crt_model::<module>` (or a crt-model module that uses it, depth 2), and the unit tests of the `ultimatecrt` modules that do. |
+| `crates/ultimatecrt/src/<module>` | The module's unit tests (`cargo test -p ultimatecrt --lib -- <module>::`), every integration test referencing `ultimatecrt::<module>`, and the dependants found by the `use crate::` graph (depth 2, marked "transitive" in the reasons). |
+| `crates/ultimatecrt/src/gpu/stages/<stage>.rs` | The stage's unit tests, the tests naming the stage (`"<stage>"` in `enable_only`/`stage(...)`; an `after: "<stage>"` input injection does not count) and the whole-chain tests (those that render without a stage filter). |
+| `shaders/*.comp, *.vert, *.frag` | The same as the owning stage (the stage Rust file holding `<shader>.spv`). |
+| `shaders/include/*.glsl` | Every shader that `#include`s it, transitively, then as above, plus the unit tests that read shader sources. |
+| `params/*.toml` | `cargo check --workspace --all-targets` (the table is regenerated), the `params`, `settings` and `presets` unit tests, `tests/presets.rs`, and the tests naming a changed parameter id (from the diff: only the changed blocks). |
+| `crates/paramgen/**` | `cargo test -p paramgen`, `cargo check --workspace`, the params-related tests. |
+| `presets/tubes/*.toml`, assets (fonts) | The module that embeds the file (`include_str!`/`include_bytes!`), the tests referencing it, the tests iterating over the presets. |
+| `Cargo.toml`, `Cargo.lock`, `build.rs`, `rust-toolchain.toml`, `rustfmt.toml`, `deny.toml`, `src/lib.rs` | FULL (all of `ultimatecrt` for `lib.rs`). |
+| A file kind the model cannot place | FULL, with the reason printed. |
+
+Always: `cargo fmt --all -- --check`. Clippy (`--all-targets -- -D warnings`) runs only on the packages that own a changed Rust file plus the workspace crates that depend on them. The GPU tests it selects run with `UCRT_REQUIRE_GPU=1`.
+
+Reading the plan: each line is `[cost] command`. Cost classes: `cheap` (no GPU), `GPU` (headless Vulkan test), `slow` (clippy, full-chain renders, tests that spawn the binary or render the presets, tests over 900 lines, and any GPU test measured above 20 s). `-Run` records the run time of every integration test it executes in `impact-timings.json` next to the shared target folder; the plan then classifies by the measurement and prints the measured seconds (on 2026-11-19 `ui_menu` took 160 s of the 6 min 43 s full run). The last lines give "Test programs selected: N of M" and the list of programs not run ("skipped by impact analysis"). M counts the integration test files plus one unit-test target per package. `-Explain` lists the reasons per program. The selection is deliberately conservative: a test that merely names a stage or module is included, and a widely used module (`params`, `gpu`) pulls in most tests, as it should.
+
+Limits: the model is textual (module paths, quoted stage names, shader names, parameter ids), not a type analysis. It cannot see a test that reaches a module only through a re-export from another crate item it does not name, or behaviour shared through a data file it does not know. When a change is risky, or the plan looks too small, run `-Full`.
+
+Shared build cache: `impact.ps1` and `check.ps1` set `CARGO_TARGET_DIR` to `C:\projects\personal\ultimateCRT-wt\target-shared` when it is not already set, and `CARGO_INCREMENTAL=0`. Every agent and worktree then reuses the compiled external dependencies (`windows`, `ash`, and the Dear ImGui C++ sources built by `dear-imgui-sys`, about 16 s in release) instead of building them cold. The workspace crates themselves rebuild once per worktree path, which is expected. Cargo takes a file lock on the target folder, so parallel cargo runs on it wait for each other (the "Blocking waiting for file lock" line) instead of corrupting it. Do not delete the shared folder after a task; `scripts\clean-targets.ps1` prints the sizes of the shared and per-worktree `target` folders and deletes the shared one only when the free disk space is under 30 GB (or with `-Force`, and never while cargo runs). An `.exe` in the shared folder cannot be replaced while it runs, as with any target folder.
 ### Scripts (`scripts/`)
 
 | Script | Use |
 |---|---|
-| `check.ps1` | The local gate above. `-Smoke` adds the 10 s live run, `-SkipTests` skips `cargo test`. |
+| `check.ps1` | The local gate. By default it runs the impact plan of `impact.ps1` (Test policy above); `-Full` runs everything below (the previous behaviour). `-Smoke` adds the 10 s live run, `-SkipTests` skips `cargo test` (full gate). |
+| `impact.ps1` | Impact analysis: prints or runs the checks and tests a change needs (Test policy above). `-Full`, `-Explain`, `-Run`, `-DryRun`, `-KeepGoing`, `-Files`, `-Rev`, `-Validate`, `-SelfTest`. |
+| `clean-targets.ps1` | Sizes of the shared and per-worktree `target` folders; deletes the shared one only when free disk < 30 GB or with `-Force`. |
 | `check-capture.ps1` | Capture fidelity (T-12, CAP-3): runs `pixel-demo --image` at several integer scales, saves a capture with `ultimatecrt --save-capture` and compares it with the known pixels. Parameters `-TargetDir` (default `..\target`, needs release builds of both programs), `-Scales`, `-Occlude`, `-MoveTo "x,y"`, `-KeepFiles`. Opens windows: hands off the keyboard and mouse. |
 | `poll-foreground.ps1` | Foreground-window poll for focus checks, see "Foreground poll" below. |
 | `package.ps1`, `release.ps1` | Release, sections 5 and 6. |

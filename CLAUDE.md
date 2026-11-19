@@ -62,6 +62,7 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 
 - **"Publish"** means the full release procedure of `ENV.md` section 7: version update, changelog update, build, test, commit and push, package, and publish as a release on GitHub. Anything shorter (a plain commit, a push) is not a publish.
 - Commit or push only when asked. Never publish without being asked.
+- **Testing:** run the impact plan (`scripts\impact.ps1 -Run`), not the whole suite, for a task. The full gate (`scripts\check.ps1 -Full`) only before a merge to main, a push or a release, or when unsure (`ENV.md` Test policy).
 
 ## Repository layout
 
@@ -74,7 +75,7 @@ Cargo workspace, Windows only. Private GitHub repository `arnaud-sintes/ultimate
 - `params/`: the declarative parameter table, one TOML file per stage.
 - `presets/tubes/`: the 10 shipped tube presets (data files).
 - `spikes/imgui-spike`: own Cargo workspace, the TEC-5 (T-08) Dear ImGui spike, not part of the product build.
-- `scripts/`: `check.ps1` (local gate), `check-capture.ps1` (capture fidelity), `poll-foreground.ps1` (focus checks), `package.ps1` (release zip) and `release.ps1` (GitHub release).
+- `scripts/`: `check.ps1` (local gate: the impact plan by default, `-Full` for everything), `impact.ps1` (impact analysis: runs only the tests a change can affect, see `ENV.md` Test policy), `clean-targets.ps1` (shared cargo target folder), `check-capture.ps1` (capture fidelity), `poll-foreground.ps1` (focus checks), `package.ps1` (release zip) and `release.ps1` (GitHub release).
 - `rust-toolchain.toml`, `rustfmt.toml`: pinned toolchain and formatting.
 
 ## Status

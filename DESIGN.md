@@ -78,6 +78,7 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 ## 10. Testing
 
 - Pure logic has unit tests with synthetic data, named after the behaviour (`tolerates_rounded_window_corners`). Run `cargo test`.
+- Which tests to run for a change: `scripts\impact.ps1` selects them from the files changed (modules, stages, shaders, parameters, presets); the full gate (`scripts\check.ps1 -Full`) is for a merge to main, a push, a release, or when unsure. See `ENV.md`, Test policy.
 - Physics gets analytic tests derived from `CRT.md` (for example 57 % scanline modulation at Ïƒ/P = 0.25) before the matching shader is trusted. **(planned, SCP-3)**
 - GPU passes are tested headless (`gpu::Headless`, no window): integration tests in `crates/ultimatecrt/tests/gpu_*.rs` get a renderer from `common::gpu_or_skip`, which enables the validation layer when installed, and end with `common::assert_no_validation_messages` after dropping the renderer. Without a Vulkan 1.3 device they print "skipped" and pass; `UCRT_REQUIRE_GPU=1` turns a missing device or validation layer into a failure (use it on the dev machine).
 - Capture and presentation are checked by hand with `pixel-demo` and `ultimatecrt --stats --validation` (see `ENV.md`). A hosted CI runner (none is set up yet) has no GPU, so it could cover build, format, lint and unit tests only (GPU tests skip).
