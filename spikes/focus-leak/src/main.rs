@@ -4,9 +4,12 @@
 //!   --title           SetWindowTextW every second (as app.rs does)
 //!   --print           a stdout line every second (as --stats does)
 //!   --hotkey          RegisterHotKey Ctrl+Alt+Q (as output.rs does)
+//!   --guard-pos       WM_WINDOWPOSCHANGING adds SWP_NOACTIVATE to every position change
+//!   --refuse          WM_ACTIVATE (activated) hands the foreground back to the window it came from
 //!   --exit-after <s>  quit after s seconds (default 40)
 //! Logs every activation-related message it receives with its time since start.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use windows::{
@@ -23,6 +26,10 @@ use windows::{
 };
 
 static mut START: Option<Instant> = None;
+static GUARD_POS: AtomicBool = AtomicBool::new(false);
+static REFUSE: AtomicBool = AtomicBool::new(false);
+/// Last foreground window that was not ours, sampled by the loop.
+static LAST_FG: std::sync::atomic::AtomicIsize = std::sync::atomic::AtomicIsize::new(0);
 
 fn t() -> f64 {
     unsafe { (*std::ptr::addr_of!(START)).map_or(0.0, |s| s.elapsed().as_secs_f64()) }
@@ -50,6 +57,20 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         println!("{:8.3} {n} wparam=0x{:X}{flags}", t(), wparam.0);
     }
     match msg {
+        WM_WINDOWPOSCHANGING if GUARD_POS.load(Ordering::Relaxed) => {
+            let wp = &mut *(lparam.0 as *mut WINDOWPOS);
+            wp.flags |= SWP_NOACTIVATE;
+            LRESULT(0)
+        }
+        WM_ACTIVATE if REFUSE.load(Ordering::Relaxed) && (wparam.0 & 0xFFFF) != 0 => {
+            let mut prev = HWND(lparam.0 as *mut std::ffi::c_void);
+            if prev.is_invalid() {
+                prev = HWND(LAST_FG.load(Ordering::Relaxed) as *mut std::ffi::c_void);
+            }
+            let ok = !prev.is_invalid() && SetForegroundWindow(prev).as_bool();
+            println!("{:8.3} refuse: SetForegroundWindow(prev {:?}) = {ok}", t(), prev.0);
+            LRESULT(0)
+        }
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
         WM_ERASEBKGND => LRESULT(1),
         WM_HOTKEY => {
@@ -73,8 +94,19 @@ fn main() {
         .and_then(|i| args.get(i + 1))
         .and_then(|s| s.parse::<f64>().ok())
         .unwrap_or(40.0);
+    GUARD_POS.store(has("--guard-pos"), Ordering::Relaxed);
+    REFUSE.store(has("--refuse"), Ordering::Relaxed);
     unsafe {
         START = Some(Instant::now());
+        if let Some(d) = args
+            .iter()
+            .position(|a| a == "--delay")
+            .and_then(|i| args.get(i + 1))
+            .and_then(|s| s.parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_secs(d));
+            println!("{:8.3} delay over, creating the window", t());
+        }
         let hinstance = GetModuleHandleW(None).unwrap();
         let class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
@@ -88,7 +120,10 @@ fn main() {
             cbSize: std::mem::size_of::<MONITORINFO>() as u32,
             ..Default::default()
         };
-        let _ = GetMonitorInfoW(MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY), &mut info);
+        let _ = GetMonitorInfoW(
+            MonitorFromPoint(Default::default(), MONITOR_DEFAULTTOPRIMARY),
+            &mut info,
+        );
         let r = info.rcMonitor;
         let hwnd = if has("--windowed") {
             CreateWindowExW(
@@ -125,6 +160,9 @@ fn main() {
         if has("--hotkey") {
             let _ = RegisterHotKey(Some(hwnd), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q' as u32);
         }
+        if has("--disabled") {
+            let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hwnd, false);
+        }
         let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
         println!("{:8.3} shown", t());
         let mut last = Instant::now();
@@ -137,6 +175,10 @@ fn main() {
                 }
                 let _ = TranslateMessage(&msg);
                 DispatchMessageW(&msg);
+            }
+            let fg = GetForegroundWindow();
+            if !fg.is_invalid() && fg != hwnd {
+                LAST_FG.store(fg.0 as isize, Ordering::Relaxed);
             }
             if t() > exit_after {
                 break;
