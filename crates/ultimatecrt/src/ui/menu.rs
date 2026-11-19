@@ -17,13 +17,18 @@
 //! milliseconds per stage (T-21). Position, size, opacity and the collapsed state persist in
 //! `settings.toml` (`[global.ui]`). The parameter panels come from a registry by stage ([`panel_for_stage`]),
 //! the extension point of T-53.
+//!
+//! Look (`super::theme`): a flat SemiBold title bar, collapsible sections with small-capital headers, rows with
+//! the label on the left and the widget or value on the right (numbers right-aligned, tabular digits), sliders
+//! without inner text and with an accent fill, a scrolling body above a pinned footer (opacity, close hint).
 
-use dear_imgui_rs::{Condition, TreeNodeFlags, Ui as Frame, WindowFlags};
+use dear_imgui_rs::{Condition, StyleVar, Ui as Frame, WindowFlags};
 
-use crate::params::{ParamType, ParamValue, Params, PARAMS_META};
+use crate::params::{ParamMeta, ParamType, ParamValue, Params, PARAMS_META};
 use crate::presets::Library;
 use crate::settings;
 
+use super::theme::{self, Fonts, METRICS, PALETTE};
 use super::UiState;
 
 // ---------------------------------------------------------------------------------------------------------
@@ -191,49 +196,129 @@ fn output_panel(ui: &Frame, params: &mut Params) -> bool {
     changed
 }
 
-/// One widget for the parameter `id`, from its metadata: a slider over the soft range for numbers, a check
-/// box for a bool, a combo for an enum (vectors are shown, not edited, until T-53). True when it changed.
-pub fn param_widget(ui: &Frame, params: &mut Params, id: &str) -> bool {
-    let Some(m) = PARAMS_META.iter().find(|m| m.id == id) else {
-        return false;
-    };
-    let label = if m.unit == "1" {
-        m.id.to_string()
+/// The label shown for a parameter in a section about `context` (a stage): its id in words, without the stage
+/// prefix when the parameter belongs to that stage (`output_knee` under `output` -> "Knee"; `mask_depth` under
+/// `output` -> "Mask depth").
+pub fn param_label(m: &ParamMeta, context: &str) -> String {
+    let prefix = format!("{}_", m.stage);
+    let id = if m.stage == context {
+        m.id.strip_prefix(&prefix).unwrap_or(m.id)
     } else {
-        format!("{} [{}]", m.id, m.unit)
+        m.id
     };
-    let (lo, hi) = m.soft_range.unwrap_or((0.0, 1.0));
+    words(id)
+}
+
+/// An identifier in words with a capital first letter (`mask_depth` -> "Mask depth").
+pub fn words(id: &str) -> String {
+    let s = id.replace('_', " ");
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
+/// The value text of a number in a slider row: precision from the range, the unit if it has one.
+pub fn value_text(v: f64, range: (f64, f64), unit: &str) -> String {
+    let span = (range.1 - range.0).abs();
+    let digits = if span >= 100.0 {
+        1
+    } else if span >= 10.0 {
+        2
+    } else {
+        3
+    };
+    if unit == "1" {
+        format!("{v:.digits$}")
+    } else {
+        format!("{v:.digits$} {unit}")
+    }
+}
+
+/// Width of the value column of slider rows.
+fn value_width(ui: &Frame) -> f32 {
+    ui.calc_text_size("00.000 mm")[0]
+}
+
+/// One row for the parameter `id`, from its metadata: its label on the left; a slider over the soft range with
+/// the value aligned right for numbers, a check box for a bool, a combo for an enum (vectors are shown, not
+/// edited, until T-53). The description is the tooltip. True when it changed.
+pub fn param_widget(ui: &Frame, params: &mut Params, id: &str) -> bool {
+    let stage = PARAMS_META.iter().find(|m| m.id == id).map_or("", |m| m.stage);
+    param_row(ui, params, id, stage).0
+}
+
+/// [`param_widget`] in a section about the stage `context` ([`param_label`]), also returning the rectangle
+/// (min, max) of the widget itself (not the label or value).
+pub fn param_row(ui: &Frame, params: &mut Params, id: &str, context: &str) -> (bool, [[f32; 2]; 2]) {
+    let Some(m) = PARAMS_META.iter().find(|m| m.id == id) else {
+        return (false, [[0.0; 2]; 2]);
+    };
+    let width = theme::row_label(ui, &param_label(m, context));
+    let label_hovered = ui.is_item_hovered();
+    let wid = format!("##{}", m.id);
+    let range = m.soft_range.unwrap_or((0.0, 1.0));
+    let (lo, hi) = range;
+    let track = width - value_width(ui) - ui.clone_style().item_spacing()[0];
+    let mut value_shown = None;
     let changed = match (m.ty, params.get(id)) {
         (ParamType::F32, Some(ParamValue::F32(mut v))) => {
-            ui.slider_f32(&label, &mut v, lo as f32, hi as f32) && params.set(id, ParamValue::F32(v))
+            let c = theme::slider(ui, &wid, &mut v, lo as f32, hi as f32, track);
+            value_shown = Some(value_text(f64::from(v), range, m.unit));
+            c && params.set(id, ParamValue::F32(v))
         }
         (ParamType::I32, Some(ParamValue::I32(mut v))) => {
-            ui.slider_i32(&label, &mut v, lo as i32, hi as i32) && params.set(id, ParamValue::I32(v))
+            let c = theme::slider(ui, &wid, &mut v, lo as i32, hi as i32, track);
+            value_shown = Some(if m.unit == "1" {
+                v.to_string()
+            } else {
+                format!("{v} {}", m.unit)
+            });
+            c && params.set(id, ParamValue::I32(v))
         }
         (ParamType::Bool, Some(ParamValue::Bool(mut v))) => {
-            ui.checkbox(&label, &mut v) && params.set(id, ParamValue::Bool(v))
+            ui.checkbox(&wid, &mut v) && params.set(id, ParamValue::Bool(v))
         }
         (ParamType::Enum, Some(ParamValue::Enum(v))) => {
-            let mut i = v as usize;
-            ui.combo_simple_string(&label, &mut i, m.values) && params.set(id, ParamValue::Enum(i as u32))
+            ui.set_next_item_width(width);
+            let current = m.values.get(v as usize).map_or_else(|| "?".to_string(), |s| words(s));
+            let mut pick = None;
+            if let Some(_combo) = ui.begin_combo(&wid, &current) {
+                for (i, name) in m.values.iter().enumerate() {
+                    let selected = i == v as usize;
+                    if ui.selectable_config(words(name)).selected(selected).build() {
+                        pick = Some(i as u32);
+                    }
+                    if selected {
+                        ui.set_item_default_focus();
+                    }
+                }
+            }
+            pick.is_some_and(|i| i != v && params.set(id, ParamValue::Enum(i)))
         }
         (_, Some(v)) => {
-            ui.label_text(&label, format!("{v:?}"));
+            ui.text_colored(PALETTE.text, format!("{v:?}"));
             false
         }
         _ => false,
     };
-    if ui.is_item_hovered() {
-        ui.tooltip_text(m.description);
+    let widget_hovered = ui.is_item_hovered();
+    let rect = [ui.item_rect_min(), ui.item_rect_max()];
+    if let Some(text) = value_shown {
+        ui.same_line();
+        theme::text_right(ui, PALETTE.text, &text);
     }
-    changed
+    if (label_hovered || widget_hovered) && !m.description.is_empty() {
+        theme::tooltip(ui, m.description);
+    }
+    (changed, rect)
 }
 
 // ---------------------------------------------------------------------------------------------------------
 // The menu window.
 
 /// Title of the menu window (the `###` part is its ImGui id, stable when the title changes).
-pub const TITLE: &str = "ultimatecrt settings###ucrt_menu";
+pub const TITLE: &str = "ultimateCRT###ucrt_menu";
 
 /// Screen rectangles (min, max) of the menu widgets in the frame just built (tests, live check).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -244,6 +329,9 @@ pub struct MenuRects {
     pub preset: [[f32; 2]; 2],
     pub headroom_mode: [[f32; 2]; 2],
     pub exposure: [[f32; 2]; 2],
+    /// Headers of the sections closed by default.
+    pub source_header: [[f32; 2]; 2],
+    pub performance_header: [[f32; 2]; 2],
 }
 
 impl MenuRects {
@@ -262,12 +350,14 @@ pub struct MenuModel<'a> {
     pub filter: &'a mut String,
     pub layout: &'a mut settings::UiState,
     pub library: &'a Library,
-    /// Menu key shown in the title bar hint.
+    /// Menu key shown in the footer hint.
     pub key: &'a str,
-    /// Hotkey registration problems, shown under the hint (empty: nothing shown).
+    /// Hotkey registration problems, shown at the top (empty: nothing shown).
     pub hotkey_problems: &'a [String],
     /// Give the keyboard focus to the menu window in this frame (the frame after it opened).
     pub focus: bool,
+    /// The theme's fonts ([`theme::load_fonts`]).
+    pub fonts: Fonts,
 }
 
 /// What the menu window did in one frame.
@@ -282,145 +372,299 @@ pub struct MenuResult {
     pub rects: MenuRects,
 }
 
-/// The presets whose id or name contains `filter` (case insensitive), as (id, label).
+/// The presets whose id or name contains `filter` (case insensitive), as (id, name).
 pub fn filtered_presets(library: &Library, filter: &str) -> Vec<(String, String)> {
     let f = filter.trim().to_lowercase();
     library
         .list()
         .iter()
         .filter(|p| f.is_empty() || p.id.to_lowercase().contains(&f) || p.name.to_lowercase().contains(&f))
-        .map(|p| (p.id.clone(), format!("{} ({})", p.name, p.id)))
+        .map(|p| (p.id.clone(), p.name.clone()))
         .collect()
 }
 
-/// Builds the menu window.
-pub fn build(ui: &Frame, m: MenuModel<'_>) -> MenuResult {
-    let mut r = MenuResult::default();
-    let rect = |ui: &Frame| [ui.item_rect_min(), ui.item_rect_max()];
-    let before = m.layout.clone();
-    // A layout saved on a larger output (or another monitor) must not put the title bar out of reach.
-    let display = ui.io().display_size();
+/// Position and size of the menu window on a display of `display` px at UI scale `scale`, from the saved
+/// layout: the default size grows with the scale (a size the user set is kept as is), the size is at most the
+/// display less a margin, and the window is moved so that it lies on the display.
+pub fn placement(layout: &settings::UiState, display: [f32; 2], scale: f32) -> ([f32; 2], [f32; 2]) {
+    let default = settings::UiState::default();
+    let mut size = [layout.menu_w, layout.menu_h];
+    if size == [default.menu_w, default.menu_h] {
+        size = [size[0] * scale, size[1] * scale];
+    }
+    let margin = 8.0 * scale;
+    let fit = |v: f32, d: f32, min: f32| v.min(d - 2.0 * margin).max(min);
+    let size = [fit(size[0], display[0], 240.0), fit(size[1], display[1], 120.0)];
     let pos = [
-        m.layout.menu_x.clamp(0.0, (display[0] - 120.0).max(0.0)),
-        m.layout.menu_y.clamp(0.0, (display[1] - 40.0).max(0.0)),
+        layout.menu_x.clamp(0.0, (display[0] - size[0]).max(0.0)),
+        layout.menu_y.clamp(0.0, (display[1] - size[1]).max(0.0)),
     ];
-    let shown = ui
-        .window(TITLE)
-        .position(pos, Condition::Appearing)
-        .size([m.layout.menu_w, m.layout.menu_h], Condition::Appearing)
-        .collapsed(m.layout.menu_collapsed, Condition::Appearing)
-        .size_constraints([240.0, 120.0], [f32::MAX, f32::MAX])
-        .bg_alpha(m.layout.menu_opacity.clamp(0.2, 1.0))
-        .focused(m.focus)
-        .flags(WindowFlags::NO_SAVED_SETTINGS)
-        .build(|| {
-            let (pos, size) = (ui.window_pos(), ui.window_size());
-            r.rects.window = [pos, [pos[0] + size[0], pos[1] + size[1]]];
-            (m.layout.menu_x, m.layout.menu_y) = (pos[0], pos[1]);
-            (m.layout.menu_w, m.layout.menu_h) = (size[0], size[1]);
-            m.layout.menu_collapsed = false;
-            ui.text_disabled(format!("{} or Esc closes the menu", m.key));
-            // Hotkey registration problems (T-54): a chord another program owns, the fallback in force.
-            for p in m.hotkey_problems {
-                ui.text_wrapped(format!("! {p}"));
-            }
-            ui.slider_f32("opacity", &mut m.layout.menu_opacity, 0.2, 1.0);
-            r.rects.opacity = rect(ui);
+    (pos, size)
+}
 
-            if ui.collapsing_header("Preset", TreeNodeFlags::DEFAULT_OPEN) {
-                ui.input_text("filter", m.filter).build();
-                r.rects.filter = rect(ui);
-                let list = filtered_presets(m.library, m.filter);
-                let current = m.state.preset.as_deref();
-                let preview = current
-                    .and_then(|id| m.library.find(id))
-                    .map_or("(custom)".to_string(), |p| format!("{} ({})", p.name, p.id));
-                if let Some(_combo) = ui.begin_combo("preset", &preview) {
-                    for (id, label) in &list {
-                        let selected = current == Some(id.as_str());
-                        if ui.selectable_config(label).selected(selected).build() {
-                            if let Some(p) = m.library.find(id) {
-                                *m.params = p.params();
-                                r.preset = Some(id.clone());
-                                r.params_changed = true;
-                            }
-                        }
-                        if selected {
-                            ui.set_item_default_focus();
-                        }
-                    }
-                }
-                r.rects.preset = rect(ui);
-                ui.text_disabled(format!("{} of {} presets", list.len(), m.library.list().len()));
-            }
-
-            if ui.collapsing_header("Headroom", TreeNodeFlags::DEFAULT_OPEN) {
-                match m.state.headroom {
-                    Some(h) => {
-                        ui.text(format!("headroom {:.3}", h.total()));
-                        ui.text_disabled(format!(
-                            "mask {:.3} (physical {:.3}) x scanlines {:.3} x white {:.3} x exposure {:.3}",
-                            h.mask_peak, h.mask_peak_physical, h.scanline_peak, h.matrix_max, h.exposure
-                        ));
-                        let mode = crate::headroom::effective_mode(m.params, h.mask_peak_physical);
-                        let name = crate::params::meta("output_headroom_mode")
-                            .and_then(|meta| meta.values.get(mode as usize))
-                            .copied()
-                            .unwrap_or("?");
-                        ui.text_disabled(format!("mode in effect: {name}"));
-                    }
-                    None => ui.text_disabled("headroom: no frame yet"),
-                }
-                // The registered output panel; the first two widgets are the mode combo and the exposure.
-                for (k, id) in HEADROOM_IDS.iter().enumerate() {
-                    r.params_changed |= param_widget(ui, m.params, id);
-                    match k {
-                        0 => r.rects.headroom_mode = rect(ui),
-                        1 => r.rects.exposure = rect(ui),
-                        _ => {}
-                    }
-                }
-            }
-
-            if ui.collapsing_header("Source", TreeNodeFlags::empty()) {
-                match &m.state.placement {
-                    Some(p) => ui.text_wrapped(p.to_string()),
-                    None => ui.text_disabled("no source frame yet"),
-                }
-            }
-
-            if ui.collapsing_header("Stats", TreeNodeFlags::empty()) {
-                ui.text(format!(
-                    "capture {:.0} fps | render {:.0} fps",
-                    m.state.capture_fps, m.state.render_fps
-                ));
-                match &m.state.timings {
-                    Some(t) => {
-                        ui.text(format!("GPU {:.3} ms per frame", t.frame_ms));
-                        for s in &t.stages {
-                            match s.ms {
-                                Some(ms) if s.bypassed => ui.text(format!("  {:<10} {ms:.3} ms (bypass)", s.name)),
-                                Some(ms) => ui.text(format!("  {:<10} {ms:.3} ms", s.name)),
-                                None => ui.text_disabled(format!("  {:<10} -", s.name)),
-                            }
-                        }
-                    }
-                    None => ui.text_disabled("GPU timings: none yet (or unavailable)"),
-                }
-            }
-
-            // Further stage panels registered by T-53 (the output panel is drawn under "Headroom").
-            for (stage, panel) in PANELS.iter().filter(|(s, _)| *s != "output") {
-                if ui.collapsing_header(stage, TreeNodeFlags::empty()) {
-                    r.params_changed |= panel(ui, m.params);
-                }
-            }
-        });
+/// Builds the menu window.
+pub fn build(ui: &Frame, mut m: MenuModel<'_>) -> MenuResult {
+    let mut r = MenuResult::default();
+    let before = m.layout.clone();
+    let s = theme::scale_of(ui);
+    let fonts = m.fonts;
+    let (pos, size) = placement(m.layout, ui.io().display_size(), s);
+    // A taller title bar in the SemiBold font; the content goes back to the body font and frame padding.
+    let title_pad = ui.push_style_var(StyleVar::FramePadding([14.0 * s, 9.0 * s]));
+    let shown = theme::with_font(ui, fonts.strong, METRICS.font_body, || {
+        ui.window(TITLE)
+            .position(pos, Condition::Appearing)
+            .size(size, Condition::Appearing)
+            .collapsed(m.layout.menu_collapsed, Condition::Appearing)
+            .size_constraints([240.0 * s, 120.0 * s], [f32::MAX, f32::MAX])
+            .bg_alpha(m.layout.menu_opacity.clamp(0.2, 1.0))
+            .focused(m.focus)
+            .flags(WindowFlags::NO_SAVED_SETTINGS | WindowFlags::NO_SCROLLBAR | WindowFlags::NO_SCROLL_WITH_MOUSE)
+            .build(|| {
+                let pad = METRICS.frame_padding;
+                let _pad = ui.push_style_var(StyleVar::FramePadding([pad[0] * s, pad[1] * s]));
+                theme::with_font(ui, fonts.body, METRICS.font_body, || {
+                    let (pos, size) = (ui.window_pos(), ui.window_size());
+                    r.rects.window = [pos, [pos[0] + size[0], pos[1] + size[1]]];
+                    (m.layout.menu_x, m.layout.menu_y) = (pos[0], pos[1]);
+                    (m.layout.menu_w, m.layout.menu_h) = (size[0], size[1]);
+                    m.layout.menu_collapsed = false;
+                    // The footer (rule, opacity row, hint) stays put; the body above it scrolls.
+                    // Footer items: the rule (1 px), a 2 px gap, the opacity row, the hint; each followed by the
+                    // item spacing, as is the body child itself.
+                    let small = theme::with_font(ui, None, METRICS.font_small, || ui.text_line_height());
+                    let sp = ui.clone_style().item_spacing()[1];
+                    let footer_h = 1.0 + 2.0 * s + ui.frame_height() + small + 4.0 * sp;
+                    ui.child_window("##ucrt_menu_body")
+                        .size([0.0, -footer_h])
+                        .build(ui, || body(ui, &mut m, &mut r));
+                    footer(ui, &mut m, &mut r);
+                });
+            })
+    });
+    title_pad.pop();
     if shown.is_none() {
         m.layout.menu_collapsed = true;
     }
     r.layout_changed = *m.layout != before;
     r
+}
+
+fn rect(ui: &Frame) -> [[f32; 2]; 2] {
+    [ui.item_rect_min(), ui.item_rect_max()]
+}
+
+/// The scrolling body: hotkey problems, preset, headroom, source, performance.
+fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let fonts = m.fonts;
+    // Hotkey registration problems (T-54): a chord another program owns, the fallback in force.
+    if !m.hotkey_problems.is_empty() {
+        theme::callout(ui, PALETTE.problem, m.hotkey_problems);
+        ui.spacing();
+    }
+
+    // Preset: filter and selector; selecting applies the preset.
+    let list = filtered_presets(m.library, m.filter);
+    let count = format!("{} of {}", list.len(), m.library.list().len());
+    if theme::section(ui, &fonts, "Preset", Some(&count), true) {
+        ui.set_next_item_width(-f32::MIN_POSITIVE);
+        ui.input_text("##filter", m.filter).hint("Filter presets").build();
+        r.rects.filter = rect(ui);
+        let current = m.state.preset.as_deref();
+        let preview = current
+            .and_then(|id| m.library.find(id))
+            .map_or("Custom".to_string(), |p| p.name.clone());
+        ui.set_next_item_width(-f32::MIN_POSITIVE);
+        if let Some(_combo) = ui.begin_combo("##preset", &preview) {
+            for (id, name) in &list {
+                let selected = current == Some(id.as_str());
+                if ui.selectable_config(format!("{name}##{id}")).selected(selected).build() {
+                    if let Some(p) = m.library.find(id) {
+                        *m.params = p.params();
+                        r.preset = Some(id.clone());
+                        r.params_changed = true;
+                    }
+                }
+                if ui.is_item_hovered() {
+                    theme::tooltip(ui, id);
+                }
+                if selected {
+                    ui.set_item_default_focus();
+                }
+            }
+        }
+        r.rects.preset = rect(ui);
+    }
+
+    // SDR headroom (T-84): the readout, its factors, the mode in effect, the output panel.
+    if theme::section(ui, &fonts, "SDR headroom", None, false) {
+        match m.state.headroom {
+            Some(h) => {
+                let total = h.total();
+                let (colour, status) = if total > 1.0 {
+                    (PALETTE.accent, "Above panel white")
+                } else {
+                    (PALETTE.ok, "Fits panel white")
+                };
+                theme::with_font(ui, fonts.strong, METRICS.font_display, || {
+                    ui.text_colored(colour, format!("{total:.3}"));
+                });
+                let [min, max] = [ui.item_rect_min(), ui.item_rect_max()];
+                ui.same_line();
+                theme::with_font(ui, None, METRICS.font_small, || {
+                    // The unit on the number's baseline band, a status pill on the right.
+                    let y = max[1] - ui.text_line_height() - 0.22 * (max[1] - min[1]);
+                    ui.set_cursor_screen_pos([ui.cursor_screen_pos()[0], y]);
+                    ui.text_colored(PALETTE.text_muted, "\u{00D7} panel white");
+                    theme::pill(ui, status, colour, (min[1] + max[1]) * 0.5);
+                });
+                // The factors of the readout, one faint line.
+                let mask = if (h.mask_peak - h.mask_peak_physical).abs() > 5e-4 {
+                    format!("{:.3} (physical {:.3})", h.mask_peak, h.mask_peak_physical)
+                } else {
+                    format!("{:.3}", h.mask_peak)
+                };
+                theme::with_font(ui, None, METRICS.font_small, || {
+                    ui.text_colored(
+                        PALETTE.text_faint,
+                        format!(
+                            "mask {mask}  \u{00D7}  scanlines {:.3}  \u{00D7}  white {:.3}  \u{00D7}  exposure {:.3}",
+                            h.scanline_peak, h.matrix_max, h.exposure
+                        ),
+                    );
+                });
+                ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+                let mode = crate::headroom::effective_mode(m.params, h.mask_peak_physical);
+                let name = crate::params::meta("output_headroom_mode")
+                    .and_then(|meta| meta.values.get(mode as usize))
+                    .map_or_else(|| "?".to_string(), |v| words(v));
+                theme::kv_row(ui, "Mode in effect", &name, PALETTE.text);
+            }
+            None => theme::kv_row(ui, "Readout", "no frame yet", PALETTE.text_faint),
+        }
+        ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+        // The registered output panel; the first two rows are the mode combo and the exposure.
+        for (k, id) in HEADROOM_IDS.iter().enumerate() {
+            let (changed, widget) = param_row(ui, m.params, id, "output");
+            r.params_changed |= changed;
+            match k {
+                0 => r.rects.headroom_mode = widget,
+                1 => r.rects.exposure = widget,
+                _ => {}
+            }
+        }
+    }
+
+    // Source placement (T-96).
+    let (open, header) = theme::section_closed(ui, &fonts, "Source");
+    r.rects.source_header = header;
+    if open {
+        match &m.state.placement {
+            Some(p) => placement_rows(ui, p),
+            None => theme::kv_row(ui, "Source", "no frame yet", PALETTE.text_faint),
+        }
+    }
+
+    // Performance (T-21): fps and the GPU milliseconds per stage.
+    let (open, header) = theme::section_closed(ui, &fonts, "Performance");
+    r.rects.performance_header = header;
+    if open {
+        theme::kv_row(ui, "Capture", &format!("{:.0} fps", m.state.capture_fps), PALETTE.text);
+        theme::kv_row(ui, "Render", &format!("{:.0} fps", m.state.render_fps), PALETTE.text);
+        match &m.state.timings {
+            Some(t) => {
+                theme::kv_row(ui, "GPU per frame", &format!("{:.3} ms", t.frame_ms), PALETTE.accent);
+                ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+                for st in &t.stages {
+                    let (text, colour) = match st.ms {
+                        Some(ms) if st.bypassed => (format!("bypass  {ms:.3} ms"), PALETTE.text_faint),
+                        Some(ms) => (format!("{ms:.3} ms"), PALETTE.text),
+                        None => ("off".to_string(), PALETTE.text_faint),
+                    };
+                    let share = st.ms.map_or(0.0, |ms| (ms / t.frame_ms.max(1e-9)) as f32);
+                    theme::bar_row(ui, st.name, share, &text, colour);
+                }
+            }
+            None => theme::kv_row(ui, "GPU timings", "none yet", PALETTE.text_faint),
+        }
+    }
+
+    // Further stage panels registered by T-53 (the output panel is drawn under the headroom).
+    for (stage, panel) in PANELS.iter().filter(|(s, _)| *s != "output") {
+        if theme::section_closed(ui, &fonts, &words(stage)).0 {
+            r.params_changed |= panel(ui, m.params);
+        }
+    }
+}
+
+/// The source placement readout as label and value rows.
+fn placement_rows(ui: &Frame, p: &crate::placement::Readout) {
+    use crate::placement::Fit;
+    use crt_model::mask::AxisTier;
+    let tier = |t: AxisTier| match t {
+        AxisTier::Integrated => "integrated".to_string(),
+        AxisTier::Blended { box_px } => format!("blended, box {box_px:.2} px"),
+        AxisTier::Prefiltered => "prefiltered".to_string(),
+    };
+    let text = PALETTE.text;
+    theme::kv_row(ui, "Mode", &p.mode.to_string(), PALETTE.accent);
+    theme::kv_row(ui, "Native", &format!("{} \u{00D7} {}", p.native.0, p.native.1), text);
+    theme::kv_row(ui, "Output", &format!("{} \u{00D7} {}", p.target.0, p.target.1), text);
+    theme::kv_row(
+        ui,
+        "Picture",
+        &format!(
+            "{} \u{00D7} {} at {}, {}",
+            p.picture_px.0, p.picture_px.1, p.offset_px.0, p.offset_px.1
+        ),
+        text,
+    );
+    let scale = format!("{:.4} \u{00D7} {:.4}", p.px_per_source_px.0, p.px_per_source_px.1);
+    theme::kv_row(ui, "Px per source px", &scale, text);
+    theme::kv_row(
+        ui,
+        "Integer aligned",
+        if p.integer_aligned { "yes" } else { "no" },
+        if p.integer_aligned {
+            PALETTE.ok
+        } else {
+            PALETTE.text_muted
+        },
+    );
+    theme::kv_row(ui, "Density", &format!("{:.3} px/mm", p.px_per_mm), text);
+    theme::kv_row(ui, "Scanline pitch", &format!("{:.3} px", p.line_px), text);
+    theme::kv_row(ui, "Triad pitch", &format!("{:.3} px", p.px_per_triad), text);
+    theme::kv_row(ui, "Mask, horizontal", &tier(p.tiers.horizontal), text);
+    theme::kv_row(ui, "Mask, vertical", &tier(p.tiers.vertical), text);
+    let fit = match p.fit {
+        Fit::Fits => None,
+        Fit::Clamped { requested, used } => Some(format!("x{requested} does not fit this output: x{used} used")),
+        Fit::Downscaled => Some("The output is smaller than the native picture: downscaled, not integer".to_string()),
+    };
+    if let Some(f) = fit {
+        ui.spacing();
+        theme::callout(ui, PALETTE.accent, &[f]);
+    }
+}
+
+/// The pinned footer: a rule, the opacity row and the close hint.
+fn footer(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let s = theme::scale_of(ui);
+    theme::rule(ui);
+    ui.dummy([0.0, 2.0 * s]);
+    let width = theme::row_label(ui, "Opacity");
+    let track = width - value_width(ui) - ui.clone_style().item_spacing()[0];
+    theme::slider(ui, "##opacity", &mut m.layout.menu_opacity, 0.2, 1.0, track);
+    r.rects.opacity = rect(ui);
+    ui.same_line();
+    theme::text_right(
+        ui,
+        PALETTE.text,
+        &format!("{:.0} %", m.layout.menu_opacity.clamp(0.0, 1.0) * 100.0),
+    );
+    theme::with_font(ui, None, METRICS.font_small, || {
+        ui.text_colored(PALETTE.text_faint, format!("{} or Esc closes the menu", m.key));
+    });
 }
 
 #[cfg(test)]

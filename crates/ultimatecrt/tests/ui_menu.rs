@@ -54,13 +54,12 @@ struct Rig {
 
 impl Rig {
     fn new(test: &str, w: u32, h: u32) -> Option<Rig> {
+        Self::with_config(test, w, h, UiConfig::headless())
+    }
+
+    fn with_config(test: &str, w: u32, h: u32, config: UiConfig) -> Option<Rig> {
         let gpu = common::gpu_or_skip(test)?;
-        let ui = Ui::new(
-            gpu.context(),
-            Headless::vk_format(TargetFormat::Bgra8Unorm),
-            UiConfig::headless(),
-        )
-        .expect("create the UI");
+        let ui = Ui::new(gpu.context(), Headless::vk_format(TargetFormat::Bgra8Unorm), config).expect("create the UI");
         Some(Rig {
             ui,
             gpu,
@@ -452,4 +451,148 @@ fn ui_can_be_created_and_destroyed_repeatedly() {
         eprintln!("round {round}: created, drawn and destroyed twice");
         rig.finish();
     }
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Preview images of the menu's look (owner request 2026-11-19), for a human to look at.
+
+/// A picture with some structure under the menu: colour bars over a dark-to-light ramp (BGRA).
+fn preview_background(w: u32, h: u32) -> Vec<u8> {
+    const BARS: [[u8; 3]; 8] = [
+        [192, 192, 192],
+        [192, 192, 0],
+        [0, 192, 192],
+        [0, 192, 0],
+        [192, 0, 192],
+        [192, 0, 0],
+        [0, 0, 192],
+        [16, 16, 16],
+    ];
+    let mut v = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = if y < h * 2 / 3 {
+                BARS[(x * 8 / w.max(1)) as usize]
+            } else {
+                let g = (x * 255 / w.max(1)) as u8;
+                [g, g, g]
+            };
+            v.extend_from_slice(&[b, g, r, 255]);
+        }
+    }
+    v
+}
+
+/// What the preview menu shows: a headroom readout above 1, a placement, per-stage timings.
+fn preview_state() -> UiState {
+    use ultimatecrt::gpu::{FrameTimings, StageTiming};
+    let params = Params::default();
+    let stage = |name, ms: Option<f64>, bypassed| StageTiming { name, ms, bypassed };
+    UiState {
+        params,
+        preset: Library::embedded().list().first().map(|p| p.id.clone()),
+        headroom: Some(crt_model::output::Headroom {
+            mask_peak: 1.842,
+            mask_peak_physical: 1.842,
+            scanline_peak: 1.318,
+            matrix_max: 1.036,
+            exposure: 1.0,
+        }),
+        placement: Some(ultimatecrt::placement::readout(&params, (320, 240), (1280, 720), true)),
+        timings: Some(FrameTimings {
+            frames: 60,
+            frame_ms: 4.94,
+            stages: vec![
+                stage("upload", Some(0.031), false),
+                stage("decode", Some(0.042), false),
+                stage("amp", Some(0.462), false),
+                stage("gun", Some(0.101), false),
+                stage("abl", Some(0.611), false),
+                stage("screen", Some(2.418), false),
+                stage("phosphor", Some(0.982), false),
+                stage("optics", Some(0.012), true),
+                stage("encode", Some(0.701), false),
+                stage("ui", None, false),
+            ],
+        }),
+        capture_fps: 59.94,
+        render_fps: 60.0,
+    }
+}
+
+/// Writes `img` (RGBA, display codes) to `target/ui-preview/<name>.png` in the workspace.
+fn write_png(img: &ImageF32, name: &str) -> std::path::PathBuf {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/ui-preview");
+    std::fs::create_dir_all(&dir).expect("create target/ui-preview");
+    let path = dir.join(format!("{name}.png"));
+    let file = std::io::BufWriter::new(std::fs::File::create(&path).expect("create the PNG"));
+    let mut enc = png::Encoder::new(file, img.width, img.height);
+    enc.set_color(png::ColorType::Rgb);
+    enc.set_depth(png::BitDepth::Eight);
+    let mut w = enc.write_header().expect("PNG header");
+    let data: Vec<u8> = img
+        .rgba
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .flat_map(|p| [p[0], p[1], p[2]].map(|c| (c.clamp(0.0, 1.0) * 255.0).round() as u8))
+        .collect();
+    w.write_image_data(&data).expect("PNG data");
+    path.canonicalize().unwrap_or(path)
+}
+
+/// One preview: the menu (and the overlay) at `w` x `h` and UI scale `scale`; `expand` opens the sections
+/// closed by default; `combo` opens the preset list.
+fn preview(name: &str, w: u32, h: u32, scale: f32, expand: bool, combo: bool) {
+    let config = UiConfig {
+        hotkey_problems: vec!["F10 is registered by another program: the menu uses Ctrl+Alt+F10 instead.".to_string()],
+        menu_key: "Ctrl+Alt+F10".to_string(),
+        layout: ultimatecrt::settings::UiState {
+            menu_h: if expand { 1240.0 / scale.max(1.0) } else { 560.0 },
+            ..ultimatecrt::settings::UiState::default()
+        },
+        ..UiConfig::headless()
+    };
+    let Some(mut rig) = Rig::with_config(name, w, h, config) else {
+        return;
+    };
+    rig.bg = preview_background(w, h);
+    rig.state = preview_state();
+    rig.ui.set_ui_scale(scale);
+    rig.ui.request_toggle();
+    rig.ui.toggle_overlay();
+    for _ in 0..3 {
+        rig.frame(&[]);
+    }
+    if expand {
+        rig.click(MenuRects::at(rig.ui.menu_rects().source_header, 0.5, 0.5));
+        rig.frame(&[]);
+        rig.click(MenuRects::at(rig.ui.menu_rects().performance_header, 0.5, 0.5));
+    }
+    if combo {
+        rig.click(MenuRects::at(rig.ui.menu_rects().preset, 0.5, 0.5));
+    }
+    // Hover nothing; settle the auto-sized overlay.
+    rig.frame(&[(WM_MOUSEMOVE, 0, mouse_lparam(i16::MAX, i16::MAX))]);
+    rig.frame(&[]);
+    let img = rig.frame(&[]);
+    let r = rig.ui.menu_rects();
+    assert!(
+        r.window[1][0] <= w as f32 + 0.5 && r.window[1][1] <= h as f32 + 0.5,
+        "{name}: the menu {:?} leaves the {w}x{h} output",
+        r.window
+    );
+    let path = write_png(&img, name);
+    eprintln!("{name}: menu {:?}, preview {}", r.window, path.display());
+    rig.finish();
+}
+
+#[test]
+fn menu_preview_images() {
+    let _g = lock();
+    preview("menu-1280x720-100", 1280, 720, 1.0, false, false);
+    preview("menu-1280x720-100-presets", 1280, 720, 1.0, false, true);
+    preview("menu-1280x720-150", 1280, 720, 1.5, false, false);
+    preview("menu-2560x1440-200", 2560, 1440, 2.0, false, false);
+    preview("menu-2560x1440-100-expanded", 2560, 1440, 1.0, true, false);
 }
