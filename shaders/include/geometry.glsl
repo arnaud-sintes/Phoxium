@@ -138,6 +138,47 @@ vec2 geometry_raster_px(vec2 p, float scale) {
     return c + s * ppm;
 }
 
+// Forward map (T-91): the host position (tube image px) where the raster point r (tube image px: raster px from
+// the raster's top-left plus raster_margin) lands and is seen, the inverse of geometry_raster_px, step by step
+// in the opposite order: size, pincushion s (1 + k |s|^2 / rc^2), trapezoid x (1 + t y / half height), rotation
+// by +angle, then the curvature (arc s at angle phi = |s| / R on the surface: lateral R sin(phi), depth
+// R (1 - cos(phi)), seen at lateral x eye / (eye + depth), or the lateral itself with the eye at infinity;
+// cylindrical: along x only, y kept on the surface and scaled by the same perspective). Used where a raster
+// point needs its landing position (the convergence of a line-image entry, beam_warp.glsl); f32, not used for
+// any position the tests measure.
+vec2 geometry_seen_px(vec2 r, float scale) {
+    float ppm = frame.px_per_mm;
+    vec2 c = 0.5 * vec2(frame.tube_size);
+    vec2 half_mm = 0.5 * vec2(geometry_raster_size()) / ppm;
+    vec2 s = (r - c) / ppm;
+    s *= vec2(1.0 + params.geometry_overscan_x, 1.0 + params.geometry_overscan_y) * scale;
+    float k = params.geometry_pincushion;
+    if (k != 0.0) {
+        s *= 1.0 + k * dot(s, s) / dot(half_mm, half_mm);
+    }
+    s.x *= 1.0 + params.geometry_trapezoid * s.y / half_mm.y;
+    float ang = params.geometry_rotation_deg * GEOMETRY_DEG;
+    if (ang != 0.0) {
+        float co = cos(ang);
+        float si = sin(ang);
+        s = vec2(co * s.x - si * s.y, si * s.x + co * s.y);
+    }
+    float rr = params.geometry_radius_mm;
+    if (params.geometry_curvature != GEOMETRY_CURVATURE_FLAT && rr > 0.0) {
+        float d = params.geometry_eye_distance_mm;
+        bool cyl = params.geometry_curvature == GEOMETRY_CURVATURE_CYLINDRICAL;
+        float rho = cyl ? abs(s.x) : length(s);
+        if (rho > 0.0) {
+            float phi = rho / rr;
+            float z = rr * (1.0 - cos(phi));
+            float lat = rr * sin(phi) / rho; // lateral per unit arc
+            float persp = d > 0.0 ? d / (d + z) : 1.0;
+            s = cyl ? vec2(s.x * lat, s.y) * persp : s * (lat * persp);
+        }
+    }
+    return c + s * ppm;
+}
+
 // HOOK (beam_eval): origin of the footprint of host pixel q (tube image) in the beam raster (host px from the
 // raster's top-left). q - raster_margin exactly when the geometry is the identity or the tube is not placed.
 vec2 geometry_footprint(ivec2 q) {
@@ -168,8 +209,9 @@ vec2 geometry_inv_magnification() {
 // True when the host -> raster mapping is separable per axis (uniform over the dispatch, parameters only): flat
 // faceplate, no rotation, trapezoid or pincushion. Overscan, raster_scale and the margin are then per-axis affine
 // maps (the raster x of a host pixel depends on its host x only, its raster y on its host y only, both
-// increasing), so the separable standard-quality beam (beam.glsl, T-36c) stays exact; any other geometry makes the
-// beam fall back to the per-pixel reference form. The radial convergence term is not checked: it is not part of
+// increasing), so the separable standard-quality beam (beam.glsl, T-36c) stays exact; any other geometry takes the
+// two-pass warp path of the standard quality (T-91, beam_warp.glsl, decided on the CPU by
+// src/gpu/stages/screen.rs, which mirrors this test). The radial convergence term is not checked: it is not part of
 // the host -> raster map but an offset the standard path takes at the column and line centre instead of at the
 // pixel (beam.glsl); its gradient is at most rad (0.48 / rc) px per px (rad in px, rc the half diagonal in px; 2 mm
 // on a 19 in tube at 1440 lines: 0.004 px per px), an error well inside the T-48 contract.

@@ -30,6 +30,7 @@ pub use headless::{StageInput, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
 pub use present::Presenter;
 pub use stages::encode::{output_matrix, ClipCounts};
+pub use stages::screen::{warp_plan, WarpPlan, WARP_SIGMA_STEPS};
 pub use stages::{Domain, AMP_K};
 
 use pipeline::{Pipeline, Target};

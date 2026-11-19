@@ -1,0 +1,36 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `screen`, warp path, pass 2 of 2 (T-91, include/beam_warp.glsl): per host pixel of the tube image, the beam
+// from the line images through the geometry (beam_warp_eval), times the mask in tube coordinates (mask_eval, the
+// glass: not warped) and the visible opening, as screen.comp.
+
+#include "params.glsl"
+#include "common.glsl"
+layout(push_constant) uniform ScreenPush {
+    uint abl_runs;
+    uint ox;
+    int pad;
+} screen_push;
+#define GEOMETRY_ABL_RUNS (screen_push.abl_runs != 0u)
+#define ABL_STATE_QUALIFIER readonly
+#define BEAM_NO_TILE
+#include "abl.glsl"
+#include "geometry.glsl"
+#include "beam.glsl"
+#include "beam_warp.glsl"
+#include "mask.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(q, frame.tube_size))) {
+        return;
+    }
+    vec3 l = mask_eval(q) * beam_warp_eval(q);
+    l *= geometry_opening_coverage(q);
+    imageStore(light_out, q, round_f16(vec4(l, 1.0)));
+}
