@@ -303,6 +303,12 @@ impl LostWatch {
         self.fullscreen
     }
 
+    /// The user switched the output between fullscreen and a window (F11, T-57): only a fullscreen output
+    /// drops to a window when the source stays lost.
+    pub fn set_fullscreen(&mut self, fullscreen: bool) {
+        self.fullscreen = fullscreen;
+    }
+
     /// Called every loop iteration with `attached` from [`Reattacher::is_attached`]. The first call
     /// with `attached == false` starts the lost period: reminder at once, then every
     /// [`LOST_REMIND_S`]; a fullscreen output drops to a window after `wait_s` (never back to
@@ -1125,6 +1131,16 @@ mod tests {
         assert_eq!(w.update(130.5, false), LostAction::None);
         assert_eq!(w.update(140.0, false), LostAction::Remind);
         assert_eq!(w.update(1000.0, false), LostAction::Remind);
+    }
+
+    #[test]
+    fn a_user_switch_to_a_window_cancels_the_drop_and_back_to_fullscreen_re_arms_it() {
+        let mut w = LostWatch::new(LostPolicy::default(), true);
+        assert_eq!(w.update(100.0, false), LostAction::Remind);
+        w.set_fullscreen(false); // F11 to a window
+        assert_eq!(w.update(200.0, false), LostAction::Remind, "no drop for a window");
+        w.set_fullscreen(true); // F11 back, the source is still lost for longer than the wait
+        assert_eq!(w.update(210.0, false), LostAction::GoWindowed);
     }
 
     #[test]

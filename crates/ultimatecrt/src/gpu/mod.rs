@@ -210,6 +210,16 @@ impl Renderer {
         self.pipeline.as_ref().and_then(Pipeline::headroom)
     }
 
+    /// Names of the chain slots, in order (`signal`, `amp`, `gun`, `screen`, `phosphor`, `optics`; T-54 bypass).
+    pub fn stage_names(&self) -> Vec<&'static str> {
+        self.pipeline.as_ref().map(Pipeline::stage_names).unwrap_or_default()
+    }
+
+    /// The enable flag of the chain slot `name`, `None` for an unknown name.
+    pub fn stage_enabled(&self, name: &str) -> Option<bool> {
+        self.pipeline.as_ref().and_then(|p| p.is_enabled(name))
+    }
+
     /// Turns the chain slot `name` on or off (off: bypassed, exact identity; A11 enable flags).
     pub fn set_stage_enabled(&mut self, name: &str, on: bool) -> Res<()> {
         self.pipeline

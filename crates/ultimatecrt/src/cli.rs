@@ -58,7 +58,10 @@ Usage: ultimatecrt [options]
   --help               print this text
 
 Quit: Ctrl+Alt+Q (the output cannot take keyboard focus in fullscreen), or Esc in an activating
-windowed output.";
+windowed output.
+Hotkeys (global, configurable in settings.toml [global.hotkeys]): F11 fullscreen or framed window, F10
+settings menu, Ctrl+Alt+O overlay, Ctrl+Alt+B A/B bypass of the CRT chain, Ctrl+Alt+PageDown and
+Ctrl+Alt+PageUp next and previous preset. A chord another program owns falls back and is reported.";
 
 #[derive(Default)]
 pub struct Args {
