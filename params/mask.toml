@@ -77,8 +77,8 @@ unit = "1"
 default = 0
 min = 0
 max = 3
-tag = "S"
-source = "CRT.md Aperture grille geometry: one damper wire about 2/3 of the way down on tubes of 15 in and below, two at 1/3 and 2/3 on larger monitors, three above 21 in (Goldwasser; positions of three wires not sourced, taken at 1/4, 1/2, 3/4 as crt-model damper_positions_mm). Default 0 until the presets (T-50) set it per tube (a 20 in PVM has 2)"
+tag = "E"
+source = "CRT.md Aperture grille geometry: one damper wire about 2/3 of the way down on tubes of 15 in and below, two at 1/3 and 2/3 on larger monitors, three above 21 in (Goldwasser; positions of three wires not sourced, taken at 1/4, 1/2, 3/4 as crt-model damper_positions_mm). Default 0 until the presets (T-50) set it per tube (a 20 in PVM has 2) [T-87: was S; CRT.md gives wires per tube-size class, not a published count behind a default of 0 (no wires)]"
 description = "Number of damper wires of an aperture grille (0 = none). Their shadows are dark horizontal lines at fixed fractions of the visible height: 1 wire at 2/3, 2 wires at 1/3 and 2/3, n wires at k / (n + 1)."
 group = "Mask"
 
@@ -90,8 +90,8 @@ unit = "mm"
 default = 0.02
 min = 0.01
 max = 0.03
-tag = "S"
-source = "CRT.md Aperture grille geometry: damper wires are tungsten, 10 to 30 micrometres in diameter (15 to 30 in another Sony patent)"
+tag = "D"
+source = "CRT.md Aperture grille geometry: damper wires are tungsten, 10 to 30 micrometres in diameter (15 to 30 in another Sony patent) [T-87: was S; the default 0.02 mm is the midpoint of the sourced 10 to 30 um range]"
 description = "Width of the shadow of a damper wire, between the half-value points of its edges. A host pixel row crossed by the whole shadow is dimmed by width / row height."
 group = "Mask"
 
@@ -128,8 +128,8 @@ unit = "px"
 default = 0.4
 min = 0.0
 max = 1.0
-tag = "D"
-source = "PLAN D-15, T-39c (review of T-39a: the mask snapped from flat to saturated RGB columns at 3.0 px per triad); crt-model mask.rs axis_tier"
+tag = "E"
+source = "[T-87: was D; the blend width 0.4 is a design choice from the T-39c review, not a derivation] PLAN D-15, T-39c (review of T-39a: the mask snapped from flat to saturated RGB columns at 3.0 px per triad); crt-model mask.rs axis_tier"
 description = "Width of the blend band of mask_tier = auto, in host px per triad, centred on the 3 px per triad limit (0.4: 2.8 to 3.2). Inside it the horizontal prefilter box narrows linearly from one triad (lower edge) to one host pixel (upper edge), so the mask fades in instead of snapping; the vertical limit (2 px) has a band of the same relative width (blend x 2 / 3 px). 0 = hard switch at the limits."
 group = "Mask"
 [[param]]
