@@ -286,6 +286,7 @@ Spike overview (details in each task):
 - **Model:** Sonnet high, small DXGI FFI that is well documented. **Review:** Opus medium. **Owner:** yes (run and settings check).
 
 ### T-04 SP-1b: shared-handle handoff and its cost
+- **Status (2026-11-19, D-20): deferred, optional performance setting. Not run, not cancelled.** The owner keeps the simple CPU copy as the universal path and wants the zero-copy path studied later as an extra performance option. Run it after the features work, when quality and performance settings are on the table.
 - **M0, W1, L.** Settles CAP-2, part of TEC-2. Deps: T-02 (uses T-03 results if available).
 - **Question:** can the WGC D3D11 texture reach Vulkan without a CPU round trip, reliably, and how much does it save at the real capture sizes?
 - **Do (branch `spike/T-04`, not merged):** copy the client area into a D3D11 texture created with `D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX` (or with a shared `ID3D11Fence`), import it with `VK_KHR_external_memory_win32` (handle type D3D11 texture) and synchronise with `VK_KHR_win32_keyed_mutex` or an imported fence as a timeline semaphore. Measure against the CPU path: callback CPU time, GPU time, capture-to-submit latency (QPC) at 768x720, 1920x1080 and 2560x1440 sources (`pixel-demo --res` and scale), on the same adapter and, if T-03 shows it, across adapters. Extension availability on both GPUs is unverified until this spike.
@@ -365,6 +366,7 @@ Spike overview (details in each task):
 - **Model:** Sonnet low. **Review:** none. **Owner:** yes (display settings toggles).
 
 ### T-13 M0 decision gate
+- **Status (2026-11-19): decided, recorded in D-19 to D-26 and in QUESTIONS "Decision gate, Owner decisions".** One item stays open and non-blocking: the owner's judgement of the early-look renders (D-26).
 - **M0, W3, S.** Records TEC-1, TEC-2, CAP-2, HW-3, OUT-2, TEC-5, TEC-3, TEC-7. Deps: T-03, T-04, T-06, T-07, T-08, T-09, T-10, T-11, T-12, T-16, T-59. It gates only T-15, T-26 and T-52a: T-20a and T-20b run before it, at risk.
 - **Do:** consolidate the spike results; decide: keep Rust + Vulkan + GLSL or move capture/present to D3D12 (would rewrite T-20 onward); CPU copy or shared handle (enable or cancel T-26); ImGui crate set; render adapter; one-screen go/no-go; whether the early-look renders (T-16) justify the plan as is. Update ARCHITECTURE A3, A4, A17 statuses, QUESTIONS "Decisions recorded", the `CLAUDE.md` status and next step, and this plan (tasks cancelled or added).
 - **Files:** ARCHITECTURE 4, QUESTIONS, `PLAN.md`.
@@ -445,6 +447,7 @@ Spike overview (details in each task):
 - **Model:** Sonnet medium. **Review:** none. **Owner:** no.
 
 ### T-26 Shared-handle capture path (conditional on T-13)
+- **Status (2026-11-19, D-20): deferred optional performance setting.** Not cancelled and not scheduled: it follows the T-04 study. The default stays the CPU copy; `--handoff shared` (and a matching setting) would be opt-in.
 - **M1, W4, M.** Implements CAP-2 decision. Deps: T-13 (adopted), T-20a.
 - **Do:** productionise the T-04 path behind `--handoff auto|cpu|shared` (auto = shared on the same adapter when supported, else CPU). The detector needs CPU pixels: read back every Nth frame until the divisor locks.
 - **Files:** `src/capture.rs`, `src/gpu/upload.rs`, `src/cli.rs`, `crates/ultimatecrt/Cargo.toml`, ARCHITECTURE A3.
@@ -799,6 +802,12 @@ Findings of the independent physics audit, turned into tasks. Ids T-84 to T-90 a
 - **T-95 pixel-demo as a universal test source (D-13).** True 1:1 pixel display of the native image, integer upscale x1 to x10, auto-fit scaling (largest integer that fits, and a non-integer fit mode with nearest and bilinear filtering to emulate smoothed sources), centering inside the window with black rectangles around the game zone, borderless/fullscreen window modes, window resize handling and DPI changes (fix `WM_DPICHANGED`), selectable native sizes and aspect ratios (256x240, 320x240, 640x480, 1920x1080 sources), a selectable test card/animation (moving bars, ramp, checker) at a configurable update rate (30/50/60/75/120 Hz) and an optional frame counter. All options on the command line and via keys. Sonnet medium.
 - **T-96 Source adjustment settings in the application (D-13, D-18).** Settings (parameters, stored in profiles) for how the captured source is mapped to the tube: scale mode (1:1 pixel, integer scale xN with N auto or manual 2..10, auto-fit to the output, free fit), centering with black surround, crop (manual rectangle) and divisor (manual or automatic detection) as already exist in the CLI, pixel aspect ratio, and the automatic/manual choice per option; defaults adaptive to the actual host monitor (no hard-coded resolution); readouts of the resulting px per triad. Opus high.
 
+- **Backlog after the decision gate (2026-11-19).**
+  - Modern custom look of the settings menu: **done** (`ui/theme.rs`, Inter font; D-25).
+  - GPU choice as a setting: **done** (`[global.gpu] adapter`, default `auto` = adapter of the covered monitor; D-21); live check on the hybrid laptop still to do.
+  - Menu content: the generated parameter panels, presets list and readouts of the settings menu (T-53) are the next feature work; features before optimisation (D-23).
+  - Pixel-demo coverage: the demo source (T-95) and the source adjustment settings (T-96) are the way to cover more real-game cases until the owner tests real games once a stable version exists (D-13).
+
 Not modelled and ranked by visual impact (audit): optics (T-45: glare, halation, glass tint, vignette), SDR headroom (T-84), corner defocus, spot halo (tail weight default 0), amplifier slew nonlinearity, composite, interlace.
 
 ## 9. Quality gates (every task, before merge)
@@ -831,7 +840,7 @@ Rows marked **Decided** are settled (2026-11-18) and the plan above already refl
 | D-4 | Host EOTF: pure 2.2 (COL-3 default) or piecewise sRGB? | Pure 2.2 |
 | D-5 | First usable version with all 3 mask types, or a smaller cut? | **Decided:** all 3 mask types in the first version (T-39a on the critical path, T-39b off it). |
 | D-6 | Halation in the first usable version? (PRJ-6 default: no.) | No, M4 |
-| D-7 | One screen: how is the menu used? | **Decided:** no separate control window. F11 toggles fullscreen and a resizable windowed output; F12 opens and closes the ImGui settings menu inside the output window, which takes the focus while open and gives it back to the source on close. |
+| D-7 | One screen: how is the menu used? | **Decided:** no separate control window. F11 toggles fullscreen and a resizable windowed output; F12 (default changed to F10, D-17, D-25) opens and closes the ImGui settings menu inside the output window, which takes the focus while open and gives it back to the source on close. |
 | D-8 | Output click-through by default (OUT-4 default) or not? | Off by default; toggle (clicks on a covering output otherwise land at wrong positions once curvature exists) |
 | D-9 | If no Dear ImGui binding works with raw Win32 and ash, may a non-ImGui toolkit be used (A17)? | No; own renderer over `dear-imgui-sys` first |
 | D-10 | Code signing if T-11 shows detections? | No signing; document the warning |
@@ -843,6 +852,25 @@ Rows marked **Decided** are settled (2026-11-18) and the plan above already refl
 | D-16 | SDR headroom (audit B1, M1): the mask and the scanline peaks exceed the frame mean (a lit stripe reads 3 to 4 x the mean at resolved densities, scanline peaks 1.35 x at 0.8 mm FWHM), and SDR hard-clips anything above 1, so full white loses 12 to 60 % and shows bands or a tint on presets 03, 05, 06, 08 and 12 % on the default. Options: (A) physical: exposure = 1/peak for resolved tiers (honest, dimmer picture), (B) a soft shoulder (output_knee below 1) by default, labelled non-physical, keeps brightness and rolls peaks off, (C) a user 'mask depth' limit (non-physical) that lowers peak/mean. | Hybrid: A as the readout (headroom shown), B default shoulder knee about 0.6 so no hard clip, exposure per preset documented; the user may switch to A or C **Decided 2026-11-19: all three options A, B and C are SETTINGS: a headroom mode (`output_headroom_mode`: physical exposure, soft shoulder, mask depth) with per-mode parameters (T-84).** |
 | D-17 | Default key of the F12-style settings menu (F12 is registered system-wide by another program on the dev machine, RegisterHotKey error 1409). | **Decided 2026-11-19: F10** (configurable; F12 and Ctrl+Alt+F12 selectable; a visible message when registration fails). |
 | D-18 | Target monitor: the software must be ADAPTIVE to any host monitor and resolution (the owner works with different monitors at different places); there is no single real target. | **Decided 2026-11-19:** no tuning to one resolution; sizes and tiers derive from the actual host; the test matrix covers several host sizes (1280x720 to 3840x2160 and ultrawide/portrait). |
+| D-19 | Stack: keep Rust, Vulkan (`ash`) and GLSL, or move capture and presentation to Direct3D 12? (gate answer, TEC-1, TEC-2) | **Decided 2026-11-19:** keep Rust + Vulkan + GLSL, the "winner combo" (ARCHITECTURE A1, A4, A5). No spike result called for Direct3D 12. |
+| D-20 | Capture path: simple CPU copy or the zero-copy shared handle? (gate answer, CAP-2) | **Decided 2026-11-19:** the CPU copy stays, because it is the most universal. The zero-copy path is not dropped: it is a later optional performance setting ("study later as an extra performance option, don't forget it"; see T-04, T-26 and "Not forgotten" below). Known so far: both Vulkan devices report Direct3D 11 texture import (extension queries only, untested), and the monitors are split across the RTX and the Intel iGPU. |
+| D-21 | Which GPU runs the whole chain? (HW-3) | **Decided 2026-11-19:** a setting, `[global.gpu] adapter`, default `auto` = the adapter of the monitor the output covers. Done (see the backlog lines in 8b). |
+| D-22 | One screen go/no-go (OUT-1, CAP-4) | **Decided 2026-11-19:** conditional GO. A single screen must work, at least when the third-party game is not in exclusive fullscreen; if it fails on a real game, it is debugged then (D-1 stays the last resort). |
+| D-23 | Is 60 fps at the 4.2 ms budget a hard requirement? (PRF-1) | **Decided 2026-11-19:** no. 60 fps is a target, the 4.2 ms budget is a goal and not a gate. Features come first; optimise after they work; offer quality and performance settings (T-48). |
+| D-24 | First-version scope (PRJ-6) | **Decided 2026-11-19:** all three mask types in (D-5 confirmed), halation off in the first usable version (D-6 confirmed), persistence, saturation and automatic beam limiting off by default. |
+| D-25 | Menu and hotkeys (D-7, D-17 confirmed) | **Decided 2026-11-19:** the menu is Dear ImGui, takes the focus while open (accepted), default key F10; the owner wants a modern custom look (done). F11 (fullscreen) is a default binding and can be reassigned; the quit chord stays fixed. |
+| D-26 | Early-look renders: is the physical render visibly better than scanlines only? (T-16, SCP-7) | **Open, non-blocking.** Plain words: look at `tv26_grille_2p9_montage.png` at 100 %; is the difference between the physical render (left) and the scanlines-only render (right) worth the project? The owner did not understand the question on 2026-11-19; it stays listed until answered. |
+
+### Not forgotten
+
+Work that is postponed on purpose, not dropped. Each item comes back after the features work.
+
+- **Zero-copy capture** (shared handle between the capture texture and Vulkan): a later optional performance setting, studied through T-04 and built through T-26 (D-20).
+- **Quality tiers** (quality and performance settings, automatic drop on sustained overrun): T-48, with the speed work T-91 to T-93. 60 fps is a target (D-23).
+- **Optics** (halation, glare, glass tint, vignette): off in the first usable version, built in M4 (T-45; D-24).
+- **Optional modules** (composite video, interlace, ageing, burn-in): off by default, after the first usable version (T-31, T-32, T-42, T-43).
+- **Mina the Hollower acceptance** on the owner's other machine: the final real-game test (T-83; D-2, D-22).
+- **Early-look judgement** (D-26): the owner's look at the renders, still open.
 
 ### Proposals (not part of the plan until the owner agrees)
 

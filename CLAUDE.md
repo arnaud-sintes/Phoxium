@@ -11,8 +11,10 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 - Runs externally to the captured game or software: no injection, no modification of the target application.
 - Captures the content of a chosen window (generally 1:1 pixel-art content).
 - Transforms it on the GPU and presents the result in a second window, which can be put fullscreen.
-- Presenting or interacting with the output window must not steal focus from the captured application. One deliberate exception: the ImGui settings menu (F10 by default, configurable, inside the output window; F12 is held by another program on the dev machine, D-17) takes the focus while it is open and returns it to the source on close. F11 (default, configurable) toggles fullscreen and a resizable windowed output.
-- Must work with a single screen: the fullscreen output covers the captured window on the same monitor.
+- Presenting or interacting with the output window must not steal focus from the captured application. One deliberate exception: the ImGui settings menu (F10 by default, reassignable, inside the output window; F12 is held by another program on the dev machine) takes the focus while it is open (accepted by the owner) and returns it to the source on close. F11 (a default binding, reassignable) toggles fullscreen and a resizable windowed output. The quit chord is fixed.
+- Capture uses a simple CPU copy, the most universal path (decided 2026-11-19). A zero-copy path (shared handle) is a later optional performance setting.
+- Which GPU runs the whole chain is a setting (`[global.gpu] adapter`), default `auto` = the adapter of the monitor the output covers.
+- Must work with a single screen: the fullscreen output covers the captured window on the same monitor, at least when the captured game is not in exclusive fullscreen (conditional GO, 2026-11-19; to be debugged on a real game if it fails).
 - Input resolution and colour count are arbitrary (the model works on the captured RGB frame).
 - Output is SDR only. HDR output and HDR colour are out of scope for now.
 - Target hardware: NVIDIA GPU (dev machine: hybrid laptop with Intel UHD plus RTX A2000 Laptop, two Dell P2418D 2560×1440 SDR monitors), Windows 11.
@@ -23,9 +25,9 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 - All CRT parameters are tunable live through a menu built with ImGui.
 
 ### Performance
-- As fast as possible, so fully GPU-based.
+- As fast as possible, so fully GPU-based. 60 fps is a target, not a hard requirement: features come first, optimisation after they work, with quality and performance settings. The 4.2 ms frame-share budget is a goal, not a gate.
 - Internal computation in linear light with floating point (FP16, FP32 where needed), output SDR.
-- Proposed stack (the author's own guess, not a hard constraint; counter-proposals welcome, to be confirmed by spikes SP-1, SP-2):
+- Stack, decided 2026-11-19 after the spikes (the owner's "winner combo"):
   - Graphics API: Vulkan.
   - Shaders: GLSL.
   - Core application: Rust.
@@ -80,4 +82,5 @@ Cargo workspace, Windows only. Private GitHub repository `arnaud-sintes/ultimate
 Study phase done (2026-11-18); `CRT.md` (physics knowledge base) and `QUESTIONS.md` (open questions, decisions, spikes) are written.
 What exists (see `ARCHITECTURE.md` for the detail): window capture with source scaling and target lifecycle, test patterns and image sources, the full physical chain on the GPU with analytic tests against the `crt-model` oracle (source decode, video amplifier, gun law and white balance, automatic beam limiting, beam with spot growth, geometry and convergence, aperture grille, slot mask and delta dot mask, phosphor saturation and persistence, output transform), 10 tube presets, a settings file, the offline `render` command, diagnostics (`--log`, GPU timestamps with `--stats`), the check and capture-fidelity scripts, and in code (headless and unit tested, not yet validated live): the ImGui settings menu (F10) with its focus hand-off and the read-only stats overlay (Ctrl+Alt+O), the global hotkeys (configurable, with fallbacks; F11 fullscreen and windowed, presets, A/B bypass, Ctrl+Alt+Q quit) and the output modes (fullscreen and framed window, remembered rectangle).
 What does not exist yet: the generated parameter panels of the menu (T-53), the optics stage (halation, glare), the optional modules (composite, interlace, ageing, burn-in), the click-through option, any live validation of the menu, the hotkeys and the output modes (`scripts/check-menu.ps1`, `scripts/check-hotkeys.ps1` not yet run), and any live validation of the chain on a real game (SP-1, SP-2 are only partly answered, see `QUESTIONS.md`).
-Next step: the live spikes T-03, T-06, T-07, T-08, then the T-13 decision gate, then T-52a (ImGui integration).
+Decision gate done (2026-11-19): stack kept (Rust, Vulkan, GLSL), CPU-copy capture kept, zero-copy capture deferred as an optional performance setting, GPU choice is a setting, one screen is a conditional GO, 60 fps is a target, first-version scope confirmed (see `QUESTIONS.md`, "Decision gate", and `PLAN.md`, D-19 to D-26). Open and non-blocking: the owner's judgement of the early-look renders.
+Next step: the menu content (parameter panels), then the live checks of the menu, hotkeys and output modes on the dev machine, then the optics stage; the owner tests real games once a stable version exists.
