@@ -301,8 +301,9 @@ fn tube_rectangle_and_black_surround_in_the_output() {
 /// right (none vertically: the raster fills the target height), m = ceil(4 sigma_max px_per_mm) with sigma_max
 /// the spot sigma (mm) at twice the peak current (`BEAM_REACH_CURRENT`), from the crt-model spot growth law
 /// (oracle, independent of `with_skirt_margin`; default parameters: no tail, no misconvergence). The output's
-/// tube rectangle is the grown one: the spot's skirt lights the column just left of the raster (319) and
-/// just right of it (2240) on a scanline, and the black surround starts m px further out.
+/// tube rectangle is the grown one, and the black surround starts m px further out. Since the T-37 review
+/// (F1) the margin lies outside the visible opening (the raster at zero overscan): the columns just left of
+/// the raster (319) and just right of it (2240) are exactly 0, the raster's edge columns are lit.
 #[test]
 fn skirt_margin_in_the_output_when_the_beam_runs() {
     let test = "stage_source skirt margin";
@@ -344,7 +345,13 @@ fn skirt_margin_in_the_output_when_the_beam_runs() {
         (1920 + 2 * m, 1440),
         "tube image grown by the margin"
     );
-    assert!(any(&r, 319) && any(&r, 2240), "skirt drawn past the raster's ends");
+    // T-37 review F1: the margin is evaluated but lies outside the visible opening (the raster at zero
+    // overscan), so the skirt past the raster's ends is clipped to exactly 0; the raster's own edge is lit.
+    assert!(
+        black(&r, 319) && black(&r, 2240),
+        "skirt clipped by the visible opening"
+    );
+    assert!(any(&r, 320) && any(&r, 2239), "raster edge lit");
     assert!(
         black(&r, 320 - m - 1) && black(&r, 2240 + m),
         "black surround past the margin"

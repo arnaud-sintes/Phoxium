@@ -104,7 +104,19 @@ pub fn sphere_seen_mm(r_mm: f64, s: (f64, f64), eye_mm: f64) -> (f64, f64) {
 /// Seen position of the raster point `s` on a cylindrical faceplate (horizontal radius `r_mm`, flat
 /// vertically) seen from infinity: x maps through [`projected_from_arc_mm`], y is unchanged. [D]
 pub fn cylinder_seen_mm(r_mm: f64, s: (f64, f64)) -> (f64, f64) {
-    (projected_from_arc_mm(r_mm, s.0, 0.0), s.1)
+    cylinder_seen_eye_mm(r_mm, s, 0.0)
+}
+
+/// Seen position of the raster point `s` on a cylindrical faceplate (horizontal radius `r_mm`, vertical
+/// axis) from an eye on the axis at `eye_mm` in front of the centre (0: at infinity). The surface point is at
+/// lateral R sin(phi), height s.1, depth R (1 - cos(phi)) (phi = s.0 / R); the central projection on the
+/// tangent plane scales both coordinates by eye / (eye + depth), which depends on s.0 only, so a vertical
+/// raster line is seen as a vertical line. [D]
+pub fn cylinder_seen_eye_mm(r_mm: f64, s: (f64, f64), eye_mm: f64) -> (f64, f64) {
+    let phi = s.0 / r_mm;
+    let depth = r_mm * (1.0 - phi.cos());
+    let k = if eye_mm > 0.0 { eye_mm / (eye_mm + depth) } else { 1.0 };
+    (projected_from_arc_mm(r_mm, s.0, eye_mm), s.1 * k)
 }
 
 /// Misconvergence of one beam at the picture position `u` (mm from the centre) of a picture of half size

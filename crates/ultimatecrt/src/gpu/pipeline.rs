@@ -1107,9 +1107,15 @@ impl Pipeline {
             ..
         } = planned?;
         // Stage-owned resources (history images, T-41), once the routing of the frame is known.
+        let mut abl_runs = false;
         for i in 0..self.chain.len() {
             let runs = have_source && self.plan.iter().any(|&(j, m, _)| j == i && m == Mode::Run);
             self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
+            abl_runs |= runs && self.chain[i].stage.abl_state().is_some();
+        }
+        // T-37: `screen` reads `raster_scale` from the ABL state only when `abl` updates it in this frame.
+        for l in &self.chain {
+            l.stage.set_abl_runs(abl_runs);
         }
         self.record_commands(
             ctx,

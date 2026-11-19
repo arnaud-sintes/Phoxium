@@ -12,7 +12,12 @@
 //! once every stage is created ([`Stage::link_abl_state`]). No copy, no extra pass, no CPU readback; the
 //! `abl` stage ends its recording with a barrier from its reduce write to later compute reads. Until linked
 //! (a chain without `abl`), set 1 points at a small buffer of this stage that is never read in a meaningful
-//! way: the shader reads the state only when `abl_breathing` is not 0, and ignores a scale outside [0.5, 2].
+//! way: the shader reads the state only when `abl_breathing` is not 0 and the `abl` slot runs in this frame
+//! (T-37 review: the pipeline tells the stage, [`Stage::set_abl_runs`], and the stage passes it as a push
+//! constant; a disabled or skipped `abl` gives `raster_scale` 1, never a stale state), and ignores a scale
+//! outside [0.5, 2].
+
+use std::cell::Cell;
 
 use ash::vk;
 
@@ -49,6 +54,8 @@ struct Screen {
     /// Stand-in for the ABL state until [`Stage::link_abl_state`].
     fallback: vk::Buffer,
     memory: vk::DeviceMemory,
+    /// The `abl` slot runs in the frame being recorded (push constant `abl_runs` of `screen.comp`).
+    abl_runs: Cell<bool>,
 }
 
 impl Screen {
@@ -81,8 +88,13 @@ impl Stage for Screen {
         self.state_layout =
             d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&state), None)?;
         let set_layouts = [self.pass.set_layout, self.state_layout];
-        self.pass.layout =
-            d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts), None)?;
+        let push = [vk::PushConstantRange::default().stage_flags(s).offset(0).size(4)];
+        self.pass.layout = d.create_pipeline_layout(
+            &vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&set_layouts)
+                .push_constant_ranges(&push),
+            None,
+        )?;
         self.pass.pipeline = compute_pipeline(d, self.pass.layout, SPV)?;
 
         self.fallback = d.create_buffer(
@@ -125,12 +137,24 @@ impl Stage for Screen {
         self.bind_state(d, buffer);
     }
 
+    fn set_abl_runs(&self, runs: bool) {
+        self.abl_runs.set(runs);
+    }
+
     unsafe fn record(&self, d: &ash::Device, cb: vk::CommandBuffer, set: vk::DescriptorSet, size: (u32, u32)) {
         // As `ComputePass::dispatch_group` with the tile workgroup, plus the ABL state set 1.
         let sets = [set, self.state_set];
         let bind = vk::PipelineBindPoint::COMPUTE;
         d.cmd_bind_pipeline(cb, bind, self.pass.pipeline);
         d.cmd_bind_descriptor_sets(cb, bind, self.pass.layout, 0, &sets, &[]);
+        let runs = u32::from(self.abl_runs.get());
+        d.cmd_push_constants(
+            cb,
+            self.pass.layout,
+            vk::ShaderStageFlags::COMPUTE,
+            0,
+            &runs.to_ne_bytes(),
+        );
         d.cmd_dispatch(cb, size.0.div_ceil(SCREEN_GROUP.0), size.1.div_ceil(SCREEN_GROUP.1), 1);
     }
 

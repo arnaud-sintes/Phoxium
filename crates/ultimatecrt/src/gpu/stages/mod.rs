@@ -175,6 +175,11 @@ pub(super) trait Stage {
     /// # Safety
     /// `d` is the device of the stage's objects and `buffer` a live buffer of `abl` on it.
     unsafe fn link_abl_state(&mut self, _d: &ash::Device, _buffer: vk::Buffer) {}
+
+    /// Tells the stage whether the `abl` slot runs in the frame about to be recorded (its state is then
+    /// up to date for this frame), after every `prepare` (T-37 review: `screen` takes `raster_scale` 1 when
+    /// it does not). Default: nothing.
+    fn set_abl_runs(&self, _runs: bool) {}
 }
 
 /// A slot whose stage is not written yet: always bypassed (exact identity).

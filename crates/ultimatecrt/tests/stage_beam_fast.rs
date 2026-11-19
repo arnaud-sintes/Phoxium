@@ -12,8 +12,10 @@
 //!
 //! Tolerance contract (PLAN T-48 quality tiers ask MAE <= 1 % of white between tiers; this is tighter):
 //! on every test pattern the standard result is within a mean absolute error of 0.5 % of white and a max
-//! absolute error of 2.5 % of white of the exact form (white = current 1, light 1 per unit area of a flat
-//! field). Measured (T-36c, PVM-20M4U growth 0.45 -> 0.8 mm, 6 px per line, K = 4): MAE <= 0.008 % on
+//! absolute error of 4 % of white of the exact form, for any alignment of the pixel grid to the samples and
+//! lines (white = current 1, light 1 per unit area of a flat field; ARCHITECTURE 3.7, T-37 review: the T-36c
+//! max of 2.5 % held only at the identity alignment). At the identity alignment the tests keep the tighter
+//! regression bound [`CONTRACT_MAX`] = 2.5 %; under a geometry they use the contract, [`GEOMETRY_MAX`]. Measured (T-36c, PVM-20M4U growth 0.45 -> 0.8 mm, 6 px per line, K = 4): MAE <= 0.008 % on
 //! every pattern; max 0 on flat fields, checker, window and pluge (one current per column), 0.05 % on the
 //! ramp, 2.04 % on pixel art (one pixel on the flank of a line where a bright and a dim current share a
 //! column; a single moment-matched Gaussian gave 4.7 %); against the oracle on a small pixel-art tube max
@@ -29,7 +31,9 @@ use ultimatecrt::params::{
 };
 use ultimatecrt::patterns::{generate, Pattern};
 
-/// Tolerance contract of the standard quality against the exact form (module header), in units of white.
+/// Tolerance of the standard quality against the exact form (module header), in units of white: the contract's
+/// MAE, and the regression bound on the max at the identity alignment (2.04 % measured; the contract's max is
+/// [`GEOMETRY_MAX`]).
 const CONTRACT_MAE: f64 = 0.005;
 const CONTRACT_MAX: f64 = 0.025;
 
@@ -389,12 +393,13 @@ fn standard_is_within_the_contract_of_the_oracle() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// Max error of the standard quality against the exact form under a separable geometry (T-37), in units of
-/// white. The contract's 2.5 % (module header) was measured with the pixel grid on its identity alignment to
-/// the amp samples and lines; overscan moves every pixel footprint against them by a fraction of a pixel, and
+/// Max error of the standard quality against the exact form for any alignment (T-37, the T-48 contract, ARCHITECTURE
+/// 3.7), in units of white. The 2.5 % regression bound (module header) holds with the pixel grid on its identity
+/// alignment to the amp samples and lines; overscan moves every pixel footprint against them by a fraction of a pixel, and
 /// the worst pixel (on the flank of a line where a bright and a dim current share a column) then reaches
-/// 3.22 % (measured, pixel art, overscan 3.1 % x -1.7 %; identity 2.04 %, red dx 0.3 mm 2.22 %). The mean
-/// error keeps the contract (0.008 %, PLAN T-48 asks <= 1 %). Bound: the measured worst plus 25 %.
+/// 3.22 % (measured, pixel art, overscan 3.1 % x -1.7 %; identity 2.04 %, red dx 0.3 mm 2.22 %; after the T-37
+/// review, which keeps the spot's size in mm under overscan: overscan 3.13 %, radial convergence 2 mm 3.52 %).
+/// The mean error keeps the contract (0.008 %, PLAN T-48 asks <= 1 %).
 const GEOMETRY_MAX: f64 = 0.04;
 
 /// `fc` grown by a raster margin of `m` px per side (T-37: the tube image is the raster plus the margin).
@@ -447,9 +452,14 @@ fn standard_follows_the_geometry() {
             );
         }
     }
-    // The margin columns hold light (the skirt), so the geometry reached the separable path.
-    let lit = (396..408).any(|y| s.pixel(3, y)[..3].iter().any(|&v| v > 0.0));
-    assert!(lit, "{test}: no light in the left margin");
+    // The margin columns lie outside the visible opening (T-37 review F1): exactly 0; the raster's first
+    // column (7) is lit.
+    assert!(
+        (0..s.height).all(|y| s.pixel(3, y)[..3].iter().all(|&v| v == 0.0)),
+        "{test}: light in the margin"
+    );
+    let lit = (396..408).any(|y| s.pixel(7, y)[..3].iter().any(|&v| v > 0.0));
+    assert!(lit, "{test}: no light in the raster's first column");
 
     let growth = separable(Params::default());
     let d = Params {
@@ -477,6 +487,16 @@ fn standard_follows_the_geometry() {
             "blue dy",
             Params {
                 geometry_conv_blue_dy_mm: -0.2,
+                ..d
+            },
+        ),
+        // The radial convergence term is not checked by geometry_separable (it is an offset, not part of the
+        // host -> raster map): the standard path takes it at the column and line centre (T-37 review F5).
+        (
+            "radial",
+            Params {
+                geometry_conv_red_radial_mm: 2.0,
+                geometry_conv_blue_radial_mm: -1.0,
                 ..d
             },
         ),

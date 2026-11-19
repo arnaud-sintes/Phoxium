@@ -3,7 +3,8 @@
 //
 // State (one std430 storage buffer, owned by the `abl` slot, src/gpu/stages/abl.rs, set ABL_STATE_SET):
 // apl_f = low-passed frame APL (relative beam current, 1 = full-field white), apl_frame = APL of the last
-// frame. Cleared to 0 when the slot is created (cold start on black). A shader that declares the block
+// frame. Cleared when the slot starts (apl_f = abl_breathing_ref while the breathing is on, so raster_scale starts
+// at 1; otherwise 0, cold start on black; src/gpu/stages/abl.rs). A shader that declares the block
 // includes this file after defining ABL_STATE_QUALIFIER (readonly or empty).
 
 #ifndef ABL_GLSL

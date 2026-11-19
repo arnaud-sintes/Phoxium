@@ -26,6 +26,10 @@
 //! off the pipeline records neither pass (the apply pass would be a full-image copy). The state is not
 //! touched while skipped, and nothing reads it (`screen` reads it only when `abl_breathing` is not 0); the
 //! slot's `prepare` sees `runs` false and clears the state in the first frame that runs again.
+//!
+//! Cold start (T-37 review): the clear sets apl_f to `abl_breathing_ref` when the breathing is on, so
+//! `raster_scale` starts at exactly 1 and then follows the APL with the low-pass, and to 0 otherwise (cold
+//! start on black for the limiter). `screen` takes `raster_scale` 1 in a frame where this slot does not run.
 
 use std::cell::Cell;
 
@@ -68,6 +72,9 @@ struct Abl {
     cleared: Cell<bool>,
     /// The frame being recorded clears the state (given back by [`Stage::abandon`]).
     clearing: Cell<bool>,
+    /// Value of apl_f after a clear: `abl_breathing_ref` while the breathing is on, else 0 (set by
+    /// `prepare`).
+    seed: Cell<f32>,
 }
 
 impl Stage for Abl {
@@ -149,7 +156,8 @@ impl Stage for Abl {
                 ),
                 (vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE),
             );
-            d.cmd_fill_buffer(cb, self.buffer, 0, vk::WHOLE_SIZE, 0);
+            d.cmd_fill_buffer(cb, self.buffer, 0, 4, self.seed.get().to_bits());
+            d.cmd_fill_buffer(cb, self.buffer, 4, vk::WHOLE_SIZE, 0);
             src_stage |= vk::PipelineStageFlags2::CLEAR;
             src_access |= vk::AccessFlags2::TRANSFER_WRITE;
             self.cleared.set(true);
@@ -205,10 +213,12 @@ impl Stage for Abl {
         &mut self,
         _ctx: &crate::gpu::Context,
         _fc: &crate::gpu::FrameConstants,
-        _params: &crate::params::Params,
+        params: &crate::params::Params,
         runs: bool,
     ) -> Res<()> {
         self.clearing.set(false);
+        let breathing = params.abl_breathing != 0.0 && params.abl_breathing_ref.is_finite();
+        self.seed.set(if breathing { params.abl_breathing_ref } else { 0.0 });
         if !runs {
             // Slot skipped (disabled or no source): the state no longer follows the picture, the slot
             // restarts cold (black) when it runs again. `abl_enable` off is different: the reduce
