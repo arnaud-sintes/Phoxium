@@ -2,7 +2,7 @@
 
 use std::env;
 
-use crate::{lifecycle, patterns, scaling, Res};
+use crate::{lifecycle, params::Params, patterns, scaling, Res};
 
 pub const USAGE: &str = "ultimatecrt: captures a window and shows it in a second window through a GPU pipeline.
 
@@ -19,7 +19,21 @@ Usage: ultimatecrt [options]
   --crop <x,y,w,h>     part of the captured client area that is the source (default: all of it)
   --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
                        1 means native. Default: detected from the first informative frames
-  --integer            integer scale only (letterboxed)
+  --integer            tube scale mode: whole host pixels per source row only (letterboxed)
+  --crop-mode <auto|manual|none>  source area: the client area (auto), the --crop rectangle or the source
+                       profile's (manual), or the whole window (none). --crop implies manual, --no-crop none
+  --divisor-mode <auto|manual|none>  native raster: detected (auto), --divisor or the profile's (manual),
+                       or the captured pixels (none, divisor 1). --divisor implies manual
+  --scale-mode <tube|native|integer|fit|fit-free>  picture size: by the tube (default, physical), 1:1 host
+                       pixels per source pixel, xN (--scale), the largest whole factor that fits, or the
+                       largest non-integer fit (breaks the scanline and mask alignment)
+  --scale <N>          host pixels per source row in the integer mode: 0 = largest that fits (default),
+                       1 to 10 manual
+  --align <center|top-left>  picture position in the output (default center)
+  --surround <r,g,b>   colour outside the picture, output code values 0 to 1 (default 0,0,0: black)
+  --par <W:H|number>   pixel aspect ratio of a source pixel (1:1 default, 8:7 NES/SNES, 32:35 Genesis H40)
+  --aspect <par|fill|W:H|number>  picture shape: from the PAR (default), the whole tube (fill), or a forced
+                       display aspect such as 4:3
   --pattern <name[:args]>  generated test pattern instead of a capture (no window needed): flat[:level],
                        ramp, vline[:N], hline[:N], grating[:N], checker[:N], crosshatch[:N], point,
                        window[:APL%], bar[:width[:px-per-frame]], pluge, moire[:N]
@@ -29,7 +43,8 @@ Usage: ultimatecrt [options]
                        the preset of the settings file, else the parameter table defaults); the parameter
                        overrides of the settings file apply on top
   --validation         enable the Vulkan validation layer (needs the Vulkan SDK)
-  --stats             print capture and render rates every second
+  --stats             print the resolved placement (scale, picture, px per mm, px per triad, mask tier),
+                       then capture and render rates every second
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
@@ -68,6 +83,27 @@ pub struct Args {
     pub pattern_size: Option<(u32, u32)>,
     pub image: Option<String>,
     pub preset: Option<String>,
+    /// T-96 source adjustment: enum value names of `source_crop_mode`, `source_divisor_mode`,
+    /// `source_scale_mode` (checked when applied), and the other source parameters.
+    pub crop_mode: Option<String>,
+    pub divisor_mode: Option<String>,
+    pub scale_mode: Option<String>,
+    pub scale: Option<i32>,
+    pub center: Option<bool>,
+    pub surround: Option<[f32; 3]>,
+    pub par: Option<f32>,
+    pub aspect: Option<Aspect>,
+}
+
+/// The `--aspect` choice (T-96).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Aspect {
+    /// From the PAR (`raster_aspect` par, no forced aspect).
+    Par,
+    /// The whole tube (`raster_aspect` fill_tube).
+    Fill,
+    /// A forced display aspect (`source_display_aspect`).
+    Display(f32),
 }
 
 fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Res<T> {
@@ -75,9 +111,82 @@ fn number<T: std::str::FromStr>(flag: &str, text: &str) -> Res<T> {
         .map_err(|_| format!("{flag} expects a number, got \"{text}\"").into())
 }
 
+/// A ratio "W:H" or a positive number.
+pub fn parse_ratio(flag: &str, text: &str) -> Res<f32> {
+    let v = match text.split_once(':') {
+        Some((a, b)) => number::<f32>(flag, a.trim())? / number::<f32>(flag, b.trim())?,
+        None => number::<f32>(flag, text.trim())?,
+    };
+    if v.is_finite() && v > 0.0 {
+        Ok(v)
+    } else {
+        Err(format!("{flag} expects a positive ratio such as 8:7, got \"{text}\"").into())
+    }
+}
+
+impl Args {
+    /// Applies the source options of the command line onto `params` (T-96): they override the preset, the
+    /// global overrides and the source profile. `--crop` implies the manual crop mode, `--no-crop` none,
+    /// `--divisor` the manual divisor mode, unless the mode is given.
+    pub fn apply_source(&self, params: &mut Params) -> Res<()> {
+        use crate::settings::set_enum_by_name;
+        let crop_mode = self.crop_mode.clone().or_else(|| {
+            if self.crop.is_some() {
+                Some("manual".into())
+            } else if self.no_crop {
+                Some("none".into())
+            } else {
+                None
+            }
+        });
+        let divisor_mode = self.divisor_mode.clone().or(self.divisor.map(|_| "manual".into()));
+        for (flag, id, value) in [
+            ("--crop-mode", "source_crop_mode", &crop_mode),
+            ("--divisor-mode", "source_divisor_mode", &divisor_mode),
+            ("--scale-mode", "source_scale_mode", &self.scale_mode),
+        ] {
+            if let Some(v) = value {
+                if !set_enum_by_name(params, id, v) {
+                    return Err(format!("{flag}: unknown value \"{v}\"").into());
+                }
+            }
+        }
+        if let Some(n) = self.scale {
+            params.source_scale = n;
+        }
+        if let Some(c) = self.center {
+            params.source_center = c;
+        }
+        if let Some(c) = self.surround {
+            params.source_surround_color = c;
+        }
+        if let Some(p) = self.par {
+            params.source_par = p;
+        }
+        match self.aspect {
+            None => {}
+            Some(Aspect::Par) => {
+                params.raster_aspect = crate::params::RASTER_ASPECT_PAR;
+                params.source_display_aspect = 0.0;
+            }
+            Some(Aspect::Fill) => params.raster_aspect = crate::params::RASTER_ASPECT_FILL_TUBE,
+            Some(Aspect::Display(a)) => {
+                params.raster_aspect = crate::params::RASTER_ASPECT_PAR;
+                params.source_display_aspect = a;
+            }
+        }
+        Ok(())
+    }
+}
+
 pub fn parse_args() -> Res<Args> {
+    parse_from(env::args().skip(1))
+}
+
+/// Parses the options (without the program name).
+pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
     let mut a = Args::default();
-    let mut it = env::args().skip(1);
+    let mut it = args.into_iter();
     while let Some(arg) = it.next() {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} expects a value"));
         match arg.as_str() {
@@ -109,6 +218,42 @@ pub fn parse_args() -> Res<Args> {
             "--pattern-size" => a.pattern_size = Some(patterns::parse_size(&value("--pattern-size")?)?),
             "--image" => a.image = Some(value("--image")?),
             "--preset" => a.preset = Some(value("--preset")?),
+            "--crop-mode" => a.crop_mode = Some(value("--crop-mode")?),
+            "--divisor-mode" => a.divisor_mode = Some(value("--divisor-mode")?),
+            "--scale-mode" => a.scale_mode = Some(value("--scale-mode")?),
+            "--scale" => {
+                let n: i32 = number("--scale", &value("--scale")?)?;
+                if !(0..=10).contains(&n) {
+                    return Err("--scale expects 0 (automatic) or 1 to 10".into());
+                }
+                a.scale = Some(n);
+            }
+            "--align" => {
+                a.center = Some(match value("--align")?.as_str() {
+                    "center" | "centre" => true,
+                    "top-left" | "top_left" => false,
+                    other => return Err(format!("--align expects center or top-left, got \"{other}\"").into()),
+                })
+            }
+            "--surround" => {
+                let text = value("--surround")?;
+                let v: Vec<f32> = text
+                    .split(',')
+                    .map(|p| number::<f32>("--surround", p.trim()))
+                    .collect::<Res<_>>()?;
+                match v[..] {
+                    [r, g, b] if v.iter().all(|c| (0.0..=1.0).contains(c)) => a.surround = Some([r, g, b]),
+                    _ => return Err("--surround expects r,g,b with values from 0 to 1".into()),
+                }
+            }
+            "--par" => a.par = Some(parse_ratio("--par", &value("--par")?)?),
+            "--aspect" => {
+                a.aspect = Some(match value("--aspect")?.as_str() {
+                    "par" => Aspect::Par,
+                    "fill" | "fill-tube" | "fill_tube" => Aspect::Fill,
+                    other => Aspect::Display(parse_ratio("--aspect", other)?),
+                })
+            }
             "--version" => {
                 println!("ultimatecrt {}", env!("CARGO_PKG_VERSION"));
                 std::process::exit(0);
@@ -121,4 +266,49 @@ pub fn parse_args() -> Res<Args> {
         }
     }
     Ok(a)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::params::{
+        RASTER_ASPECT_FILL_TUBE, SOURCE_CROP_MODE_MANUAL, SOURCE_CROP_MODE_NONE, SOURCE_DIVISOR_MODE_MANUAL,
+        SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER,
+    };
+
+    fn parse(s: &str) -> Res<Args> {
+        parse_from(s.split_whitespace().map(String::from))
+    }
+
+    /// T-96: the source options parse and override the parameters; --crop and --divisor imply manual.
+    #[test]
+    fn source_options_apply_to_the_parameters() {
+        let a =
+            parse("--scale-mode integer --scale 3 --align top-left --surround 0.5,0,1 --par 8:7 --aspect 4:3").unwrap();
+        let mut p = Params::default();
+        a.apply_source(&mut p).unwrap();
+        assert_eq!((p.source_scale_mode, p.source_scale), (SOURCE_SCALE_MODE_INTEGER, 3));
+        assert!(!p.source_center);
+        assert_eq!(p.source_surround_color, [0.5, 0.0, 1.0]);
+        assert_eq!(p.source_par, 8.0 / 7.0);
+        assert_eq!(p.source_display_aspect, 4.0 / 3.0);
+        let a = parse("--crop 0,0,320,240 --divisor 2x3 --scale-mode fit-free --aspect fill").unwrap();
+        let mut p = Params::default();
+        a.apply_source(&mut p).unwrap();
+        assert_eq!(p.source_crop_mode, SOURCE_CROP_MODE_MANUAL);
+        assert_eq!(p.source_divisor_mode, SOURCE_DIVISOR_MODE_MANUAL);
+        assert_eq!(p.source_scale_mode, SOURCE_SCALE_MODE_FIT_FREE);
+        assert_eq!(p.raster_aspect, RASTER_ASPECT_FILL_TUBE);
+        let mut p = Params::default();
+        parse("--no-crop").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p.source_crop_mode, SOURCE_CROP_MODE_NONE);
+        // No option: the parameters are untouched.
+        let mut p = Params::default();
+        parse("").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p, Params::default());
+        assert!(parse("--scale 11").is_err());
+        assert!(parse("--surround 1,2").is_err());
+        assert!(parse("--par 0:1").is_err());
+        assert!(parse("--scale-mode huge").unwrap().apply_source(&mut p).is_err());
+    }
 }

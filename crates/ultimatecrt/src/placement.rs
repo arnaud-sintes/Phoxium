@@ -20,21 +20,123 @@
 //!
 //! With the defaults (`par`, PAR 1, fraction 1) this is the native raster letterboxed into the output,
 //! exactly as before T-30 ([`crate::gpu::tube_rect_letterbox`]), with the physical scale added.
+//!
+//! # Host scale modes (T-96, PLAN D-13, D-18)
+//!
+//! `source_scale_mode` = `tube` (the default) is the derivation above. The other modes size the picture
+//! against the actual output (no host resolution is assumed anywhere) by k host pixels per source row,
+//! with the picture aspect A of step 1 and the raster (Wr, Hr) of step 2 unchanged:
+//! - `native`: k = 1; `integer`: k = `source_scale` (1 to 10), 0 = the largest whole number that fits;
+//!   `fit`: the largest whole number that fits; `fit_free`: k = min(target_w / (native_h A), target_h /
+//!   native_h), non-integer (the picture fills the output on one axis; the scanlines and the mask no longer
+//!   fall on whole host pixels).
+//! - A whole k that does not fit falls to the largest that does; when not even k = 1 fits (the source is
+//!   larger than the output) the free fit is used. Both are reported ([`Fit`]); `fit` falling back to the
+//!   free fit below 1 is its documented behaviour and reports [`Fit::Fits`].
+//! - Picture: round(k native_h A) x k native_h host px, centred with floor (or at the top-left corner with
+//!   `source_center` off). With A = native_w / native_h (PAR 1, `par`) the width is k native_w: every source
+//!   pixel is exactly k x k host pixels in the whole-number modes.
+//! - The physical model stays consistent: s = k native_h / Hr host px per mm (picture height over raster
+//!   height), so the scanline pitch P = Hr / (native_h x line_multiplier) is still k / line_multiplier host
+//!   px and the mask pitch in host px per triad is `mask_pitch_mm` x s: it follows the picture size, not the
+//!   tube's. `tube_height_fraction` applies to the `tube` mode only.
+//!
+//! The oracle of the host modes is `crt_model::tube::host_rows_scale` (an independent counting search).
+
+use std::fmt;
 
 use crt_model::mask::{AxisTier, AxisTiers, Delta, Grille, Mask, Slot, TierMode, TierRule};
 
 use crate::gpu::FrameConstants;
 use crate::params::{
     Params, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE,
+    SOURCE_SCALE_MODE_FIT, SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER, SOURCE_SCALE_MODE_NATIVE,
 };
 
-/// How the picture takes its shape on the tube (`params.raster_aspect`).
+/// How the picture takes its shape on the tube (`params.raster_aspect`, `params.source_display_aspect`).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum RasterAspect {
     /// Aspect = source width x PAR / source height.
     Par(f64),
     /// The picture fills the whole visible area.
     FillTube,
+    /// A forced display aspect (width / height), whatever the source size (T-96).
+    Display(f64),
+}
+
+/// How large the picture is in the output (`params.source_scale_mode`, T-96).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum ScaleMode {
+    /// Sized by the tube (visible area and height fraction), the physical default.
+    #[default]
+    Tube,
+    /// One source row on one host pixel.
+    Native,
+    /// `n` host pixels per source row; 0 = the largest whole number that fits.
+    Integer(u32),
+    /// The largest whole number that fits; the free fit below 1.
+    Fit,
+    /// The largest non-integer scale that fits.
+    FitFree,
+}
+
+impl ScaleMode {
+    /// The mode of the parameter table: `source_scale_mode` and `source_scale` (clamped to 0..=10).
+    pub fn from_params(p: &Params) -> Self {
+        match p.source_scale_mode {
+            SOURCE_SCALE_MODE_NATIVE => ScaleMode::Native,
+            SOURCE_SCALE_MODE_INTEGER => ScaleMode::Integer(p.source_scale.clamp(0, 10) as u32),
+            SOURCE_SCALE_MODE_FIT => ScaleMode::Fit,
+            SOURCE_SCALE_MODE_FIT_FREE => ScaleMode::FitFree,
+            _ => ScaleMode::Tube,
+        }
+    }
+
+    /// Whether the mode asks for whole host pixels per source row.
+    pub fn is_whole(self) -> bool {
+        matches!(self, ScaleMode::Native | ScaleMode::Integer(_) | ScaleMode::Fit)
+    }
+}
+
+impl fmt::Display for ScaleMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ScaleMode::Tube => write!(f, "tube"),
+            ScaleMode::Native => write!(f, "native"),
+            ScaleMode::Integer(0) => write!(f, "integer auto"),
+            ScaleMode::Integer(n) => write!(f, "integer x{n}"),
+            ScaleMode::Fit => write!(f, "fit"),
+            ScaleMode::FitFree => write!(f, "fit_free"),
+        }
+    }
+}
+
+/// The host-scale options of [`PlacementInput`] (T-96). The default is the `tube` mode, centred.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct HostFit {
+    pub mode: ScaleMode,
+    /// Centre the picture (else the top-left corner).
+    pub center: bool,
+}
+
+impl Default for HostFit {
+    fn default() -> Self {
+        Self {
+            mode: ScaleMode::Tube,
+            center: true,
+        }
+    }
+}
+
+/// Whether the requested scale fitted the output (T-96 readout).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Fit {
+    /// As requested.
+    Fits,
+    /// The requested whole factor was too large: the largest that fits is used.
+    Clamped { requested: u32, used: u32 },
+    /// The output is smaller than the native picture: a free (non-integer) fit below 1 is used.
+    Downscaled,
 }
 
 /// Inputs of [`place`].
@@ -51,8 +153,10 @@ pub struct PlacementInput {
     pub aspect: RasterAspect,
     /// Scanlines per source row (1 or 2).
     pub line_multiplier: u32,
-    /// Whole host pixels per source row (when at least 1).
+    /// Whole host pixels per source row (when at least 1), `tube` mode only (`--integer`).
     pub integer: bool,
+    /// Host scale mode and alignment (T-96); the default is the `tube` mode, centred.
+    pub fit: HostFit,
 }
 
 impl PlacementInput {
@@ -66,11 +170,17 @@ impl PlacementInput {
             height_fraction: f64::from(params.tube_height_fraction),
             aspect: if params.raster_aspect == RASTER_ASPECT_FILL_TUBE {
                 RasterAspect::FillTube
+            } else if params.source_display_aspect > 0.0 {
+                RasterAspect::Display(f64::from(params.source_display_aspect))
             } else {
                 RasterAspect::Par(f64::from(params.source_par))
             },
             line_multiplier: params.line_multiplier.max(1) as u32,
             integer,
+            fit: HostFit {
+                mode: ScaleMode::from_params(params),
+                center: params.source_center,
+            },
         }
     }
 }
@@ -88,6 +198,10 @@ pub struct Placement {
     pub display_aspect: f64,
     /// Picture size in mm (the raster).
     pub raster_mm: (f64, f64),
+    /// Host pixels per source row (T-96): whole in the whole-number modes when it fits.
+    pub row_px: f64,
+    /// Whether the requested scale fitted the output (T-96).
+    pub fit: Fit,
 }
 
 /// Places the tube picture in the output (derivation in the module documentation). A zero native or
@@ -103,6 +217,8 @@ pub fn place(i: &PlacementInput) -> Placement {
         line_pitch_mm: 0.0,
         display_aspect: 0.0,
         raster_mm: (0.0, 0.0),
+        row_px: 0.0,
+        fit: Fit::Fits,
     };
     if !(nw > 0.0 && nh > 0.0 && tw > 0.0 && th > 0.0 && vw > 0.0 && vh > 0.0 && i.height_fraction > 0.0) {
         return empty;
@@ -110,29 +226,171 @@ pub fn place(i: &PlacementInput) -> Placement {
     let aspect = match i.aspect {
         RasterAspect::Par(par) => nw * par / nh,
         RasterAspect::FillTube => vw / vh,
+        RasterAspect::Display(a) => a,
     };
+    if !(aspect > 0.0 && aspect.is_finite()) {
+        return empty;
+    }
     let (wr, hr) = if aspect <= vw / vh {
         (vh * aspect, vh)
     } else {
         (vw, vw / aspect)
     };
-    let mut s = (tw / wr).min(i.height_fraction * th / hr);
-    if i.integer {
-        let row_px = s * hr / nh;
-        if row_px >= 1.0 {
-            // The epsilon keeps an exact whole factor (such as 1440 / 290 x 290 / 240 = 6) from falling
-            // to the one below through rounding.
-            s = (row_px + 1e-9).floor() * nh / hr;
+    let (s, fit) = if i.fit.mode == ScaleMode::Tube {
+        let mut s = (tw / wr).min(i.height_fraction * th / hr);
+        if i.integer {
+            let row_px = s * hr / nh;
+            if row_px >= 1.0 {
+                // The epsilon keeps an exact whole factor (such as 1440 / 290 x 290 / 240 = 6) from falling
+                // to the one below through rounding.
+                s = (row_px + 1e-9).floor() * nh / hr;
+            }
         }
-    }
+        (s, Fit::Fits)
+    } else {
+        let (k, fit) = host_row_px(i.fit.mode, nh, aspect, (tw, th));
+        (k * nh / hr, fit)
+    };
     let (w, h) = ((wr * s).round(), (hr * s).round());
-    let (x0, y0) = (((tw - w) / 2.0).floor(), ((th - h) / 2.0).floor());
+    let (x0, y0) = if i.fit.center {
+        (((tw - w) / 2.0).floor(), ((th - h) / 2.0).floor())
+    } else {
+        (0.0, 0.0)
+    };
     Placement {
         rect_px: [x0 as f32, y0 as f32, (x0 + w) as f32, (y0 + h) as f32],
         px_per_mm: s,
         line_pitch_mm: hr / (nh * f64::from(i.line_multiplier.max(1))),
         display_aspect: aspect,
         raster_mm: (wr, hr),
+        row_px: s * hr / nh,
+        fit,
+    }
+}
+
+/// Host pixels per source row of a host scale mode (not `tube`) for `nh` source rows at display aspect
+/// `aspect` in an output of `target` px, and whether it fitted (module documentation, T-96).
+fn host_row_px(mode: ScaleMode, nh: f64, aspect: f64, target: (f64, f64)) -> (f64, Fit) {
+    let free = (target.0 / (nh * aspect)).min(target.1 / nh);
+    // As in the `tube` integer case, the epsilon keeps an exact whole factor (2160 / 240 = 9).
+    let largest = (free + 1e-9).floor();
+    let whole = |want: f64| {
+        if want <= largest {
+            (want, Fit::Fits)
+        } else if largest >= 1.0 {
+            (
+                largest,
+                Fit::Clamped {
+                    requested: want as u32,
+                    used: largest as u32,
+                },
+            )
+        } else {
+            (free, Fit::Downscaled)
+        }
+    };
+    match mode {
+        ScaleMode::Native => whole(1.0),
+        ScaleMode::Integer(n) if n >= 1 => whole(f64::from(n)),
+        ScaleMode::Integer(_) if largest >= 1.0 => (largest, Fit::Fits),
+        ScaleMode::Integer(_) => (free, Fit::Downscaled),
+        ScaleMode::Fit if largest >= 1.0 => (largest, Fit::Fits),
+        ScaleMode::Fit | ScaleMode::FitFree | ScaleMode::Tube => (free, Fit::Fits),
+    }
+}
+
+/// The resolved placement of a frame for the readouts (T-96: `--stats` at start, the settings menu of
+/// T-53): what the picture is in the output and what the tube's physical numbers become on this host.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Readout {
+    pub mode: ScaleMode,
+    pub native: (u32, u32),
+    pub target: (u32, u32),
+    /// Host pixels per source pixel (columns, rows): the picture size over the native size.
+    pub px_per_source_px: (f64, f64),
+    /// Every source pixel is a whole number of host pixels on both axes.
+    pub integer_aligned: bool,
+    /// Picture size in host px (the raster, without the beam's skirt margin).
+    pub picture_px: (u32, u32),
+    /// Top-left corner of the picture in the output.
+    pub offset_px: (u32, u32),
+    pub px_per_mm: f64,
+    /// Scanline pitch in host px.
+    pub line_px: f64,
+    /// Mask pitch of the current preset in host px per triad (`mask_pitch_mm` x px per mm).
+    pub px_per_triad: f64,
+    /// The mask tier decision at this scale (`mask_tiers`).
+    pub tiers: AxisTiers,
+    pub fit: Fit,
+}
+
+/// The resolved placement of a `native` raster in a `target` output with the parameters (T-96), as the
+/// live pipeline places it ([`FrameConstants::placed`]).
+pub fn readout(params: &Params, native: (u32, u32), target: (u32, u32), integer: bool) -> Readout {
+    let input = PlacementInput::from_params(params, native, target, integer);
+    let p = place(&input);
+    let (w, h) = (
+        (p.rect_px[2] - p.rect_px[0]) as u32,
+        (p.rect_px[3] - p.rect_px[1]) as u32,
+    );
+    let per = |a: u32, n: u32| if n > 0 { f64::from(a) / f64::from(n) } else { 0.0 };
+    let px = (per(w, native.0), per(h, native.1));
+    let whole = |v: f64| v >= 1.0 && v.fract() == 0.0;
+    Readout {
+        mode: input.fit.mode,
+        native,
+        target,
+        px_per_source_px: px,
+        integer_aligned: whole(px.0) && whole(px.1),
+        picture_px: (w, h),
+        offset_px: (p.rect_px[0] as u32, p.rect_px[1] as u32),
+        px_per_mm: p.px_per_mm,
+        line_px: p.line_pitch_mm * p.px_per_mm,
+        px_per_triad: f64::from(params.mask_pitch_mm) * p.px_per_mm,
+        tiers: mask_tiers(p.px_per_mm as f32, params),
+        fit: p.fit,
+    }
+}
+
+impl fmt::Display for Readout {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let tier = |t: AxisTier| match t {
+            AxisTier::Integrated => "integrated".to_string(),
+            AxisTier::Blended { box_px } => format!("blended (box {box_px:.2} px)"),
+            AxisTier::Prefiltered => "prefiltered".to_string(),
+        };
+        write!(
+            f,
+            "placement: {} | native {}x{} in {}x{} | picture {}x{} at ({}, {}) | {:.4} x {:.4} px per source px{} | \
+             {:.4} px/mm | scanline {:.3} px | {:.3} px per triad | mask tier h {} v {}",
+            self.mode,
+            self.native.0,
+            self.native.1,
+            self.target.0,
+            self.target.1,
+            self.picture_px.0,
+            self.picture_px.1,
+            self.offset_px.0,
+            self.offset_px.1,
+            self.px_per_source_px.0,
+            self.px_per_source_px.1,
+            if self.integer_aligned { " (integer)" } else { "" },
+            self.px_per_mm,
+            self.line_px,
+            self.px_per_triad,
+            tier(self.tiers.horizontal),
+            tier(self.tiers.vertical),
+        )?;
+        match self.fit {
+            Fit::Fits => Ok(()),
+            Fit::Clamped { requested, used } => {
+                write!(f, " | x{requested} does not fit this output: x{used} used")
+            }
+            Fit::Downscaled => write!(
+                f,
+                " | the output is smaller than the native picture: downscaled (not integer)"
+            ),
+        }
     }
 }
 
@@ -332,6 +590,7 @@ mod tests {
             aspect,
             line_multiplier: 1,
             integer: false,
+            fit: HostFit::default(),
         }
     }
 
@@ -447,6 +706,37 @@ mod tests {
             ..pvm((256, 240), (128, 120), RasterAspect::Par(1.0))
         };
         assert_eq!(place(&small).rect_px, tube_rect_letterbox((256, 240), (128, 120), true));
+    }
+
+    /// T-96: the mode comes from the table (`source_scale` clamped to 0..=10), the readout line names the
+    /// mode, the integer alignment and the fit note (256 x 240 x10 on 1920 x 1080: 4 fits, 1024 x 960 at
+    /// (448, 60), the hand case of `tests/placement_modes.rs`).
+    #[test]
+    fn host_mode_from_the_table_and_readout_text() {
+        use crate::params::{SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER};
+        let mut p = Params::default();
+        assert_eq!(ScaleMode::from_params(&p), ScaleMode::Tube);
+        p.source_scale_mode = SOURCE_SCALE_MODE_INTEGER;
+        p.source_scale = 42;
+        assert_eq!(ScaleMode::from_params(&p), ScaleMode::Integer(10));
+        let r = readout(&p, (256, 240), (1920, 1080), false);
+        assert_eq!(r.fit, Fit::Clamped { requested: 10, used: 4 });
+        let text = r.to_string();
+        assert!(
+            text.contains("integer x10") && text.contains("1024x960 at (448, 60)"),
+            "{text}"
+        );
+        assert!(
+            text.contains("(integer)") && text.contains("x10 does not fit"),
+            "{text}"
+        );
+        p.source_scale_mode = SOURCE_SCALE_MODE_FIT_FREE;
+        let text = readout(&p, (256, 240), (1920, 1080), false).to_string();
+        assert!(text.contains("fit_free") && !text.contains("(integer)"), "{text}");
+        // The default (tube) readout of the T-39c case: 1.5393 px per triad on 2560 x 1440.
+        let r = readout(&Params::default(), (256, 240), (2560, 1440), false);
+        assert!((r.px_per_triad - 1440.0 / 290.0 * 0.31).abs() < 1e-6);
+        assert!(matches!(r.tiers.horizontal, AxisTier::Prefiltered));
     }
 
     #[test]

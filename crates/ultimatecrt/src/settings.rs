@@ -113,7 +113,9 @@ impl HostProfile {
     }
 }
 
-/// Per-source settings (SRC-2). Unset fields mean automatic.
+/// Per-source settings (SRC-2, T-96). Unset fields keep the value of the preset and the global overrides
+/// (for the modes: automatic). The app applies the profile of the attached window (executable and class)
+/// on top of the preset and the global overrides; command-line flags override the profile.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct SourceProfile {
@@ -121,17 +123,130 @@ pub struct SourceProfile {
     pub exe: String,
     /// Window class, matched case insensitively.
     pub class: String,
-    /// Crop in pixels: left, top, right, bottom.
+    /// Crop rectangle in captured pixels of the client area: left, top, right, bottom (x0, y0, x1, y1, the
+    /// right and bottom edges exclusive). Used when the crop mode is `manual`.
     pub crop: Option<[u32; 4]>,
+    /// Integer divisor (horizontal, and vertical unless `divisor_v` is set). Used when the divisor mode is
+    /// `manual`.
     pub divisor: Option<u32>,
-    /// Pixel aspect ratio.
+    /// Vertical divisor when it differs from `divisor` (T-96).
+    pub divisor_v: Option<u32>,
+    /// Pixel aspect ratio (`source_par`).
     pub par: Option<f32>,
+    /// `source_eotf` value name: `drive_voltage` or `srgb`.
     pub eotf: Option<String>,
     /// Pixel clock in Hz.
     pub pixel_clock_hz: Option<f64>,
     /// Video bandwidth in Hz.
     pub bandwidth_hz: Option<f64>,
     pub line_multiplier: Option<u32>,
+    /// `source_crop_mode` value name: `auto`, `manual` or `none` (T-96).
+    pub crop_mode: Option<String>,
+    /// `source_divisor_mode` value name: `auto`, `manual` or `none` (T-96).
+    pub divisor_mode: Option<String>,
+    /// `source_scale_mode` value name: `tube`, `native`, `integer`, `fit` or `fit_free` (T-96).
+    pub scale_mode: Option<String>,
+    /// `source_scale`: host px per source row in the integer mode, 0 = automatic (T-96).
+    pub scale: Option<u32>,
+    /// `source_center` (T-96).
+    pub center: Option<bool>,
+    /// `source_surround_color`, output code values 0 to 1 (T-96).
+    pub surround_color: Option<[f32; 3]>,
+    /// `source_display_aspect`, 0 = from the PAR (T-96).
+    pub display_aspect: Option<f32>,
+    /// `raster_aspect` value name: `par` or `fill_tube` (T-96).
+    pub raster_aspect: Option<String>,
+}
+
+/// Sets the enum parameter `id` to the value called `name` (its `values` entry, `-` read as `_`). False
+/// when the id is not an enum or the name is not one of its values.
+pub fn set_enum_by_name(params: &mut Params, id: &str, name: &str) -> bool {
+    let name = name.trim().replace('-', "_");
+    PARAMS_META
+        .iter()
+        .find(|m| m.id == id && m.ty == ParamType::Enum)
+        .and_then(|m| m.values.iter().position(|v| v.eq_ignore_ascii_case(&name)))
+        .is_some_and(|i| params.set(id, ParamValue::Enum(i as u32)))
+}
+
+impl SourceProfile {
+    /// Applies the parameter fields of the profile onto `params` (T-96). Returns one warning per invalid
+    /// value (skipped). The crop rectangle and the divisor are not parameters: [`SourceProfile::crop_rect`]
+    /// and [`SourceProfile::divisor_pair`]. The pixel clock and the bandwidth are kept for the signal
+    /// stages and not applied here.
+    pub fn apply_to(&self, params: &mut Params) -> Vec<String> {
+        let mut warnings = Vec::new();
+        let mut warn = |ok: bool, field: &str| {
+            if !ok {
+                warnings.push(format!(
+                    "source profile {} ({}): invalid {field} ignored",
+                    self.exe, self.class
+                ));
+            }
+        };
+        let enums = [
+            ("source_eotf", &self.eotf, "eotf"),
+            ("source_crop_mode", &self.crop_mode, "crop_mode"),
+            ("source_divisor_mode", &self.divisor_mode, "divisor_mode"),
+            ("source_scale_mode", &self.scale_mode, "scale_mode"),
+            ("raster_aspect", &self.raster_aspect, "raster_aspect"),
+        ];
+        for (id, value, field) in enums {
+            if let Some(v) = value {
+                warn(set_enum_by_name(params, id, v), field);
+            }
+        }
+        if let Some(v) = self.par {
+            warn(v > 0.0 && params.set("source_par", ParamValue::F32(v)), "par");
+        }
+        if let Some(v) = self.line_multiplier {
+            warn(
+                i32::try_from(v)
+                    .is_ok_and(|v| (1..=2).contains(&v) && params.set("line_multiplier", ParamValue::I32(v))),
+                "line_multiplier",
+            );
+        }
+        if let Some(v) = self.scale {
+            warn(
+                v <= 10 && params.set("source_scale", ParamValue::I32(v as i32)),
+                "scale",
+            );
+        }
+        if let Some(v) = self.center {
+            warn(params.set("source_center", ParamValue::Bool(v)), "center");
+        }
+        if let Some(c) = self.surround_color {
+            warn(
+                c.iter().all(|v| (0.0..=1.0).contains(v)) && params.set("source_surround_color", ParamValue::Vec3(c)),
+                "surround_color",
+            );
+        }
+        if let Some(v) = self.display_aspect {
+            warn(
+                v >= 0.0 && v.is_finite() && params.set("source_display_aspect", ParamValue::F32(v)),
+                "display_aspect",
+            );
+        }
+        warnings
+    }
+
+    /// The manual crop rectangle (`crop`), `None` when unset or empty.
+    pub fn crop_rect(&self) -> Option<crate::scaling::Rect> {
+        let [x0, y0, x1, y1] = self.crop?;
+        (x1 > x0 && y1 > y0).then(|| crate::scaling::Rect {
+            x: x0,
+            y: y0,
+            w: x1 - x0,
+            h: y1 - y0,
+        })
+    }
+
+    /// The manual divisor (`divisor`, `divisor_v`), `None` when unset or zero.
+    pub fn divisor_pair(&self) -> Option<(u32, u32)> {
+        let h = self.divisor.filter(|&d| d >= 1)?;
+        let v = self.divisor_v.unwrap_or(h);
+        (v >= 1).then_some((h, v))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -367,6 +482,15 @@ mod tests {
             pixel_clock_hz: Some(5.37e6),
             bandwidth_hz: Some(3.0e6),
             line_multiplier: Some(2),
+            divisor_v: Some(3),
+            crop_mode: Some("manual".into()),
+            divisor_mode: Some("manual".into()),
+            scale_mode: Some("integer".into()),
+            scale: Some(3),
+            center: Some(false),
+            surround_color: Some([0.25, 0.5, 0.0]),
+            display_aspect: Some(4.0 / 3.0),
+            raster_aspect: Some("par".into()),
         });
         let mut p = Params::default();
         let m = some_id();
@@ -482,6 +606,83 @@ mod tests {
         s.upsert_source(mk("Game.exe", "A", 9));
         assert_eq!(s.sources.len(), 3);
         assert_eq!(s.find_source("game.exe", "A").unwrap().divisor, Some(9));
+    }
+
+    /// T-96: a source profile sets the source parameters by name, rejects invalid values with a warning, and
+    /// gives the manual crop rectangle and divisor. An empty profile changes nothing.
+    #[test]
+    fn source_profile_applies_to_the_parameters() {
+        use crate::params::{
+            RASTER_ASPECT_FILL_TUBE, SOURCE_CROP_MODE_NONE, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_EOTF_SRGB,
+            SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER,
+        };
+        let mut p = Params::default();
+        assert!(SourceProfile::default().apply_to(&mut p).is_empty());
+        assert_eq!(p, Params::default());
+        let profile = SourceProfile {
+            exe: "game.exe".into(),
+            class: "C".into(),
+            crop: Some([8, 4, 328, 244]),
+            divisor: Some(2),
+            divisor_v: Some(3),
+            par: Some(8.0 / 7.0),
+            eotf: Some("srgb".into()),
+            line_multiplier: Some(2),
+            crop_mode: Some("none".into()),
+            divisor_mode: Some("manual".into()),
+            scale_mode: Some("integer".into()),
+            scale: Some(4),
+            center: Some(false),
+            surround_color: Some([0.1, 0.2, 0.3]),
+            display_aspect: Some(1.5),
+            raster_aspect: Some("fill_tube".into()),
+            ..Default::default()
+        };
+        assert!(profile.apply_to(&mut p).is_empty());
+        assert_eq!(p.source_eotf, SOURCE_EOTF_SRGB);
+        assert_eq!(p.source_crop_mode, SOURCE_CROP_MODE_NONE);
+        assert_eq!(p.source_divisor_mode, SOURCE_DIVISOR_MODE_MANUAL);
+        assert_eq!(p.source_scale_mode, SOURCE_SCALE_MODE_INTEGER);
+        assert_eq!(p.raster_aspect, RASTER_ASPECT_FILL_TUBE);
+        assert_eq!((p.source_scale, p.source_center, p.line_multiplier), (4, false, 2));
+        assert_eq!(p.source_par, 8.0 / 7.0);
+        assert_eq!(p.source_surround_color, [0.1, 0.2, 0.3]);
+        assert_eq!(p.source_display_aspect, 1.5);
+        assert_eq!(
+            profile.crop_rect(),
+            Some(crate::scaling::Rect {
+                x: 8,
+                y: 4,
+                w: 320,
+                h: 240
+            })
+        );
+        assert_eq!(profile.divisor_pair(), Some((2, 3)));
+        // The command-line spelling `fit-free` is accepted.
+        assert!(set_enum_by_name(&mut p, "source_scale_mode", "fit-free"));
+        assert_eq!(p.source_scale_mode, SOURCE_SCALE_MODE_FIT_FREE);
+        let bad = SourceProfile {
+            scale_mode: Some("huge".into()),
+            scale: Some(11),
+            line_multiplier: Some(3),
+            surround_color: Some([2.0, 0.0, 0.0]),
+            crop: Some([10, 10, 5, 20]),
+            divisor: Some(0),
+            ..Default::default()
+        };
+        let before = p;
+        assert_eq!(bad.apply_to(&mut p).len(), 4);
+        assert_eq!(p, before, "invalid values change nothing");
+        assert_eq!((bad.crop_rect(), bad.divisor_pair()), (None, None));
+    }
+
+    /// A settings file written before T-96 (no new fields) still loads, the new fields unset.
+    #[test]
+    fn profiles_without_the_t96_fields_still_load() {
+        let s = Settings::from_toml("version = 1\n[[source]]\nexe = \"a.exe\"\nclass = \"B\"\ndivisor = 3\n").unwrap();
+        let p = s.find_source("a.exe", "b").unwrap();
+        assert_eq!(p.divisor_pair(), Some((3, 3)));
+        assert_eq!((p.scale_mode.as_deref(), p.crop_mode.as_deref()), (None, None));
     }
 
     #[test]

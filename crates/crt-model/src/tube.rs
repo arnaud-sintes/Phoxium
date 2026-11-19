@@ -60,6 +60,53 @@ pub fn drive_voltage_from_code(code: f64) -> f64 {
     code / 255.0
 }
 
+/// How the picture is sized against the host output when the tube does not size it (T-96, PLAN D-13, D-18).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum HostScale {
+    /// One source row on one host pixel.
+    Native,
+    /// `n` host pixels per source row; 0 = the largest whole number that fits.
+    Integer(u32),
+    /// The largest whole number that fits, the free fit below 1.
+    Fit,
+    /// The largest real scale that fits.
+    FitFree,
+}
+
+/// Host pixels per source row `k` of a picture of `rows` source rows and display aspect `aspect` in an
+/// output of `target_px`, and whether the requested scale fitted (T-96). The picture is `k rows aspect` x
+/// `k rows` host px. Written independently of the application (`placement.rs` floors a quotient): the whole
+/// factor is found by counting up while the picture fits, with 1e-9 px of slack for the f64 products.
+/// A requested whole factor that does not fit falls to the largest that does; when not even 1 fits (the
+/// native picture is larger than the output) the free fit is used and `false` returned. [D]
+pub fn host_rows_scale(mode: HostScale, rows: f64, aspect: f64, target_px: (f64, f64)) -> (f64, bool) {
+    let fits = |k: f64| k * rows * aspect <= target_px.0 + 1e-9 && k * rows <= target_px.1 + 1e-9;
+    let free = (target_px.0 / (rows * aspect)).min(target_px.1 / rows);
+    let mut largest = 0u32;
+    while largest < 100_000 && fits(f64::from(largest + 1)) {
+        largest += 1;
+    }
+    let want = match mode {
+        HostScale::FitFree => return (free, true),
+        HostScale::Native => 1,
+        HostScale::Integer(0) | HostScale::Fit => largest,
+        HostScale::Integer(n) => n,
+    };
+    if want >= 1 && want <= largest {
+        (f64::from(want), true)
+    } else if largest >= 1 {
+        (f64::from(largest), false)
+    } else {
+        (free, mode == HostScale::Fit)
+    }
+}
+
+/// Host pixels per tube mm of a picture whose `rows` source rows take `k` host pixels each, on a raster
+/// `raster_height_mm` high: the picture height in px over its height in mm (T-96). [D]
+pub fn host_px_per_mm(k: f64, rows: f64, raster_height_mm: f64) -> f64 {
+    k * rows / raster_height_mm
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,6 +160,51 @@ mod tests {
         assert!(close(scanline_pitch_mm(r.1, 180.0, 1.0), 1.208_333, 1e-5));
         // On 2560 x 1440: both limits coincide, 1440 / 217.5 = 6.6207 = 2560 / 386.667.
         assert!(close(px_per_mm(r, (2560.0, 1440.0), 1.0), 6.620_69, 1e-5));
+    }
+
+    /// T-96 host scales, by hand:
+    /// - 256 x 240 (aspect 256 / 240) on 1920 x 1080: 1080 / 240 = 4.5 and 1920 / 256 = 7.5, so the largest
+    ///   whole factor is 4 (1024 x 960) and the free fit 4.5 (1152 x 1080);
+    /// - on 3840 x 2160: 2160 / 240 = 9 exactly, so 9 (2304 x 2160): the slack keeps an exact fit;
+    /// - 1920 x 1080 on 1366 x 768: 1366 / 1920 = 0.7115 and 768 / 1080 = 0.7111, no whole factor fits: the
+    ///   free fit 0.7111 (Fit accepts it, Native and Integer report that they did not fit);
+    /// - x10 requested for 320 x 240 on 1920 x 1080 (4.5 fits): clamped to 4, reported;
+    /// - portrait 1080 x 1920 with 640 x 480: 1080 / 640 = 1.6875, so 1 (640 x 480).
+    #[test]
+    fn host_scales_by_hand() {
+        let a = 256.0 / 240.0;
+        assert_eq!(host_rows_scale(HostScale::Fit, 240.0, a, (1920.0, 1080.0)), (4.0, true));
+        assert_eq!(
+            host_rows_scale(HostScale::Integer(0), 240.0, a, (1920.0, 1080.0)),
+            (4.0, true)
+        );
+        assert_eq!(
+            host_rows_scale(HostScale::FitFree, 240.0, a, (1920.0, 1080.0)),
+            (4.5, true)
+        );
+        assert_eq!(
+            host_rows_scale(HostScale::Native, 240.0, a, (1920.0, 1080.0)),
+            (1.0, true)
+        );
+        assert_eq!(host_rows_scale(HostScale::Fit, 240.0, a, (3840.0, 2160.0)), (9.0, true));
+        let (k, ok) = host_rows_scale(HostScale::Fit, 1080.0, 16.0 / 9.0, (1366.0, 768.0));
+        assert!(close(k, 768.0 / 1080.0, 1e-12) && ok);
+        assert!(!host_rows_scale(HostScale::Native, 1080.0, 16.0 / 9.0, (1366.0, 768.0)).1);
+        assert!(!host_rows_scale(HostScale::Integer(0), 1080.0, 16.0 / 9.0, (1366.0, 768.0)).1);
+        assert_eq!(
+            host_rows_scale(HostScale::Integer(10), 240.0, 4.0 / 3.0, (1920.0, 1080.0)),
+            (4.0, false)
+        );
+        assert_eq!(
+            host_rows_scale(HostScale::Integer(3), 240.0, 4.0 / 3.0, (1920.0, 1080.0)),
+            (3.0, true)
+        );
+        assert_eq!(
+            host_rows_scale(HostScale::Fit, 480.0, 4.0 / 3.0, (1080.0, 1920.0)),
+            (1.0, true)
+        );
+        // 4 px per row on the PVM's 290 mm: 960 px over 290 mm = 3.3103 px per mm.
+        assert!(close(host_px_per_mm(4.0, 240.0, 290.0), 3.310_345, 1e-6));
     }
 
     #[test]

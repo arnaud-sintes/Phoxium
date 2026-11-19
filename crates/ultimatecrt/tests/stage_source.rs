@@ -30,7 +30,7 @@ use crt_model::geometry::{px_per_triad, triads_across, triads_per_source_px};
 use crt_model::tube;
 use ultimatecrt::gpu::{FrameConstants, Headless, Rendered, Settings, SourceFrame, TargetFormat, Transfer, AMP_K};
 use ultimatecrt::params::{ParamValue, Params, RASTER_ASPECT_FILL_TUBE, SOURCE_EOTF_SRGB};
-use ultimatecrt::placement::{place, PlacementInput, RasterAspect};
+use ultimatecrt::placement::{place, HostFit, PlacementInput, RasterAspect};
 use ultimatecrt::scaling::View;
 
 const W: u32 = 256;
@@ -387,6 +387,7 @@ fn pvm_input(native: (u32, u32), aspect: RasterAspect) -> PlacementInput {
         aspect,
         line_multiplier: 1,
         integer: false,
+        fit: HostFit::default(),
     }
 }
 

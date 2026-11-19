@@ -52,6 +52,16 @@ The CRT model needs the native raster: scanlines are native rows. A game shown a
 - The shader reads the centre of each block, so no extra pass is needed. Detection restarts when the captured size changes.
 - Only simple integer nearest-neighbour upscales are handled. Smoothed or non-integer scaling detects as x1.
 
+## Source adjustment (T-96)
+
+How the source is mapped to the output, adaptive to any host monitor (no resolution is assumed: everything follows from the actual window or monitor size). Each option is a parameter of `params/source.toml`, can be stored in the source profile of `settings.toml` (keyed by executable and window class, applied when the target window is attached) and is overridden by its command-line flag:
+- `--scale-mode tube|native|integer|fit|fit-free` (`source_scale_mode`, default `tube`): `tube` sizes the picture by the tube (visible height, aspect, `tube_height_fraction`), the physical default. `native` shows one source pixel on one host pixel, centred. `integer` uses `--scale N` host pixels per source row (`source_scale`, 1 to 10; 0 = the largest whole factor that fits, the default). `fit` takes the largest whole factor that fits (a free fit below 1). `fit-free` takes the largest non-integer scale that fits, aspect kept: it breaks the alignment of the scanlines and the mask with the host pixels. A factor that does not fit is reduced, a source larger than the output is downscaled; both are reported. In the host modes the tube's px per mm follows from the picture height (px per mm = picture height / raster height in mm), so the mask pitch in px per triad scales with the picture.
+- `--align center|top-left` (`source_center`) and `--surround r,g,b` (`source_surround_color`, output code values 0 to 1, black by default): the colour of the letterbox or pillarbox around the picture.
+- `--crop-mode auto|manual|none` (`source_crop_mode`): the client area (default), the `--crop` rectangle (or the profile's `crop = [left, top, right, bottom]`), or the whole window. `--crop` implies `manual`, `--no-crop` implies `none`.
+- `--divisor-mode auto|manual|none` (`source_divisor_mode`): detected (default), `--divisor` (or the profile's `divisor`, `divisor_v`), or none (the captured pixels are native). `--divisor` implies `manual`.
+- `--par W:H` (`source_par`: 1:1, 8:7 for NES/SNES, 32:35 for Genesis H40) and `--aspect par|fill|W:H` (`raster_aspect` and `source_display_aspect`: from the PAR, filling the tube, or a forced display aspect such as 4:3).
+- `--stats` prints the resolved placement when the native raster or the output size changes: mode, host px per source px (and whether every source pixel is a whole number of host pixels), picture size and offset, px per mm, scanline pitch in px, px per triad of the current preset, the mask tier per axis, and a note when the requested scale did not fit.
+
 ## Target lifecycle (T-56)
 
 - **Reattach:** when the captured window closes, the app waits for a new window with the same executable and window class (title preferred, then the largest) and captures it. Only windows that appear after the loss are candidates, or the old handle if it comes back: sibling windows of a shared host (every Chrome window, every UWP app) that were already open are ignored. A sibling that was hidden or minimised when the target closed and is shown later counts as new.
