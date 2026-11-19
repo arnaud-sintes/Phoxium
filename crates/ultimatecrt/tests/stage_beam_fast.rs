@@ -452,14 +452,15 @@ fn standard_follows_the_geometry() {
             );
         }
     }
-    // The margin columns lie outside the visible opening (T-37 review F1): exactly 0; the raster's first
-    // column (7) is lit.
+    // The raster (384 x 1440 px) is narrower than the 4:3 tube: the visible opening is the tube's full width
+    // (T-37 review F1), so the side margin columns, inside it, hold the skirt (the geometry reached the
+    // separable path); the opening's height is the raster's, so the top margin rows are exactly 0.
+    let lit = (396..408).any(|y| s.pixel(3, y)[..3].iter().any(|&v| v > 0.0));
+    assert!(lit, "{test}: no light in the left margin");
     assert!(
-        (0..s.height).all(|y| s.pixel(3, y)[..3].iter().all(|&v| v == 0.0)),
-        "{test}: light in the margin"
+        (0..5).all(|y| (0..s.width).all(|x| s.pixel(x, y)[..3].iter().all(|&v| v == 0.0))),
+        "{test}: light above the opening"
     );
-    let lit = (396..408).any(|y| s.pixel(7, y)[..3].iter().any(|&v| v > 0.0));
-    assert!(lit, "{test}: no light in the raster's first column");
 
     let growth = separable(Params::default());
     let d = Params {

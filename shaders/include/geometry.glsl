@@ -222,8 +222,9 @@ void geometry_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
 
 // Visible opening (T-37 review F1; CRT.md Visible area, overscan, corners: "a rounded rectangle defined by the
 // tube's phosphor area and the cabinet bezel", corner radius 15 to 40 mm on older tubes, near zero on flat
-// ones). The opening is the tube's visible area, tube_visible_height_mm x tube_aspect: the raster rectangle at
-// zero overscan (geometry_raster_size, centred in the tube image), with corners of radius
+// ones). The opening is the tube's visible area, tube_visible_height_mm x tube_aspect, centred in the tube image:
+// the raster rectangle at zero overscan, widened to the tube's aspect when a `par` picture is narrower (or
+// letterboxed, shorter) than the tube; with corners of radius
 // geometry_opening_corner_radius_mm (clamped to the half height). The light is clipped to it, independently of
 // the raster margin (the margin only sets the evaluated area; overscan, raster_scale and the spot no longer move
 // the picture's outer edge). Coverage of host pixel q: clamp(0.5 - d, 0, 1), d the signed distance (host px,
@@ -236,7 +237,17 @@ float geometry_opening_coverage(ivec2 q) {
     if (!(ppm > 0.0)) {
         return 1.0;
     }
-    vec2 half_px = 0.5 * vec2(geometry_raster_size());
+    // The raster fills the visible area along one axis (placement.rs: the raster height is the visible height,
+    // or its width the visible width when a `par` picture is wider than the tube); along the other the visible
+    // area is the raster's size on that axis times (or over) tube_aspect when that is wider (taller) by more
+    // than a pixel (a `par` picture narrower than the tube), else the raster's own, pixel-aligned size.
+    vec2 rs = vec2(geometry_raster_size());
+    vec2 open = rs;
+    if (params.tube_aspect > 0.0) {
+        vec2 vis = vec2(rs.y * params.tube_aspect, rs.x / params.tube_aspect);
+        open = mix(rs, vis, greaterThan(vis, rs + 1.0));
+    }
+    vec2 half_px = 0.5 * open;
     vec2 p = abs(vec2(q) + 0.5 - 0.5 * vec2(frame.tube_size));
     float r = clamp(params.geometry_opening_corner_radius_mm * ppm, 0.0, min(half_px.x, half_px.y));
     vec2 e = p - (half_px - r);

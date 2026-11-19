@@ -69,7 +69,8 @@
 //!     (0.267623, 0.185278) mm = (1.07049, 0.74111) px; the oracle's source-point value (1.0278, 0.7115) px
 //!     is its first-order inverse.
 //! G12. Visible opening [Visible area, overscan, corners: rounded rectangle, corner radius 15 to 40 mm]. The
-//!     opening is the raster rectangle at zero overscan (the tube's visible area) with corners of radius r. Tube
+//!     opening is the tube's visible area (the raster rectangle at zero overscan when the raster has the tube's
+//!     aspect, 4:3 here; a narrower par raster gets the tube's full width) with corners of radius r. Tube
 //!     64 x 48 native at n = 4, 2 px per mm (256 x 192 px, 128 x 96 mm), r = 20 mm = 40 px: the corner arc is
 //!     centred at (40, 40) px from the top-left; the pixel (5, 5) (centre (5.5, 5.5)) is at 40 sqrt(2) -
 //!     34.5 sqrt(2) = 7.78 px outside the arc, so exactly 0; (40, 2) is on the straight edge, inside by 2.5
@@ -720,6 +721,31 @@ fn opening_clips_the_light() {
                 );
             }
             assert!(out.pixel(mx, y)[1] > 0.0 && out.pixel(tw - mx - 1, y)[1] > 0.0);
+        }
+    }
+
+    // A par raster narrower than the tube (48 x 48 px, square, in a 4:3 tube): the opening is the tube's full
+    // visible width, 48 x 4 / 3 = 64 px, so the skirt in the side margins (inside the opening) is drawn; the
+    // opening's height is the raster's, so the top and bottom margins are exactly 0.
+    let mut fc = tube(12, 12, 4, 2.0);
+    fc.target_size = [100, 60];
+    fc.tube_rect_px = [26.0, 6.0, 74.0, 54.0];
+    let fc = fc.with_skirt_margin(&base());
+    let (mx, my) = (fc.raster_margin[0] as u32, fc.raster_margin[1] as u32);
+    assert!(mx > 0 && my > 0, "{test}: margin {mx} {my}");
+    let out = run(&mut gpu, &["screen"], fc, &base(), &currents(&fc, |_, _| WHITE));
+    let (tw, th) = (fc.tube_size[0] as u32, fc.tube_size[1] as u32);
+    let side = (my + 8..my + 40)
+        .map(|y| f64::from(out.pixel(mx - 1, y)[1]))
+        .sum::<f64>();
+    println!("{test}: par narrower raster: side margin column light {side:.4}");
+    assert!(side > 0.0, "{test}: no skirt in the side margin inside the opening");
+    for x in 0..tw {
+        for y in (0..my).chain(th - my..th) {
+            assert!(
+                out.pixel(x, y)[..3].iter().all(|&v| v == 0.0),
+                "{test}: ({x}, {y}) above or below the opening"
+            );
         }
     }
     drop(gpu);
