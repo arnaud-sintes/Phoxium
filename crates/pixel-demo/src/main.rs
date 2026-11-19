@@ -77,6 +77,9 @@ struct App {
     /// Bar brush (solid or pattern) and, for a pattern, the packed DIB it was made from.
     brush: HBRUSH,
     brush_dib: Vec<u32>,
+    /// Integer scale the user asked for (option, digit key, M key), when the window had to show a smaller
+    /// one to fit the work area; the title reports both so that it never claims an undisplayed scale.
+    requested_scale: Option<u32>,
     /// Saved style and placement while fullscreen.
     saved: Option<(isize, WINDOWPLACEMENT)>,
     stat_start: Instant,
@@ -132,6 +135,7 @@ fn main() {
     }
     let current = contents.iter().position(|c| *c == o.content).unwrap_or(0);
 
+    let window_given = o.window_size.is_some();
     let (cw, ch) = initial_client(&o);
     println!(
         "pixel-demo: source {nw}x{nh}, {}, content {}, {} Hz, initial client {cw}x{ch}",
@@ -190,6 +194,7 @@ fn main() {
                 scaled_valid: false,
                 brush,
                 brush_dib,
+                requested_scale: None,
                 saved: None,
                 stat_start: now,
                 stat_ticks: 0,
@@ -228,8 +233,16 @@ fn main() {
             );
         }
         // The window may have been created on a monitor with another DPI than the system one.
+        // An integer scale taller or wider than the work area is clamped to the largest one that fits (an explicit
+        // --window size is the user's own and is kept).
         if !maximised && !fullscreen {
+            let (cw, ch) = if window_given {
+                (cw, ch)
+            } else {
+                clamp_to_work_area(hwnd).unwrap_or((cw, ch))
+            };
             fit_window_to_client(hwnd, cw, ch);
+            keep_in_work_area(hwnd);
         }
         update_title(hwnd);
         let _ = ShowWindow(hwnd, if maximised { SW_SHOWMAXIMIZED } else { SW_SHOW });
@@ -363,6 +376,61 @@ unsafe fn fit_window_to_client(hwnd: HWND, cw: u32, ch: u32) {
     let _ = SetWindowPos(hwnd, None, 0, 0, ww, wh, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+/// Work area (the monitor minus the taskbar) of the monitor nearest to the window.
+unsafe fn work_area(hwnd: HWND) -> Option<layout::Rect> {
+    let mut mi = MONITORINFO {
+        cbSize: size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    if !GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut mi).as_bool() {
+        return None;
+    }
+    let r = mi.rcWork;
+    Some(layout::Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top))
+}
+
+/// Clamps an integer scale mode to the largest scale whose exact window fits the work area of the
+/// window's monitor (frame included, at the window's DPI), keeping the requested scale for the
+/// title. Returns the exact client size of the (possibly clamped) mode, `None` when the mode has no
+/// exact size. Does nothing while maximised or fullscreen: there the scale is the user's choice.
+unsafe fn clamp_to_work_area(hwnd: HWND) -> Option<(u32, u32)> {
+    let limit = if IsZoomed(hwnd).as_bool() || APP.with(|a| a.borrow().as_ref().is_some_and(|a| a.saved.is_some())) {
+        None
+    } else {
+        let style = WINDOW_STYLE(GetWindowLongPtrW(hwnd, GWL_STYLE) as u32);
+        let (fw, fh) = outer_size(0, 0, style, GetDpiForWindow(hwnd));
+        work_area(hwnd).map(|w| layout::max_client(w.w.max(0) as u32, w.h.max(0) as u32, fw as u32, fh as u32))
+    };
+    APP.with(|a| {
+        let mut a = a.borrow_mut();
+        let a = a.as_mut()?;
+        if let (ScaleMode::Integer(cur), Some((mw, mh))) = (a.o.mode, limit) {
+            let requested = *a.requested_scale.get_or_insert(cur);
+            let n = layout::clamp_integer_scale(a.nw as u32, a.nh as u32, a.o.par, requested, mw, mh);
+            if n != cur {
+                println!(
+                    "pixel-demo: integer x{requested} does not fit the work area (client at most {mw}x{mh}), showing x{n}"
+                );
+            }
+            a.o.mode = ScaleMode::Integer(n);
+        }
+        exact_client(a)
+    })
+}
+
+/// Moves the window (keeping its size) so that it lies inside the work area of its monitor.
+unsafe fn keep_in_work_area(hwnd: HWND) {
+    let mut r = RECT::default();
+    if IsZoomed(hwnd).as_bool() || GetWindowRect(hwnd, &mut r).is_err() {
+        return;
+    }
+    let Some(area) = work_area(hwnd) else { return };
+    let outer = layout::Rect::new(r.left, r.top, r.right - r.left, r.bottom - r.top);
+    let (x, y) = layout::shift_into(outer, area);
+    if (x, y) != (outer.x, outer.y) {
+        let _ = SetWindowPos(hwnd, None, x, y, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
 unsafe fn toggle_fullscreen(hwnd: HWND) {
     let restore = APP.with(|a| a.borrow_mut().as_mut().unwrap().saved.take());
     if let Some((style, placement)) = restore {
@@ -468,7 +536,7 @@ fn update_title(hwnd: HWND) {
         let a = a.as_ref()?;
         let mode = match a.o.mode {
             ScaleMode::Native => "1to1".to_string(),
-            ScaleMode::Integer(n) => format!("integer x{n}"),
+            ScaleMode::Integer(n) => layout::integer_label(a.requested_scale, n),
             ScaleMode::Fit => match current_layout(a, cw, ch).scale {
                 Some(n) => format!("autofit x{n}"),
                 None => "autofit".to_string(),
@@ -727,6 +795,7 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
             let a = a.as_mut().unwrap();
             let n = if key == 0x30 { 10 } else { key - 0x30 };
             a.o.mode = ScaleMode::Integer(n);
+            a.requested_scale = Some(n);
             resize = exact_client(a);
         }),
         0x4D => APP.with(|a| {
@@ -734,6 +803,9 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
             let mut a = a.borrow_mut();
             let a = a.as_mut().unwrap();
             a.o.mode = a.o.mode.next(3);
+            if let ScaleMode::Integer(n) = a.o.mode {
+                a.requested_scale = Some(n);
+            }
             a.scaled_valid = false;
             resize = exact_client(a);
         }),
@@ -768,7 +840,10 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
         _ => return,
     }
     if let Some((cw, ch)) = resize {
+        // A window that cannot show the requested integer scale whole shows the largest that fits.
+        let (cw, ch) = clamp_to_work_area(hwnd).unwrap_or((cw, ch));
         fit_window_to_client(hwnd, cw, ch);
+        keep_in_work_area(hwnd);
     }
     update_title(hwnd);
     let _ = InvalidateRect(Some(hwnd), None, false);

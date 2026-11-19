@@ -197,6 +197,42 @@ pub fn client_for_scale(nw: u32, nh: u32, par: Par, n: u32) -> (u32, u32) {
     ((nw as u64 * n * pn / pm).max(1) as u32, (nh as u64 * n) as u32)
 }
 
+/// Largest integer scale `<= requested` (clipped to 1..=`MAX_SCALE`) whose exact client area
+/// (`client_for_scale`) fits `max_cw x max_ch`. Never below 1: a source that does not fit even at
+/// x1 stays x1 (the window then cannot show it whole, nothing can be done about it).
+pub fn clamp_integer_scale(nw: u32, nh: u32, par: Par, requested: u32, max_cw: u32, max_ch: u32) -> u32 {
+    let requested = requested.clamp(1, MAX_SCALE);
+    (1..=requested)
+        .rev()
+        .find(|&n| {
+            let (cw, ch) = client_for_scale(nw, nh, par, n);
+            cw <= max_cw && ch <= max_ch
+        })
+        .unwrap_or(1)
+}
+
+/// Largest client area a window can have inside a work area of `work_w x work_h`, given the frame
+/// (outer size minus client size) at the window's DPI. Zero when the frame alone does not fit.
+pub fn max_client(work_w: u32, work_h: u32, frame_w: u32, frame_h: u32) -> (u32, u32) {
+    (work_w.saturating_sub(frame_w), work_h.saturating_sub(frame_h))
+}
+
+/// Mode text of the title for an integer scale: the scale shown, and the requested one when it
+/// had to be clamped, so the title never claims a scale that is not displayed.
+pub fn integer_label(requested: Option<u32>, scale: u32) -> String {
+    match requested {
+        Some(r) if r != scale => format!("integer x{r} (clamped to x{scale})"),
+        _ => format!("integer x{scale}"),
+    }
+}
+
+/// Top-left position that moves `outer` (a window rectangle) inside `area` with the least
+/// displacement; the top-left corner wins when it is larger than the area.
+pub fn shift_into(outer: Rect, area: Rect) -> (i32, i32) {
+    let x = outer.x.min(area.right() - outer.w).max(area.x);
+    let y = outer.y.min(area.bottom() - outer.h).max(area.y);
+    (x, y)
+}
 /// Maps a native pixel centre to client coordinates for a destination rectangle.
 pub fn native_to_client(dest: Rect, nw: u32, nh: u32, x: u32, y: u32) -> (i32, i32) {
     let fx = dest.x as f64 + (x as f64 + 0.5) * dest.w as f64 / nw as f64;
@@ -582,5 +618,140 @@ mod tests {
         assert_eq!(native_to_client(dest, 256, 240, 0, 0), (101, 51));
         // Pixel (255, 239): 100 + 255.5*3 = 866.5 -> 866; 50 + 239.5*3 = 768.5 -> 768.
         assert_eq!(native_to_client(dest, 256, 240, 255, 239), (866, 768));
+    }
+
+    /// Frame (outer minus client) of a WS_OVERLAPPEDWINDOW at a DPI scaling in percent: 16 x 39 at
+    /// 100 %, scaled with the DPI (the values `AdjustWindowRectExForDpi` gives, rounded).
+    fn frame(percent: u32) -> (u32, u32) {
+        (16 * percent / 100, 39 * percent / 100)
+    }
+
+    /// Effective scale of a `nw x nh` source requested at `req` on a monitor whose work area is
+    /// `work_w x work_h` physical pixels, at a DPI scaling.
+    fn fit(nw: u32, nh: u32, par: Par, req: u32, work: (u32, u32), percent: u32) -> u32 {
+        let (fw, fh) = frame(percent);
+        let (mw, mh) = max_client(work.0, work.1, fw, fh);
+        clamp_integer_scale(nw, nh, par, req, mw, mh)
+    }
+
+    #[test]
+    fn clamp_keeps_a_scale_that_fits() {
+        // 1920x1080, taskbar 48: work area 1920x1032. 256x240 x4 = 960 high fits.
+        for percent in [100, 125, 150] {
+            assert_eq!(fit(256, 240, SQ, 4, (1920, 1032), percent), 4, "{percent} %");
+            assert_eq!(fit(256, 240, SQ, 1, (1920, 1032), percent), 1);
+        }
+    }
+
+    #[test]
+    fn clamp_live_case_x5_and_above_on_1080_lines() {
+        // Live finding 2026-11-19: from x5 (1200 lines) the window was taller than the monitor.
+        for percent in [100, 125, 150] {
+            for req in 5..=10 {
+                assert_eq!(
+                    fit(256, 240, SQ, req, (1920, 1032), percent),
+                    4,
+                    "x{req} at {percent} %"
+                );
+            }
+        }
+        // The same at the full monitor height (no taskbar): 1080 - 39 = 1041 still gives x4.
+        assert_eq!(fit(256, 240, SQ, 5, (1920, 1080), 100), 4);
+    }
+
+    #[test]
+    fn clamp_on_1920x1200() {
+        // Work area 1920x1152: 1152 - 39 = 1113 client lines, x4 (960) fits, x5 (1200) does not.
+        assert_eq!(fit(256, 240, SQ, 5, (1920, 1152), 100), 4);
+        // 320x200 (DOS): x5 = 1000 lines fits, x6 = 1200 does not (and 1600 wide fits).
+        assert_eq!(fit(320, 200, SQ, 6, (1920, 1152), 100), 5);
+        assert_eq!(fit(320, 200, SQ, 5, (1920, 1152), 100), 5);
+    }
+
+    #[test]
+    fn clamp_on_2560x1440() {
+        // Work area 2560x1392 (taskbar 48): 1392 - 39 = 1353: x5 (1200) fits, x6 (1440) does not.
+        assert_eq!(fit(256, 240, SQ, 5, (2560, 1392), 100), 5);
+        assert_eq!(fit(256, 240, SQ, 6, (2560, 1392), 100), 5);
+        assert_eq!(fit(256, 240, SQ, 10, (2560, 1392), 100), 5);
+        // At 150 % the frame is 24 x 58: 1392 - 58 = 1334, still x5.
+        assert_eq!(fit(256, 240, SQ, 6, (2560, 1392), 150), 5);
+        // A 160x144 (Game Boy) source: x9 = 1296 fits, x10 = 1440 does not.
+        assert_eq!(fit(160, 144, SQ, 10, (2560, 1392), 100), 9);
+    }
+
+    #[test]
+    fn clamp_is_limited_by_the_width_too() {
+        // 8:7 PAR, 256 wide: x10 is 2925 wide, more than 2560 - 16; x8 = 2340 fits.
+        let par = Par { n: 8, m: 7 };
+        assert_eq!(fit(256, 144, par, 10, (2560, 1392), 100), 8);
+        // A 1280x720 source at x2 is 2560 wide: the frame (16) makes it not fit on 2560.
+        assert_eq!(fit(1280, 720, SQ, 2, (2560, 1392), 100), 1);
+    }
+
+    #[test]
+    fn clamp_never_goes_below_one_and_clips_the_request() {
+        // Nothing fits, not even x1: stays x1.
+        assert_eq!(fit(256, 240, SQ, 3, (300, 200), 100), 1);
+        assert_eq!(clamp_integer_scale(256, 240, SQ, 3, 0, 0), 1);
+        // Request 0 and 99 are clipped to 1..=10 before the search.
+        assert_eq!(clamp_integer_scale(16, 16, SQ, 0, 4000, 4000), 1);
+        assert_eq!(clamp_integer_scale(16, 16, SQ, 99, 4000, 4000), 10);
+    }
+
+    #[test]
+    fn clamped_scale_is_exact_and_the_next_one_does_not_fit() {
+        for work in [(1920, 1032), (1920, 1152), (2560, 1392), (1366, 720)] {
+            for percent in [100, 125, 150] {
+                let (fw, fh) = frame(percent);
+                let (mw, mh) = max_client(work.0, work.1, fw, fh);
+                for (nw, nh) in [(256, 240), (320, 200), (160, 144), (640, 480)] {
+                    for req in 1..=MAX_SCALE {
+                        let n = clamp_integer_scale(nw, nh, SQ, req, mw, mh);
+                        assert!((1..=req).contains(&n));
+                        let (cw, ch) = client_for_scale(nw, nh, SQ, n);
+                        assert!(
+                            n == 1 || (cw <= mw && ch <= mh),
+                            "{nw}x{nh} x{req} {work:?} {percent} %"
+                        );
+                        if n < req {
+                            let (cw, ch) = client_for_scale(nw, nh, SQ, n + 1);
+                            assert!(cw > mw || ch > mh, "x{} would have fitted", n + 1);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn max_client_subtracts_the_frame_and_saturates() {
+        assert_eq!(max_client(1920, 1032, 16, 39), (1904, 993));
+        assert_eq!(max_client(10, 10, 16, 39), (0, 0));
+    }
+
+    #[test]
+    fn integer_label_never_claims_an_undisplayed_scale() {
+        assert_eq!(integer_label(None, 4), "integer x4");
+        assert_eq!(integer_label(Some(4), 4), "integer x4");
+        assert_eq!(integer_label(Some(5), 4), "integer x5 (clamped to x4)");
+        assert_eq!(integer_label(Some(10), 1), "integer x10 (clamped to x1)");
+    }
+
+    #[test]
+    fn shift_into_keeps_the_window_in_the_work_area() {
+        let area = Rect::new(0, 0, 1920, 1032);
+        // Already inside: unchanged.
+        assert_eq!(shift_into(Rect::new(100, 50, 1000, 900), area), (100, 50));
+        // Bottom overflow: moved up so that the bottom edge touches the work area.
+        assert_eq!(shift_into(Rect::new(100, 300, 1000, 900), area), (100, 132));
+        // Right and left overflow.
+        assert_eq!(shift_into(Rect::new(1500, 0, 1000, 900), area), (920, 0));
+        assert_eq!(shift_into(Rect::new(-50, -20, 1000, 900), area), (0, 0));
+        // Larger than the area: the top-left corner wins.
+        assert_eq!(shift_into(Rect::new(10, 10, 3000, 2000), area), (0, 0));
+        // Secondary monitor with an offset origin.
+        let area2 = Rect::new(-2560, 0, 2560, 1392);
+        assert_eq!(shift_into(Rect::new(-100, 800, 600, 700), area2), (-600, 692));
     }
 }
