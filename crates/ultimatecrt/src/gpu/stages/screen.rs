@@ -514,6 +514,8 @@ mod tests {
             include_str!("../../../../../shaders/screen_lines.comp"),
             include_str!("../../../../../shaders/screen_warp.comp"),
         ] {
+            // Independent of the checkout's line endings (a CRLF checkout of the shader sources).
+            let glsl = glsl.replace("\r\n", "\n");
             assert!(glsl.contains("uint abl_runs;\n    uint ox;\n    int pad;"));
         }
     }
