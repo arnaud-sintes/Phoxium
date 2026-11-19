@@ -21,7 +21,10 @@
 //!   rows sum to 1.
 //! - Exposure: linear in E, so 0.5 halves every value.
 //! - Shoulder with knee 0.8 at x = 1: 0.8 + 0.2 (1 - exp(-1)) = 0.926424; at x = 2: 0.8 + 0.2 (1 - exp(-6))
-//!   = 0.999505.
+//!   = 0.999505 (T-46 asymptotic shoulder = T-84 shoulder of rate 1, a white point far above 1).
+//! - T-84 headroom modes: with only `encode` running the readout is exposure x white matrix maximum; the default
+//!   shoulder mode with its automatic white point leaves a readout <= 1 untouched (hard clip at 1 = the T-46
+//!   identity chain), physical and mask depth divide the exposure by readout x (1 + margin).
 //! - Ordered dither of the flat value 127.5 codes: thresholds (b + 0.5) / 64, b = 0..63; floor(127.5 + t) is 128
 //!   when t >= 0.5, i.e. for b >= 32: half of the pixels, mean 127.5 exactly, each pixel within 0.5 code.
 
@@ -38,13 +41,16 @@ mod common;
 
 use crt_model::colour::{gun_power, srgb_eotf};
 use crt_model::output::{
-    apply, dithered_code, encode_power, encode_srgb, ordered_threshold, shoulder, tube_to_display, D65, IDENTITY,
+    apply, dithered_code, encode_power, encode_srgb, ordered_threshold, shoulder, shoulder_rate, shoulder_with_rate,
+    tube_to_display, D65, IDENTITY,
 };
 use ultimatecrt::gpu::{
     output_matrix, ClipCounts, FrameConstants, Headless, ImageF32, Rendered, Settings, StageInput, StageRun,
     TargetFormat, Transfer,
 };
-use ultimatecrt::params::{meta, ParamValue, Params};
+use ultimatecrt::params::{
+    meta, ParamValue, Params, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH, OUTPUT_HEADROOM_MODE_PHYSICAL,
+};
 
 /// Renders `tube` (linear light, one texel per host pixel) through `encode` only, into a target of the
 /// same size, as `format`. `frame_index` is injected into the frame constants.
@@ -375,8 +381,12 @@ fn shoulder_is_identity_below_the_knee_monotonic_above_and_hard_at_knee_1() {
         let v = x as f32 * 0.01;
         [v, v, v]
     });
+    // T-84: shoulder mode (the default) with a far white point: T = (64 - 0.8) / 0.2 = 316, rate
+    // 1 - exp(-316) = 1 in f64, which is the T-46 asymptotic shoulder exactly.
     let mut soft = Params::default();
     set(&mut soft, "output_knee", ParamValue::F32(0.8));
+    set(&mut soft, "output_shoulder_white", ParamValue::F32(64.0));
+    assert_eq!(shoulder_rate(0.8, 64.0), Some(1.0));
     let r = encode(&mut gpu, &tube, &soft, Transfer::Identity, TargetFormat::Rgba32F, 0);
     let mut last = -1.0f32;
     for x in 0..251u32 {
@@ -399,18 +409,102 @@ fn shoulder_is_identity_below_the_knee_monotonic_above_and_hard_at_knee_1() {
     // Hand values: 0.926424 at 1, 0.999505 at 2.
     assert!((f64::from(r.output.pixel(100, 0)[0]) - 0.926_424).abs() < 1e-5);
     assert!((f64::from(r.output.pixel(200, 0)[0]) - 0.999_505).abs() < 1e-5);
-    // Knee 1: hard clip at panel white.
-    let r = encode(
-        &mut gpu,
-        &tube,
-        &Params::default(),
-        Transfer::Identity,
-        TargetFormat::Rgba32F,
-        0,
+    // Hard clip at panel white: knee 1, the clip mode, and the default shoulder mode when the headroom readout
+    // is 1 (only `encode` runs, identity matrix, exposure 1: nothing above panel white to roll off).
+    let mut knee1 = Params::default();
+    set(&mut knee1, "output_knee", ParamValue::F32(1.0));
+    set(&mut knee1, "output_shoulder_white", ParamValue::F32(4.0));
+    let mut clip = Params::default();
+    set(
+        &mut clip,
+        "output_headroom_mode",
+        ParamValue::Enum(OUTPUT_HEADROOM_MODE_CLIP),
     );
+    set(&mut clip, "output_shoulder_white", ParamValue::F32(4.0));
+    for p in [knee1, clip, Params::default()] {
+        let r = encode(&mut gpu, &tube, &p, Transfer::Identity, TargetFormat::Rgba32F, 0);
+        for x in 0..251u32 {
+            let v = tube.pixel(x, 0)[0];
+            assert_eq!(r.output.pixel(x, 0)[0], v.min(1.0), "x {x}");
+        }
+    }
+    drop(gpu);
+}
+
+/// T-84 shoulder to a white point: knee 0.6 (the default), white point 2: T = 1.4 / 0.4 = 3.5, the rate solves
+/// 1 - exp(-3.5 a) = a (crt_model::output::shoulder_rate, about 0.96597: exp(-3.3809) = 0.034017). The GPU, given the f32 rate, matches
+/// the f64 oracle `shoulder_with_rate`, reaches panel white at x = 2 (within the f32 exp) and clips above;
+/// identity below the knee.
+#[test]
+fn shoulder_reaches_panel_white_at_the_white_point() {
+    let Some(mut gpu) = gpu("shoulder_reaches_panel_white_at_the_white_point") else {
+        return;
+    };
+    let tube = image(251, 1, |x, _| {
+        let v = x as f32 * 0.01;
+        [v, v, v]
+    });
+    let mut p = Params::default();
+    set(&mut p, "output_shoulder_white", ParamValue::F32(2.0));
+    let rate = f64::from(shoulder_rate(0.6, 2.0).unwrap() as f32);
+    assert!((rate - 0.965_97).abs() < 1e-4, "{rate}");
+    let r = encode(&mut gpu, &tube, &p, Transfer::Identity, TargetFormat::Rgba32F, 0);
+    let mut last = -1.0f32;
     for x in 0..251u32 {
-        let v = tube.pixel(x, 0)[0];
-        assert_eq!(r.output.pixel(x, 0)[0], v.min(1.0), "x {x}");
+        let v = f64::from(tube.pixel(x, 0)[0]);
+        let g = r.output.pixel(x, 0)[0];
+        let want = shoulder_with_rate(v, 0.6, Some(rate));
+        assert!((f64::from(g) - want).abs() < 2e-6, "x {x}: {g} vs {want}");
+        if v <= 0.6 {
+            assert_eq!(f64::from(g), v, "identity below the knee, x {x}");
+        }
+        assert!(g >= last && g <= 1.0, "x {x}: {g}");
+        last = g;
+    }
+    assert!((f64::from(r.output.pixel(200, 0)[0]) - 1.0).abs() < 1e-5);
+    assert_eq!(r.output.pixel(250, 0)[0], 1.0);
+    drop(gpu);
+}
+
+/// T-84 physical and mask depth modes on `encode` alone: the headroom readout is the exposure times the white
+/// matrix maximum (no mask, no scanlines), here 2 x 1 = 2, so the pushed exposure is 2 / (2 x 1.02) = 0.980392
+/// and the brightest input (1.0) lands at 1 / 1.02 = 0.980392: nothing clips, the clip counter stays 0. Mask
+/// depth has no mask to reduce here and derives the same exposure. The readout is reported by the renderer.
+#[test]
+fn physical_mode_derives_the_exposure_from_the_readout() {
+    let Some(mut gpu) = gpu("physical_mode_derives_the_exposure") else {
+        return;
+    };
+    let tube = image(5, 1, |x, _| {
+        let v = [0.1, 0.3, 0.5, 0.8, 1.0][x as usize];
+        [v, v, v]
+    });
+    for mode in [OUTPUT_HEADROOM_MODE_PHYSICAL, OUTPUT_HEADROOM_MODE_MASK_DEPTH] {
+        let mut p = Params::default();
+        set(&mut p, "exposure", ParamValue::F32(2.0));
+        set(&mut p, "output_headroom_mode", ParamValue::Enum(mode));
+        let r = encode(&mut gpu, &tube, &p, Transfer::Identity, TargetFormat::Rgba32F, 0);
+        let h = gpu.last_headroom().expect("readout");
+        assert_eq!(
+            (h.mask_peak, h.scanline_peak, h.matrix_max, h.exposure),
+            (1.0, 1.0, 1.0, 2.0)
+        );
+        let e = 2.0 / (2.0 * 1.02);
+        for x in 0..5 {
+            let want = f64::from(tube.pixel(x, 0)[0]) * e;
+            let got = f64::from(r.output.pixel(x, 0)[0]);
+            assert!((got - want).abs() < 1e-6, "mode {mode} x {x}: {got} vs {want}");
+        }
+        assert_eq!(r.clip.over_white, 0, "mode {mode}");
+        // Clip mode with the same exposure: 1.6 and 2.0 clip (0.5 x 2 = 1.0 is panel white, not over).
+        set(
+            &mut p,
+            "output_headroom_mode",
+            ParamValue::Enum(OUTPUT_HEADROOM_MODE_CLIP),
+        );
+        let r = encode(&mut gpu, &tube, &p, Transfer::Identity, TargetFormat::Rgba32F, 0);
+        assert_eq!(r.clip.over_white, 2);
+        assert_eq!(r.output.pixel(4, 0)[0], 1.0);
     }
     drop(gpu);
 }

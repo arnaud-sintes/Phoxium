@@ -5,13 +5,16 @@
 //! `texelFetch`), 3 the clip counters (storage buffer, one per frame in flight, owned by the pipeline).
 //! Inside the tube rectangle the input goes through the output transform (T-46, `shaders/encode.frag`):
 //! exposure, the colour matrix from the tube primaries and white to sRGB primaries, clip counters, soft
-//! shoulder, inverse host EOTF, optional dither; outside it the target is black (surround).
+//! shoulder, inverse host EOTF, optional dither; outside it the target is black (surround). The exposure and
+//! the shoulder come from the headroom mode (T-84, `crate::headroom::OutputTransform`), resolved by the
+//! pipeline per frame.
 
 use ash::vk;
 use crt_model::colour::Mat3;
 use crt_model::output::{tube_to_display, IDENTITY};
 
 use super::super::pipeline::Transfer;
+use crate::headroom::OutputTransform;
 use crate::params::Params;
 use crate::Res;
 
@@ -37,7 +40,7 @@ pub struct ClipCounts {
 
 const STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
-/// Push constants of `encode.frag`, laid out as its `Push` block (64 bytes).
+/// Push constants of `encode.frag`, laid out as its `Push` block (72 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -47,7 +50,10 @@ struct Push {
     gamma: f32,
     /// Quantisation steps of the target, 0 for a float target (no dither).
     levels: f32,
-    pad: u32,
+    /// The headroom mode resolved on the CPU (T-84, [`OutputTransform`]): exposure, shoulder knee and rate.
+    exposure: f32,
+    knee: f32,
+    rate: f32,
 }
 
 /// The linear colour matrix from the tube primaries and white (`colour.toml`) to sRGB/Rec.709 primaries
@@ -145,6 +151,7 @@ impl Encode {
         extent: vk::Extent2D,
         host: Transfer,
         params: &Params,
+        xf: OutputTransform,
         format: vk::Format,
     ) {
         let attachment = [vk::RenderingAttachmentInfo::default()
@@ -193,7 +200,9 @@ impl Encode {
                 transfer,
                 gamma,
                 levels: levels(format),
-                pad: 0,
+                exposure: xf.exposure,
+                knee: xf.knee,
+                rate: xf.rate,
             };
             super::push(d, cb, self.layout, STAGES, &push);
             d.cmd_draw(cb, 3, 1, 0, 0);

@@ -7,10 +7,11 @@ Small consumer set with a coarse slot mask. Pitch 0.60 mm is measured by Goldwas
 No CRT.md data for this set, so these keep their table defaults (primaries and white are listed with that provenance): slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma, raster breathing, source clock (ABL: see the M4 values below). The visible size is derived from the triad count (440 x 0.60 = 264 mm wide), the same size as the 14 in BVM.
 Spot: CRT.md gives no row for this set; the consumer TV class (mid 0.7 to 1.5 mm, peak 1.5 to 2 mm) is used with 0.75 -> 1.5 mm, n = 0.42 (ratio 2.0 stays under the zero-floor bound 2.01, which leaves a floor d0 close to zero). Research point (T-36b review): these widths need n = 0.5 for a ratio of 2, which gives peak/d0 about 3.7 at n = 0.5; no 13 in spot data exists, so the widths are not changed here.
 Amplifier: 5 MHz (cheap consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 / 5 = 0.142 source px, so amp_samples = 16 (K = 4 over-dims isolated vertical lines by 2.3 points at 5 MHz, T-33 follow-up). Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
-Output: tube-faithful, dithered. D65 does not clip at exposure 1.
+Output: tube-faithful, dithered. The unmasked D65 white stays within panel white at exposure 1 (element peaks do not: see Headroom below).
 M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1R faceplate, R = 1.767 x 330 mm = 583 mm (the diagonal is derived from the triad count); convergence 1.0 mm radial at the corner on red (outward) and blue (inward), no static offset (CRT.md Starting presets TV, no centre value); ABL on with the RCA 1.4 mA and 0.5 s values, FLAGGED: they come from another (larger) RCA tube and CRT.md has no value for a 13 in set, and with the table full-white current of 2.8 mA the limiter engages only above half-field white. Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
 Spot growth flagged: the 0.75 to 1.5 mm widths are at the zero-floor bound for n = 0.42 (see above), no 13 in spot data exists.
 Not yet parameters: faceplate thickness (10 mm estimate), halation.
+Headroom (T-84, D-16): a full-white field is not flat on the tube. On the reference host 2560 x 1440 with a 320 x 240 source the readout (crate::headroom) is mask peak 3.849 x scanline peak 1.000 x white matrix maximum 1.006 x exposure 1.00 = 3.872: the brightest elements are 3.872 times panel white, so the exposure alone does not keep white unclipped (the earlier 'no clip' statement covered the unmasked white only). Measured by the flat-white chain test of tests/presets.rs (ABL off): the T-46 hard clip loses 54.1 % of the white mean; the default headroom mode shoulder (knee 0.6, white point = readout x 1.02, non-physical above the knee) has no hard clip and keeps 44.9 % of the intended white mean; the physical mode keeps every element unclipped at an effective exposure of 0.253 (25 % of the intended white). The readout changes with the host size and the source lines.
 """
 
 [params]
@@ -40,6 +41,7 @@ geometry_conv_blue_radial_mm = -1.0
 exposure = 1.0
 output_match_srgb = false
 output_dither = "noise"
+output_headroom_mode = "shoulder"
 
 [provenance]
 tube_visible_height_mm = "D: CRT.md Consumer TVs table, about 440 triads x 0.60 mm = 264 mm wide, 4:3"
@@ -65,6 +67,7 @@ phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all pre
 phosphor_tail_strength_rgb = "E: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1) [T-87: was S; the Kuhn P22 power-law tail is extrapolated beyond 2 ms from another sample, not measured on this tube]"
 geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
 geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
-exposure = "D: D65 white, no clip"
+exposure = "D: D65 white: the unmasked white maps to panel white at exposure 1 (largest linear sRGB channel 1). Not a no-clip statement: the mask and scanline peaks lift elements above it (headroom readout 3.872 on 2560 x 1440), handled by output_headroom_mode (T-84)"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
+output_headroom_mode = "E: PLAN D-16 (owner decision 2026-11-19): the shoulder default (knee 0.6, automatic white point from the headroom readout) for every preset; readout 3.872 on 2560 x 1440 (see notes); physical, mask_depth and clip stay selectable"

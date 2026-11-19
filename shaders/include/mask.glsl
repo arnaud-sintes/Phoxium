@@ -415,12 +415,8 @@ vec3 mask_delta(ivec2 q) {
     return sum / (coverage * bx * by);
 }
 
-// Emitter weight per channel of host pixel q. Exactly 1 when the mask is off or the tube is not placed (px per
-// mm 0, before T-30), so the screen slot stays an identity of the beam image there.
-vec3 mask_eval(ivec2 q) {
-    if (!params.mask_enabled || !(frame.px_per_mm > 0.0)) {
-        return vec3(1.0);
-    }
+// Emitter weight per channel of host pixel q, the physical mask (mask_eval below adds the switches).
+vec3 mask_eval_physical(ivec2 q) {
     // T-37: the mask lattice is centred on the tube centre (mask_centred_phase), which is also the raster's
     // centre (the margin is the same on both sides), so q is taken in the tube image as it is.
     switch (params.mask_type) {
@@ -432,6 +428,22 @@ vec3 mask_eval(ivec2 q) {
     default:
         return mask_grille(q);
     }
+}
+
+// The weight the screen slot multiplies the beam by. Exactly 1 when the mask is off or the tube is not placed
+// (px per mm 0, before T-30), so the screen slot stays an identity of the beam image there. In the mask_depth
+// headroom mode (T-84, D-16 option C, NON-PHYSICAL) the contrast is scaled: 1 + depth (m - 1) = mix(1, m, depth),
+// linear in m, so the field mean (1 per channel) is kept exactly and the peak over the mean falls to
+// 1 + depth (peak - 1).
+vec3 mask_eval(ivec2 q) {
+    if (!params.mask_enabled || !(frame.px_per_mm > 0.0)) {
+        return vec3(1.0);
+    }
+    vec3 m = mask_eval_physical(q);
+    if (params.output_headroom_mode == OUTPUT_HEADROOM_MODE_MASK_DEPTH) {
+        m = mix(vec3(1.0), m, clamp(params.mask_depth, 0.0, 1.0));
+    }
+    return m;
 }
 
 #endif

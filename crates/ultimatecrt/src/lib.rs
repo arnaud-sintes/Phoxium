@@ -5,6 +5,7 @@ pub mod capture;
 pub mod cli;
 pub mod diag;
 pub mod gpu;
+pub mod headroom;
 pub mod lifecycle;
 pub mod output;
 pub mod params;

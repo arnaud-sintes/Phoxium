@@ -170,3 +170,16 @@ tag = "E"
 source = "CRT.md Delta (dot) triad geometry: dot diameter about 0.4 to 0.5 P (below the dot spacing P / sqrt 3 because of the black matrix)"
 description = "Delta mask only: phosphor dot diameter as a fraction of the diagonal dot pitch P, between the half-value points of its edge. The shader limits it to the dot spacing P / sqrt(3) = 0.577 P."
 group = "Mask"
+
+[[param]]
+id = "mask_depth"
+stage = "mask"
+type = "f32"
+unit = "1"
+default = 0.5
+min = 0.0
+max = 1.0
+tag = "E"
+source = "PLAN D-16 option C (owner decision 2026-11-19, T-84): a non-physical limit on the mask contrast for SDR. Used only when output_headroom_mode = mask_depth: each channel weight m becomes 1 + depth (m - 1) = mix(1, m, depth). Linear in m, so the field mean of every channel stays exactly 1 (the mask's own mean) and the peak over the mean falls from m_peak to 1 + depth (m_peak - 1); a peak-limiting curve such as min(m, cap) would lose mean. 0.5 is a placeholder midpoint, no source [E]"
+description = "Mask depth mode only (NON-PHYSICAL): how much of the mask contrast is kept, 1 = the physical mask, 0 = flat. Lowers the brightest elements so that less exposure reduction is needed in SDR; the mean of a flat field does not change. Damper-wire shadows are made shallower by the same factor."
+group = "Mask"

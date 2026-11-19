@@ -123,6 +123,26 @@ pub fn scanline_row_mean(currents: &[f64], first: f64, pitch: f64, profile: &Sca
     sum * pitch / (y1 - y0)
 }
 
+/// Peak over mean of the scanline structure of a flat field as host pixels see it (T-84 headroom readout): the
+/// largest [`scanline_row_mean`] of a field of equal lines (pitch `pitch`) over host rows `pixel` high, with the
+/// row centred on a line (the summed profile is periodic, symmetric and unimodal, and so is its box
+/// average, so the centred row is the largest). The mean of a flat field is 1 by construction, so this is the
+/// peak/mean ratio: about P / (sigma sqrt(2 pi)) for narrow lines and pixels, 1 when the lines merge. 81 lines
+/// around the row are summed (beyond 40 pitches a line adds nothing at any sigma the readout meets; a wider
+/// spot is flat anyway). Same length unit for every argument. [D]
+///
+/// # Panics
+/// Unless `pitch` > 0 and `pixel` > 0, or as [`ScanlineProfile::fraction`].
+pub fn scanline_pixel_peak(profile: &ScanlineProfile, pitch: f64, pixel: f64) -> f64 {
+    assert!(
+        pitch > 0.0 && pixel > 0.0,
+        "scanline_pixel_peak: pitch {pitch}, pixel {pixel}"
+    );
+    let currents = [1.0; 81];
+    // The true value is at least the mean 1; a spot tens of pitches wide loses energy past the 81 lines.
+    scanline_row_mean(&currents, -40.0 * pitch, pitch, profile, -0.5 * pixel, 0.5 * pixel).max(1.0)
+}
+
 /// Spot FWHM against beam current: d^2 = d0^2 + k I^(2n). [E]
 /// `d0_mm` is the floor set by the gun optics, n between 0.3 and 0.5.
 pub fn spot_fwhm_mm(current_ua: f64, d0_mm: f64, k: f64, n: f64) -> f64 {
@@ -552,6 +572,26 @@ mod tests {
     use super::*;
     use crate::close;
     use crate::units::{fwhm_from_sigma, sigma_from_fwhm};
+
+    /// T-84: peak over mean of the flat-field scanlines. A row far thinner than the line gives the pointwise
+    /// ratio: the sum of unit-peak lines at 0 over their mean sigma sqrt(2 pi) / P (at sigma/P = 0.3 from
+    /// `scanline_sum`, an independent sum); at sigma/P = 0.1 the neighbours add nothing: 1 / (0.1 sqrt(2 pi))
+    /// = 3.98942. A row as high as a line pitch averages the structure away: 1. Wide spots: 1. A row of P / 5
+    /// at sigma/P = 0.1 holds erf(1 / sqrt 2) = 0.6827 of the line: 0.6827 x 5 = 3.41.
+    #[test]
+    fn scanline_pixel_peak_over_the_mean() {
+        let p = 1.2;
+        let thin = 1e-6 * p;
+        let g = |s: f64| ScanlineProfile::gaussian(s * p);
+        assert!(close(scanline_pixel_peak(&g(0.1), p, thin), 3.989_423, 1e-5));
+        let pointwise = scanline_sum(0.3, 0.0) / (0.3 * (2.0 * PI).sqrt());
+        assert!(close(scanline_pixel_peak(&g(0.3), p, thin), pointwise, 1e-6));
+        assert!(close(scanline_pixel_peak(&g(0.3), p, p), 1.0, 1e-9));
+        assert_eq!(scanline_pixel_peak(&g(30.0), p, thin), 1.0);
+        // A pixel of a fifth of a line lowers the narrow-line peak.
+        let fifth = scanline_pixel_peak(&g(0.1), p, 0.2 * p);
+        assert!(fifth < 3.989_423 && fifth > 3.0, "{fifth}");
+    }
 
     /// CRT.md scanline table: sigma/P, FWHM/P, valley/peak, Michelson.
     #[test]

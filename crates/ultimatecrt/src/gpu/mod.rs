@@ -203,6 +203,13 @@ impl Renderer {
         self.clip
     }
 
+    /// SDR headroom readout of the last frame recorded (T-84, D-16; for the UI): mask peak, scanline peak,
+    /// white matrix maximum and exposure, whose product ([`crt_model::output::Headroom::total`]) above 1 means
+    /// a full-white field has elements brighter than panel white. `None` before the first frame.
+    pub fn headroom(&self) -> Option<crt_model::output::Headroom> {
+        self.pipeline.as_ref().and_then(Pipeline::headroom)
+    }
+
     /// Turns the chain slot `name` on or off (off: bypassed, exact identity; A11 enable flags).
     pub fn set_stage_enabled(&mut self, name: &str, on: bool) -> Res<()> {
         self.pipeline
