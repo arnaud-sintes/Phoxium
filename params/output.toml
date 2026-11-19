@@ -30,12 +30,50 @@ id = "output_knee"
 stage = "output"
 type = "f32"
 unit = "1"
-default = 1.0
+default = 0.6
 min = 0.5
 max = 1.0
 tag = "E"
-source = "QUESTIONS COL-1: element peaks above panel white are soft-clipped when the mask is resolved; knee 1 is a hard clip. Shape: identity up to the knee, then k + (1 - k) (1 - exp(-(x - k) / (1 - k))) per channel (continuous slope, monotonic, asymptote 1) [E]"
-description = "Start of the soft shoulder for linear values above panel white, as a fraction of panel white. 1 clips hard at panel white."
+source = "QUESTIONS COL-1 and PLAN D-16 (T-84): shoulder mode only. Element peaks above panel white are rolled off, starting at the knee; knee 1 is a hard clip. Shape (per channel, t = (x - k) / (1 - k)): identity up to the knee, then k + (1 - k) min((1 - exp(-a t)) / a, 1), slope 1 at the knee, monotonic, reaching panel white exactly at output_shoulder_white (crt_model::output::shoulder_rate gives a). Default 0.6 is the D-16 'about 0.6' (owner decision 2026-11-19), not a measured value [E]"
+description = "Shoulder mode only: start of the soft roll-off, as a fraction of panel white. Values below it are unchanged; values between it and the shoulder white point are compressed into the range up to panel white. 1 clips hard at panel white."
+group = "Output"
+
+[[param]]
+id = "output_headroom_mode"
+stage = "output"
+type = "enum"
+unit = "1"
+default = "shoulder"
+values = ["shoulder", "physical", "mask_depth", "clip"]
+tag = "E"
+source = "PLAN D-16 (owner decision 2026-11-19, audit B1/M1, T-84): the mask and scanline peaks of a full-white field exceed panel white (headroom readout = mask peak x scanline peak x white matrix maximum x exposure), so SDR must clip, roll off or dim. shoulder = soft roll-off from output_knee to output_shoulder_white, exposure unchanged (NON-PHYSICAL tone curve above the knee, the D-16 default); physical = exposure / max(1, readout (1 + output_headroom_margin)), nothing clips and the picture is dimmer (the physical choice); mask_depth = the mask contrast is limited by mask_depth (NON-PHYSICAL, mean kept) and the exposure is derived from the lowered readout as in physical; clip = the T-46 behaviour, hard clip at panel white (tests and comparison)."
+description = "How the output handles light above panel white (SDR headroom): shoulder (soft roll-off, default, non-physical above the knee), physical (exposure lowered from the headroom readout so nothing clips: dimmer), mask_depth (reduced mask contrast, non-physical, then as physical), clip (hard clip)."
+group = "Output"
+
+[[param]]
+id = "output_headroom_margin"
+stage = "output"
+type = "f32"
+unit = "1"
+default = 0.02
+min = 0.0
+max = 0.5
+tag = "E"
+source = "T-84: physical and mask_depth modes: the readout peak lands at 1 / (1 + margin) of panel white. The readout is already an upper bound (product of independent peaks); the 2 % covers what it leaves out (geometry and convergence, FP16 rounding) without a measured value [E]"
+description = "Physical and mask depth modes: extra room left under panel white, as a fraction of the headroom readout. The derived exposure is exposure / max(1, readout x (1 + margin)). Shoulder mode: the automatic white point is the readout x (1 + margin)."
+group = "Output"
+
+[[param]]
+id = "output_shoulder_white"
+stage = "output"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 64.0
+tag = "E"
+source = "T-84, D-16 shoulder shape: the linear input value (after exposure and colour matrix, panel white = 1) that the shoulder maps to panel white exactly; above it values clip. 0 = automatic: the headroom readout x (1 + output_headroom_margin), so the brightest element of a full-white field just reaches panel white and nothing hard-clips. A white point at or under 1 leaves nothing to compress: identity up to 1 and a hard clip above. Large values tend to the T-46 asymptotic shoulder (rate 1) [E]"
+description = "Shoulder mode only: shape of the roll-off, the input level (1 = panel white) that just reaches panel white. 0 = automatic from the headroom readout. A lower value compresses harder near the knee; a higher one keeps more highlight contrast and clips the rest."
 group = "Output"
 
 [[param]]

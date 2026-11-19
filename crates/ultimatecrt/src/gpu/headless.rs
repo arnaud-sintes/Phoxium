@@ -449,6 +449,11 @@ impl Headless {
         })
     }
 
+    /// SDR headroom readout of the last frame recorded (T-84), as [`super::Renderer::headroom`].
+    pub fn last_headroom(&self) -> Option<crt_model::output::Headroom> {
+        self.pipeline.headroom()
+    }
+
     /// GPU timings (T-21) of the last frame rendered, readback copies included in `frame_ms` only. Every
     /// render call reads the timestamps of its frames after the device idle, so after a call this is
     /// that call's last frame. `None` before any render or without timestamp support.

@@ -32,9 +32,11 @@ use super::context::Context;
 use super::headless::{GpuImage, HostBuffer, ImageF32};
 use super::stages::{self, decode, decode::Decode, encode, encode::Encode, ComputePass, Domain, Registration, Stage};
 use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
+use crate::headroom::{headroom, OutputTransform};
 use crate::params::{Params, PARAMS_STD140_SIZE};
 use crate::scaling::View;
 use crate::Res;
+use crt_model::output::Headroom;
 
 /// Frames the CPU may record ahead of the GPU.
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -486,7 +488,13 @@ pub struct Pipeline {
     timings: Option<FrameTimings>,
     /// Mean of the timings read since [`Pipeline::take_timing_average`].
     average: TimingAverager,
+    /// SDR headroom readout of the last recorded frame and the inputs it was computed from (T-84): computed
+    /// again only when the parameters, the placement or the `screen` routing change.
+    headroom: Option<(HeadroomKey, Headroom)>,
 }
+
+/// The inputs of the headroom readout: parameters, px per mm, line pitch (bits) and whether `screen` runs.
+type HeadroomKey = (Params, u32, u32, bool);
 
 /// What [`Pipeline::plan_frame`] decided for a frame.
 #[derive(Clone, Copy)]
@@ -569,6 +577,7 @@ impl Pipeline {
             timer: GpuTimer::new(chain.iter().map(|r| r.name)),
             timings: None,
             average: TimingAverager::default(),
+            headroom: None,
         };
         match p.create(ctx) {
             Ok(()) => Ok(p),
@@ -762,6 +771,11 @@ impl Pipeline {
     /// The fence of the last submission was waited.
     pub(super) unsafe fn last_clip_counts(&self) -> encode::ClipCounts {
         self.clip_counts_of((self.current + FRAMES_IN_FLIGHT - 1) % FRAMES_IN_FLIGHT)
+    }
+
+    /// SDR headroom readout of the last recorded frame (T-84, `crate::headroom`), `None` before the first.
+    pub(super) fn headroom(&self) -> Option<Headroom> {
+        self.headroom.map(|(_, h)| h)
     }
 
     /// Names of the chain slots, in order.
@@ -1401,6 +1415,23 @@ impl Pipeline {
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
         );
+        // T-84: the headroom readout of this frame (the `screen` slot draws the mask and the scanlines only
+        // when it runs) and the output transform of the headroom mode.
+        let screen = have_source
+            && self
+                .plan
+                .iter()
+                .any(|&(i, m, _)| m == Mode::Run && self.chain[i].reg.name == "screen");
+        let key = (*params, fc.px_per_mm.to_bits(), fc.line_pitch_mm.to_bits(), screen);
+        let h = match self.headroom {
+            Some((k, h)) if k == key => h,
+            _ => {
+                let h = headroom(params, fc.px_per_mm, fc.line_pitch_mm, screen);
+                self.headroom = Some((key, h));
+                h
+            }
+        };
+        let xf = OutputTransform::new(params, &h);
         let s = &self.slots[cur];
         // The slot's previous frame is done (`wait_slot`): clear the counters `encode` increments.
         std::ptr::write_bytes(s.clip_buf.mapped, 0, encode::CLIP_BYTES);
@@ -1414,6 +1445,7 @@ impl Pipeline {
             fc.tube_rect_px,
             settings.host,
             params,
+            xf,
             target.format,
         );
         self.timer.mark(d, cb, cur, self.timer.encode(), false);

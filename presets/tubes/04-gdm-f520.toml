@@ -8,10 +8,11 @@ Parameters not listed keep their table defaults: mask stripe fill, edge softness
 Dampers: two wires (CRT.md rule for larger monitors; Goldwasser reports three above 21 in).
 White: D65 chosen from "9300 or 6500 K" (Starting presets, Trinitron or Diamondtron monitor row). A 9300 K variant needs tube_white_xy (0.2831, 0.2971) and exposure <= 0.745.
 Spot growth: 0.35 -> 0.5 mm with n = 0.27 (Hitachi 51 cm monitor tube) keeps a non-negative floor (bound ratio 1.567, here 1.43).
-Colour: D65 white does not clip at exposure 1, but the pure tube red does in linear sRGB (largest channel 1.085 with the GDM-17SE1 primaries, outside sRGB); the no-clip check covers white only, the clipped-primaries test of presets.rs reports the primaries as information.
+Colour: The unmasked D65 white stays within panel white at exposure 1 (element peaks do not: see Headroom below), but the pure tube red exceeds it in linear sRGB (largest channel 1.085 with the GDM-17SE1 primaries, outside sRGB); the white check of presets.rs covers the unmasked white only, the clipped-primaries test of presets.rs reports the primaries as information.
 Amplifier: 200 MHz (PC monitor 100 to 400 MHz, the amplifier is not the limit). The amp stage blur is 0.1325 x 5.37 / 200 = 0.0036 source px, an ideal amplifier, so amp_samples = 4 (presets::recommended_amp_k). Ratio 1.0.
 M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); cylindrical phosphor surface with horizontal radius 2500 mm (estimate: the Mitsubishi 50 cm flat tube inner radius of T-63, the nearest sourced flat-face tube in size; the Sony 28 in tube is 10,000 mm; no GDM-F520 value; the flat outer face and its refraction are not modelled); convergence 0.075 mm static plus 0.275 mm radial on red (outward) and blue (inward), green the reference (CRT.md Starting presets PC/PVM midpoints); ABL stays off (good monitors have very mild ABL). Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
 Not yet parameters (T-63 values kept for later): faceplate centre thickness 12 to 15 mm, halation (12 to 20 mm / 1 %).
+Headroom (T-84, D-16): a full-white field is not flat on the tube. On the reference host 2560 x 1440 with a 320 x 240 source the readout (crate::headroom) is mask peak 1.000 x scanline peak 2.292 x white matrix maximum 1.085 x exposure 1.00 = 2.488: the brightest elements are 2.488 times panel white, so the exposure alone does not keep white unclipped (the earlier 'no clip' statement covered the unmasked white only). Measured by the flat-white chain test of tests/presets.rs (ABL off): the T-46 hard clip loses 35.1 % of the white mean; the default headroom mode shoulder (knee 0.6, white point = readout x 1.02, non-physical above the knee) has no hard clip and keeps 62.9 % of the intended white mean; the physical mode keeps every element unclipped at an effective exposure of 0.394 (39 % of the intended white). The readout changes with the host size and the source lines.
 """
 
 [params]
@@ -41,6 +42,7 @@ geometry_conv_blue_radial_mm = -0.275
 exposure = 1.0
 output_match_srgb = false
 output_dither = "noise"
+output_headroom_mode = "shoulder"
 
 [provenance]
 tube_visible_height_mm = "D: CRT.md Reference scales, 21 in monitor 406 x 305 mm"
@@ -66,6 +68,7 @@ geometry_conv_red_dx_mm = "E: CRT.md Starting presets, convergence error centre 
 geometry_conv_blue_dx_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
 geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
 geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
-exposure = "D: D65 white, no clip"
+exposure = "D: D65 white: the unmasked white maps to panel white at exposure 1 (largest linear sRGB channel 1). Not a no-clip statement: the mask and scanline peaks lift elements above it (headroom readout 2.488 on 2560 x 1440), handled by output_headroom_mode (T-84)"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
+output_headroom_mode = "E: PLAN D-16 (owner decision 2026-11-19): the shoulder default (knee 0.6, automatic white point from the headroom readout) for every preset; readout 2.488 on 2560 x 1440 (see notes); physical, mask_depth and clip stay selectable"

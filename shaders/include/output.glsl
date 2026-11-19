@@ -23,8 +23,26 @@ float shoulder(float x, float knee) {
     return knee + (1.0 - knee) * (1.0 - exp(-(x - knee) / (1.0 - knee)));
 }
 
-vec3 shoulder(vec3 x, float knee) {
-    return vec3(shoulder(x.r, knee), shoulder(x.g, knee), shoulder(x.b, knee));
+// T-84 (D-16 shoulder mode): the shoulder of rate `rate` that reaches 1 exactly at the white point the CPU
+// solved it for (crt_model::output::shoulder_rate, shoulder_with_rate): above the knee
+// k + (1 - k) min((1 - exp(-a t)) / a, 1), t = (x - k) / (1 - k). Rate 1 is the asymptotic shoulder above;
+// knee >= 1 or rate <= 0 is a hard clip at 1.
+float shoulder_rate(float x, float knee, float rate) {
+    if (x <= 0.0) {
+        return 0.0;
+    }
+    if (knee >= 1.0 || rate <= 0.0) {
+        return min(x, 1.0);
+    }
+    if (x <= knee) {
+        return x;
+    }
+    float t = (x - knee) / (1.0 - knee);
+    return knee + (1.0 - knee) * min((1.0 - exp(-rate * t)) / rate, 1.0);
+}
+
+vec3 shoulder_rate(vec3 x, float knee, float rate) {
+    return vec3(shoulder_rate(x.r, knee, rate), shoulder_rate(x.g, knee, rate), shoulder_rate(x.b, knee, rate));
 }
 
 // Entry (x, y) of the 8x8 Bayer matrix, 0..63: bits a0 y0 a1 y1 a2 y2 from the most significant bit, with

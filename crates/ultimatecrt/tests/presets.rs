@@ -5,12 +5,20 @@
 
 mod common;
 
+use crt_model::output::{apply, shoulder_with_rate};
 use crt_model::phosphor::{DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED};
 use crt_model::units::frame_period_ms;
-use ultimatecrt::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
-use ultimatecrt::params::Params;
+use ultimatecrt::gpu::{
+    output_matrix, FrameConstants, Headless, ImageF32, Settings, SourceFrame, StageInput, StageRun, TargetFormat,
+};
+use ultimatecrt::headroom::OutputTransform;
+use ultimatecrt::params::{
+    ParamValue, Params, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH, OUTPUT_HEADROOM_MODE_PHYSICAL,
+    OUTPUT_HEADROOM_MODE_SHOULDER,
+};
 use ultimatecrt::presets::Library;
 use ultimatecrt::render_cmd::render_source;
+use ultimatecrt::scaling::View;
 use ultimatecrt::source::Source;
 
 const SIZE: (u32, u32) = (2560, 1440);
@@ -60,6 +68,166 @@ fn three_presets_render_finite_images() {
 fn all_ten_presets_render_finite_images() {
     render_presets("presets all", &(0..10).collect::<Vec<_>>());
 }
+
+/// T-84 (audit B1/M1, D-16): a full-white field through the whole chain of every preset, in each headroom
+/// mode, at the reference host 2560 x 1440 (the owner's monitors; 320 x 240 source, the raster at full height).
+///
+/// The chain runs as live (beam, mask, saturation, persistence, geometry, encode; `Settings::default`, host pure
+/// 2.2, float target so no dither), three frames after a history clear (persistence primed). ABL is turned off:
+/// on a full-white field it only lowers the light, and its loop integrates the real time between headless
+/// frames, which would make the modes differ by timing alone.
+///
+/// Per texel of the encode input L (the last chain image), the display value is c = M (e L) (M the colour
+/// matrix, e the exposure the mode pushes, `OutputTransform`), and the output must equal the oracle
+/// `shoulder_with_rate(c, knee, rate)` (hard clip for knee 1 or rate 0) decoded through 2.2: checked as the
+/// sums over the field (relative 2e-3: FP16 storage and the f32 pow round trip). Hand derivations of the
+/// expectations:
+/// - The readout (`crate::headroom`) is an upper bound: max c <= readout (x e / exposure in physical modes).
+/// - physical, mask_depth: e = exposure / max(1, H (1 + 0.02)), so max c <= 1 / 1.02 < 1: no clip counted, and
+///   the output mean equals the unclipped mean (no loss, within 2e-3).
+/// - mask_depth (depth 0.5): the mask weight 1 + d (m - 1) has the same field mean as m (linear, mean of m is
+///   1), so the encode input mean equals the one of physical mode within 0.5 % (edges of the curved raster),
+///   and the mask peak is 1 + 0.5 (peak - 1).
+/// - shoulder (default): exposure unchanged, the white point W = H x 1.02 >= max c, so no value is hard-clipped;
+///   values above the knee 0.6 are compressed, and the field mean loses at most [`SHOULDER_MAX_LOSS`].
+/// - clip (T-46): the loss to clipping is reported (the audit's 12 to 60 %), not asserted.
+#[test]
+fn flat_white_through_the_chain_in_every_headroom_mode() {
+    let Some(mut gpu) = common::gpu_or_skip("presets flat white") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let lib = Library::embedded();
+    let (w, h) = (320u32, 240u32);
+    let white = vec![255u8; (w * h * 4) as usize];
+    let frame = SourceFrame {
+        width: w,
+        height: h,
+        bgra: &white,
+    };
+    let view = View::full(w, h);
+    let modes = [
+        ("clip", OUTPUT_HEADROOM_MODE_CLIP),
+        ("shoulder", OUTPUT_HEADROOM_MODE_SHOULDER),
+        ("physical", OUTPUT_HEADROOM_MODE_PHYSICAL),
+        ("mask_depth", OUTPUT_HEADROOM_MODE_MASK_DEPTH),
+    ];
+    eprintln!(
+        "preset            mask(phys)    scan   matrix  exp    H      | loss clip  shoulder | physical e   white"
+    );
+    for preset in lib.list() {
+        let base = preset.params();
+        assert_eq!(
+            base.output_headroom_mode, OUTPUT_HEADROOM_MODE_SHOULDER,
+            "{}: D-16 default",
+            preset.id
+        );
+        let mut input_sum = [0.0_f64; 4];
+        let mut losses = [0.0_f64; 4];
+        let mut physical_e = 0.0;
+        let mut readout = None;
+        for (k, (name, mode)) in modes.iter().enumerate() {
+            let mut p = base;
+            assert!(p.set("abl_enable", ParamValue::Bool(false)));
+            assert!(p.set("output_headroom_mode", ParamValue::Enum(*mode)));
+            assert!(p.set("mask_depth", ParamValue::F32(0.5)));
+            gpu.clear_history();
+            let frames = [(Some(frame), view); 3];
+            let r = gpu
+                .render_burst(&frames, &Settings::default(), &p, SIZE, TargetFormat::Rgba32F)
+                .unwrap_or_else(|e| panic!("{} {name}: {e}", preset.id));
+            let hr = gpu.last_headroom().expect("readout");
+            let xf = OutputTransform::new(&p, &hr);
+            let m = output_matrix(&p);
+            let (_, input) = r.stages.last().expect("chain image");
+            let e = f64::from(xf.exposure);
+            let rate = (xf.knee < 1.0 && xf.rate > 0.0).then_some(f64::from(xf.rate));
+            let (mut unclipped, mut expected, mut max_c) = (0.0_f64, 0.0_f64, 0.0_f64);
+            for t in input.rgba.chunks(4) {
+                let c = apply(&m, [t[0], t[1], t[2]].map(|v| f64::from(v) * e));
+                for v in c {
+                    unclipped += v.max(0.0);
+                    expected += shoulder_with_rate(v, f64::from(xf.knee), rate);
+                    max_c = max_c.max(v);
+                }
+                input_sum[k] += f64::from(t[0] + t[1] + t[2]);
+            }
+            let got: f64 = r
+                .output
+                .rgba
+                .chunks(4)
+                .map(|o| (0..3).map(|i| f64::from(o[i].max(0.0)).powf(2.2)).sum::<f64>())
+                .sum();
+            let id = &preset.id;
+            assert!(
+                ((got - expected) / expected).abs() < 2e-3,
+                "{id} {name}: output sum {got} against the oracle {expected}"
+            );
+            let bound = hr.total() * e / f64::from(p.exposure);
+            assert!(
+                max_c <= bound * (1.0 + 1e-3),
+                "{id} {name}: peak {max_c} above the readout {bound} ({hr:?})"
+            );
+            losses[k] = 1.0 - got / unclipped;
+            match *mode {
+                OUTPUT_HEADROOM_MODE_PHYSICAL | OUTPUT_HEADROOM_MODE_MASK_DEPTH => {
+                    assert_eq!(r.clip.over_white, 0, "{id} {name}: clipped pixels");
+                    assert!(max_c <= 1.0 / 1.02 + 1e-3, "{id} {name}: peak {max_c}");
+                    assert!(losses[k].abs() < 2e-3, "{id} {name}: loss {}", losses[k]);
+                    if *mode == OUTPUT_HEADROOM_MODE_PHYSICAL {
+                        physical_e = e;
+                        readout = Some(hr);
+                    } else {
+                        let want = 1.0 + 0.5 * (hr.mask_peak_physical - 1.0);
+                        assert!((hr.mask_peak - want).abs() < 1e-9, "{id}: {hr:?}");
+                    }
+                }
+                OUTPUT_HEADROOM_MODE_SHOULDER => {
+                    assert_eq!(f64::from(xf.exposure), f64::from(p.exposure), "{id}");
+                    if let Some(a) = rate {
+                        // No hard clip: the white point is at or above every value.
+                        let white = hr.total() * 1.02;
+                        assert!(max_c <= white * (1.0 + 1e-3), "{id}: {max_c} above W {white}");
+                        // The f32 rate reaches panel white at W within its rounding.
+                        assert!(shoulder_with_rate(white, f64::from(xf.knee), Some(a)) > 1.0 - 1e-5);
+                    }
+                    assert!(losses[k] < SHOULDER_MAX_LOSS, "{id} shoulder: loss {}", losses[k]);
+                }
+                _ => {}
+            }
+        }
+        // Mask depth keeps the field mean of the encode input (physical: index 2, mask depth: index 3).
+        let ratio = input_sum[3] / input_sum[2];
+        assert!(
+            (ratio - 1.0).abs() < 5e-3,
+            "{}: mask depth changes the mean by {ratio}",
+            preset.id
+        );
+        let hr = readout.expect("physical readout");
+        eprintln!(
+            "{:<17} {:.3}         {:.3}  {:.3}   {:.2}   {:.3}  | {:5.1} %   {:5.1} % | {:.3}  {:.3}",
+            preset.id,
+            hr.mask_peak_physical,
+            hr.scanline_peak,
+            hr.matrix_max,
+            hr.exposure,
+            hr.total(),
+            100.0 * losses[0],
+            100.0 * losses[1],
+            physical_e,
+            physical_e / hr.exposure,
+        );
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Largest share of the full-white field mean the default shoulder (knee 0.6, automatic white point) may lose
+/// on a shipped preset at 2560 x 1440 (T-84). Measured worst: preset 06 (slot mask, readout 3.87) 55.1 %, with 5
+/// points of room. The shoulder loses 1 to 4 points MORE than the T-46 hard clip (54.1 % there): the knee 0.6
+/// also compresses the field mean between 0.6 and 1; what it buys is no hard clip (no bands or tint), not mean
+/// brightness. The measured table is in the presets' notes.
+const SHOULDER_MAX_LOSS: f64 = 0.6;
 
 /// A texel image of one colour.
 fn flat(w: u32, h: u32, c: f32) -> ImageF32 {

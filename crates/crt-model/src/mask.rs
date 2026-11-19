@@ -727,6 +727,49 @@ impl Mask {
         }
     }
 
+    /// Largest host-pixel value [`Mask::host_value`] of a flat white field under `tiers`, over the three
+    /// channels and every pixel phase, for host pixels of `px_mm` mask units (T-84 headroom readout, audit B1).
+    /// The value of a channel is its area mean over coverage, so its mean over the phase is 1 and this peak
+    /// over that mean is how far the mask lifts the brightest pixel above the field mean: about 1 / fill for
+    /// a resolved stripe, 1 when prefiltered. The phases searched are the pixel centred on each element of
+    /// each colour (where a box-filtered symmetric element peaks) and a 24 x 24 grid over one period of the
+    /// pattern (a guard for overlapping boxes); damper wires only lower the value and are not modelled here. [D]
+    pub fn peak_value(&self, tiers: AxisTiers, px_mm: f64) -> f64 {
+        let (period_x, period_y) = match self {
+            Mask::Grille(g) => (g.pitch_mm, px_mm),
+            Mask::Slot(m) => (2.0 * m.pitch_mm, m.slot_period_mm),
+            Mask::Delta(d) => (d.pitch_mm * 3.0_f64.sqrt(), d.pitch_mm),
+        };
+        let at = |c: usize, x: f64, y: f64| {
+            let q = Rect::new(x - 0.5 * px_mm, y - 0.5 * px_mm, x + 0.5 * px_mm, y + 0.5 * px_mm);
+            self.host_value(c, &q, tiers, px_mm)
+        };
+        let mut peak: f64 = 0.0;
+        for c in 0..3 {
+            let (cx, cy) = match self {
+                Mask::Grille(g) => (stripe_centre(c, g.pitch_mm), 0.0),
+                // Column 0 has its bridges centred on y = 0, so its slots are centred on V / 2.
+                Mask::Slot(m) => (stripe_centre(c, m.pitch_mm), 0.5 * m.slot_period_mm),
+                Mask::Delta(d) => {
+                    let (x, y, _) = d.dot(c as i64, 0);
+                    (x, y)
+                }
+            };
+            peak = peak.max(at(c, cx, cy));
+            const N: usize = 24;
+            // The grille's value does not depend on y (no dampers here): one row is enough.
+            let rows = if matches!(self, Mask::Grille(_)) { 1 } else { N };
+            for i in 0..N {
+                for j in 0..rows {
+                    let x = period_x * i as f64 / N as f64;
+                    let y = period_y * j as f64 / N as f64;
+                    peak = peak.max(at(c, x, y));
+                }
+            }
+        }
+        peak
+    }
+
     /// Vertical prefilter box: the whole vertical period of one column, V for the
     /// slot mask and P for delta (rows j and j + 2 hold the same colour at the
     /// same x); none for the grille. See [`axis_tiers`] for why not V / 2 or P / 2.
@@ -927,6 +970,49 @@ mod tests {
 
     fn masks() -> [Mask; 3] {
         [grille(), slot(), delta()]
+    }
+
+    /// T-84 headroom: the mask peak over the field mean. A host pixel far smaller than an element sits inside
+    /// its plateau: 1 / coverage (grille 1 / 0.25 = 4, slot 1 / (0.25 x 0.85) = 4.7059, delta 1 / f). A pixel
+    /// that holds a whole grille stripe and its ramps (p = 0.78, stripe 0.195 + edge 0.0546 = 0.2496 mm, pixel
+    /// 1 / 3.7895 = 0.26389 mm) collects the whole stripe: (0.195 / 0.26389) / 0.25 = p / pixel = 2.9558 px per
+    /// triad. Prefiltered (both axes): 1.
+    #[test]
+    fn peak_value_over_the_field_mean() {
+        let integrated = AxisTiers {
+            horizontal: AxisTier::Integrated,
+            vertical: AxisTier::Integrated,
+        };
+        let pre = AxisTiers {
+            horizontal: AxisTier::Prefiltered,
+            vertical: AxisTier::Prefiltered,
+        };
+        let plain = |p: f64| {
+            Mask::Grille(Grille {
+                pitch_mm: p,
+                stripe_mm: 0.25 * p,
+                edge_mm: 0.07 * p,
+                damper_y_mm: Vec::new(),
+                damper_mm: 0.0,
+                damper_edge_mm: 0.0,
+            })
+        };
+        assert!(close(plain(0.31).peak_value(integrated, 0.005), 4.0, 1e-9));
+        assert!(close(slot().peak_value(integrated, 0.005), 1.0 / (0.25 * 0.85), 1e-9));
+        let d = delta();
+        assert!(close(d.peak_value(integrated, 0.002), 1.0 / d.coverage(), 1e-6));
+        let px = 1.0 / 3.789_473_7;
+        assert!(close(plain(0.78).peak_value(integrated, px), 0.78 / px, 1e-6));
+        for m in masks() {
+            assert!(close(m.peak_value(pre, 0.2), 1.0, 1e-9), "{m:?}");
+        }
+        // Blend band: between the prefiltered 1 and the integrated peak.
+        let blended = AxisTiers {
+            horizontal: AxisTier::Blended { box_px: 2.0 },
+            vertical: AxisTier::Integrated,
+        };
+        let b = plain(0.78).peak_value(blended, px);
+        assert!(b > 1.0 && b < 0.78 / px, "{b}");
     }
 
     /// Seeded LCG (Knuth MMIX constants), uniform in [0, 1).

@@ -5,11 +5,12 @@ label = "based on published data for 19 in arcade monitors (class values, no sin
 notes = """
 Arcade look, the coarsest mask of the list. Estimated: pitch 0.75 mm (CRT.md range 0.7 to 0.8; an unidentified 19 in arcade monitor measured 0.81 mm on a forum, so the class is uncertain), size 36 x 27 cm, spot and amplifier. No arcade tube data in CRT.md; RCA 20V TV tubes are 0.84 mm.
 Parameters not listed keep their table defaults: slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma (power 2.4, CRT.md says 2.4 to 2.5), ABL (off, no value for arcade chassis), source clock.
-White: about 9300 K as the tube white (D93), P22 primaries. D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or white clips.
+White: about 9300 K as the tube white (D93), P22 primaries. D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or the unmasked white clips.
 Spot growth: 0.9 -> 1.6 mm with n = 0.42 keeps a non-negative floor.
 Amplifier: 6 MHz, no arcade row in CRT.md, the consumer RGB class 4 to 8 MHz is used. The amp stage blur is 0.1325 x 5.37 / 6 = 0.119 source px, so amp_samples = 16. Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
 M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1R faceplate, R = 1.767 x 450 mm = 795 mm (estimate: arcade monitors use TV-class tubes, no arcade value). ABL stays off and convergence stays 0: CRT.md has neither value for arcade chassis. Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
 Not yet parameters (T-63 values kept for later): faceplate thickness 11 mm (LG.Philips 9 to 11.5 mm for 400 to 500 mm diagonals), halation (12 mm / 3 %).
+Headroom (T-84, D-16): a full-white field is not flat on the tube. On the reference host 2560 x 1440 with a 320 x 240 source the readout (crate::headroom) is mask peak 3.720 x scanline peak 1.001 x white matrix maximum 1.347 x exposure 0.74 = 3.712: the brightest elements are 3.712 times panel white, so the exposure alone does not keep white unclipped (the earlier 'no clip' statement covered the unmasked white only). Measured by the flat-white chain test of tests/presets.rs (ABL off): the T-46 hard clip loses 44.1 % of the white mean; the default headroom mode shoulder (knee 0.6, white point = readout x 1.02, non-physical above the knee) has no hard clip and keeps 54.6 % of the intended white mean; the physical mode keeps every element unclipped at an effective exposure of 0.195 (26 % of the intended white). The readout changes with the host size and the source lines.
 """
 
 [params]
@@ -34,6 +35,7 @@ phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
 exposure = 0.74
 output_match_srgb = false
 output_dither = "noise"
+output_headroom_mode = "shoulder"
 
 [provenance]
 tube_visible_height_mm = "E: CRT.md Starting presets, 19 in arcade 36 x 27 cm"
@@ -54,6 +56,7 @@ geometry_curvature = "E: CRT.md Faceplate curvature: spherical 1R, most pre-1990
 geometry_radius_mm = "E: CRT.md Faceplate curvature: 1R = 1.767 x 450 mm diagonal = 795 mm (sagitta table: 7.2 % of the diagonal at the corner)"
 phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown [T-87: was D; D covers only the first-frame energy ratios E1/E0; the tail beyond 2 ms is E (phosphor_tail_strength_rgb)]"
 phosphor_tail_strength_rgb = "E: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1) [T-87: was S; the Kuhn P22 power-law tail is extrapolated beyond 2 ms from another sample, not measured on this tube]"
-exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
+exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745; this bounds the unmasked white only: the mask and scanline peaks lift elements above panel white (headroom readout 3.712 on 2560 x 1440), handled by output_headroom_mode (T-84)"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
+output_headroom_mode = "E: PLAN D-16 (owner decision 2026-11-19): the shoulder default (knee 0.6, automatic white point from the headroom readout) for every preset; readout 3.712 on 2560 x 1440 (see notes); physical, mask_depth and clip stay selectable"
