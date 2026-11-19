@@ -37,7 +37,9 @@ param(
     [int]$Cycles = 10,
     [string]$OutDir = '',
     [ValidateSet('auto', 'plain', 'alt', 'attach')][string]$FgMethod = 'auto',
-    [switch]$NoBuild
+    [switch]$NoBuild,
+    [string[]]$Modes = @('windowed', 'fullscreen'),
+    [ValidateSet('f12', 'f10', 'ctrl-alt-f12')][string]$MenuKey = 'f12'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -102,26 +104,23 @@ function Read-Summary([string]$path) {
 # the source within 1 s of a `close` row. Everything else is a focus leak.
 function Get-UnexpectedChanges([string]$csvPath) {
     $rows = Import-Csv -LiteralPath $csvPath
-    $lastOpen = -100000; $lastClose = -100000
+    # The poll thread and the main loop log independently: the foreground change can be logged up to
+    # 200 ms before its `open` or `close` row (seen live: 1 ms before), so the window is [-200 ms, +1000 ms].
+    $opens = @($rows | Where-Object { $_.kind -eq 'open' } | ForEach-Object { [int64]$_.t_ms })
+    $closes = @($rows | Where-Object { $_.kind -eq 'close' } | ForEach-Object { [int64]$_.t_ms })
+    $near = { param($t, $list) ($list | Where-Object { ($t - $_) -ge -200 -and ($t - $_) -le 1000 } | Measure-Object).Count -gt 0 }
     $bad = @()
     foreach ($r in $rows) {
+        if ($r.kind -ne 'fg') { continue }
         $t = [int64]$r.t_ms
-        switch ($r.kind) {
-            'open' { $lastOpen = $t }
-            'close' { $lastClose = $t }
-            'fg' {
-                $ok = $false
-                if ($r.menu_open -eq '1') { $ok = ($r.fg_is_self -eq '1') -and (($t - $lastOpen) -le 1000) }
-                else { $ok = ($r.fg_is_source -eq '1') -and (($t - $lastClose) -le 1000) }
-                if (-not $ok) { $bad += "t=$t ms fg='$($r.fg_title)' menu_open=$($r.menu_open)" }
-            }
-        }
+        if ($r.menu_open -eq '1') { $ok = ($r.fg_is_self -eq '1') -and (& $near $t $opens) }
+        else { $ok = ($r.fg_is_source -eq '1') -and (& $near $t $closes) }
+        if (-not $ok) { $bad += "t=$t ms fg='$($r.fg_title)' menu_open=$($r.menu_open)" }
     }
     return , $bad
 }
-
 $allPass = $true
-foreach ($mode in @('windowed', 'fullscreen')) {
+foreach ($mode in $Modes) {
     Write-Host ''
     Write-Host "--- mode: $mode ($Cycles cycles, fg-method $FgMethod) ---"
     $csv = Join-Path $OutDir "t08-$mode.csv"
@@ -141,14 +140,14 @@ foreach ($mode in @('windowed', 'fullscreen')) {
         & $p -OutFile $o -SourceTitle 'pixel-demo' -DurationSeconds $d -IntervalMs 50
     } -ArgumentList $poll, $pollCsv, $duration
 
-    $liveArgs = @('--selftest', $Cycles, '--csv', $csv, '--summary', $sum, '--source-title', 'pixel-demo', '--fg-method', $FgMethod)
+    $liveArgs = @('--selftest', $Cycles, '--csv', $csv, '--summary', $sum, '--source-title', 'pixel-demo', '--fg-method', $FgMethod, '--menu-key', $MenuKey)
     if ($mode -eq 'fullscreen') { $liveArgs += '--fullscreen' }
     $lp = Start-Process -FilePath $live -ArgumentList $liveArgs -PassThru -NoNewWindow
     if (-not $lp.WaitForExit(($duration + 30) * 1000)) {
         $lp.Kill()
         $reasons += 'live did not exit in time (killed)'
     }
-    $pollOut = Receive-Job -Job $job -Wait -AutoRemoveJob 2>&1 | Out-String
+    $pollOut = Receive-Job -Job $job -Wait -AutoRemoveJob 6>&1 2>&1 | Out-String
     if (-not $demoProc.HasExited) { Stop-Process -Id $demoProc.Id -Force }
 
     if (-not (Test-Path $sum)) {
