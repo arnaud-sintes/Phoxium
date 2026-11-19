@@ -1,0 +1,999 @@
+//! Global hotkeys (T-54, PLAN D-17, QUESTIONS OUT-5): chords, actions, settings parsing and the registration
+//! plan. Pure: no OS call is made here. The `RegisterHotKey` calls are made by `output.rs` through the
+//! [`Registrar`] trait, so that the fallback logic is unit tested with a fake registrar.
+//!
+//! `RegisterHotKey` only (no low-level hook): a registered chord is swallowed system-wide, so the captured game
+//! loses it while ultimatecrt runs (documented in the README), but the foreground window never changes.
+//! Defaults: Quit `Ctrl+Alt+Q` (fixed), fullscreen `F11`, settings menu `F10` (F12 is registered by another
+//! program on the dev machine, error 1409), overlay `Ctrl+Alt+O`, A/B bypass `Ctrl+Alt+B`, next and previous
+//! preset `Ctrl+Alt+PageDown` and `Ctrl+Alt+PageUp`.
+
+use std::{collections::BTreeMap, fmt, str::FromStr};
+
+/// Modifier set, with the values of the Win32 `MOD_*` flags (`MOD_ALT` 1, `MOD_CONTROL` 2, `MOD_SHIFT` 4, `MOD_WIN` 8).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug, Default)]
+pub struct Mods(u8);
+
+impl Mods {
+    pub const NONE: Mods = Mods(0);
+    pub const ALT: Mods = Mods(1);
+    pub const CTRL: Mods = Mods(2);
+    pub const SHIFT: Mods = Mods(4);
+    pub const WIN: Mods = Mods(8);
+
+    pub fn contains(self, other: Mods) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// The Win32 `MOD_*` flags (without `MOD_NOREPEAT`).
+    pub fn bits(self) -> u32 {
+        u32::from(self.0)
+    }
+}
+
+impl std::ops::BitOr for Mods {
+    type Output = Mods;
+    fn bitor(self, rhs: Mods) -> Mods {
+        Mods(self.0 | rhs.0)
+    }
+}
+
+/// Keys that are not a letter, a digit or a function key: canonical name and virtual-key code.
+const NAMED_KEYS: &[(&str, u16)] = &[
+    ("PageUp", 0x21),
+    ("PageDown", 0x22),
+    ("End", 0x23),
+    ("Home", 0x24),
+    ("Left", 0x25),
+    ("Up", 0x26),
+    ("Right", 0x27),
+    ("Down", 0x28),
+    ("Insert", 0x2D),
+    ("Delete", 0x2E),
+    ("Space", 0x20),
+    ("Pause", 0x13),
+    ("ScrollLock", 0x91),
+    ("PrintScreen", 0x2C),
+];
+
+/// Accepted spellings besides the canonical names (compared case-insensitively).
+const KEY_ALIASES: &[(&str, u16)] = &[("PgUp", 0x21), ("PgDn", 0x22), ("Ins", 0x2D), ("Del", 0x2E)];
+
+const VK_F1: u16 = 0x70;
+
+fn key_from_name(name: &str) -> Option<u16> {
+    let lower = name.to_ascii_lowercase();
+    if let Some(digits) = lower.strip_prefix('f') {
+        if let Some(n) = digits
+            .parse::<u16>()
+            .ok()
+            .filter(|_| digits.bytes().all(|b| b.is_ascii_digit()))
+        {
+            if (1..=24).contains(&n) {
+                return Some(VK_F1 + n - 1);
+            }
+        }
+    }
+    let mut chars = lower.chars();
+    if let (Some(c), None) = (chars.next(), chars.next()) {
+        if c.is_ascii_alphabetic() || c.is_ascii_digit() {
+            return Some(c.to_ascii_uppercase() as u16);
+        }
+    }
+    NAMED_KEYS
+        .iter()
+        .chain(KEY_ALIASES)
+        .find(|(n, _)| n.eq_ignore_ascii_case(&lower))
+        .map(|&(_, vk)| vk)
+}
+
+fn key_name(vk: u16) -> String {
+    match vk {
+        0x70..=0x87 => format!("F{}", vk - VK_F1 + 1),
+        0x30..=0x39 | 0x41..=0x5A => char::from(vk as u8).to_string(),
+        _ => NAMED_KEYS
+            .iter()
+            .find(|&&(_, v)| v == vk)
+            .map_or_else(|| format!("VK_{vk:#04X}"), |&(n, _)| n.to_string()),
+    }
+}
+
+fn is_function_key(vk: u16) -> bool {
+    (0x70..=0x87).contains(&vk)
+}
+
+/// Canonical order of the modifiers in the text of a chord.
+const MOD_ORDER: [Mods; 4] = [Mods::CTRL, Mods::ALT, Mods::SHIFT, Mods::WIN];
+
+fn mod_name(m: Mods) -> &'static str {
+    match m {
+        Mods::CTRL => "Ctrl",
+        Mods::ALT => "Alt",
+        Mods::SHIFT => "Shift",
+        _ => "Win",
+    }
+}
+
+fn mod_from_name(name: &str) -> Option<Mods> {
+    match name.to_ascii_lowercase().as_str() {
+        "ctrl" | "control" => Some(Mods::CTRL),
+        "alt" => Some(Mods::ALT),
+        "shift" => Some(Mods::SHIFT),
+        "win" | "windows" | "super" => Some(Mods::WIN),
+        _ => None,
+    }
+}
+
+/// Why a chord text was rejected.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ChordError {
+    Empty,
+    /// An empty part, as in `Ctrl++Q` or a trailing `+`.
+    EmptyPart,
+    UnknownKey(String),
+    NotAModifier(String),
+    DuplicateModifier(String),
+    /// Only modifiers, as in `Ctrl+Alt`.
+    MissingKey,
+    /// A chord without Ctrl, Alt or Win on a key other than a function key would swallow normal typing.
+    NeedsModifier(String),
+}
+
+impl fmt::Display for ChordError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ChordError::Empty => write!(f, "is empty"),
+            ChordError::EmptyPart => write!(f, "has an empty part (expected Mod+Mod+Key)"),
+            ChordError::UnknownKey(k) => write!(f, "has an unknown key '{k}' (F1 to F24, A to Z, 0 to 9, PageUp, PageDown, Home, End, Insert, Delete, arrows, Space, Pause, ScrollLock, PrintScreen)"),
+            ChordError::NotAModifier(m) => write!(f, "has '{m}' where a modifier (Ctrl, Alt, Shift, Win) is expected"),
+            ChordError::DuplicateModifier(m) => write!(f, "repeats the modifier {m}"),
+            ChordError::MissingKey => write!(f, "has no key after the modifiers"),
+            ChordError::NeedsModifier(k) => write!(f, "is the bare key {k}: only function keys may be used without Ctrl, Alt or Win"),
+        }
+    }
+}
+
+impl std::error::Error for ChordError {}
+
+/// A global hotkey: modifiers and one key.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub struct Chord {
+    pub mods: Mods,
+    /// Windows virtual-key code.
+    pub vk: u16,
+}
+
+impl Chord {
+    /// A chord, checked against the rule that only function keys may go without Ctrl, Alt or Win.
+    pub fn new(mods: Mods, vk: u16) -> Result<Chord, ChordError> {
+        let strong = mods.contains(Mods::CTRL) || mods.contains(Mods::ALT) || mods.contains(Mods::WIN);
+        if !strong && !is_function_key(vk) {
+            return Err(ChordError::NeedsModifier(key_name(vk)));
+        }
+        Ok(Chord { mods, vk })
+    }
+}
+
+impl fmt::Display for Chord {
+    /// The canonical text: `Ctrl+Alt+Shift+Win+Key`, as [`Chord::from_str`] reads it back.
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for m in MOD_ORDER {
+            if self.mods.contains(m) {
+                write!(f, "{}+", mod_name(m))?;
+            }
+        }
+        write!(f, "{}", key_name(self.vk))
+    }
+}
+
+impl FromStr for Chord {
+    type Err = ChordError;
+
+    /// Reads `F10`, `Ctrl+Alt+F12`, `ctrl+alt+pagedown` (case-insensitive, `PgDn` and `Del` accepted).
+    fn from_str(text: &str) -> Result<Chord, ChordError> {
+        let text = text.trim();
+        if text.is_empty() {
+            return Err(ChordError::Empty);
+        }
+        let parts: Vec<&str> = text.split('+').map(str::trim).collect();
+        if parts.iter().any(|p| p.is_empty()) {
+            return Err(ChordError::EmptyPart);
+        }
+        let (key, modifiers) = parts.split_last().expect("split gives at least one part");
+        let mut mods = Mods::NONE;
+        for m in modifiers {
+            let bit = mod_from_name(m).ok_or_else(|| ChordError::NotAModifier((*m).to_string()))?;
+            if mods.contains(bit) {
+                return Err(ChordError::DuplicateModifier(mod_name(bit).to_string()));
+            }
+            mods = mods | bit;
+        }
+        let vk = match key_from_name(key) {
+            Some(vk) => vk,
+            None if mod_from_name(key).is_some() => return Err(ChordError::MissingKey),
+            None => return Err(ChordError::UnknownKey((*key).to_string())),
+        };
+        Chord::new(mods, vk)
+    }
+}
+
+/// What a hotkey does. The discriminant plus one is the `RegisterHotKey` id.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Debug)]
+pub enum Action {
+    Quit,
+    ToggleFullscreen,
+    ToggleMenu,
+    ToggleOverlay,
+    /// A/B: full bypass of the CRT chain (all chain slots disabled), the picture goes through source placement only.
+    ToggleBypass,
+    NextPreset,
+    PreviousPreset,
+}
+
+impl Action {
+    /// Every action, in registration order (Quit first: it is the escape path).
+    pub const ALL: [Action; 7] = [
+        Action::Quit,
+        Action::ToggleFullscreen,
+        Action::ToggleMenu,
+        Action::ToggleOverlay,
+        Action::ToggleBypass,
+        Action::NextPreset,
+        Action::PreviousPreset,
+    ];
+
+    /// The key of the action in `[global.hotkeys]` of `settings.toml`.
+    pub fn id(self) -> &'static str {
+        match self {
+            Action::Quit => "quit",
+            Action::ToggleFullscreen => "toggle_fullscreen",
+            Action::ToggleMenu => "toggle_menu",
+            Action::ToggleOverlay => "toggle_overlay",
+            Action::ToggleBypass => "toggle_bypass",
+            Action::NextPreset => "next_preset",
+            Action::PreviousPreset => "previous_preset",
+        }
+    }
+
+    pub fn from_id(id: &str) -> Option<Action> {
+        Action::ALL.into_iter().find(|a| a.id() == id)
+    }
+
+    /// The default chord text (the same as `settings::DEFAULT_HOTKEYS`, checked by a test).
+    pub fn default_text(self) -> &'static str {
+        match self {
+            Action::Quit => "Ctrl+Alt+Q",
+            Action::ToggleFullscreen => "F11",
+            Action::ToggleMenu => "F10",
+            Action::ToggleOverlay => "Ctrl+Alt+O",
+            Action::ToggleBypass => "Ctrl+Alt+B",
+            Action::NextPreset => "Ctrl+Alt+PageDown",
+            Action::PreviousPreset => "Ctrl+Alt+PageUp",
+        }
+    }
+
+    pub fn default_chord(self) -> Chord {
+        self.default_text().parse().expect("the default chords are valid")
+    }
+
+    /// Chords tried in this order when the wanted one cannot be registered (another program owns it).
+    /// The menu list ends with `Ctrl+Alt+F12` (D-17). Quit has none: it is fixed, and a fullscreen output
+    /// refuses to start without it.
+    pub fn fallbacks(self) -> &'static [&'static str] {
+        match self {
+            Action::Quit => &[],
+            Action::ToggleFullscreen => &["Ctrl+Alt+F11"],
+            Action::ToggleMenu => &["F10", "Ctrl+Alt+F10", "Ctrl+Alt+F12"],
+            Action::ToggleOverlay => &["Ctrl+Alt+Shift+O"],
+            Action::ToggleBypass => &["Ctrl+Alt+Shift+B"],
+            Action::NextPreset => &["Ctrl+Alt+Shift+PageDown"],
+            Action::PreviousPreset => &["Ctrl+Alt+Shift+PageUp"],
+        }
+    }
+
+    /// A short phrase for messages.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Action::Quit => "quit",
+            Action::ToggleFullscreen => "fullscreen / windowed",
+            Action::ToggleMenu => "settings menu",
+            Action::ToggleOverlay => "overlay",
+            Action::ToggleBypass => "A/B bypass",
+            Action::NextPreset => "next preset",
+            Action::PreviousPreset => "previous preset",
+        }
+    }
+
+    /// The `RegisterHotKey` id of the action.
+    pub fn hotkey_id(self) -> i32 {
+        self as i32 + 1
+    }
+
+    pub fn from_hotkey_id(id: i32) -> Option<Action> {
+        Action::ALL.into_iter().find(|a| a.hotkey_id() == id)
+    }
+}
+
+/// The chord wanted for each action, after validation. An action is missing only when its chord and its
+/// default both collide with another action's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Bindings {
+    chords: BTreeMap<Action, Chord>,
+}
+
+impl Default for Bindings {
+    fn default() -> Self {
+        Bindings {
+            chords: Action::ALL.into_iter().map(|a| (a, a.default_chord())).collect(),
+        }
+    }
+}
+
+impl Bindings {
+    pub fn get(&self, action: Action) -> Option<Chord> {
+        self.chords.get(&action).copied()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (Action, Chord)> + '_ {
+        self.chords.iter().map(|(a, c)| (*a, *c))
+    }
+
+    /// Reads `[global.hotkeys]` (action id to chord text). Every invalid entry gives a warning and the
+    /// default chord; `quit` cannot be rebound; a chord already taken by an earlier action (in
+    /// [`Action::ALL`] order) is rejected, the default is used instead, and the action stays unbound when the
+    /// default is taken as well; unknown action ids are ignored with a warning. Returns the bindings and the
+    /// warnings to show.
+    pub fn from_settings(map: &BTreeMap<String, String>) -> (Bindings, Vec<String>) {
+        let mut warnings = Vec::new();
+        for key in map.keys() {
+            if Action::from_id(key).is_none() {
+                warnings.push(format!("hotkey '{key}': unknown action ignored"));
+            }
+        }
+        let mut chords: BTreeMap<Action, Chord> = BTreeMap::new();
+        for action in Action::ALL {
+            let default = action.default_chord();
+            let id = action.id();
+            let wanted = match map.get(id) {
+                None => default,
+                Some(text) if action == Action::Quit => {
+                    if text.parse::<Chord>().ok() != Some(default) {
+                        warnings.push(format!(
+                            "hotkey quit: cannot be rebound; '{text}' ignored, {default} used"
+                        ));
+                    }
+                    default
+                }
+                Some(text) => match text.parse::<Chord>() {
+                    Ok(c) => c,
+                    Err(e) => {
+                        warnings.push(format!("hotkey {id}: '{text}' {e}; default {default} used"));
+                        default
+                    }
+                },
+            };
+            let owner = |c: &Chord| chords.iter().find(|(_, o)| *o == c).map(|(a, _)| *a);
+            match owner(&wanted) {
+                None => {
+                    chords.insert(action, wanted);
+                }
+                Some(other) => {
+                    let prefix = format!("hotkey {id}: {wanted} is already used by {}", other.id());
+                    if wanted != default && owner(&default).is_none() {
+                        warnings.push(format!("{prefix}; default {default} used"));
+                        chords.insert(action, default);
+                    } else {
+                        warnings.push(format!("{prefix}; the action is left unbound"));
+                    }
+                }
+            }
+        }
+        (Bindings { chords }, warnings)
+    }
+
+    /// The chords as `settings.toml` text, by action id.
+    pub fn to_settings(&self) -> BTreeMap<String, String> {
+        self.chords
+            .iter()
+            .map(|(a, c)| (a.id().to_string(), c.to_string()))
+            .collect()
+    }
+}
+
+/// The chords to try for one action, in order: the wanted one, then the fallbacks.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Attempt {
+    pub action: Action,
+    pub candidates: Vec<Chord>,
+}
+
+/// The registration plan, in registration order: one [`Attempt`] per bound action, with the action's fallbacks
+/// after the wanted chord. A fallback that equals a candidate already listed or the wanted chord of another
+/// action is left out. Pure.
+pub fn plan_registration(bindings: &Bindings) -> Vec<Attempt> {
+    let wanted: Vec<Chord> = bindings.iter().map(|(_, c)| c).collect();
+    bindings
+        .iter()
+        .map(|(action, chord)| {
+            let mut candidates = vec![chord];
+            for text in action.fallbacks() {
+                let c: Chord = text.parse().expect("the fallback chords are valid");
+                if !candidates.contains(&c) && !wanted.contains(&c) {
+                    candidates.push(c);
+                }
+            }
+            Attempt { action, candidates }
+        })
+        .collect()
+}
+
+/// `ERROR_HOTKEY_ALREADY_REGISTERED`.
+pub const ERROR_HOTKEY_ALREADY_REGISTERED: u32 = 1409;
+
+/// The Win32 error code inside an HRESULT (`HRESULT_FROM_WIN32`), or the value itself when it is not one.
+pub fn win32_code(hresult: i32) -> u32 {
+    let v = hresult as u32;
+    if v >> 16 == 0x8007 {
+        v & 0xFFFF
+    } else {
+        v
+    }
+}
+
+/// A readable text for the codes `RegisterHotKey` returns in practice.
+pub fn describe_win32(code: u32) -> String {
+    match code {
+        ERROR_HOTKEY_ALREADY_REGISTERED => {
+            format!("hot key is already registered by another program, Win32 error {code}")
+        }
+        1400 => format!("invalid window handle, Win32 error {code}"),
+        87 => format!("invalid parameter, Win32 error {code}"),
+        _ => format!("Win32 error {code}"),
+    }
+}
+
+/// Registers and unregisters chords with the system (`RegisterHotKey` in `output.rs`, a fake in the tests).
+pub trait Registrar {
+    /// Registers `chord` under `id`; the error is the Win32 error code.
+    fn register(&mut self, id: i32, chord: &Chord) -> Result<(), u32>;
+    fn unregister(&mut self, id: i32);
+}
+
+/// What happened for one action.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Outcome {
+    pub action: Action,
+    /// The chord asked for (the first candidate).
+    pub wanted: Chord,
+    /// The chord that is registered, `None` when every candidate failed.
+    pub bound: Option<Chord>,
+    /// The candidates that failed, in the order tried, with the Win32 error code.
+    pub failures: Vec<(Chord, u32)>,
+}
+
+impl Outcome {
+    /// The console line for a problem: names the chord and the error code. `None` when the wanted chord is bound.
+    pub fn message(&self) -> Option<String> {
+        if self.failures.is_empty() {
+            return None;
+        }
+        let list = self
+            .failures
+            .iter()
+            .map(|(c, e)| format!("{c} ({})", describe_win32(*e)))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let id = self.action.id();
+        Some(match self.bound {
+            Some(b) => format!("hotkey {id}: cannot register {list}; using {b} instead"),
+            None => format!(
+                "hotkey {id}: cannot register {list}; the {} hotkey is unavailable (set another chord in [global.hotkeys])",
+                self.action.describe()
+            ),
+        })
+    }
+}
+
+/// The result of [`register_all`]: the state the UI can display.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Registration {
+    pub outcomes: Vec<Outcome>,
+}
+
+impl Registration {
+    /// The chord registered for `action`.
+    pub fn bound(&self, action: Action) -> Option<Chord> {
+        self.outcomes.iter().find(|o| o.action == action).and_then(|o| o.bound)
+    }
+
+    /// One message per action whose wanted chord could not be registered (empty when all went through).
+    pub fn problems(&self) -> Vec<String> {
+        self.outcomes.iter().filter_map(Outcome::message).collect()
+    }
+
+    /// The state flag for the UI: some wanted chord is not the one in force.
+    pub fn has_problems(&self) -> bool {
+        self.outcomes.iter().any(|o| !o.failures.is_empty())
+    }
+
+    /// `quit Ctrl+Alt+Q, fullscreen / windowed F11, ...` for the console and the menu help.
+    pub fn summary(&self) -> String {
+        self.outcomes
+            .iter()
+            .map(|o| match o.bound {
+                Some(c) => format!("{} {c}", o.action.describe()),
+                None => format!("{} unavailable", o.action.describe()),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Unregisters every chord that is registered.
+    pub fn unregister_all(&self, reg: &mut dyn Registrar) {
+        for o in self.outcomes.iter().filter(|o| o.bound.is_some()) {
+            reg.unregister(o.action.hotkey_id());
+        }
+    }
+}
+
+/// Runs the plan: for each action, the candidates in order until one registers. A candidate already registered
+/// for another action is skipped without asking the system (it would fail with error 1409 anyway).
+pub fn register_all(reg: &mut dyn Registrar, plan: &[Attempt]) -> Registration {
+    let mut taken: Vec<Chord> = Vec::new();
+    let mut outcomes = Vec::new();
+    for attempt in plan {
+        let mut failures = Vec::new();
+        let mut bound = None;
+        for c in &attempt.candidates {
+            let result = if taken.contains(c) {
+                Err(ERROR_HOTKEY_ALREADY_REGISTERED)
+            } else {
+                reg.register(attempt.action.hotkey_id(), c)
+            };
+            match result {
+                Ok(()) => {
+                    taken.push(*c);
+                    bound = Some(*c);
+                    break;
+                }
+                Err(code) => failures.push((*c, code)),
+            }
+        }
+        outcomes.push(Outcome {
+            action: attempt.action,
+            wanted: attempt.candidates[0],
+            bound,
+            failures,
+        });
+    }
+    Registration { outcomes }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::{BTreeSet, HashMap};
+
+    fn chord(text: &str) -> Chord {
+        text.parse().unwrap_or_else(|e| panic!("{text}: {e}"))
+    }
+
+    #[test]
+    fn parses_and_formats_the_documented_examples() {
+        assert_eq!(chord("F10").to_string(), "F10");
+        assert_eq!(chord("Ctrl+Alt+F12").to_string(), "Ctrl+Alt+F12");
+        assert_eq!(chord("Ctrl+Alt+PageDown").to_string(), "Ctrl+Alt+PageDown");
+        assert_eq!(
+            chord("Ctrl+Alt+PageDown"),
+            Chord {
+                mods: Mods::CTRL | Mods::ALT,
+                vk: 0x22
+            }
+        );
+        assert_eq!(
+            chord("F10"),
+            Chord {
+                mods: Mods::NONE,
+                vk: 0x79
+            }
+        );
+        assert_eq!(chord("Ctrl+Alt+Q").vk, b'Q' as u16);
+    }
+
+    #[test]
+    fn parsing_is_case_insensitive_and_normalises() {
+        assert_eq!(chord("ctrl+alt+pagedown"), chord("Ctrl+Alt+PageDown"));
+        assert_eq!(chord("CTRL + alt + PGDN").to_string(), "Ctrl+Alt+PageDown");
+        assert_eq!(chord("f11").to_string(), "F11");
+        assert_eq!(
+            chord("alt+ctrl+q").to_string(),
+            "Ctrl+Alt+Q",
+            "modifier order is canonical"
+        );
+        assert_eq!(chord("Control+Shift+del").to_string(), "Ctrl+Shift+Delete");
+        assert_eq!(chord("Win+Ctrl+7").to_string(), "Ctrl+Win+7");
+    }
+
+    #[test]
+    fn every_key_name_round_trips() {
+        let mut seen = BTreeSet::new();
+        for vk in (0x70..=0x87u16)
+            .chain(0x30..=0x39)
+            .chain(0x41..=0x5A)
+            .chain(NAMED_KEYS.iter().map(|k| k.1))
+        {
+            let c = Chord { mods: Mods::CTRL, vk };
+            let back: Chord = c.to_string().parse().unwrap();
+            assert_eq!(back, c, "{c}");
+            assert!(seen.insert(c.to_string()), "{c} appears twice");
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_keys_and_malformed_chords() {
+        assert_eq!("".parse::<Chord>(), Err(ChordError::Empty));
+        assert_eq!("  ".parse::<Chord>(), Err(ChordError::Empty));
+        assert_eq!("Ctrl++Q".parse::<Chord>(), Err(ChordError::EmptyPart));
+        assert_eq!("Ctrl+".parse::<Chord>(), Err(ChordError::EmptyPart));
+        assert_eq!(
+            "Ctrl+Alt+Banana".parse::<Chord>(),
+            Err(ChordError::UnknownKey("Banana".into()))
+        );
+        assert_eq!("F25".parse::<Chord>(), Err(ChordError::UnknownKey("F25".into())));
+        assert_eq!("F0".parse::<Chord>(), Err(ChordError::UnknownKey("F0".into())));
+        assert_eq!("Ctrl+Alt".parse::<Chord>(), Err(ChordError::MissingKey));
+        assert_eq!("Ctrl+F5+A".parse::<Chord>(), Err(ChordError::NotAModifier("F5".into())));
+        assert_eq!(
+            "Ctrl+Ctrl+A".parse::<Chord>(),
+            Err(ChordError::DuplicateModifier("Ctrl".into()))
+        );
+        assert_eq!("Esc".parse::<Chord>(), Err(ChordError::UnknownKey("Esc".into())));
+        assert_eq!("QQ".parse::<Chord>(), Err(ChordError::UnknownKey("QQ".into())));
+    }
+
+    #[test]
+    fn a_bare_ordinary_key_is_refused_but_function_keys_may_go_bare() {
+        assert_eq!("Q".parse::<Chord>(), Err(ChordError::NeedsModifier("Q".into())));
+        assert_eq!("Shift+Q".parse::<Chord>(), Err(ChordError::NeedsModifier("Q".into())));
+        assert_eq!(
+            "PageDown".parse::<Chord>(),
+            Err(ChordError::NeedsModifier("PageDown".into()))
+        );
+        assert!("F1".parse::<Chord>().is_ok());
+        assert!("Shift+F24".parse::<Chord>().is_ok());
+        assert!("Alt+Q".parse::<Chord>().is_ok());
+    }
+
+    #[test]
+    fn error_messages_are_readable() {
+        let m = "Ctrl+Alt+Banana".parse::<Chord>().unwrap_err().to_string();
+        assert!(m.contains("Banana") && m.contains("unknown key"), "{m}");
+        let m = "Q".parse::<Chord>().unwrap_err().to_string();
+        assert!(m.contains("bare key Q"), "{m}");
+    }
+
+    #[test]
+    fn defaults_are_valid_distinct_and_match_the_settings_table() {
+        let mut seen = BTreeSet::new();
+        for a in Action::ALL {
+            assert!(seen.insert(a.default_chord()), "{a:?} shares its default");
+            let in_settings = crate::settings::DEFAULT_HOTKEYS
+                .iter()
+                .find(|(id, _)| *id == a.id())
+                .unwrap_or_else(|| panic!("{} missing from settings::DEFAULT_HOTKEYS", a.id()));
+            assert_eq!(in_settings.1, a.default_text(), "{}", a.id());
+            assert_eq!(
+                a.default_chord().to_string(),
+                a.default_text(),
+                "default text is canonical"
+            );
+        }
+        assert_eq!(crate::settings::DEFAULT_HOTKEYS.len(), Action::ALL.len());
+        assert_eq!(Action::Quit.default_text(), "Ctrl+Alt+Q");
+        assert_eq!(Action::ToggleMenu.default_text(), "F10");
+        assert_eq!(Action::ToggleFullscreen.default_text(), "F11");
+    }
+
+    #[test]
+    fn ids_and_hotkey_ids_round_trip() {
+        for a in Action::ALL {
+            assert_eq!(Action::from_id(a.id()), Some(a));
+            assert_eq!(Action::from_hotkey_id(a.hotkey_id()), Some(a));
+        }
+        assert_eq!(Action::from_id("nope"), None);
+        assert_eq!(Action::from_hotkey_id(0), None);
+        assert_eq!(Action::from_hotkey_id(99), None);
+        assert_eq!(Action::Quit.hotkey_id(), 1, "the quit id stays 1, as before T-54");
+    }
+
+    fn map(entries: &[(&str, &str)]) -> BTreeMap<String, String> {
+        entries.iter().map(|(a, c)| (a.to_string(), c.to_string())).collect()
+    }
+
+    #[test]
+    fn settings_defaults_give_the_default_bindings_without_warnings() {
+        let (b, w) = Bindings::from_settings(&crate::settings::default_hotkeys());
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(b, Bindings::default());
+        let (b, w) = Bindings::from_settings(&BTreeMap::new());
+        assert!(w.is_empty());
+        assert_eq!(b, Bindings::default());
+    }
+
+    #[test]
+    fn a_valid_override_is_used() {
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_menu", "Ctrl+Alt+F12"), ("toggle_overlay", "F9")]));
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(b.get(Action::ToggleMenu), Some(chord("Ctrl+Alt+F12")));
+        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("F9")));
+        assert_eq!(b.get(Action::ToggleBypass), Some(Action::ToggleBypass.default_chord()));
+    }
+
+    #[test]
+    fn an_invalid_entry_falls_back_to_the_default_with_a_warning() {
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_menu", "Ctrl+Alt+Banana"), ("next_preset", "Q")]));
+        assert_eq!(b.get(Action::ToggleMenu), Some(chord("F10")));
+        assert_eq!(b.get(Action::NextPreset), Some(chord("Ctrl+Alt+PageDown")));
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(
+            w[0].contains("toggle_menu") && w[0].contains("Banana") && w[0].contains("F10"),
+            "{w:?}"
+        );
+        assert!(w[1].contains("next_preset") && w[1].contains("bare key"), "{w:?}");
+    }
+
+    #[test]
+    fn quit_cannot_be_rebound() {
+        let (b, w) = Bindings::from_settings(&map(&[("quit", "Ctrl+Q")]));
+        assert_eq!(b.get(Action::Quit), Some(chord("Ctrl+Alt+Q")));
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("quit") && w[0].contains("cannot be rebound"), "{w:?}");
+        // Writing the default is not a warning, in any case.
+        let (_, w) = Bindings::from_settings(&map(&[("quit", "ctrl+alt+q")]));
+        assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn colliding_chords_are_rejected_with_a_message() {
+        // The overlay asks for the menu's F10: rejected, its default is used.
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_overlay", "F10")]));
+        assert_eq!(b.get(Action::ToggleMenu), Some(chord("F10")));
+        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("Ctrl+Alt+O")));
+        assert_eq!(w.len(), 1);
+        assert!(
+            w[0].contains("toggle_overlay") && w[0].contains("already used by toggle_menu"),
+            "{w:?}"
+        );
+        // Nothing can take the quit chord.
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_bypass", "Ctrl+Alt+Q")]));
+        assert_eq!(b.get(Action::ToggleBypass), Some(chord("Ctrl+Alt+B")));
+        assert!(w[0].contains("already used by quit"), "{w:?}");
+        // Same chord for two rebinds: the earlier action keeps it.
+        let (b, w) = Bindings::from_settings(&map(&[("next_preset", "F8"), ("previous_preset", "F8")]));
+        assert_eq!(b.get(Action::NextPreset), Some(chord("F8")));
+        assert_eq!(b.get(Action::PreviousPreset), Some(chord("Ctrl+Alt+PageUp")));
+        assert_eq!(w.len(), 1);
+    }
+
+    #[test]
+    fn an_action_stays_unbound_when_chord_and_default_are_both_taken() {
+        // The menu takes the bypass default, and the bypass asks for the menu's chord.
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_menu", "Ctrl+Alt+B"), ("toggle_bypass", "Ctrl+Alt+B")]));
+        assert_eq!(b.get(Action::ToggleMenu), Some(chord("Ctrl+Alt+B")));
+        assert_eq!(b.get(Action::ToggleBypass), None);
+        assert!(w.iter().any(|m| m.contains("left unbound")), "{w:?}");
+        // Unbound actions have no registration attempt.
+        assert!(plan_registration(&b).iter().all(|a| a.action != Action::ToggleBypass));
+    }
+
+    #[test]
+    fn unknown_action_ids_are_ignored_with_a_warning() {
+        let (b, w) = Bindings::from_settings(&map(&[("screenshot", "F9")]));
+        assert_eq!(b, Bindings::default());
+        assert_eq!(w.len(), 1);
+        assert!(w[0].contains("screenshot"));
+    }
+
+    #[test]
+    fn bindings_write_back_as_settings_text() {
+        assert_eq!(Bindings::default().to_settings(), crate::settings::default_hotkeys());
+    }
+
+    // ---- registration with a fake registrar ----
+
+    /// Chords other programs own, by Win32 error; everything else registers. Records the calls.
+    #[derive(Default)]
+    struct Fake {
+        owned_elsewhere: HashMap<Chord, u32>,
+        registered: HashMap<i32, Chord>,
+        calls: Vec<(i32, Chord)>,
+        unregistered: Vec<i32>,
+    }
+
+    impl Fake {
+        fn taking(chords: &[&str]) -> Fake {
+            Fake {
+                owned_elsewhere: chords
+                    .iter()
+                    .map(|c| (chord(c), ERROR_HOTKEY_ALREADY_REGISTERED))
+                    .collect(),
+                ..Fake::default()
+            }
+        }
+    }
+
+    impl Registrar for Fake {
+        fn register(&mut self, id: i32, c: &Chord) -> Result<(), u32> {
+            self.calls.push((id, *c));
+            if let Some(e) = self.owned_elsewhere.get(c) {
+                return Err(*e);
+            }
+            // The system refuses a chord twice, also within this process.
+            if self.registered.values().any(|r| r == c) {
+                return Err(ERROR_HOTKEY_ALREADY_REGISTERED);
+            }
+            self.registered.insert(id, *c);
+            Ok(())
+        }
+
+        fn unregister(&mut self, id: i32) {
+            self.registered.remove(&id);
+            self.unregistered.push(id);
+        }
+    }
+
+    #[test]
+    fn the_plan_lists_the_wanted_chord_first_then_the_fallbacks() {
+        let plan = plan_registration(&Bindings::default());
+        assert_eq!(plan.len(), 7);
+        assert_eq!(plan[0].action, Action::Quit, "quit is registered first");
+        assert_eq!(plan[0].candidates, vec![chord("Ctrl+Alt+Q")], "quit has no fallback");
+        let menu = plan.iter().find(|a| a.action == Action::ToggleMenu).unwrap();
+        // F10 is the wanted chord, so the plain F10 fallback is not repeated; the list ends with Ctrl+Alt+F12.
+        assert_eq!(
+            menu.candidates,
+            vec![chord("F10"), chord("Ctrl+Alt+F10"), chord("Ctrl+Alt+F12")]
+        );
+        for a in &plan {
+            let set: BTreeSet<_> = a.candidates.iter().collect();
+            assert_eq!(set.len(), a.candidates.len(), "{:?} lists a chord twice", a.action);
+        }
+    }
+
+    #[test]
+    fn a_fallback_never_steals_another_actions_wanted_chord() {
+        // Fullscreen is rebound to Ctrl+Alt+F10, the menu's first fallback.
+        let (b, _) = Bindings::from_settings(&map(&[("toggle_fullscreen", "Ctrl+Alt+F10")]));
+        let plan = plan_registration(&b);
+        let menu = plan.iter().find(|a| a.action == Action::ToggleMenu).unwrap();
+        assert_eq!(menu.candidates, vec![chord("F10"), chord("Ctrl+Alt+F12")]);
+    }
+
+    #[test]
+    fn all_chords_free_registers_the_wanted_ones_and_reports_nothing() {
+        let mut fake = Fake::default();
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert!(!reg.has_problems());
+        assert!(reg.problems().is_empty());
+        for a in Action::ALL {
+            assert_eq!(reg.bound(a), Some(a.default_chord()), "{a:?}");
+            assert_eq!(fake.registered[&a.hotkey_id()], a.default_chord());
+        }
+        assert_eq!(fake.calls.len(), 7, "one call per action when nothing fails");
+        assert!(reg.summary().contains("settings menu F10"), "{}", reg.summary());
+    }
+
+    #[test]
+    fn f10_taken_falls_back_and_names_the_chord_and_the_error() {
+        let mut fake = Fake::taking(&["F10"]);
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert_eq!(reg.bound(Action::ToggleMenu), Some(chord("Ctrl+Alt+F10")));
+        assert!(reg.has_problems());
+        let problems = reg.problems();
+        assert_eq!(problems.len(), 1, "{problems:?}");
+        let p = &problems[0];
+        assert!(
+            p.contains("toggle_menu") && p.contains("F10") && p.contains("1409"),
+            "{p}"
+        );
+        assert!(p.contains("using Ctrl+Alt+F10 instead"), "{p}");
+        // The other actions are unaffected.
+        assert_eq!(reg.bound(Action::ToggleFullscreen), Some(chord("F11")));
+        assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Alt+Q")));
+    }
+
+    #[test]
+    fn f12_taken_while_f10_is_wanted_changes_nothing() {
+        // The dev machine case: F12 is owned by another program (error 1409), the default menu key is F10.
+        let mut fake = Fake::taking(&["F12"]);
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert!(!reg.has_problems());
+        assert_eq!(reg.bound(Action::ToggleMenu), Some(chord("F10")));
+        // A user who still asks for F12 gets the fallback list, starting with the plain F10, and a message.
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_menu", "F12")]));
+        assert!(w.is_empty());
+        let mut fake = Fake::taking(&["F12"]);
+        let reg = register_all(&mut fake, &plan_registration(&b));
+        assert_eq!(reg.bound(Action::ToggleMenu), Some(chord("F10")));
+        let p = reg.problems();
+        assert_eq!(p.len(), 1);
+        assert!(
+            p[0].contains("F12") && p[0].contains("1409") && p[0].contains("using F10 instead"),
+            "{p:?}"
+        );
+    }
+
+    #[test]
+    fn every_candidate_failing_leaves_the_action_unavailable_with_all_errors_listed() {
+        let mut fake = Fake::taking(&["F10", "Ctrl+Alt+F10", "Ctrl+Alt+F12"]);
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert_eq!(reg.bound(Action::ToggleMenu), None);
+        let o = reg.outcomes.iter().find(|o| o.action == Action::ToggleMenu).unwrap();
+        assert_eq!(o.failures.len(), 3);
+        let m = o.message().unwrap();
+        assert!(
+            m.contains("F10") && m.contains("Ctrl+Alt+F12") && m.contains("unavailable"),
+            "{m}"
+        );
+        assert!(reg.summary().contains("settings menu unavailable"), "{}", reg.summary());
+    }
+
+    #[test]
+    fn a_double_registration_of_one_chord_reports_the_failing_chord() {
+        // Both actions want F8 (a hand-built plan, as a settings file cannot give it after validation).
+        let plan = vec![
+            Attempt {
+                action: Action::ToggleOverlay,
+                candidates: vec![chord("F8")],
+            },
+            Attempt {
+                action: Action::ToggleBypass,
+                candidates: vec![chord("F8")],
+            },
+        ];
+        let mut fake = Fake::default();
+        let reg = register_all(&mut fake, &plan);
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("F8")));
+        assert_eq!(reg.bound(Action::ToggleBypass), None);
+        let p = reg.problems();
+        assert_eq!(p.len(), 1);
+        assert!(
+            p[0].contains("toggle_bypass") && p[0].contains("F8") && p[0].contains("1409"),
+            "{p:?}"
+        );
+        assert_eq!(fake.calls.len(), 1, "the second try is not sent to the system");
+    }
+
+    #[test]
+    fn quit_failing_is_visible_to_the_caller() {
+        let mut fake = Fake::taking(&["Ctrl+Alt+Q"]);
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert_eq!(reg.bound(Action::Quit), None, "output.rs refuses to go fullscreen then");
+        assert!(reg.problems()[0].contains("Ctrl+Alt+Q"));
+    }
+
+    #[test]
+    fn unregister_all_releases_exactly_the_registered_ids() {
+        let mut fake = Fake::taking(&["Ctrl+Alt+O"]);
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        fake.unregistered.clear();
+        reg.unregister_all(&mut fake);
+        let mut ids = fake.unregistered.clone();
+        ids.sort();
+        let mut want: Vec<i32> = Action::ALL.iter().map(|a| a.hotkey_id()).collect();
+        want.sort();
+        assert_eq!(
+            ids, want,
+            "the overlay fell back to its fallback chord and is registered too"
+        );
+        assert!(fake.registered.is_empty());
+    }
+
+    #[test]
+    fn win32_codes_come_out_of_hresults() {
+        assert_eq!(win32_code(0x8007_0581u32 as i32), 1409);
+        assert_eq!(win32_code(1409), 1409);
+        assert!(describe_win32(1409).contains("already registered"));
+        assert!(describe_win32(5).contains("Win32 error 5"));
+    }
+}

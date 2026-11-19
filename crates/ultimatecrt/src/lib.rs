@@ -3,10 +3,14 @@
 pub mod app;
 pub mod capture;
 pub mod cli;
+pub mod controls;
 pub mod diag;
 pub mod gpu;
 pub mod headroom;
+pub mod hotkeys;
 pub mod lifecycle;
+pub mod live;
+pub mod modes;
 pub mod output;
 pub mod params;
 pub mod patterns;

@@ -7,7 +7,10 @@ use windows::Win32::{
     UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
 };
 
-use crate::{capture, cli, diag, gpu, lifecycle, output, placement, scaling, settings, source, sources, Res};
+use crate::{
+    capture, cli, controls, diag, gpu, hotkeys, lifecycle, live, modes, output, placement, presets, scaling, settings,
+    source, sources, Res,
+};
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
@@ -153,12 +156,24 @@ pub fn run() -> Res<()> {
         .map_or((1280, 720), |r| (r.right - r.left, r.bottom - r.top));
     let fit = |avail: i32, size: u32| (avail.max(1) as u32 * 5 / 6) / size.max(1);
     let scale = fit(screen.1, frame.height).min(fit(screen.0, frame.width)).max(1) as i32;
+    // T-54, T-57: the hotkey chords and the remembered window rectangle come from the settings file.
+    let settings_dir = settings::default_dir();
+    let stored = settings_dir
+        .as_deref()
+        .map(|d| settings::load(d).settings)
+        .unwrap_or_default();
+    let (bindings, hotkey_warnings) = hotkeys::Bindings::from_settings(&stored.global.hotkeys);
+    for w in &hotkey_warnings {
+        eprintln!("warning: {w}");
+    }
     let win = output::create(&output::Options {
         fullscreen: args.fullscreen,
         no_activate: args.no_activate,
         monitor: args.monitor,
         follow,
         client_size: (frame.width as i32 * scale, frame.height as i32 * scale),
+        hotkeys: bindings,
+        saved_rect: stored.global.output.windowed.map(modes::IRect::from_array),
     })?;
     let mut renderer = gpu::Renderer::new(
         win.hwnd.0 as isize,
@@ -177,6 +192,7 @@ pub fn run() -> Res<()> {
             " or Esc in the output window"
         }
     );
+    println!("hotkeys: {}", win.hotkeys.summary());
 
     let mut log = args
         .log
@@ -205,8 +221,29 @@ pub fn run() -> Res<()> {
     let mut lost_watch = lifecycle::LostWatch::new(args.lost, args.fullscreen);
     let windowed_size = (frame.width as i32 * scale, frame.height as i32 * scale);
     let mut readout_key = ((0u32, 0u32), (0u32, 0u32));
+    // Hotkey actions and output modes (T-54, T-57). `ui` is the stand-in until `ui::Ui` implements `UiHook`.
+    let library = presets::Library::load(settings_dir.as_deref().map(presets::user_dir).as_deref());
+    let current_preset = args
+        .preset
+        .as_deref()
+        .or(Some(stored.global.preset.as_str()).filter(|p| !p.is_empty()))
+        .and_then(|id| library.find(id))
+        .map(|p| p.id.clone());
+    let mut ui = controls::NoUi;
+    let mut live = live::Live::new(
+        args.fullscreen,
+        stored,
+        settings_dir,
+        library,
+        current_preset,
+        output::default_outer_size(windowed_size),
+    );
     loop {
         if !output::pump() {
+            break;
+        }
+        live.tick(&mut ui, win.hwnd, &mut renderer, &mut params, &mut lost_watch);
+        if live.controls.quit {
             break;
         }
         if args.exit_after.is_some_and(|s| start.elapsed().as_secs_f64() > s) {
@@ -247,6 +284,7 @@ pub fn run() -> Res<()> {
                 lifecycle::LostAction::Remind => println!("{}", lifecycle::LOST_REMINDER),
                 lifecycle::LostAction::GoWindowed => {
                     output::drop_to_windowed(win.hwnd, windowed_size);
+                    live.dropped_to_windowed();
                     println!(
                         "source lost for {:.0} s: the output is now a normal window (Esc closes it)",
                         args.lost.wait_s
@@ -399,6 +437,7 @@ pub fn run() -> Res<()> {
             last_captured = captured;
         }
     }
+    live.finish(win.hwnd);
     if let Some(l) = log.as_mut() {
         l.summary();
     }

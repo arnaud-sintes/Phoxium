@@ -22,11 +22,16 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const SETTINGS_FILE: &str = "settings.toml";
 pub const BACKUP_FILE: &str = "settings.toml.bak";
 
-/// Hotkey action ids with their default chords. F11 and F12 are reserved for fullscreen and the menu.
+/// Hotkey action ids with their default chords (T-54; parsed and validated by `hotkeys::Bindings::from_settings`,
+/// which also fixes `quit`). The menu key is F10 (PLAN D-17: F12 is owned by another program on the dev machine).
 pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
-    ("toggle_fullscreen", "F11"),
-    ("toggle_menu", "F12"),
     ("quit", "Ctrl+Alt+Q"),
+    ("toggle_fullscreen", "F11"),
+    ("toggle_menu", "F10"),
+    ("toggle_overlay", "Ctrl+Alt+O"),
+    ("toggle_bypass", "Ctrl+Alt+B"),
+    ("next_preset", "Ctrl+Alt+PageDown"),
+    ("previous_preset", "Ctrl+Alt+PageUp"),
 ];
 
 fn default_version() -> u32 {
@@ -53,6 +58,15 @@ impl Default for UiState {
     }
 }
 
+/// Output window state remembered between runs (T-57).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct OutputState {
+    /// Outer rectangle of the framed windowed output in virtual-screen pixels: left, top, right, bottom. The
+    /// position holds the monitor; a rectangle that is no longer on a monitor is ignored (`modes::restore_rect`).
+    pub windowed: Option<[i32; 4]>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Global {
@@ -63,6 +77,8 @@ pub struct Global {
     /// Action id to chord text (`F11`, `Ctrl+Alt+Q`).
     pub hotkeys: BTreeMap<String, String>,
     pub ui: UiState,
+    /// Windowed output rectangle (T-57).
+    pub output: OutputState,
 }
 
 impl Default for Global {
@@ -72,6 +88,7 @@ impl Default for Global {
             overrides: BTreeMap::new(),
             hotkeys: default_hotkeys(),
             ui: UiState::default(),
+            output: OutputState::default(),
         }
     }
 }
@@ -581,11 +598,29 @@ mod tests {
     }
 
     #[test]
-    fn hotkey_defaults_reserve_f11_and_f12_and_fill_gaps() {
+    fn hotkey_defaults_fill_gaps_and_the_menu_key_is_f10() {
         let s = Settings::from_toml("version = 1\n[global.hotkeys]\nquit = \"Ctrl+Q\"\n").unwrap();
         assert_eq!(s.global.hotkeys["toggle_fullscreen"], "F11");
-        assert_eq!(s.global.hotkeys["toggle_menu"], "F12");
+        assert_eq!(s.global.hotkeys["toggle_menu"], "F10");
+        assert_eq!(s.global.hotkeys["toggle_bypass"], "Ctrl+Alt+B");
+        assert_eq!(s.global.hotkeys["previous_preset"], "Ctrl+Alt+PageUp");
+        // Parsing keeps the text as written; the validation is `hotkeys::Bindings::from_settings` (it fixes quit).
         assert_eq!(s.global.hotkeys["quit"], "Ctrl+Q");
+        let (b, w) = crate::hotkeys::Bindings::from_settings(&s.global.hotkeys);
+        assert_eq!(b.get(crate::hotkeys::Action::Quit).unwrap().to_string(), "Ctrl+Alt+Q");
+        assert_eq!(w.len(), 1, "{w:?}");
+    }
+
+    #[test]
+    fn output_state_round_trips_and_defaults_to_nothing() {
+        assert_eq!(Settings::default().global.output.windowed, None);
+        let mut s = Settings::default();
+        s.global.output.windowed = Some([100, -50, 1380, 770]);
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.global.output.windowed, Some([100, -50, 1380, 770]));
+        // A file without the table keeps working.
+        let s = Settings::from_toml("version = 1\n").unwrap();
+        assert_eq!(s.global.output, OutputState::default());
     }
 
     #[test]

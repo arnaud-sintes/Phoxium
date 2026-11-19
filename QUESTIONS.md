@@ -327,6 +327,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** With a click-through output the system draws the cursor in host space, while the captured cursor appears in tube space: double or misplaced cursors. Many pixel-art games draw their own.
 - **Who:** USER plus SPIKE.
 - **Default:** Capture without cursor, hide the host cursor over the output where a clean method exists, document the rest. Optional inclusion through the tube.
+- **IMPLEMENTED (T-57, code and unit tests; live check not run):** the source cursor stays out of the capture. The host cursor is hidden over the client area of the output (`WM_SETCURSOR` answered with no cursor) while the settings menu is closed; the frame and title bar of the framed window keep the normal cursor. The output is not click-through yet, so the hiding is unconditional when the menu is closed. Open: a game that hides or clips its own cursor and a cursor that stays visible at the output's edge (live check, `scripts\check-hotkeys.ps1` does not cover it); optional inclusion of the source cursor through the tube is not built.
 
 ### CAP-7 Target selection and lifecycle
 - **Q:** How is the target chosen (system picker, window list, hotkey on the foreground window, profile match by executable and window class), and what happens on resize, move, DPI change, close, relaunch (new window handle) and crash? What about apps that render into child or separate windows, and how is the capture region defined (client area, numeric crop)?
@@ -355,6 +356,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** One monitor raises occlusion, cursor and focus problems. Two monitors raise mixed-refresh pacing and possibly cross-adapter copies.
 - **Who:** USER.
 - **Default:** Two-monitor is the guaranteed mode, one-monitor is the design target if SP-1 and SP-2 show it works. One explicitly chosen output monitor, the target anywhere. (Opus and Fable would make one-monitor the reference case because it is the harder one.)
+- **IMPLEMENTED (T-57, code and unit tests; live check not run):** the output monitor can change at run time. F11 to fullscreen covers the monitor the framed window is on, so moving the window to the second monitor and pressing F11 puts the output there; the framed window remembers its rectangle (and so its monitor) in `settings.toml`, restored while it is still on a monitor; `WM_DISPLAYCHANGE` (resolution change, monitor plugged or unplugged) re-covers the monitor that holds most of a fullscreen output, and moves a framed window that is mostly off screen back onto a monitor (`modes::ModeState::display_change`, unit tested); the framed window follows `WM_DPICHANGED`. Not verified: mixed refresh rates and DPI on two monitors, a cross-adapter present.
 
 ### OUT-2 No-focus fullscreen presentation
 - **Q:** Does a borderless, topmost, monitor-sized, non-activating (`WS_EX_NOACTIVATE`), optionally click-through window present at full refresh with Vulkan, with HDR, without tearing and without forcing extra compositor latency? Does the driver ever try exclusive fullscreen? Does Windows or the driver deprioritise a never-foreground process's GPU work and presents?
@@ -381,6 +383,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Who:** USER.
 - **Options:** keyboard and gamepad content only; align the source under a non-curved picture; synthesise remapped input (fragile).
 - **Default:** Keyboard and gamepad games only. Output is click-through. Mouse remapping later, never input hooks.
+- **STATUS (T-57):** PLAN D-8 changed the default: click-through is OFF by default and an option (clicks on a covering output otherwise land at wrong positions once curvature exists). The option is NOT implemented: there is no `--click-through` flag yet, so the output always takes the mouse (non-activating: a click does not move the focus). Planned method per the T-07 notes: `WS_EX_LAYERED | WS_EX_TRANSPARENT` set and cleared with the same style functions as `output::set_no_activate`, hotkey-toggled or a settings entry; it needs a live check that a layered window keeps the independent-flip present path (OUT-2) before it is offered. Mouse remapping stays out.
 
 ### OUT-5 Hotkeys and the escape path
 - **Q:** Which global actions need hotkeys (toggle effect, toggle menu, cycle preset, screenshot, bypass, quit), and what is the guaranteed way out when a topmost, possibly click-through window covers the desktop?
@@ -388,6 +391,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Who:** USER.
 - **Default:** A small set of registered hotkeys with a configurable, rarely used chord, no low-level hooks, and a fixed panic hotkey that always returns to windowed mode.
 - **IMPLEMENTED (2026-11-18), first part:** one registered hotkey, Ctrl+Alt+Q, which quits (it does not return to windowed mode yet). No hooks. A fullscreen output refuses to start if the hotkey cannot be registered.
+- **IMPLEMENTED (T-54 and T-57, code and unit tests; live check not run):** the small registered set is Quit `Ctrl+Alt+Q` (fixed), fullscreen and framed window `F11` (the panic key: from fullscreen it returns to a framed window, from anywhere), settings menu `F10` (D-17: F12 is owned by another program on the dev machine, `RegisterHotKey` error 1409; `F11`, `F10` and `Ctrl+Alt+F12` register fine), overlay `Ctrl+Alt+O`, A/B bypass `Ctrl+Alt+B`, next and previous preset `Ctrl+Alt+PageDown` and `PageUp`. All chords except quit are configurable in `settings.toml` (`[global.hotkeys]`), validated, with a short fallback list per action and a console line naming the chord and the Win32 error when registration fails; no low-level hook. Screenshot is not a hotkey. Decision: F11 is configurable too (PLAN T-54 said fixed); only Quit is fixed, and whatever chord toggles the output mode is the panic key. Open: `scripts\check-hotkeys.ps1` has not been run (needs a hands-off desktop); the game loses the registered chords while ultimatecrt runs (documented in the README).
 
 ### OUT-6 Present mode, vsync, tearing and VRR
 - **Q:** Default present mode (FIFO, mailbox, immediate with tearing)? Is tearing ever acceptable? What happens when the frame budget is missed? Does VRR engage for an unfocused output window, and is it wanted given rolling scan needs a fixed refresh?
