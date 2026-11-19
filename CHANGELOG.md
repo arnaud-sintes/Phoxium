@@ -11,6 +11,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 Programs, capture and tooling
 - `pixel-demo`: demo source window with a procedural NES-style scene, a test card and optional PNG display, at any source resolution and integer scale.
+- `pixel-demo` as a universal test source (T-95): display modes `--mode native|integer|fit|fit-free` (`--scale 1..10`, `--filter nearest|bilinear|bicubic` for the free fit to emulate smoothed upscalers), `--par N:M` pixel aspect ratio, centring with `--bg` bars and `--align`, `--native WxH`, `--borderless`, `--maximised`, `--fullscreen` and F key, resizable window with re-layout, `--no-round-corners`, contents `card|bars|ramp|checker|motion|text|noise|scene|image`, `--fps` driven by a high-resolution waitable timer, `--stats` achieved rate, `--fixed-seed`, a binary frame counter (`--counter`) with an offline `--decode` of captures, a pure `layout` module and unit tests, and `scripts\check-pixel-demo.ps1` (live check, not yet run).
 - `ultimatecrt`: window capture (Windows.Graphics.Capture, client area only, CPU copy) and Vulkan 1.3 output in a windowed or fullscreen non-activating window. Ctrl+Alt+Q always quits.
 - Source integer scaling: `--crop`, `--divisor` and automatic detection (x1 detected as native). Flat frames (a black boot screen) are not counted by the detector.
 - `--version` flag on both programs, single workspace version.
@@ -63,3 +64,4 @@ Pipeline and physics (each stage has an oracle in `crt-model` and analytic GPU t
 ### Fixed
 - FP16 stage stores round to nearest, ties to even, on every device (`round_f16` in `shaders/include/common.glsl`, applied at every `imageStore` of `decode`, `resample`, `amp`, `gun`, `abl` and `screen`): the Vulkan spec leaves the float to FP16 rounding to the implementation and this NVIDIA driver truncated (bias -2^-10 to 0 per store, about -0.15 to -0.2 % after the chain). The 8-bit identity budget drops from 0.4968 to 0.311 of a code on an RGBA16F target (0.186 on an 8-bit target), the stage tests use the symmetric half-ulp window, and `gpu_fp16_store` checks the stores bit for bit against a CPU reference.
 - The Esc hint is no longer printed for a `--no-activate` output.
+- `pixel-demo` handles `WM_DPICHANGED`: a window dragged to a monitor with another scaling no longer loses client area (live-A); an exact-size window stays exact, otherwise Windows' suggested rectangle is used. The animation clock no longer depends on the 8 ms `WM_TIMER` (about 57 distinct frames per second).

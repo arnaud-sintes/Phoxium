@@ -18,7 +18,7 @@
     Also run each scale with the left half of the source covered by another window.
 .PARAMETER MoveTo
     "x,y": move the pixel-demo window there (virtual-desktop pixels, e.g. onto another monitor with another DPI)
-    before capturing. The window is only moved, never resized. The client area is then resized to exactly width*scale x height*scale (the non-client area scales with the DPI, pixel-demo does not handle WM_DPICHANGED). Reported DPI is that of the window.
+    before capturing. The window is only moved, never resized. The client area is then resized to exactly width*scale x height*scale (the non-client area scales with the DPI; pixel-demo now handles WM_DPICHANGED and keeps an exact-size window exact, this resize stays as a safety net). Reported DPI is that of the window.
 .PARAMETER KeepFiles
     Keep the generated PNGs in the work directory.
 #>
