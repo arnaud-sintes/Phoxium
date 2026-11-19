@@ -8,7 +8,8 @@ Parameters not listed keep their table defaults: slot period and bridge, mask st
 White: about 9300 K as the tube white (D93), P22 primaries. D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or white clips.
 Spot growth: 0.9 -> 1.6 mm with n = 0.42 keeps a non-negative floor.
 Amplifier: 6 MHz, no arcade row in CRT.md, the consumer RGB class 4 to 8 MHz is used. The amp stage blur is 0.1325 x 5.37 / 6 = 0.119 source px, so amp_samples = 16. Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
-Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 11 mm, halation (12 mm / 3 %).
+M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1R faceplate, R = 1.767 x 450 mm = 795 mm (estimate: arcade monitors use TV-class tubes, no arcade value). ABL stays off and convergence stays 0: CRT.md has neither value for arcade chassis. Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
+Not yet parameters (T-63 values kept for later): faceplate thickness 11 mm (LG.Philips 9 to 11.5 mm for 400 to 500 mm diagonals), halation (12 mm / 3 %).
 """
 
 [params]
@@ -26,6 +27,10 @@ beam_growth_exponent = 0.42
 amp_bandwidth_mhz = 6.0
 amp_fall_rise_ratio = 0.8
 amp_samples = 16
+geometry_curvature = "spherical"
+geometry_radius_mm = 795.0
+phosphor_persistence = true
+phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
 exposure = 0.74
 output_match_srgb = false
 output_dither = "noise"
@@ -45,6 +50,10 @@ beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42, floor non-
 amp_bandwidth_mhz = "E: CRT.md RGB path table, consumer RGB 4 to 8 MHz (no arcade row)"
 amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
 amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 6 MHz = 0.119 source px, above 0.02 so K = 16"
+geometry_curvature = "E: CRT.md Faceplate curvature: spherical 1R, most pre-1990 TVs and monitors; arcade monitors use TV-class tubes (CRT.md lists the 19 in arcade with the TV pitches), no arcade curvature data"
+geometry_radius_mm = "E: CRT.md Faceplate curvature: 1R = 1.767 x 450 mm diagonal = 795 mm (sagitta table: 7.2 % of the diagonal at the corner)"
+phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown"
+phosphor_tail_strength_rgb = "S: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1)"
 exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

@@ -1280,4 +1280,99 @@ mod tests {
         assert_eq!(user_dir(Path::new("C:\\a")), Path::new("C:\\a").join("presets"));
         let _ = fs::remove_dir_all(&dir);
     }
+    /// Viewable diagonal of the preset tube (mm).
+    fn diagonal_mm(q: &Params) -> f64 {
+        let h = f64::from(q.tube_visible_height_mm);
+        h.hypot(h * f64::from(q.tube_aspect))
+    }
+
+    /// T-64: the faceplate radius of each preset gives the CRT.md corner sagitta of its tube class, checked with
+    /// the `crt_model::geometry` oracle: spherical 1R (R = 1.767 diagonals) 7.2 % of the diagonal, 1.5R 4.8 %;
+    /// the cylindrical tubes lie in the patent range 1.33 to 1.75 x 1R (Trinitron) or the flat-face inner radii
+    /// of CRT.md (2300 to 2500 mm).
+    #[test]
+    fn faceplate_radius_gives_the_crt_md_sagitta() {
+        use crt_model::geometry::sagitta_mm;
+        let l = lib();
+        // (id, R / diagonal, corner sagitta / diagonal): CRT.md Faceplate curvature table.
+        let spherical = [
+            ("slot-tv-26in", 1.767, 0.072),
+            ("tv-13in", 1.767, 0.072),
+            ("arcade-19in", 1.767, 0.072),
+            ("cromaclear-17in", 1.5 * 1.767, 0.048),
+            ("vga-15in", 1.5 * 1.767, 0.048),
+            ("delta-17in", 1.5 * 1.767, 0.048),
+        ];
+        for (id, ratio, sag) in spherical {
+            let q = l.find(id).unwrap().params();
+            assert_eq!(
+                q.geometry_curvature,
+                crate::params::GEOMETRY_CURVATURE_SPHERICAL,
+                "{id}"
+            );
+            let (d, r) = (diagonal_mm(&q), f64::from(q.geometry_radius_mm));
+            assert!((r / d - ratio).abs() < 0.002, "{id}: R/D {}", r / d);
+            let s = sagitta_mm(r, d / 2.0) / d;
+            assert!((s - sag).abs() < 0.0006, "{id}: corner sagitta {s} of the diagonal");
+        }
+        // Hand check, 26 in: R 1166 mm, corner sagitta about 0.072 x 660 = 47.6 mm.
+        let q = l.find("slot-tv-26in").unwrap().params();
+        assert!((sagitta_mm(f64::from(q.geometry_radius_mm), 330.0) - 47.6).abs() < 0.3);
+        for id in ["pvm-20m4u", "bvm-20f1u", "kv-trinitron-tv"] {
+            let q = l.find(id).unwrap().params();
+            assert_eq!(
+                q.geometry_curvature,
+                crate::params::GEOMETRY_CURVATURE_CYLINDRICAL,
+                "{id}"
+            );
+            let (d, r) = (diagonal_mm(&q), f64::from(q.geometry_radius_mm));
+            let ratio = r / (1.767 * d);
+            assert!(
+                (1.33..=1.75).contains(&ratio),
+                "{id}: {ratio} x 1R outside the patent range"
+            );
+            // Horizontal edge sagitta stays below the 1R corner value 7.2 % of the diagonal.
+            let w = f64::from(q.tube_visible_height_mm) * f64::from(q.tube_aspect);
+            assert!(sagitta_mm(r, w / 2.0) / d < 0.072, "{id}");
+        }
+        let q = l.find("kv-trinitron-tv").unwrap().params();
+        assert!((1594.0..=2100.0).contains(&f64::from(q.geometry_radius_mm)));
+        let q = l.find("gdm-f520").unwrap().params();
+        assert_eq!(q.geometry_curvature, crate::params::GEOMETRY_CURVATURE_CYLINDRICAL);
+        assert!((2300.0..=2500.0).contains(&f64::from(q.geometry_radius_mm)));
+    }
+
+    /// T-64: persistence is on for every preset with the Kuhn P22 constants (tail strength 1), and the 60 Hz frame
+    /// energy ratios of the oracle are the CRT.md table (green 5.36 %, blue 4.72 %); ABL is on exactly for the
+    /// consumer TV presets with the sourced RCA 1.4 mA threshold; raster breathing and saturation keep their
+    /// defaults; mask_tier_blend stays the parameter default (D-15).
+    #[test]
+    fn m4_values_follow_the_recorded_policies() {
+        use crt_model::phosphor::{KUHN_BLUE, KUHN_GREEN};
+        let t = crt_model::units::frame_period_ms(60.0);
+        assert!((KUHN_GREEN.frame_energy_ratios(t)[0] * 100.0 - 5.36).abs() < 0.01);
+        assert!((KUHN_BLUE.frame_energy_ratios(t)[0] * 100.0 - 4.72).abs() < 0.01);
+        let d = Params::default();
+        for p in lib().list() {
+            let q = p.params();
+            assert!(q.phosphor_persistence, "{}", p.id);
+            assert_eq!(q.phosphor_tail_strength_rgb, [1.0; 3], "{}", p.id);
+            let tv = ["kv-trinitron-tv", "slot-tv-26in", "tv-13in"].contains(&p.id.as_str());
+            assert_eq!(q.abl_enable, tv, "{}", p.id);
+            if tv {
+                assert_eq!(q.abl_threshold_ma, 1.4, "{}", p.id);
+            }
+            assert_eq!(q.abl_breathing, d.abl_breathing, "{}", p.id);
+            assert_eq!(q.phosphor_saturation, d.phosphor_saturation, "{}", p.id);
+            assert_eq!(q.mask_tier_blend, d.mask_tier_blend, "{}", p.id);
+            assert_ne!(q.geometry_curvature, crate::params::GEOMETRY_CURVATURE_FLAT, "{}", p.id);
+            for k in ["geometry_curvature", "geometry_radius_mm", "phosphor_persistence"] {
+                assert!(
+                    p.values.iter().any(|(id, _)| *id == k) && p.provenance.contains_key(k),
+                    "{}: {k}",
+                    p.id
+                );
+            }
+        }
+    }
 }

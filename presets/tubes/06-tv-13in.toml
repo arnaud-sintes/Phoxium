@@ -4,11 +4,13 @@ name = "13 in consumer TV (GE class)"
 label = "based on published data for a 13 in GE television (pitch measured by a third party)"
 notes = """
 Small consumer set with a coarse slot mask. Pitch 0.60 mm is measured by Goldwasser (CRT.md); about 440 triads across. Everything else is a consumer-TV class estimate.
-No CRT.md data for this set, so these keep their table defaults (primaries and white are listed with that provenance): slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma, ABL (off: no value for a 13 in set), raster breathing, source clock. The visible size is derived from the triad count (440 x 0.60 = 264 mm wide), the same size as the 14 in BVM.
+No CRT.md data for this set, so these keep their table defaults (primaries and white are listed with that provenance): slot period and bridge, mask stripe fill, edge softness, beam tail, gun law and gamma, raster breathing, source clock (ABL: see the M4 values below). The visible size is derived from the triad count (440 x 0.60 = 264 mm wide), the same size as the 14 in BVM.
 Spot: CRT.md gives no row for this set; the consumer TV class (mid 0.7 to 1.5 mm, peak 1.5 to 2 mm) is used with 0.75 -> 1.5 mm, n = 0.42 (ratio 2.0 stays under the zero-floor bound 2.01, which leaves a floor d0 close to zero). Research point (T-36b review): these widths need n = 0.5 for a ratio of 2, which gives peak/d0 about 3.7 at n = 0.5; no 13 in spot data exists, so the widths are not changed here.
 Amplifier: 5 MHz (cheap consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 / 5 = 0.142 source px, so amp_samples = 16 (K = 4 over-dims isolated vertical lines by 2.3 points at 5 MHz, T-33 follow-up). Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
 Output: tube-faithful, dithered. D65 does not clip at exposure 1.
-Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness (10 mm estimate), halation.
+M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1R faceplate, R = 1.767 x 330 mm = 583 mm (the diagonal is derived from the triad count); convergence 1.0 mm radial at the corner on red (outward) and blue (inward), no static offset (CRT.md Starting presets TV, no centre value); ABL on with the RCA 1.4 mA and 0.5 s values, FLAGGED: they come from another (larger) RCA tube and CRT.md has no value for a 13 in set, and with the table full-white current of 2.8 mA the limiter engages only above half-field white. Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
+Spot growth flagged: the 0.75 to 1.5 mm widths are at the zero-floor bound for n = 0.42 (see above), no 13 in spot data exists.
+Not yet parameters: faceplate thickness (10 mm estimate), halation.
 """
 
 [params]
@@ -26,6 +28,15 @@ beam_growth_exponent = 0.42
 amp_bandwidth_mhz = 5.0
 amp_fall_rise_ratio = 0.8
 amp_samples = 16
+geometry_curvature = "spherical"
+geometry_radius_mm = 583.0
+abl_enable = true
+abl_threshold_ma = 1.4
+abl_tau_s = 0.1667
+phosphor_persistence = true
+phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+geometry_conv_red_radial_mm = 1.0
+geometry_conv_blue_radial_mm = -1.0
 exposure = 1.0
 output_match_srgb = false
 output_dither = "noise"
@@ -45,6 +56,15 @@ beam_growth_exponent = "D: CRT.md T-63 item 7, TV presets about 0.42, floor non-
 amp_bandwidth_mhz = "E: CRT.md RGB path table, cheap consumer TV RGB 4 to 8 MHz"
 amp_fall_rise_ratio = "E: below 1, isolated bright pixels dimmer (CRT.md adjacent-pixel nonlinearity)"
 amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 5 MHz = 0.142 source px, above 0.02 so K = 16"
+geometry_curvature = "D: CRT.md Faceplate curvature: spherical 1R, most pre-1990 TVs and monitors; no data for this set"
+geometry_radius_mm = "D: CRT.md Faceplate curvature: 1R = 1.767 x 330 mm diagonal (derived from the 440 triad count, itself derived) = 583 mm; the 14 in row of CRT.md gives about 0.63 m"
+abl_enable = "E: CRT.md ABL, consumer TVs limit; the 1.4 mA value is an RCA TV value (T-63) for another tube, no value for a 13 in set (flagged)"
+abl_threshold_ma = "S: CRT.md T-63, RCA/Thomson average limiter 1.4 mA (RCA value, not for this set)"
+abl_tau_s = "D: CRT.md T-63, steady state about 0.5 s (RCA US 4,330,792), tau = 0.5 / 3 s"
+phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown"
+phosphor_tail_strength_rgb = "S: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1)"
+geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
+geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
 exposure = "D: D65 white, no clip"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

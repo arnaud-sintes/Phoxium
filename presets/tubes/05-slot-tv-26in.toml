@@ -11,7 +11,8 @@ Amplifier: 6 MHz (consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 
 Slot period: mask_slot_period 1.6 is the parameter maximum, and CRT.md contradicts itself: the Mask section says the vertical period is 2 to 3 times the stripe spacing p/3 (0.67 to 1.0 p), the starting-preset row says about 1.6 p. The value follows the starting-preset row; open owner/research point (QUESTIONS PHY-4).
 Host (PHY-2 option D): 2.98 px per triad on 2560 x 1440, between the option D threshold 2.8 and the tier B threshold 3, where mask_tier = auto would still average the mask away; mask_tier = integrated draws it (ripple possible).
 ABL on: threshold 1.4 mA, steady state about 0.5 s (RCA patents).
-Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 12 mm, glass transmission 0.85, halation (12 mm / 3 %).
+M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1R faceplate, R = 1.767 x 660 mm = 1166 mm (CRT.md: about 1.17 m for a 26 in tube); convergence 1.0 mm radial at the corner on red (outward) and blue (inward), no static offset (CRT.md Starting presets TV, no centre value); ABL on as above. Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
+Not yet parameters (T-63 values kept for later): faceplate thickness 12 mm, glass transmission 0.85 (RCA clear faceplates 84 to 85.5 %), halation (12 mm / 3 %).
 """
 
 [params]
@@ -34,6 +35,12 @@ amp_samples = 16
 abl_enable = true
 abl_threshold_ma = 1.4
 abl_tau_s = 0.1667
+geometry_curvature = "spherical"
+geometry_radius_mm = 1166.0
+phosphor_persistence = true
+phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+geometry_conv_red_radial_mm = 1.0
+geometry_conv_blue_radial_mm = -1.0
 exposure = 0.83
 output_match_srgb = false
 output_dither = "noise"
@@ -58,6 +65,12 @@ amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 6 M
 abl_enable = "E: CRT.md ABL, consumer TVs limit; T-63 item 2"
 abl_threshold_ma = "S: CRT.md T-63, RCA/Thomson average limiter 1.4 mA"
 abl_tau_s = "D: CRT.md T-63, steady state about 0.5 s (RCA US 4,330,792), tau = 0.5 / 3 s"
+geometry_curvature = "D: CRT.md Faceplate curvature: spherical 1R, most pre-1990 TVs and monitors; the RCA 26V tube is a 1983 datasheet part"
+geometry_radius_mm = "D: CRT.md Faceplate curvature: 1R = 1.767 x effective diagonal = 1.767 x 660 mm = 1166 mm (CRT.md: a 26 in tube gives about 1.17 m)"
+phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown"
+phosphor_tail_strength_rgb = "S: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1)"
+geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
+geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
 exposure = "D: white (0.301, 0.308) has linear sRGB blue 1.192 at Y = 1, so exposure <= 0.838"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

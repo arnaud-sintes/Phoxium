@@ -8,7 +8,8 @@ Parameters not listed keep their table defaults: tube slot period and bridge, ma
 White: 9300 K as the tube white (D93, Starting presets "9300 K"), P22 primaries (SMPTE J. 1982 measured). D93 has linear sRGB blue 1.343, so exposure is 0.74 (<= 0.745) or white clips. A D65 variant needs the white reset and exposure 1.
 Spot growth: 0.35 -> 0.5 mm, n = 0.27 (Hitachi 51 cm monitor tube) keeps a non-negative floor.
 Amplifier: 150 MHz (PC monitor 100 to 400 MHz). The amp stage blur is 0.1325 x 5.37 / 150 = 0.0047 source px, an ideal amplifier, so amp_samples = 4 (presets::recommended_amp_k). Ratio 1.0.
-Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness (10 to 12 mm class), halation (12 mm / 1.5 %).
+M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1.5R faceplate, R = 1.5 x 1.767 x 406.7 mm = 1078 mm (CRT.md: flatter spherical 1.5R to 2R for the 1990s, exact value not confirmed, no NEC value); convergence 0.075 mm static plus 0.275 mm radial on red (outward) and blue (inward), green the reference (CRT.md Starting presets PC/PVM midpoints); ABL stays off (good monitors have very mild ABL). Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
+Not yet parameters: faceplate thickness (10 to 12 mm class), halation (12 mm / 1.5 %).
 """
 
 [params]
@@ -26,6 +27,14 @@ beam_growth_exponent = 0.27
 amp_bandwidth_mhz = 150.0
 amp_fall_rise_ratio = 1.0
 amp_samples = 4
+geometry_curvature = "spherical"
+geometry_radius_mm = 1078.0
+phosphor_persistence = true
+phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+geometry_conv_red_dx_mm = 0.075
+geometry_conv_blue_dx_mm = -0.075
+geometry_conv_red_radial_mm = 0.275
+geometry_conv_blue_radial_mm = -0.275
 exposure = 0.74
 output_match_srgb = false
 output_dither = "noise"
@@ -45,6 +54,14 @@ beam_growth_exponent = "D: Hitachi 51 cm apparent exponent 0.27 (CRT.md T-63 ite
 amp_bandwidth_mhz = "E: CRT.md RGB path table, PC monitor 100 to 400 MHz"
 amp_fall_rise_ratio = "E: symmetric, amplifier not the limit"
 amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 150 MHz = 0.0047 source px, at most the 0.01 ideal limit so K = 4 (the default)"
+geometry_curvature = "E: CRT.md Faceplate curvature: flatter spherical 1.5R to 2R for late-1980s/90s tubes (exact FST not confirmed); 1.5R (the lower end) chosen"
+geometry_radius_mm = "E: CRT.md Faceplate curvature: 1.5R = 1.5 x 1.767 x 406.7 mm diagonal = 1078 mm (CRT.md sagitta table: 4.8 % of the diagonal at the corner)"
+phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown"
+phosphor_tail_strength_rgb = "S: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1)"
+geometry_conv_red_dx_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
+geometry_conv_blue_dx_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
+geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
+geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
 exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
