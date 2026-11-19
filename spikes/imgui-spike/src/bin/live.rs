@@ -39,7 +39,7 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyState, RegisterHotKey, SendInput, SetFocus, UnregisterHotKey, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT,
-    KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, KEYEVENTF_UNICODE, MOD_NOREPEAT, VIRTUAL_KEY, VK_CONTROL, VK_F11, VK_F12,
+    HOT_KEY_MODIFIERS, KEYBD_EVENT_FLAGS, KEYEVENTF_KEYUP, MOD_ALT, MOD_CONTROL, VK_F10, KEYEVENTF_UNICODE, MOD_NOREPEAT, VIRTUAL_KEY, VK_CONTROL, VK_F11, VK_F12,
     VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -67,6 +67,7 @@ struct Args {
     source_title: String,
     method: FgMethod,
     validation: bool,
+    menu_key: String,
 }
 
 fn parse_args() -> Res<Args> {
@@ -78,6 +79,7 @@ fn parse_args() -> Res<Args> {
         source_title: "pixel-demo".into(),
         method: FgMethod::Auto,
         validation: true,
+        menu_key: "f12".into(),
     };
     let mut it = std::env::args().skip(1);
     while let Some(arg) = it.next() {
@@ -89,6 +91,7 @@ fn parse_args() -> Res<Args> {
             "--summary" => a.summary = value("--summary")?,
             "--source-title" => a.source_title = value("--source-title")?,
             "--no-validation" => a.validation = false,
+            "--menu-key" => a.menu_key = value("--menu-key")?,
             "--fg-method" => {
                 a.method = match value("--fg-method")?.as_str() {
                     "auto" => FgMethod::Auto,
@@ -230,6 +233,29 @@ fn send_keys(keys: &[(VIRTUAL_KEY, u16, KEYBD_EVENT_FLAGS)]) -> u32 {
 
 fn tap(vk: VIRTUAL_KEY) -> u32 {
     send_keys(&[(vk, 0, KEYBD_EVENT_FLAGS(0)), (vk, 0, KEYEVENTF_KEYUP)])
+}
+
+fn menu_mods(k: &str) -> HOT_KEY_MODIFIERS {
+    if k == "ctrl-alt-f12" { MOD_CONTROL | MOD_ALT } else { HOT_KEY_MODIFIERS(0) }
+}
+
+fn menu_vk(k: &str) -> VIRTUAL_KEY {
+    if k == "f10" { VK_F10 } else { VK_F12 }
+}
+
+fn tap_menu(k: &str) -> u32 {
+    if k == "ctrl-alt-f12" {
+        send_keys(&[
+            (VK_CONTROL, 0, KEYBD_EVENT_FLAGS(0)),
+            (VK_MENU, 0, KEYBD_EVENT_FLAGS(0)),
+            (VK_F12, 0, KEYBD_EVENT_FLAGS(0)),
+            (VK_F12, 0, KEYEVENTF_KEYUP),
+            (VK_MENU, 0, KEYEVENTF_KEYUP),
+            (VK_CONTROL, 0, KEYEVENTF_KEYUP),
+        ])
+    } else {
+        tap(menu_vk(k))
+    }
 }
 
 fn type_text(s: &str) -> u32 {
@@ -749,13 +775,13 @@ fn run() -> Res<()> {
     let (f11, f12) = unsafe {
         (
             RegisterHotKey(Some(hwnd), HOTKEY_F11, MOD_NOREPEAT, u32::from(VK_F11.0)),
-            RegisterHotKey(Some(hwnd), HOTKEY_F12, MOD_NOREPEAT, u32::from(VK_F12.0)),
+            RegisterHotKey(Some(hwnd), HOTKEY_F12, menu_mods(&args.menu_key) | MOD_NOREPEAT, u32::from(menu_vk(&args.menu_key).0)),
         )
     };
     log.row("hotkey", &format!("F11 {:?}", f11.as_ref().map_err(|e| e.message())));
     // Microsoft documents F12 as reserved for the debugger: registration may fail or the key may
     // break into an attached debugger. Recorded, not worked around.
-    log.row("hotkey", &format!("F12 {:?}", f12.as_ref().map_err(|e| e.message())));
+    log.row("hotkey", &format!("menu key {} {:?}", args.menu_key, f12.as_ref().map_err(|e| e.message())));
 
     // Foreground poll thread.
     let stop = Arc::new(AtomicBool::new(false));
@@ -778,6 +804,7 @@ fn run() -> Res<()> {
     // Self-test driver: synthesises the hotkeys and typing, then closes the window.
     let driver = (args.selftest > 0).then(|| {
         let n = args.selftest;
+        let menu_key = args.menu_key.clone();
         let log = log.clone();
         let target = hwnd.0 as isize;
         std::thread::spawn(move || {
@@ -787,15 +814,16 @@ fn run() -> Res<()> {
                 tap(VK_F11);
                 std::thread::sleep(Duration::from_millis(1500));
             }
+            let mk = menu_key.clone();
             for i in 0..n {
                 log.row("selftest", &format!("cycle {i}: send F12 (open)"));
-                tap(VK_F12);
+                tap_menu(&mk);
                 std::thread::sleep(Duration::from_millis(1200));
                 log.row("selftest", &format!("cycle {i}: type t08"));
                 type_text("t08");
                 std::thread::sleep(Duration::from_millis(500));
                 log.row("selftest", &format!("cycle {i}: send F12 (close)"));
-                tap(VK_F12);
+                tap_menu(&mk);
                 std::thread::sleep(Duration::from_millis(1500));
             }
             // SAFETY: posting to a window handle; harmless if the window is already gone.

@@ -106,7 +106,7 @@ and control characters dropped (keys carry them); `WM_DPICHANGED` -> DPI scale (
 - API churn: 0.20, 0.21 and 0.22 in three weeks, and 0.22 removed the positional renderer constructor
   (`AshRendererConfig` now). Keep the exact pins and expect edits on every upgrade.
 
-## 6. Live harness (prepared, not run)
+## 6. Live harness (run 2026-11-19, results in section 9)
 
 Files: `src/bin/live.rs`, `scripts/run-t08-live.ps1` (in the spike folder: the plan limits T-08 to
 `spikes/imgui-spike/**` and TEC-5).
@@ -159,4 +159,98 @@ over `dear-imgui-sys`, then set B.
 - Missing LICENSE files in the crate packages: the release zip must carry the upstream notices.
 - The renderer submits its own upload work on our queue; with a future second queue or thread this must stay
   on the render queue.
-- Focus hand-off and F12 registration are unverified until the live run.
+- F12 can be held by another program (error 1409 on the dev machine): the menu key must be configurable and registration failure handled (section 9.2). Focus hand-off verified with plain `SetForegroundWindow` (section 9.3).
+
+## 9. Live run 2026-11-19
+
+Branch `task/T-08live`, dev machine (Windows 11 build 26300, RTX A2000 Laptop, Dell P2418D 2560x1440), owner away,
+hands-off desktop (idle log below). Source window: `pixel-demo` 256x240 at 3x. Every run: 2 F11 toggles with the
+source focused, then N cycles of menu key (open), `t08` typed with SendInput, menu key (close). Validation layer
+and synchronization validation on in every run: 0 messages. No pixel-demo/live/poll process left after any run.
+
+### 9.1 Results per run
+
+| Run | Mode | Menu key | fg method | Cycles | opens ok | text ok | closes to source | Poll fg changes (expected) | Verdict |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | windowed | F12 | auto | 10 | 0/10 | 0/10 | 0/10 | 0 (20) | FAIL: `RegisterHotKey(F12)` error 1409 |
+| 1 | fullscreen | F12 | auto | 10 | 0/10 | 0/10 | 0/10 | 0 (20) | FAIL: same |
+| 1b | windowed | Ctrl+Alt+F12 | auto | 10 | 10/10 | 10/10 | 10/10 | 20 (20) | PASS |
+| 1b | fullscreen | Ctrl+Alt+F12 | auto | 10 | 10/10 | 10/10 | 10/10 | 20 (20) | PASS (see note a) |
+| 2 | windowed | F10 | plain | 10 | 10/10 | 10/10 | 10/10 | 20 (20) | PASS |
+| 2 | fullscreen | F10 | plain | 10 | 10/10 | 10/10 | 10/10 | 20 (20) | PASS (see note b) |
+| 3 | windowed, long | F10 | auto | 28 (94 s) | 28/28 | 28/28 | 28/28 | 56 (56) | PASS (see 9.4) |
+
+Note a: the script flagged one "unexpected foreground change" at t=6786 ms: the live poll thread logged the
+restore to the source 1 ms before the main loop logged its `close` row (race inside the harness, not a focus
+leak). Checker fixed (window of -200 ms to +1000 ms around the hand-off row); re-evaluated on the saved CSVs: 0
+unexpected changes in both modes. Run 1b was not repeated after the fix.
+Note b: one flagged change in the live CSV at t=14726 ms with an empty foreground title while the menu was open
+(cycle 3), most likely the foreground being NULL for a moment during the switch. The independent 50 ms poll saw
+exactly 20 changes, and all counters are 10/10. The CSV was deleted before its detail was read (not repeated),
+so the cause is not proven.
+
+F11: registered in every run, 2 toggles with the source focused, no focus change.
+
+### 9.2 Hotkey registration
+
+- `RegisterHotKey(hwnd, F12, MOD_NOREPEAT)` fails in our window with "Hot key is already registered."
+  (ERROR_HOTKEY_ALREADY_REGISTERED, 1409), in both modes, with no other process of ours running. A separate
+  PowerShell process confirms: plain F12 gives 1409 there too, while F10, Ctrl+Alt+F12 and F11 register
+  (MOD_NOREPEAT). So another program of the owner's desktop holds F12 system-wide; it is not our window and not
+  the debugger reservation (we did not identify the holder). On a machine without that program F12 may well
+  register. The product must not depend on F12 registering: handle the failure (log, tell the user in the
+  window title or log) and offer a configurable menu key; the F12 default of CLAUDE.md stays but needs a fallback.
+- `F10` and `Ctrl+Alt+F12` register and work. F10 caveat for the product: a global F10 steals the menu-bar key
+  of every application; Ctrl+Alt+F12 is less intrusive. A game that itself grabs F12 (Steam screenshots, NVIDIA
+  overlay) is the likely source of the clash.
+
+### 9.3 Foreground method
+
+`auto` (plain, then Alt, then attach) used `plain` for all 10+10+28 opens and for all closes: no Alt tap and no
+AttachThreadInput was ever needed. Run 2 forced `plain`: identical result. Caveat that decides the design: in
+the self-test the hotkey is itself a synthesised key press, which counts as the last input event, so
+`SetForegroundWindow` from the `WM_HOTKEY` handler is allowed. A real key press does the same. The close hand-back
+also worked with `plain`, 48 of 48 (while the menu window is foreground, our process is the one that last
+received input). Not covered: hand-off triggered by something that is not an input event (a timer, a
+tray/command), and a real game as the source. The Alt trick is not needed, so the product needs no synthetic
+input for the focus hand-off.
+
+Typed text: "t08" sent with SendInput (`KEYEVENTF_UNICODE`) reached the ImGui text field in every cycle (48 of 48).
+Real typing by a person, dragging and clicking were not tested (nobody present).
+
+### 9.4 Long run and the external activation at about 25 s
+
+Run 3: 28 cycles (94 s), windowed, topmost non-activating window while closed. T-07 found that Windows activates
+any new topmost window about 25 s after the process starts. In the live log the menu was open at 24.4 to 26.1 s
+(cycle 6) and during every other 25 s +/- 2 s moment of the window life; the live CSV has exactly 56 `fg` rows
+(2 per cycle, each within 20 to 60 ms of an `open` or `close` row), and the independent poll counted 56 changes,
+the expected number. No additional activation, no lost hand-off, no focus change at 25 s or at any later time.
+The T-07 external activation was therefore not reproduced here: this spike window is created with
+`SW_SHOWNOACTIVATE` and `WS_EX_NOACTIVATE`, and (not isolated) `WS_EX_TOOLWINDOW`; which of these, or the later
+`SWP_NOACTIVATE` topmost, avoids it was not tested. The product logic that hands the foreground back (T-07) is not
+in the spike and was not exercised.
+
+### 9.5 Overlay GPU cost (median of per-frame timestamps, stats overlay always on, menu open 3 s of ~4.2 s per cycle)
+
+| Mode | Window | Overlay GPU median |
+|---|---|---|
+| windowed | about 1280x720 (default window; size not logged) | 0.145 to 0.160 ms (4 runs) |
+| fullscreen | 2560x1440 (the monitor) | 0.265 to 0.270 ms (3 runs) |
+
+The headless figure (0.009 ms at 320x240, no menu) is not comparable: the live figure includes the menu window
+part of the time and the GPU runs at its idle clock (a nearly empty frame: the passthrough is a clear). Order of
+magnitude: 0.15 to 0.27 ms, 1.6 % of a 60 Hz frame at most.
+
+### 9.6 Changes to the harness (spike only)
+
+- `live.rs`: new `--menu-key f12|f10|ctrl-alt-f12` (default f12) for hotkey and self-test; registration result is logged.
+- `run-t08-live.ps1`: `-MenuKey`, `-Modes` (windowed only for the long run), the independent poll result is now
+  read (Write-Host output of the job was lost, "poll gave no result"), and the unexpected-change check tolerates
+  the 200 ms log-order race described in note a.
+
+### 9.7 Idle log (GetLastInputInfo; every value consistent with no input other than our own injections)
+
+294 s at 10:38:14, 324 s at 10:38:45 (run 1 start), 21 s at 10:40:43 (after run 1, own), 64 s at 10:41:26, 74 s at
+10:41:37 (run 1b start), 20 s at 10:43:35 (after 1b, own), 52 s at 10:44:06 (run 2 start), 20 s at 10:46:04 (after
+run 2, own), 33 s at 10:46:16 (run 3 start), 38 s at 10:48:32 (after run 3, own). Idle was never lower than the
+time since our last injection.
