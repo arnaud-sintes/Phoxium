@@ -139,6 +139,30 @@ vec2 geometry_footprint(ivec2 q) {
     return geometry_raster_px(vec2(q) + 0.5, scale) - 0.5 - vec2(frame.raster_margin);
 }
 
+// True when the host -> raster mapping is separable per axis (uniform over the dispatch, parameters only): flat
+// faceplate, no rotation, trapezoid or pincushion. Overscan, raster_scale and the margin are then per-axis affine
+// maps (the raster x of a host pixel depends on its host x only, its raster y on its host y only, both
+// increasing), so the separable standard-quality beam (beam.glsl, T-36c) stays exact; any other geometry makes the
+// beam fall back to the per-pixel reference form.
+bool geometry_separable() {
+    return (params.geometry_curvature == GEOMETRY_CURVATURE_FLAT || !(params.geometry_radius_mm > 0.0))
+        && params.geometry_pincushion == 0.0 && params.geometry_trapezoid == 0.0
+        && params.geometry_rotation_deg == 0.0;
+}
+
+// Inverse of the vertical map of a separable geometry (geometry_separable): the host y (tube image) whose raster
+// position is `ry` (host px from the raster's top-left). ry + raster_margin.y exactly when the geometry is the
+// identity or the tube is not placed.
+float geometry_separable_host_y(float ry) {
+    float scale = geometry_raster_scale();
+    float m = float(frame.raster_margin.y);
+    if (geometry_identity(scale) || !(frame.px_per_mm > 0.0)) {
+        return ry + m;
+    }
+    float c = 0.5 * float(frame.tube_size.y);
+    return c + (ry + m - c) * ((1.0 + params.geometry_overscan_y) * scale);
+}
+
 // HOOK (beam_convergence_px): landing offset (host px) of the red, green and blue beams at host position p: the
 // static offset per channel plus the radial term, radial_c (r / rc)^2 along the radius (rc the half diagonal of
 // the picture), CRT.md Convergence (static offset plus a quadratic polynomial per channel). Zero by default.

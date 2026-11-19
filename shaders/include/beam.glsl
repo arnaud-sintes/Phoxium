@@ -206,7 +206,7 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
     if (!(frame.px_per_mm > 0.0) || !(frame.line_pitch_mm > 0.0)) {
         return beam_nearest(current, q);
     }
-    if (params.beam_quality == BEAM_QUALITY_STANDARD) {
+    if (params.beam_quality == BEAM_QUALITY_STANDARD && geometry_separable()) {
         return beam_tile_light;
     }
     BeamRaster r = beam_raster();
@@ -287,6 +287,15 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
 // convergence offset dx is taken at the column and line centre (pass 1) instead of at the pixel (a smooth
 // polynomial, T-37), dy at the pixel (exact). The horizontal work is shared by the BEAM_TILE_H rows of the
 // tile and the vertical one is cut from one Gaussian pair per run to one per line.
+// Geometry (T-37): the separation needs every pixel of a tile column to share its raster x and every pixel of a
+// tile row to share its raster y. That holds for the raster margin, overscan and raster_scale (per-axis affine
+// maps, geometry_separable): pass 1 takes the column's raster x and pass 2 the pixel's raster y from
+// geometry_footprint, the same footprint as the reference form, so the result stays the reference one (exact
+// without spot growth; with it the mean error keeps the contract, the max moves with the pixel grid's alignment
+// to the samples, GEOMETRY_MAX in tests/stage_beam_fast.rs). A curved faceplate, rotation, trapezoid or pincushion bends
+// the rows and columns of the raster across the tile, so the separable form no longer applies: the standard
+// quality then falls back to the reference form, per pixel (beam_eval), at the reference cost (measured in
+// tests/stage_beam_fast.rs, screen_profile_geometry). The identity geometry keeps this path and its cost.
 #define BEAM_TILE_W 8
 #define BEAM_TILE_H 32
 // Lines per shared-memory chunk: one pass-1 entry per invocation; more lines are taken in chunks.
@@ -367,10 +376,11 @@ vec3 beam_y_line(vec3 h, vec3 s, vec3 var, vec3 e0, vec3 e1, float far_y) {
 
 // Standard-quality beam of the workgroup's tile; every invocation of the workgroup must call it (barriers),
 // in uniform control flow, before any early return. Leaves the light of pixel q in beam_tile_light. Does
-// nothing (uniformly) for the reference quality or while the tube is not placed.
+// nothing (uniformly) for the reference quality, a non-separable geometry or while the tube is not placed.
 void beam_eval_workgroup(sampler2D current, ivec2 q) {
     beam_tile_light = vec3(0.0);
-    if (params.beam_quality != BEAM_QUALITY_STANDARD || !(frame.px_per_mm > 0.0) || !(frame.line_pitch_mm > 0.0)) {
+    if (params.beam_quality != BEAM_QUALITY_STANDARD || !geometry_separable() || !(frame.px_per_mm > 0.0)
+        || !(frame.line_pitch_mm > 0.0)) {
         return;
     }
     BeamRaster r = beam_raster();
@@ -395,25 +405,31 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
         dx_max = max(dx_max, max(ax.r, max(ax.g, ax.b)));
         dy_max = max(dy_max, max(ay.r, max(ay.g, ay.b)));
     }
+    // Raster rows covered by the tile: the footprints of its first and last rows (geometry_separable: the
+    // vertical map is increasing and independent of x).
+    float tile_y0 = geometry_footprint(tile).y;
+    float tile_y1 = geometry_footprint(tile + ivec2(0, BEAM_TILE_H - 1)).y + 1.0;
     float reach_y = reach + dy_max;
-    float n0 = max(0.0, ceil((float(tile.y) - reach_y - r.first) / r.pitch));
-    float n1 = min(float(r.lines - 1), floor((float(tile.y + BEAM_TILE_H) + reach_y - r.first) / r.pitch));
+    float n0 = max(0.0, ceil((tile_y0 - reach_y - r.first) / r.pitch));
+    float n1 = min(float(r.lines - 1), floor((tile_y1 + reach_y - r.first) / r.pitch));
     float off_x = dx_max;
     float reach_x = reach + off_x;
     int samples = amp_size().x;
-    float a = float(frame.tube_size.x) / float(samples);
+    float a = float(geometry_raster_size().x) / float(samples); // T-37: raster width
 
     int lx = int(gl_LocalInvocationID.x);
     int entry = int(gl_LocalInvocationID.y) * BEAM_TILE_W + lx;
     int el = entry / BEAM_TILE_W;
-    float x0 = float(tile.x + entry % BEAM_TILE_W);
+    // Pass 1 column: host column hx, its footprint origin x0 in the raster (as the reference form).
+    int hx = tile.x + entry % BEAM_TILE_W;
+    float x0 = geometry_footprint(ivec2(hx, tile.y)).x;
 
     vec3 dx;
     vec3 dy;
     beam_convergence_px(vec2(q) + 0.5, dx, dy);
     vec3 ady = abs(dy);
     float off_y = max(ady.r, max(ady.g, ady.b));
-    float y0 = float(q.y);
+    float y0 = geometry_footprint(q).y;
     float y1 = y0 + 1.0;
     float wc = w > 0.0 ? 1.0 - w : 1.0;
     vec3 sum = vec3(0.0);
@@ -425,7 +441,8 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
             float cn = r.first + float(n) * r.pitch;
             vec3 cdx;
             vec3 cdy;
-            beam_convergence_px(vec2(x0 + 0.5, cn), cdx, cdy);
+            // At the host position of the column centre and of the line centre.
+            beam_convergence_px(vec2(float(hx) + 0.5, geometry_separable_host_y(cn)), cdx, cdy);
             float j0 = max(0.0, floor((x0 - reach_x) / a));
             float j1 = min(float(samples - 1), floor((x0 + 1.0 + reach_x) / a));
             j1 = min(j1, j0 + float(BEAM_MAX_SAMPLES - 1));

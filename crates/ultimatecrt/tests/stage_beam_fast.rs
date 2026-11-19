@@ -24,7 +24,9 @@ mod common;
 use crt_model::beam::{AmpRaster, BeamOracle, Spot, SpotGrowth};
 use crt_model::units::sigma_from_fwhm;
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
-use ultimatecrt::params::{Params, BEAM_QUALITY_REFERENCE, BEAM_QUALITY_STANDARD, MASK_TIER_PREFILTERED};
+use ultimatecrt::params::{
+    Params, BEAM_QUALITY_REFERENCE, BEAM_QUALITY_STANDARD, GEOMETRY_CURVATURE_SPHERICAL, MASK_TIER_PREFILTERED,
+};
 use ultimatecrt::patterns::{generate, Pattern};
 
 /// Tolerance contract of the standard quality against the exact form (module header), in units of white.
@@ -382,6 +384,257 @@ fn standard_is_within_the_contract_of_the_oracle() {
                 "{test}: {name}, tail {tail}: MAE {mae}, max {max}"
             );
         }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Max error of the standard quality against the exact form under a separable geometry (T-37), in units of
+/// white. The contract's 2.5 % (module header) was measured with the pixel grid on its identity alignment to
+/// the amp samples and lines; overscan moves every pixel footprint against them by a fraction of a pixel, and
+/// the worst pixel (on the flank of a line where a bright and a dim current share a column) then reaches
+/// 3.22 % (measured, pixel art, overscan 3.1 % x -1.7 %; identity 2.04 %, red dx 0.3 mm 2.22 %). The mean
+/// error keeps the contract (0.008 %, PLAN T-48 asks <= 1 %). Bound: the measured worst plus 25 %.
+const GEOMETRY_MAX: f64 = 0.04;
+
+/// `fc` grown by a raster margin of `m` px per side (T-37: the tube image is the raster plus the margin).
+fn with_margin(mut fc: FrameConstants, m: [i32; 2]) -> FrameConstants {
+    fc.tube_size = [fc.tube_size[0] + 2 * m[0], fc.tube_size[1] + 2 * m[1]];
+    fc.raster_margin = m;
+    fc
+}
+
+/// Geometry (T-37) on the standard quality. A separable geometry (raster margin, overscan per axis, static
+/// misconvergence: per-axis maps, the rows and columns of the raster stay rows and columns) keeps the
+/// separable path, and without spot growth it is still the exact form: standard equals reference within the
+/// FP16 storage. With the PVM-20M4U growth the mean error stays within the contract and the max within
+/// [`GEOMETRY_MAX`] (each separable part alone, then all together). A curved faceplate (or rotation,
+/// trapezoid, pincushion) bends the raster's rows and columns across a tile: the standard quality falls back to
+/// the reference form, bit for bit.
+#[test]
+fn standard_follows_the_geometry() {
+    let test = "stage_beam_fast geometry";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let fc = with_margin(profile_tube(64), [7, 5]);
+    let amp = native_currents(&fc, &pixel_art(64, 240));
+    let separable = |p: Params| Params {
+        geometry_overscan_x: 0.031,
+        geometry_overscan_y: -0.017,
+        geometry_conv_red_dx_mm: 0.3,
+        geometry_conv_blue_dy_mm: -0.2,
+        mask_enabled: false,
+        ..p
+    };
+    let no_growth = separable(Params {
+        beam_fwhm_mid_mm: 0.6,
+        beam_fwhm_peak_mm: 0.6,
+        ..Params::default()
+    });
+    let (r, _) = screen(&mut gpu, fc, &quality(&no_growth, BEAM_QUALITY_REFERENCE), &amp);
+    let (s, _) = screen(&mut gpu, fc, &quality(&no_growth, BEAM_QUALITY_STANDARD), &amp);
+    let (mae, max) = errors(&r, &s);
+    println!("{test}: separable, no growth: MAE {mae:.2e}, max {max:.2e}");
+    for (pr, ps) in r.rgba.chunks(4).zip(s.rgba.chunks(4)) {
+        for c in 0..3 {
+            assert!(
+                (pr[c] - ps[c]).abs() <= 1e-3 * pr[c].abs() + 1e-5,
+                "{test}: separable, no growth: reference {} vs standard {}",
+                pr[c],
+                ps[c]
+            );
+        }
+    }
+    // The margin columns hold light (the skirt), so the geometry reached the separable path.
+    let lit = (396..408).any(|y| s.pixel(3, y)[..3].iter().any(|&v| v > 0.0));
+    assert!(lit, "{test}: no light in the left margin");
+
+    let growth = separable(Params::default());
+    let d = Params {
+        mask_enabled: false,
+        ..Params::default()
+    };
+    for (name, p) in [
+        ("identity", d),
+        (
+            "overscan",
+            Params {
+                geometry_overscan_x: 0.031,
+                geometry_overscan_y: -0.017,
+                ..d
+            },
+        ),
+        (
+            "red dx",
+            Params {
+                geometry_conv_red_dx_mm: 0.3,
+                ..d
+            },
+        ),
+        (
+            "blue dy",
+            Params {
+                geometry_conv_blue_dy_mm: -0.2,
+                ..d
+            },
+        ),
+        ("all", growth),
+    ] {
+        let (r, _) = screen(&mut gpu, fc, &quality(&p, BEAM_QUALITY_REFERENCE), &amp);
+        let (s, _) = screen(&mut gpu, fc, &quality(&p, BEAM_QUALITY_STANDARD), &amp);
+        let (mae, max) = errors(&r, &s);
+        println!(
+            "{test}: separable {name}, growth: MAE {:.4} %, max {:.4} % of white",
+            mae * 100.0,
+            max * 100.0
+        );
+        assert!(
+            mae <= CONTRACT_MAE && max <= GEOMETRY_MAX,
+            "{test}: {name}: MAE {mae}, max {max}"
+        );
+    }
+
+    for (name, curved) in [
+        (
+            "spherical",
+            Params {
+                geometry_curvature: GEOMETRY_CURVATURE_SPHERICAL,
+                geometry_eye_distance_mm: 600.0,
+                ..growth
+            },
+        ),
+        (
+            "pincushion",
+            Params {
+                geometry_pincushion: 0.02,
+                ..growth
+            },
+        ),
+    ] {
+        let (r, _) = screen(&mut gpu, fc, &quality(&curved, BEAM_QUALITY_REFERENCE), &amp);
+        let (s, _) = screen(&mut gpu, fc, &quality(&curved, BEAM_QUALITY_STANDARD), &amp);
+        assert_eq!(r.rgba, s.rgba, "{test}: {name}: standard falls back to the reference");
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// GPU time of `screen` with the geometry (T-37), pixel art at 1536 x 1440 (256 x 240 native), mask tier C,
+/// best / median / worst of `UCRT_PROFILE_FRAMES` frames (default 9), per quality: identity; a separable
+/// geometry (raster margin 7 px, overscan, static misconvergence: the standard path still applies); a
+/// spherical faceplate (19 in 1R, eye at 600 mm: the standard quality falls back to the reference form).
+/// Printed, not asserted. Run with `cargo test -p ultimatecrt --test stage_beam_fast screen_profile_geometry
+/// -- --ignored --nocapture`.
+#[test]
+#[ignore = "profile: run explicitly, prints a table"]
+fn screen_profile_geometry() {
+    let test = "stage_beam_fast profile geometry";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    if let Some(why) = gpu.timing_unavailable() {
+        eprintln!("{test} skipped: {why}");
+        return;
+    }
+    let counter = gpu.validation_counter();
+    let frames: usize = std::env::var("UCRT_PROFILE_FRAMES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(9);
+    println!(
+        "{test} on {}: screen ms min / median / max over {frames} frames",
+        gpu.context().gpu.name
+    );
+    let base = profile_tube(256);
+    let amp = native_currents(&base, &pixel_art(256, 240));
+    let p = Params {
+        mask_enabled: true,
+        mask_tier: MASK_TIER_PREFILTERED,
+        ..Params::default()
+    };
+    let cases: [(&str, FrameConstants, Params); 7] = [
+        ("identity", base, p),
+        ("margin 7 px", with_margin(base, [7, 0]), p),
+        (
+            "overscan 3 %",
+            base,
+            Params {
+                geometry_overscan_x: 0.03,
+                geometry_overscan_y: 0.03,
+                ..p
+            },
+        ),
+        (
+            "red dx 0.3 mm",
+            base,
+            Params {
+                geometry_conv_red_dx_mm: 0.3,
+                ..p
+            },
+        ),
+        (
+            "separable (margin, overscan, convergence)",
+            with_margin(base, [7, 0]),
+            Params {
+                geometry_overscan_x: 0.03,
+                geometry_overscan_y: 0.03,
+                geometry_conv_red_dx_mm: 0.3,
+                ..p
+            },
+        ),
+        (
+            "pincushion 0.02",
+            base,
+            Params {
+                geometry_pincushion: 0.02,
+                ..p
+            },
+        ),
+        (
+            "spherical 1R, eye 600 mm",
+            base,
+            Params {
+                geometry_curvature: GEOMETRY_CURVATURE_SPHERICAL,
+                geometry_eye_distance_mm: 600.0,
+                ..p
+            },
+        ),
+    ];
+    // Every variant once per round, `frames` rounds after a warm-up round: a clock change or other work on the
+    // shared GPU then hits all variants alike.
+    let runs: Vec<(String, FrameConstants, Params)> = cases
+        .iter()
+        .flat_map(|(name, fc, params)| {
+            QUALITIES.iter().map(move |(qname, set)| {
+                let mut q = *params;
+                set(&mut q);
+                (format!("{name} | {qname}"), *fc, q)
+            })
+        })
+        .collect();
+    let mut ms: Vec<Vec<f64>> = vec![Vec::new(); runs.len()];
+    for round in 0..=frames {
+        for (k, (_, fc, q)) in runs.iter().enumerate() {
+            if let (Some(t), true) = (screen(&mut gpu, *fc, q, &amp).1, round > 0) {
+                ms[k].push(t);
+            }
+        }
+    }
+    for ((label, fc, _), mut ms) in runs.into_iter().zip(ms) {
+        ms.sort_by(f64::total_cmp);
+        if ms.is_empty() {
+            continue;
+        }
+        println!(
+            "| {}x{} | {label} | {:.3} | {:.3} | {:.3} |",
+            fc.tube_size[0],
+            fc.tube_size[1],
+            ms[0],
+            ms[ms.len() / 2],
+            ms[ms.len() - 1]
+        );
     }
     drop(gpu);
     common::assert_no_validation_messages(&counter);
