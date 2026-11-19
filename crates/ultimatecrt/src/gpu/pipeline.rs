@@ -32,7 +32,7 @@ use super::context::Context;
 use super::headless::{GpuImage, HostBuffer, ImageF32};
 use super::stages::{self, decode, decode::Decode, encode, encode::Encode, ComputePass, Domain, Registration, Stage};
 use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
-use crate::headroom::{headroom, OutputTransform};
+use crate::headroom::{effective_mode, headroom, OutputTransform};
 use crate::params::{Params, PARAMS_STD140_SIZE};
 use crate::scaling::View;
 use crate::Res;
@@ -1303,6 +1303,25 @@ impl Pipeline {
         input: ImgRef,
     ) -> Res<vk::CommandBuffer> {
         let cur = self.current;
+        // T-84: the headroom readout of this frame (the `screen` slot draws the mask and the scanlines only
+        // when it runs) and the mode the frame really runs (T-84b: `auto` resolved, uploaded to the shader).
+        let screen = have_source
+            && self
+                .plan
+                .iter()
+                .any(|&(i, m, _)| m == Mode::Run && self.chain[i].reg.name == "screen");
+        let key = (*params, fc.px_per_mm.to_bits(), fc.line_pitch_mm.to_bits(), screen);
+        let h = match self.headroom {
+            Some((k, h)) if k == key => h,
+            _ => {
+                let h = headroom(params, fc.px_per_mm, fc.line_pitch_mm, screen);
+                self.headroom = Some((key, h));
+                h
+            }
+        };
+        let mut resolved = *params;
+        resolved.output_headroom_mode = effective_mode(params, h.mask_peak_physical);
+        let params = &resolved;
         let s = &mut self.slots[cur];
         // T-39c: the mask tiers of this frame, decided once on the CPU (the shader does not decide).
         let fc = &fc.with_mask_tiers(params);
@@ -1415,22 +1434,7 @@ impl Pipeline {
             vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
             vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
         );
-        // T-84: the headroom readout of this frame (the `screen` slot draws the mask and the scanlines only
-        // when it runs) and the output transform of the headroom mode.
-        let screen = have_source
-            && self
-                .plan
-                .iter()
-                .any(|&(i, m, _)| m == Mode::Run && self.chain[i].reg.name == "screen");
-        let key = (*params, fc.px_per_mm.to_bits(), fc.line_pitch_mm.to_bits(), screen);
-        let h = match self.headroom {
-            Some((k, h)) if k == key => h,
-            _ => {
-                let h = headroom(params, fc.px_per_mm, fc.line_pitch_mm, screen);
-                self.headroom = Some((key, h));
-                h
-            }
-        };
+        // T-84: the output transform of the headroom mode, from the readout computed above.
         let xf = OutputTransform::new(params, &h);
         let s = &self.slots[cur];
         // The slot's previous frame is done (`wait_slot`): clear the counters `encode` increments.

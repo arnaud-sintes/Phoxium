@@ -22,7 +22,12 @@
 //! in the product, which is therefore an upper bound of the brightest output element.
 //!
 //! The modes (`output_headroom_mode`), applied by `encode` through [`OutputTransform`]:
-//! - `shoulder` (default): exposure unchanged; above `output_knee` a roll-off that reaches panel white exactly
+//! - `auto` (default, T-84b, the owner's "default to C" made adaptive to the host, D-18): [`effective_mode`]
+//!   resolves it per frame on the CPU to `mask_depth` when the physical mask peak is above 1 (a resolved
+//!   mask exists, so a depth limit has something to lower) and to `shoulder` otherwise (the peak comes from
+//!   the scanlines only: the knee is the mild treatment). The GPU never sees `auto`: the pipeline uploads the
+//!   resolved mode.
+//! - `shoulder`: exposure unchanged; above `output_knee` a roll-off that reaches panel white exactly
 //!   at the white point W (`output_shoulder_white`, 0 = the readout x (1 + margin) when the readout exceeds
 //!   1); no roll-off (identity up to panel white) when W <= 1 or, automatic, when the readout is at most 1.
 //! - `physical`: exposure / max(1, readout x (1 + margin)) and a hard clip that nothing reaches.
@@ -35,7 +40,8 @@ use crt_model::output::{shoulder_rate, white_matrix_max, Headroom};
 
 use crate::gpu::output_matrix;
 use crate::params::{
-    Params, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH, OUTPUT_HEADROOM_MODE_PHYSICAL,
+    Params, OUTPUT_HEADROOM_MODE_AUTO, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH,
+    OUTPUT_HEADROOM_MODE_PHYSICAL, OUTPUT_HEADROOM_MODE_SHOULDER,
 };
 use crate::placement::{mask_model, mask_tiers};
 
@@ -45,6 +51,18 @@ const READOUT_EPS: f64 = 1e-4;
 
 /// FWHM over sigma of a Gaussian, 2 sqrt(2 ln 2).
 const FWHM_OVER_SIGMA: f64 = 2.354_820_045_030_949;
+
+/// The mode a frame really runs: `auto` resolves to `mask_depth` when the physical mask peak
+/// ([`Headroom::mask_peak_physical`]) is above 1 and to `shoulder` otherwise; any other mode is itself.
+pub fn effective_mode(params: &Params, mask_peak_physical: f64) -> u32 {
+    if params.output_headroom_mode != OUTPUT_HEADROOM_MODE_AUTO {
+        params.output_headroom_mode
+    } else if mask_peak_physical > 1.0 + READOUT_EPS {
+        OUTPUT_HEADROOM_MODE_MASK_DEPTH
+    } else {
+        OUTPUT_HEADROOM_MODE_SHOULDER
+    }
+}
 
 /// The headroom readout of a frame placed at `px_per_mm` host px per tube mm with scanlines `line_pitch_mm`
 /// apart, when `screen` (the beam and mask slot) runs; see the module documentation.
@@ -62,7 +80,7 @@ pub fn headroom(params: &Params, px_per_mm: f32, line_pitch_mm: f32, screen: boo
     } else {
         1.0
     };
-    let mask_peak = if params.output_headroom_mode == OUTPUT_HEADROOM_MODE_MASK_DEPTH {
+    let mask_peak = if effective_mode(params, mask_peak_physical) == OUTPUT_HEADROOM_MODE_MASK_DEPTH {
         1.0 + f64::from(params.mask_depth.clamp(0.0, 1.0)) * (mask_peak_physical - 1.0)
     } else {
         mask_peak_physical
@@ -125,10 +143,10 @@ impl OutputTransform {
         }
     }
 
-    /// The transform of `params.output_headroom_mode` for the readout `h` (module documentation).
+    /// The transform of the effective headroom mode ([`effective_mode`]) for the readout `h` (module documentation).
     pub fn new(params: &Params, h: &Headroom) -> Self {
         let margin = f64::from(params.output_headroom_margin.max(0.0));
-        match params.output_headroom_mode {
+        match effective_mode(params, h.mask_peak_physical) {
             OUTPUT_HEADROOM_MODE_CLIP => Self::clip(params),
             OUTPUT_HEADROOM_MODE_PHYSICAL | OUTPUT_HEADROOM_MODE_MASK_DEPTH => Self {
                 exposure: h.derived_exposure(margin) as f32,
@@ -161,7 +179,7 @@ impl OutputTransform {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::params::{ParamValue, OUTPUT_HEADROOM_MODE_SHOULDER};
+    use crate::params::ParamValue;
 
     /// Unplaced or without `screen`: only the matrix and the exposure count. Defaults: identity matrix and
     /// exposure 1, so the readout is exactly 1 and the shoulder has nothing to compress (hard clip = identity
@@ -169,7 +187,7 @@ mod tests {
     #[test]
     fn unplaced_defaults_read_one_and_keep_the_identity() {
         let p = Params::default();
-        assert_eq!(p.output_headroom_mode, OUTPUT_HEADROOM_MODE_SHOULDER);
+        assert_eq!(p.output_headroom_mode, OUTPUT_HEADROOM_MODE_AUTO);
         for (ppm, pitch, screen) in [(0.0, 0.0, true), (4.97, 1.2, false)] {
             let h = headroom(&p, ppm, pitch, screen);
             assert_eq!(
@@ -241,5 +259,60 @@ mod tests {
         assert_eq!(headroom(&p, ppm, 380.0 / 240.0, true).mask_peak, h.mask_peak_physical);
         assert!(p.set("output_headroom_mode", ParamValue::Enum(OUTPUT_HEADROOM_MODE_CLIP)));
         assert_eq!(OutputTransform::new(&p, &h), OutputTransform::clip(&p));
+    }
+
+    /// T-84b: `auto` (the default) is mask_depth where the physical mask peak is above 1 and shoulder where it
+    /// is 1 (scanline peaks only, mask off, tube not placed); an explicit mode is never changed.
+    #[test]
+    fn auto_picks_mask_depth_where_the_mask_resolves_and_the_shoulder_elsewhere() {
+        assert_eq!(Params::default().output_headroom_mode, OUTPUT_HEADROOM_MODE_AUTO);
+        let mut p = Params::default();
+        for (id, v) in [
+            ("mask_pitch_mm", ParamValue::F32(0.78)),
+            ("mask_tier", ParamValue::Enum(crate::params::MASK_TIER_INTEGRATED)),
+            ("mask_depth", ParamValue::F32(0.5)),
+        ] {
+            assert!(p.set(id, v), "{id}");
+        }
+        let ppm = 1440.0_f32 / 380.0;
+        let pitch = 380.0 / 240.0;
+        // Resolved mask: auto reads and transforms exactly like an explicit mask_depth.
+        let auto = headroom(&p, ppm, pitch, true);
+        assert!(auto.mask_peak_physical > 2.0, "{auto:?}");
+        assert_eq!(
+            effective_mode(&p, auto.mask_peak_physical),
+            OUTPUT_HEADROOM_MODE_MASK_DEPTH
+        );
+        let mut explicit = p;
+        assert!(explicit.set(
+            "output_headroom_mode",
+            ParamValue::Enum(OUTPUT_HEADROOM_MODE_MASK_DEPTH)
+        ));
+        assert_eq!(auto, headroom(&explicit, ppm, pitch, true));
+        assert_eq!(OutputTransform::new(&p, &auto), OutputTransform::new(&explicit, &auto));
+        assert!(auto.mask_peak < auto.mask_peak_physical);
+        // Mask off, or the screen slot not running: peak 1, so the shoulder (knee 0.6, readout from the scanlines).
+        let mut off = p;
+        assert!(off.set("mask_enabled", ParamValue::Bool(false)));
+        for (q, screen) in [(&off, true), (&p, false)] {
+            let h = headroom(q, ppm, pitch, screen);
+            assert_eq!(h.mask_peak_physical, 1.0);
+            assert_eq!(effective_mode(q, h.mask_peak_physical), OUTPUT_HEADROOM_MODE_SHOULDER);
+            let mut sh = *q;
+            assert!(sh.set("output_headroom_mode", ParamValue::Enum(OUTPUT_HEADROOM_MODE_SHOULDER)));
+            assert_eq!(h, headroom(&sh, ppm, pitch, screen));
+            assert_eq!(OutputTransform::new(q, &h), OutputTransform::new(&sh, &h));
+        }
+        // An explicit mode is its own effective mode whatever the peak.
+        for mode in [
+            OUTPUT_HEADROOM_MODE_SHOULDER,
+            OUTPUT_HEADROOM_MODE_PHYSICAL,
+            OUTPUT_HEADROOM_MODE_MASK_DEPTH,
+            OUTPUT_HEADROOM_MODE_CLIP,
+        ] {
+            assert!(explicit.set("output_headroom_mode", ParamValue::Enum(mode)));
+            assert_eq!(effective_mode(&explicit, 1.0), mode);
+            assert_eq!(effective_mode(&explicit, 3.0), mode);
+        }
     }
 }

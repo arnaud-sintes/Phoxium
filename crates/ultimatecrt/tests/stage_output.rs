@@ -22,9 +22,10 @@
 //! - Exposure: linear in E, so 0.5 halves every value.
 //! - Shoulder with knee 0.8 at x = 1: 0.8 + 0.2 (1 - exp(-1)) = 0.926424; at x = 2: 0.8 + 0.2 (1 - exp(-6))
 //!   = 0.999505 (T-46 asymptotic shoulder = T-84 shoulder of rate 1, a white point far above 1).
-//! - T-84 headroom modes: with only `encode` running the readout is exposure x white matrix maximum; the default
-//!   shoulder mode with its automatic white point leaves a readout <= 1 untouched (hard clip at 1 = the T-46
-//!   identity chain), physical and mask depth divide the exposure by readout x (1 + margin).
+//! - T-84 headroom modes: with only `encode` running the readout is exposure x white matrix maximum; the shoulder
+//!   mode with its automatic white point leaves a readout <= 1 untouched (hard clip at 1 = the T-46 identity
+//!   chain), physical and mask depth divide the exposure by readout x (1 + margin). The default `auto` (T-84b)
+//!   has no mask here (peak 1), so it is the shoulder: same chain, same output.
 //! - Ordered dither of the flat value 127.5 codes: thresholds (b + 0.5) / 64, b = 0..63; floor(127.5 + t) is 128
 //!   when t >= 0.5, i.e. for b >= 32: half of the pixels, mean 127.5 exactly, each pixel within 0.5 code.
 
@@ -49,7 +50,8 @@ use ultimatecrt::gpu::{
     TargetFormat, Transfer,
 };
 use ultimatecrt::params::{
-    meta, ParamValue, Params, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH, OUTPUT_HEADROOM_MODE_PHYSICAL,
+    meta, ParamValue, Params, OUTPUT_HEADROOM_MODE_AUTO, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH,
+    OUTPUT_HEADROOM_MODE_PHYSICAL, OUTPUT_HEADROOM_MODE_SHOULDER,
 };
 
 /// Renders `tube` (linear light, one texel per host pixel) through `encode` only, into a target of the
@@ -381,7 +383,7 @@ fn shoulder_is_identity_below_the_knee_monotonic_above_and_hard_at_knee_1() {
         let v = x as f32 * 0.01;
         [v, v, v]
     });
-    // T-84: shoulder mode (the default) with a far white point: T = (64 - 0.8) / 0.2 = 316, rate
+    // T-84: shoulder mode (what the default auto is here: no mask) with a far white point: T = (64 - 0.8) / 0.2 = 316, rate
     // 1 - exp(-316) = 1 in f64, which is the T-46 asymptotic shoulder exactly.
     let mut soft = Params::default();
     set(&mut soft, "output_knee", ParamValue::F32(0.8));
@@ -409,7 +411,7 @@ fn shoulder_is_identity_below_the_knee_monotonic_above_and_hard_at_knee_1() {
     // Hand values: 0.926424 at 1, 0.999505 at 2.
     assert!((f64::from(r.output.pixel(100, 0)[0]) - 0.926_424).abs() < 1e-5);
     assert!((f64::from(r.output.pixel(200, 0)[0]) - 0.999_505).abs() < 1e-5);
-    // Hard clip at panel white: knee 1, the clip mode, and the default shoulder mode when the headroom readout
+    // Hard clip at panel white: knee 1, the clip mode, and the default auto mode (the shoulder here: no mask) when the headroom readout
     // is 1 (only `encode` runs, identity matrix, exposure 1: nothing above panel white to roll off).
     let mut knee1 = Params::default();
     set(&mut knee1, "output_knee", ParamValue::F32(1.0));
@@ -506,6 +508,22 @@ fn physical_mode_derives_the_exposure_from_the_readout() {
         assert_eq!(r.clip.over_white, 2);
         assert_eq!(r.output.pixel(4, 0)[0], 1.0);
     }
+    // T-84b: the default is auto; with no mask (only `encode` runs) it is the shoulder, bit for bit, at a
+    // readout above 1 where the shoulder acts (exposure 2: readout 2, white point 2.04).
+    let mut auto = Params::default();
+    assert_eq!(auto.output_headroom_mode, OUTPUT_HEADROOM_MODE_AUTO);
+    set(&mut auto, "exposure", ParamValue::F32(2.0));
+    let mut shoulder = auto;
+    set(
+        &mut shoulder,
+        "output_headroom_mode",
+        ParamValue::Enum(OUTPUT_HEADROOM_MODE_SHOULDER),
+    );
+    let a = encode(&mut gpu, &tube, &auto, Transfer::Identity, TargetFormat::Rgba32F, 0);
+    let s = encode(&mut gpu, &tube, &shoulder, Transfer::Identity, TargetFormat::Rgba32F, 0);
+    assert_eq!(a.output.rgba, s.output.rgba);
+    assert_eq!(a.clip.over_white, s.clip.over_white);
+    assert!(a.output.pixel(4, 0)[0] > 0.99 && a.output.pixel(4, 0)[0] <= 1.0);
     drop(gpu);
 }
 
