@@ -113,7 +113,9 @@ function Invoke-Poll([string]$Path, [string]$Source, [int]$Seconds, [int]$Interv
             $lastTick = $now
             $lastSource = $isSource
 
-            $key = "${hwnd}|${fgPid}|${title}"
+            # Window identity only: pixel-demo and the ultimatecrt output rewrite their titles every second,
+            # which is not a foreground change (2026-11-19 live run).
+            $key = "${hwnd}|${fgPid}"
             if ($key -ne $lastKey) {
                 $lastKey = $key
                 $stamp = (Get-Date).ToString('yyyy-MM-ddTHH:mm:ss.fff')

@@ -130,11 +130,12 @@ try {
     # 3. F11 x 6, all inside the first 25 s after the start where possible.
     $expect = @('windowed', 'fullscreen', 'windowed', 'fullscreen', 'windowed', 'fullscreen')
     foreach ($want in $expect) {
-        $before = ((& $out) -split "`r?`n" | Where-Object { $_ -like 'output:*' }).Count
+        $before = @((& $out) -split "`r?`n" | Where-Object { $_ -like 'output:*' }).Count
         $presses += Get-Date
         Send-Chord 'F11'
         Start-Sleep -Milliseconds 1800
-        $lines = (& $out) -split "`r?`n" | Where-Object { $_ -like 'output:*' }
+        # @(): with a single matching line PowerShell returns a string and [-1] would be its last character.
+        $lines = @((& $out) -split "`r?`n" | Where-Object { $_ -like 'output:*' })
         if ($lines.Count -le $before) { $fail += "F11 -> $want : no console line"; continue }
         if ($lines[-1] -notlike "output: $want*") { $fail += "F11 -> $want : console says '$($lines[-1])'" }
         $style = [UcrtKeys]::Style($hwnd)
