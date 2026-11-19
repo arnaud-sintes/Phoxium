@@ -25,6 +25,8 @@
 //! description = "..."
 //! group = "Output"           # UI group
 //! # values = ["a", "b"]      # enum only: the choices, snake_case
+//! # advanced = true          # optional: shown in the settings menu under "Advanced" only
+//! # widget = "log"           # optional: auto (default), linear, log (positive float range), color (vec3 in 0..1)
 //! ```
 //!
 //! Files whose name starts with `_` (such as `_test.toml`) hold test-only entries: they are loaded only when
@@ -171,8 +173,47 @@ pub struct Param {
     pub group: String,
     /// Enum choices (snake_case), empty for other types.
     pub values: Vec<String>,
+    /// Shown in the settings menu only when "Advanced" is on (or a search matches it).
+    pub advanced: bool,
+    /// Settings menu widget: [`Widget::Auto`] unless the file says otherwise.
+    pub widget: Widget,
     /// Byte offset in the std140 block.
     pub offset: usize,
+}
+
+/// The settings menu widget of a parameter (`widget = "..."`, optional).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Widget {
+    /// From the type: a slider for numbers (logarithmic when the soft range is positive and spans at least two
+    /// decades), a check box, a combo.
+    Auto,
+    /// A linear slider, whatever the range.
+    Linear,
+    /// A logarithmic slider; the soft range must be positive.
+    Log,
+    /// A colour picker; vec3 only, soft range within 0 to 1.
+    Color,
+}
+
+impl Widget {
+    fn parse(s: &str) -> Option<Widget> {
+        Some(match s {
+            "auto" => Widget::Auto,
+            "linear" => Widget::Linear,
+            "log" => Widget::Log,
+            "color" => Widget::Color,
+            _ => return None,
+        })
+    }
+
+    fn variant(self) -> &'static str {
+        match self {
+            Widget::Auto => "Auto",
+            Widget::Linear => "Linear",
+            Widget::Log => "Log",
+            Widget::Color => "Color",
+        }
+    }
 }
 
 /// The whole table, in layout order.
@@ -207,6 +248,9 @@ struct RawParam {
     group: String,
     #[serde(default)]
     values: Vec<String>,
+    #[serde(default)]
+    advanced: bool,
+    widget: Option<String>,
 }
 
 fn is_snake_ident(s: &str) -> bool {
@@ -472,6 +516,30 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         None
     };
 
+    // Settings menu widget.
+    let widget = match r.widget.as_deref() {
+        None => Widget::Auto,
+        Some(w) => {
+            Widget::parse(w).ok_or_else(|| Error(format!("{at}: unknown widget `{w}` (auto, linear, log, color)")))?
+        }
+    };
+    match widget {
+        Widget::Linear if !ty.is_numeric() => {
+            return err(format!("{at}: widget `linear` needs a numeric type"));
+        }
+        Widget::Log if !soft_range.is_some_and(|(lo, _)| lo > 0.0) || ty == Type::I32 => {
+            return err(format!(
+                "{at}: widget `log` needs a float type with a positive soft range"
+            ));
+        }
+        Widget::Color if ty != Type::Vec3 || !soft_range.is_some_and(|(lo, hi)| lo >= 0.0 && hi <= 1.0) => {
+            return err(format!(
+                "{at}: widget `color` needs a vec3 with a soft range within [0, 1]"
+            ));
+        }
+        _ => {}
+    }
+
     // Default.
     // f32 values are compared with bounds rounded to f32, so a default equal to a bound such as 0.3 is in range.
     let round = |x: f64| if ty == Type::I32 { x } else { x as f32 as f64 };
@@ -566,6 +634,8 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         description: r.description,
         group: r.group,
         values: r.values,
+        advanced: r.advanced,
+        widget,
         offset: 0,
     })
 }
@@ -724,7 +794,7 @@ pub fn rust_source(t: &Table) -> String {
             None => "None".to_string(),
         };
         s.push_str(&format!(
-            "    ParamMeta {{\n        id: {:?},\n        stage: {:?},\n        ty: ParamType::{},\n        unit: {:?},\n        default: {default},\n        soft_range: {range},\n        confidence: Confidence::{},\n        source: {:?},\n        description: {:?},\n        group: {:?},\n        values: &{:?},\n        file: {:?},\n        offset: {},\n        size: {},\n    }},\n",
+            "    ParamMeta {{\n        id: {:?},\n        stage: {:?},\n        ty: ParamType::{},\n        unit: {:?},\n        default: {default},\n        soft_range: {range},\n        confidence: Confidence::{},\n        source: {:?},\n        description: {:?},\n        group: {:?},\n        values: &{:?},\n        advanced: {},\n        widget: ParamWidget::{},\n        file: {:?},\n        offset: {},\n        size: {},\n    }},\n",
             p.id,
             p.stage,
             p.ty.variant(),
@@ -734,6 +804,8 @@ pub fn rust_source(t: &Table) -> String {
             one_line(&p.description),
             p.group,
             p.values,
+            p.advanced,
+            p.widget.variant(),
             p.file,
             p.offset,
             p.ty.std140_size(),
@@ -876,6 +948,40 @@ mod tests {
 
     fn table(text: &str) -> Result<Table, Error> {
         build(&[("params/t.toml".into(), "t".into(), text.into())])
+    }
+
+    #[test]
+    fn menu_hints_are_optional_and_validated() {
+        let t = table(&entry("a", "f32", "1.0", "min = 0.1\nmax = 100.0\n")).unwrap();
+        assert_eq!((t.params[0].advanced, t.params[0].widget), (false, Widget::Auto));
+        let t = table(&entry(
+            "a",
+            "f32",
+            "1.0",
+            "min = 0.1\nmax = 100.0\nadvanced = true\nwidget = \"log\"\n",
+        ))
+        .unwrap();
+        assert_eq!((t.params[0].advanced, t.params[0].widget), (true, Widget::Log));
+        let rust = rust_source(&t);
+        assert!(rust.contains("advanced: true,") && rust.contains("widget: ParamWidget::Log,"));
+        let colour = entry(
+            "c",
+            "vec3",
+            "[0.0, 0.0, 0.0]",
+            "min = 0.0\nmax = 1.0\nwidget = \"color\"\n",
+        );
+        assert_eq!(table(&colour).unwrap().params[0].widget, Widget::Color);
+        for (ty, default, extra) in [
+            ("f32", "1.0", "min = 0.0\nmax = 100.0\nwidget = \"log\"\n"),
+            ("i32", "1", "min = 1\nmax = 100\nwidget = \"log\"\n"),
+            ("f32", "1.0", "min = 0.0\nmax = 2.0\nwidget = \"color\"\n"),
+            ("vec3", "[0.0, 0.0, 0.0]", "min = 0.0\nmax = 2.0\nwidget = \"color\"\n"),
+            ("bool", "true", "widget = \"linear\"\n"),
+            ("f32", "1.0", "min = 0.0\nmax = 2.0\nwidget = \"dial\"\n"),
+            ("f32", "1.0", "min = 0.0\nmax = 2.0\nadvanced = \"yes\"\n"),
+        ] {
+            assert!(table(&entry("x", ty, default, extra)).is_err(), "{ty} {extra}");
+        }
     }
 
     #[test]
@@ -1109,7 +1215,8 @@ mod tests {
              #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamType {{ F32, I32, Bool, Enum, Vec2, Vec3, Vec4 }}\n\
              #[derive(Debug, Clone, Copy, PartialEq)] pub enum Confidence {{ Sourced, Derived, Known, Estimate }}\n\
              #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamValue {{ F32(f32), I32(i32), Bool(bool), Enum(u32), Vec2([f32; 2]), Vec3([f32; 3]), Vec4([f32; 4]) }}\n\
-             pub struct ParamMeta {{ pub id: &'static str, pub stage: &'static str, pub ty: ParamType, pub unit: &'static str, pub default: ParamValue, pub soft_range: Option<(f64, f64)>, pub confidence: Confidence, pub source: &'static str, pub description: &'static str, pub group: &'static str, pub values: &'static [&'static str], pub file: &'static str, pub offset: usize, pub size: usize }}\n\
+             #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamWidget {{ Auto, Linear, Log, Color }}\n\
+             pub struct ParamMeta {{ pub id: &'static str, pub stage: &'static str, pub ty: ParamType, pub unit: &'static str, pub default: ParamValue, pub soft_range: Option<(f64, f64)>, pub confidence: Confidence, pub source: &'static str, pub description: &'static str, pub group: &'static str, pub values: &'static [&'static str], pub advanced: bool, pub widget: ParamWidget, pub file: &'static str, pub offset: usize, pub size: usize }}\n\
              {generated}\n\
              fn main() {{\n\
                  let mut p = Params::default();\n\

@@ -1,4 +1,4 @@
-﻿# Beam stage parameters (ARCHITECTURE section 5, step 3; shaders/include/beam.glsl). Format:
+# Beam stage parameters (ARCHITECTURE section 5, step 3; shaders/include/beam.glsl). Format:
 # crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means dimensionless.
 # T-36a: vertical scanline profile (Gaussian core plus an optional wide Gaussian tail, area-integrated over each
 # host pixel). T-36b: horizontal spot over the amp samples (the same round spot) and spot growth with the beam
@@ -42,6 +42,7 @@ tag = "E"
 source = "CRT.md Spot profile: a 'wider' Gaussian tail; its width is not sourced (estimate)"
 description = "Sigma of the wide tail as a multiple of the core sigma."
 group = "Beam"
+advanced = true
 
 [[param]]
 id = "beam_fwhm_peak_mm"
@@ -68,6 +69,7 @@ tag = "E"
 source = "CRT.md Spot growth with beam current (d^2 = d0^2 + k I^(2n), n 0.2 to 0.5; projection-gun rule d ~ sqrt(I); black to full white x1.5 to 2.5). 0.5 is the only value of the range that gives the 0.45 -> 0.8 mm defaults a real floor with a black-to-white ratio near 2.5 (0.8 / 0.317 = 2.53); below n = 0.346 they would need a negative floor"
 description = "Exponent n of the spot growth law FWHM^2 = d0^2 + k I^(2n) (I the normalised beam current). The floor d0 and k follow from the FWHM at mid drive and at peak. When the two widths would need a negative floor (peak / mid > 0.1895^-n), n is raised to the smallest value that gives a zero floor (pure power law)."
 group = "Beam"
+advanced = true
 
 [[param]]
 id = "beam_quality"

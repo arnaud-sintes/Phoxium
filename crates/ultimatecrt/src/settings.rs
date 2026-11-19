@@ -2,8 +2,9 @@
 //!
 //! Holds the global settings (preset name, parameter overrides, hotkey chords, UI state), the host profile
 //! (monitor and panel size) and the source profiles keyed by executable file name and window class.
-//! The overrides hold only the ids that differ from the parameter defaults ([`overrides_from_params`]); the
-//! diff against a preset is computed by the settings menu (T-53). Writes are atomic (temporary file, then
+//! The overrides are applied onto the settings preset at start; the settings menu records in them only the ids
+//! the user changed, against the preset in force ([`record_edit`], T-53). [`overrides_from_params`] gives the
+//! ids that differ from the table defaults. Writes are atomic (temporary file, then
 //! rename). A corrupt or too new file gives defaults plus a warning and is kept as `settings.toml.bak`.
 
 use std::{
@@ -410,6 +411,39 @@ pub fn overrides_from_params(params: &Params) -> BTreeMap<String, toml::Value> {
     out
 }
 
+/// Records a settings menu edit in the overrides (T-53): for every id whose value differs between `before` and
+/// `after` (what the user touched), the override becomes the new value, or is removed when the new value equals
+/// `reference` (the preset in force with the source profile and the command-line options, which the next start
+/// rebuilds without an override). Ids the user did not touch keep their override state, so values that come
+/// from the source profile or the command line are never written as global overrides. Returns whether the
+/// overrides changed.
+pub fn record_edit(
+    overrides: &mut BTreeMap<String, toml::Value>,
+    before: &Params,
+    after: &Params,
+    reference: &Params,
+) -> bool {
+    let mut changed = false;
+    for m in PARAMS_META {
+        let (Some(b), Some(a)) = (before.get(m.id), after.get(m.id)) else {
+            continue;
+        };
+        if a == b {
+            continue;
+        }
+        if reference.get(m.id) == Some(a) {
+            changed |= overrides.remove(m.id).is_some();
+        } else {
+            let v = to_value(a);
+            if overrides.get(m.id) != Some(&v) {
+                overrides.insert(m.id.to_string(), v);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
 /// Applies overrides onto `params`. Returns one warning per unknown id or malformed value (skipped).
 pub fn apply_overrides(params: &mut Params, overrides: &BTreeMap<String, toml::Value>) -> Vec<String> {
     let mut warnings = Vec::new();
@@ -608,6 +642,44 @@ mod tests {
         for meta in PARAMS_META {
             assert!(!text.contains(meta.id), "{} leaked into the file", meta.id);
         }
+    }
+
+    #[test]
+    fn menu_edits_record_only_touched_ids_against_the_reference() {
+        let preset = Params {
+            mask_pitch_mm: 0.5,
+            ..Params::default()
+        };
+        // The reference: the preset with a source profile value on top.
+        let mut reference = preset;
+        reference.source_par = 1.25;
+        let mut o = BTreeMap::new();
+        let before = reference;
+        let mut after = before;
+        after.exposure = 2.0;
+        assert!(record_edit(&mut o, &before, &after, &reference));
+        assert_eq!(
+            o.keys().collect::<Vec<_>>(),
+            ["exposure"],
+            "the profile value is not written"
+        );
+        // The next start: the preset, the overrides, then the profile, gives the edited parameters back.
+        let mut next = preset;
+        assert!(apply_overrides(&mut next, &o).is_empty());
+        next.source_par = 1.25;
+        assert_eq!(next, after);
+        // Back to the reference value: the override goes.
+        let mut back = after;
+        back.exposure = reference.exposure;
+        assert!(record_edit(&mut o, &after, &back, &reference));
+        assert!(o.is_empty());
+        // Nothing touched: nothing recorded.
+        assert!(!record_edit(&mut o, &back, &back, &reference));
+        // A touched value equal to the preset but not to the reference (the profile's id) is kept as written.
+        let mut p = back;
+        p.source_par = 1.0;
+        assert!(record_edit(&mut o, &back, &p, &reference));
+        assert_eq!(o.get("source_par"), Some(&toml::Value::Float(1.0)));
     }
 
     #[test]

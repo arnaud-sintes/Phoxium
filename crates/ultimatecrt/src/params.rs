@@ -60,6 +60,20 @@ impl Confidence {
     }
 }
 
+/// The settings menu widget of a parameter (`widget` in `params/*.toml`, validated by `paramgen`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ParamWidget {
+    /// From the type: a slider (logarithmic when the soft range is positive and spans two decades or more), a
+    /// check box, a combo.
+    Auto,
+    /// A linear slider.
+    Linear,
+    /// A logarithmic slider (positive soft range).
+    Log,
+    /// A colour picker (vec3 within 0 to 1).
+    Color,
+}
+
 /// Metadata of one parameter.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParamMeta {
@@ -80,6 +94,10 @@ pub struct ParamMeta {
     pub group: &'static str,
     /// Enum choices, empty for other types.
     pub values: &'static [&'static str],
+    /// Shown in the settings menu only with "Advanced" on (or when a search matches it).
+    pub advanced: bool,
+    /// The settings menu widget (`widget` in the file, [`ParamWidget::Auto`] when absent).
+    pub widget: ParamWidget,
     /// Defining file, such as `params/output.toml`.
     pub file: &'static str,
     /// Byte offset of the member in the std140 block.
