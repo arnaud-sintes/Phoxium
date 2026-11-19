@@ -785,13 +785,13 @@ mod tests {
             assert_eq!(q.mask_damper_count > 0, grille, "{}", p.id);
             // Unmasked white within panel white: the linear sRGB maximum of the tube white at Y = 1, times
             // exposure, is <= 1. This is the white balance limit only: the mask and scanline peaks lift elements
-            // above it, handled by the headroom mode (T-84, D-16: shoulder for every preset; the flat-white
+            // above it, handled by the headroom mode (T-84, D-16, T-84b: every preset inherits the auto default; the flat-white
             // chain test of tests/presets.rs measures what each mode keeps).
             let w = xy_to_srgb_max(q.tube_white_xy);
             assert!(w * f64::from(q.exposure) <= 1.0 + 1e-3, "{}: white clips ({w})", p.id);
             assert_eq!(
                 q.output_headroom_mode,
-                crate::params::OUTPUT_HEADROOM_MODE_SHOULDER,
+                crate::params::OUTPUT_HEADROOM_MODE_AUTO,
                 "{}: D-16",
                 p.id
             );

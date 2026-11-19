@@ -88,7 +88,17 @@ use crt_model::mask::{
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{
     Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK,
+    OUTPUT_HEADROOM_MODE_CLIP,
 };
+
+/// The defaults with the headroom mode pinned to `clip`: the default `auto` (T-84b) lowers the mask contrast
+/// where the mask resolves (mask depth), and these tests compare the physical mask with the oracle.
+fn physical_mask() -> Params {
+    Params {
+        output_headroom_mode: OUTPUT_HEADROOM_MODE_CLIP,
+        ..Params::default()
+    }
+}
 use ultimatecrt::placement::{mask_model, mask_tier_rule, mask_tiers};
 
 /// One FP16 step relative to the value, at most: 2^-10.
@@ -141,7 +151,7 @@ fn slot_params(pitch_mm: f32) -> Params {
         mask_type: MASK_TYPE_SLOT_MASK,
         mask_pitch_mm: pitch_mm,
         mask_tier: MASK_TIER_INTEGRATED,
-        ..Params::default()
+        ..physical_mask()
     }
 }
 
@@ -150,7 +160,7 @@ fn delta_params(pitch_mm: f32) -> Params {
         mask_type: MASK_TYPE_DELTA,
         mask_pitch_mm: pitch_mm,
         mask_tier: MASK_TIER_INTEGRATED,
-        ..Params::default()
+        ..physical_mask()
     }
 }
 
@@ -932,7 +942,7 @@ fn at_density(kind: u32, ppt: f64, (w, h): (u32, u32)) -> (FrameConstants, Param
         mask_type: kind,
         mask_pitch_mm: pitch as f32,
         mask_tier: MASK_TIER_AUTO,
-        ..Params::default()
+        ..physical_mask()
     };
     (tube(w, h, ppm as f32), p)
 }
@@ -1147,7 +1157,7 @@ fn tier_decision_agrees_on_the_limit() {
             mask_pitch_mm: pitch,
             mask_tier: MASK_TIER_AUTO,
             mask_tier_blend: 0.0,
-            ..Params::default()
+            ..physical_mask()
         };
         let tiers = mask_tiers(ppm, &p);
         let r = readouts(&mask_model(&p), f64::from(ppm), 1.0, 1.0, 1.0, mask_tier_rule(&p));

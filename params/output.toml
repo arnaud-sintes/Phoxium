@@ -43,11 +43,11 @@ id = "output_headroom_mode"
 stage = "output"
 type = "enum"
 unit = "1"
-default = "shoulder"
-values = ["shoulder", "physical", "mask_depth", "clip"]
+default = "auto"
+values = ["shoulder", "physical", "mask_depth", "clip", "auto"]
 tag = "E"
-source = "PLAN D-16 (owner decision 2026-11-19, audit B1/M1, T-84): the mask and scanline peaks of a full-white field exceed panel white (headroom readout = mask peak x scanline peak x white matrix maximum x exposure), so SDR must clip, roll off or dim. shoulder = soft roll-off from output_knee to output_shoulder_white, exposure unchanged (NON-PHYSICAL tone curve above the knee, the D-16 default); physical = exposure / max(1, readout (1 + output_headroom_margin)), nothing clips and the picture is dimmer (the physical choice); mask_depth = the mask contrast is limited by mask_depth (NON-PHYSICAL, mean kept) and the exposure is derived from the lowered readout as in physical; clip = the T-46 behaviour, hard clip at panel white (tests and comparison)."
-description = "How the output handles light above panel white (SDR headroom): shoulder (soft roll-off, default, non-physical above the knee), physical (exposure lowered from the headroom readout so nothing clips: dimmer), mask_depth (reduced mask contrast, non-physical, then as physical), clip (hard clip)."
+source = "PLAN D-16 (owner decision 2026-11-19, audit B1/M1, T-84; T-84b: default to C, owner 2026-11-19): the mask and scanline peaks of a full-white field exceed panel white (headroom readout = mask peak x scanline peak x white matrix maximum x exposure), so SDR must clip, roll off or dim. shoulder = soft roll-off from output_knee to output_shoulder_white, exposure unchanged (NON-PHYSICAL tone curve above the knee); physical = exposure / max(1, readout (1 + output_headroom_margin)), nothing clips and the picture is dimmer (the physical choice); mask_depth = the mask contrast is limited by mask_depth (NON-PHYSICAL, mean kept) and the exposure is derived from the lowered readout as in physical; clip = the T-46 behaviour, hard clip at panel white (tests and comparison); auto (default, T-84b) = the owner choice 'default to C' made adaptive to the host: mask_depth when the headroom readout's physical mask peak is above 1 (a resolved mask exists on the host, D-18), shoulder where the peak comes from the scanlines only (nothing for a depth limit to act on). Not a measured value [E]"
+description = "How the output handles light above panel white (SDR headroom): auto (default: mask_depth where the host resolves the mask, shoulder where only the scanlines peak), shoulder (soft roll-off, non-physical above the knee), physical (exposure lowered from the headroom readout so nothing clips: dimmer), mask_depth (reduced mask contrast, non-physical, then as physical), clip (hard clip)."
 group = "Output"
 
 [[param]]

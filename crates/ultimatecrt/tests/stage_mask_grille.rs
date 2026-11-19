@@ -93,8 +93,17 @@ use crt_model::mask::{
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{
     ParamValue, Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA,
-    MASK_TYPE_SLOT_MASK,
+    MASK_TYPE_SLOT_MASK, OUTPUT_HEADROOM_MODE_CLIP,
 };
+
+/// The defaults with the headroom mode pinned to `clip`: the default `auto` (T-84b) lowers the mask contrast
+/// where the mask resolves (mask depth), and these tests compare the physical mask with the oracle.
+fn physical_mask() -> Params {
+    Params {
+        output_headroom_mode: OUTPUT_HEADROOM_MODE_CLIP,
+        ..Params::default()
+    }
+}
 use ultimatecrt::placement::mask_tiers;
 
 /// One FP16 step relative to the value, at most: 2^-10 (11 significant bits).
@@ -174,7 +183,7 @@ fn grille(fc: &FrameConstants, pitch_mm: f32) -> Params {
         mask_pitch_mm: pitch_mm,
         mask_tier: MASK_TIER_INTEGRATED,
         tube_visible_height_mm: fc.tube_size[1] as f32 / fc.px_per_mm,
-        ..Params::default()
+        ..physical_mask()
     }
 }
 
@@ -448,7 +457,7 @@ fn host_pixels_equal_the_oracle_area_mean_on_random_tubes() {
             mask_damper_edge_mm: (wire * rng.next()) as f32,
             mask_tier: MASK_TIER_INTEGRATED,
             tube_visible_height_mm: ((f64::from(h) + 30.0 * rng.next()) / ppm) as f32,
-            ..Params::default()
+            ..physical_mask()
         };
         let mask = oracle(&fc, &p);
         let want = oracle_image(&fc, |c, q| mask.area_mean(c, q));
@@ -659,7 +668,7 @@ fn grille_phase_at_the_tube_centre_is_unchanged_when_par_changes() {
     let mut tubes = Vec::new();
     let mut ppm = None;
     for (par, width) in [(1.0_f32, 1536_u32), (1.25, 1920)] {
-        let mut p = Params::default();
+        let mut p = physical_mask();
         assert!(p.set("source_par", ParamValue::F32(par)));
         let placed = FrameConstants::placed((256, 240), (2560, 1440), false, &p);
         assert_eq!(placed.tube_size, [width as i32, 1440], "PAR {par}");
@@ -765,7 +774,7 @@ fn damper_wires_dim_their_host_row() {
                 mask_damper_width_mm: 0.02,
                 mask_damper_edge_mm: 0.01,
                 tube_visible_height_mm: visible_mm,
-                ..Params::default()
+                ..physical_mask()
             };
             assert_eq!(p.mask_tier, MASK_TIER_AUTO);
             let ppt = px_per_triad(&fc, &p);
@@ -1053,7 +1062,7 @@ fn full_frame_gpu_time_is_reported() {
                 mask_enabled: *enabled,
                 mask_tier: *tier,
                 mask_damper_count: 2,
-                ..Params::default()
+                ..physical_mask()
             };
             run(&mut gpu, &["screen"], fc, &p, &amp);
             if let Some(ms) = gpu.last_timings().and_then(|t| t.stage_ms("screen")) {
