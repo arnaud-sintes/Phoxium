@@ -1,5 +1,6 @@
 //! ultimatecrt library: capture, GPU pipeline, output window and application logic.
 
+pub mod adapters;
 pub mod app;
 pub mod capture;
 pub mod cli;

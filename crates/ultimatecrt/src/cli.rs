@@ -11,6 +11,8 @@ Usage: ultimatecrt [options]
                        (default \"pixel-demo\")
   --list-windows       list capturable windows and monitors, then exit
   --list-gpus          list Vulkan devices, then exit
+  --list-adapters      adapter topology (DXGI adapters and monitors, Vulkan devices, LUIDs, capture adapter,
+                       render adapter, verdict), then exit; opens no window
   --gpu <index>        Vulkan device to use (default: NVIDIA discrete, else any discrete)
   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
   --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
@@ -68,6 +70,7 @@ pub struct Args {
     pub window: Option<String>,
     pub list_windows: bool,
     pub list_gpus: bool,
+    pub list_adapters: bool,
     pub gpu: Option<usize>,
     pub fullscreen: bool,
     pub monitor: Option<usize>,
@@ -196,6 +199,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             "--window" => a.window = Some(value("--window")?),
             "--list-windows" => a.list_windows = true,
             "--list-gpus" => a.list_gpus = true,
+            "--list-adapters" | "--adapters" => a.list_adapters = true,
             "--gpu" => a.gpu = Some(number("--gpu", &value("--gpu")?)?),
             "--fullscreen" => a.fullscreen = true,
             "--monitor" => a.monitor = Some(number("--monitor", &value("--monitor")?)?),
@@ -281,6 +285,13 @@ mod tests {
 
     fn parse(s: &str) -> Res<Args> {
         parse_from(s.split_whitespace().map(String::from))
+    }
+
+    #[test]
+    fn list_adapters_flag() {
+        assert!(parse("--list-adapters").unwrap().list_adapters);
+        assert!(parse("--adapters").unwrap().list_adapters);
+        assert!(!parse("--list-gpus").unwrap().list_adapters);
     }
 
     /// T-96: the source options parse and override the parameters; --crop and --divisor imply manual.
