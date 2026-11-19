@@ -169,6 +169,17 @@ pub fn run() -> Res<()> {
     )?;
     renderer.set_params(params);
     println!("render: Vulkan on {}", renderer.gpu_name);
+    // T-52a: the settings menu and the stats overlay, drawn over the output. Created after the renderer's
+    // device, dropped before it (end of `run`).
+    let mut ui = crate::ui::Ui::new(
+        renderer.context(),
+        renderer.output_format(),
+        crate::ui::UiConfig::live(win.hwnd.0 as isize, follow.0 as isize),
+    )?;
+    let mut ui_state = crate::ui::UiState {
+        preset: args.preset.clone(),
+        ..Default::default()
+    };
     println!(
         "quit: Ctrl+Alt+Q{}",
         if args.fullscreen || args.no_activate {
@@ -228,6 +239,7 @@ pub fn run() -> Res<()> {
                         Ok(c) => {
                             capture = Some(c);
                             r.attach_result(now, hwnd, true);
+                            ui.set_source(Some(hwnd));
                             frame.seq = 0; // the new session counts from 1
                             health.reset(now);
                             size_watch.request_history_clear();
@@ -320,7 +332,29 @@ pub fn run() -> Res<()> {
             renderer.clear_history();
         }
         let out_size = output::client_size(win.hwnd);
-        renderer.render(upload, view, out_size)?;
+        // T-52a: the menu's input, what the menu and the overlay show, and what the user changed.
+        for (m, w, l) in output::take_ui_messages() {
+            ui.handle_win32_message(m, w, l);
+        }
+        if ui.is_open() || ui.overlay_on() {
+            ui_state.params = params;
+            ui_state.headroom = renderer.headroom();
+            ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
+        }
+        let changes = ui.frame(&ui_state);
+        if let Some(mut p) = changes.params {
+            if changes.preset.is_some() {
+                // A new preset: the source profile and the command-line options apply on top again.
+                for w in profile.apply_to(&mut p) {
+                    eprintln!("warning: {w}");
+                }
+                args.apply_source(&mut p)?;
+                ui_state.preset = changes.preset;
+            }
+            params = p;
+            renderer.set_params(params);
+        }
+        renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
         fresh = false;
         // T-96: the resolved placement, printed with --stats when the native raster or the output changes.
         if args.stats && (view.native, out_size) != readout_key {
@@ -364,6 +398,11 @@ pub fn run() -> Res<()> {
             if let Some(l) = log.as_mut() {
                 l.second(captured - last_captured, renders, secs, gpu.as_ref())?;
             }
+            (ui_state.timings, ui_state.capture_fps, ui_state.render_fps) = (
+                gpu.clone(),
+                (captured - last_captured) as f64 / secs,
+                renders as f64 / secs,
+            );
             output::set_title(
                 win.hwnd,
                 &format!(
@@ -402,6 +441,8 @@ pub fn run() -> Res<()> {
     if let Some(l) = log.as_mut() {
         l.summary();
     }
+    // The UI first: its ImGui renderer lives on the renderer's device (T-52a).
+    drop(ui);
     drop(renderer);
     drop(capture);
     Ok(())

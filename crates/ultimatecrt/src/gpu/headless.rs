@@ -169,6 +169,42 @@ impl Headless {
         target: (u32, u32),
         format: TargetFormat,
     ) -> Res<Rendered> {
+        self.render_frames(frames, settings, target, format, None)
+    }
+
+    /// [`Headless::render`] with the settings menu and overlay (T-52a) drawn over the output after `encode`
+    /// ([`UiPass`], `crate::ui::Ui`), when `ui` has something to draw. `ui` must have been created on
+    /// [`Headless::context`] for `format`'s Vulkan format (`Bgra8Unorm` for the swapchain format).
+    // The frame's inputs plus the UI, as `render`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_with_ui(
+        &mut self,
+        frame: Option<SourceFrame<'_>>,
+        view: View,
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
+        format: TargetFormat,
+        ui: &mut dyn UiPass,
+    ) -> Res<Rendered> {
+        self.render_frames(&[(frame, view, params)], settings, target, format, Some(ui))
+    }
+
+    /// The Vulkan format of a [`TargetFormat`] (to create a `crate::ui::Ui` for the headless target).
+    pub fn vk_format(format: TargetFormat) -> vk::Format {
+        format.vk()
+    }
+
+    /// Body of [`Headless::render_burst_params`] and [`Headless::render_with_ui`]: `ui` draws over the last
+    /// frame only.
+    fn render_frames(
+        &mut self,
+        frames: &[(Option<SourceFrame<'_>>, View, &Params)],
+        settings: &Settings,
+        target: (u32, u32),
+        format: TargetFormat,
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<Rendered> {
         if target.0 == 0 || target.1 == 0 || frames.is_empty() {
             return Err("headless render: empty target or no frame".into());
         }
@@ -177,7 +213,7 @@ impl Headless {
         // submission before returning Ok; on any path the device is idled before `s` is destroyed, so
         // the GPU no longer uses the scratch objects.
         unsafe {
-            let out = self.run(&mut s, frames, settings, target, format);
+            let out = self.run(&mut s, frames, settings, target, format, ui);
             let _ = self.ctx.device.device_wait_idle();
             self.pipeline.collect_all(&self.ctx);
             s.destroy(&self.ctx.device);
@@ -196,6 +232,7 @@ impl Headless {
         settings: &Settings,
         target: (u32, u32),
         format: TargetFormat,
+        ui: Option<&mut dyn UiPass>,
     ) -> Res<Rendered> {
         let ctx = &self.ctx;
         let extent = vk::Extent2D {
@@ -221,7 +258,7 @@ impl Headless {
         if let Some(f) = frame {
             self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
         }
-        let cb = self.pipeline.record(ctx, *view, settings, params, &t)?;
+        let cb = self.pipeline.record_ui(ctx, *view, settings, params, &t, ui)?;
         self.read_back_or_abandon(s, cb, &t, format)
     }
 
@@ -471,7 +508,7 @@ impl Headless {
         self.pipeline.timing_unavailable()
     }
 
-    /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`.
+    /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`, `ui`.
     pub fn timing_names(&self) -> Vec<&'static str> {
         self.pipeline.timing_names()
     }

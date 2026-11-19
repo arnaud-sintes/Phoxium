@@ -19,6 +19,8 @@ allow = [
     "CC0-1.0",
 ]
 # GPL and AGPL are simply absent from the allow list (denied). LGPL is not allowed either.
+# The dear-imgui-* crates (T-52a) declare MIT OR Apache-2.0 but ship no LICENSE file: the upstream notices of the
+# C/C++ they vendor (Dear ImGui, cimgui, both MIT) are in THIRD-PARTY.md, appended to the release zip.
 
 # Workspace crates are private (publish = false) and carry no licence field.
 [licenses.private]

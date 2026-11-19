@@ -3,8 +3,9 @@
 //!
 //! Chain: upload (captured BGRA8 -> `src` image) -> `decode` (compute, `src` -> `native` RGBA16F) ->
 //! the chain slots of [`stages::CHAIN`] (`signal`, `amp`, `gun`, `screen`, `phosphor`, `optics`) ->
-//! `encode` (fragment, last tube-domain image -> output target). See `stages/mod.rs` for the slot
-//! contract and ARCHITECTURE 3.7 for the image contract.
+//! `encode` (fragment, last tube-domain image -> output target) -> the UI pass when the settings menu or the
+//! overlay is shown (`ui_render.rs`, T-52a: display space, over the output, outside the chain). See
+//! `stages/mod.rs` for the slot contract and ARCHITECTURE 3.7 for the image contract.
 //!
 //! Frames in flight: [`FRAMES_IN_FLIGHT`] slots, each with its own command buffer, fence, staging upload
 //! buffers, `FrameConstants` and `Params` uniform buffers and descriptor sets (one per pass, derived
@@ -32,6 +33,7 @@ use super::context::Context;
 use super::headless::{GpuImage, HostBuffer, ImageF32};
 use super::stages::{self, decode, decode::Decode, encode, encode::Encode, ComputePass, Domain, Registration, Stage};
 use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
+use super::ui_render::{self, UiPass};
 use crate::headroom::{effective_mode, headroom, OutputTransform};
 use crate::params::{Params, PARAMS_STD140_SIZE};
 use crate::scaling::View;
@@ -858,7 +860,7 @@ impl Pipeline {
         self.timer.unavailable()
     }
 
-    /// Segment names of the timings in order: `upload`, `decode`, the chain slots, `encode`.
+    /// Segment names of the timings in order: `upload`, `decode`, the chain slots, `encode`, `ui`.
     pub(super) fn timing_names(&self) -> Vec<&'static str> {
         self.timer.names().to_vec()
     }
@@ -1036,6 +1038,25 @@ impl Pipeline {
         params: &Params,
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
+        self.record_ui(ctx, view, settings, params, target, None)
+    }
+
+    /// As [`Pipeline::record`], then the UI pass of `ui` (T-52a) as the last step, after `encode`, when it has
+    /// something to draw and was made for the target's format ([`ui_render`]): the menu and overlay are drawn
+    /// in display space on the target and never go through the chain. Without it nothing is recorded (the
+    /// output is bit-exact) and the `ui` timing segment stays empty.
+    ///
+    /// # Safety
+    /// As [`Pipeline::record`]; `ui` satisfies [`UiPass::draw`]'s contract for the returned command buffer.
+    pub(super) unsafe fn record_ui(
+        &mut self,
+        ctx: &Context,
+        view: View,
+        settings: &Settings,
+        params: &Params,
+        target: &Target,
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<vk::CommandBuffer> {
         let now = Instant::now();
         let mut fc = self.live_constants(view, settings, params, target.extent);
         fc.frame_index = self.frame_index;
@@ -1043,7 +1064,7 @@ impl Pipeline {
             .last_frame
             .map_or(0.0, |t| now.duration_since(t).as_secs_f32() * 1000.0);
         self.last_frame = Some(now);
-        self.record_with(ctx, view, fc, settings, params, target)
+        self.record_frame(ctx, view, fc, settings, params, target, ui)
     }
 
     /// Does the fallible preparation of the frame [`Pipeline::record`] will record for a target of
@@ -1107,6 +1128,25 @@ impl Pipeline {
         params: &Params,
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
+        self.record_frame(ctx, view, fc, settings, params, target, None)
+    }
+
+    /// [`Pipeline::record_with`] with the optional UI pass of [`Pipeline::record_ui`].
+    ///
+    /// # Safety
+    /// As [`Pipeline::record_ui`].
+    // The frame's inputs plus the UI: a struct would only repeat the public signatures.
+    #[allow(clippy::too_many_arguments)]
+    unsafe fn record_frame(
+        &mut self,
+        ctx: &Context,
+        view: View,
+        fc: FrameConstants,
+        settings: &Settings,
+        params: &Params,
+        target: &Target,
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<vk::CommandBuffer> {
         // A frame recorded but never submitted nor abandoned: its image states are rolled back.
         self.abandon();
         let cur = self.current;
@@ -1143,6 +1183,7 @@ impl Pipeline {
             have_source,
             encode_pipeline,
             last,
+            ui,
         )
     }
 
@@ -1301,6 +1342,7 @@ impl Pipeline {
         have_source: bool,
         encode_pipeline: vk::Pipeline,
         input: ImgRef,
+        ui: Option<&mut dyn UiPass>,
     ) -> Res<vk::CommandBuffer> {
         let cur = self.current;
         // T-84: the headroom readout of this frame (the `screen` slot draws the mask and the scanlines only
@@ -1453,6 +1495,12 @@ impl Pipeline {
             target.format,
         );
         self.timer.mark(d, cb, cur, self.timer.encode(), false);
+        // T-52a: the settings menu and the overlay, in display space over what `encode` wrote. Nothing is
+        // recorded when the UI has nothing to draw (bit-exact output, empty `ui` segment).
+        if let Some(ui) = ui.filter(|u| u.wants_frame() && u.format() == target.format) {
+            ui_render::record(d, cb, target, ui)?;
+            self.timer.mark(d, cb, cur, self.timer.ui(), false);
+        }
         // A fence wait does not make device writes visible to the host: the clip counters `encode`
         // wrote are read on the CPU after the frame (windowed `Renderer::render` and headless alike).
         barrier_to_host(d, cb, false);

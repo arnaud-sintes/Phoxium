@@ -8,7 +8,7 @@ How to set up, build, test, package, deploy and publish ultimateCRT. Windows 11 
 |---|---|---|
 | Windows | 11 | Developed on an Insider build (10.0.26300). Windows.Graphics.Capture features depend on the build. |
 | Rust | 1.98.1 | Pinned in `rust-toolchain.toml` (MSVC host, with rustfmt and clippy). `rustup` installs it on first use. |
-| MSVC build tools | Visual Studio 2022 with "Desktop development with C++" | Needed by the MSVC Rust target. |
+| MSVC build tools | Visual Studio 2022 with "Desktop development with C++" | Needed by the MSVC Rust target, and its C++ compiler (`cl.exe`) by `dear-imgui-sys`, which compiles Dear ImGui and cimgui from source for the settings menu (T-52a; about 16 s in release, once per target folder). |
 | Vulkan SDK | 1.4.x | Provides `glslc` and the validation layer. Set `VULKAN_SDK` (the installer does), or put `glslc` on `PATH`. |
 | GPU driver | Vulkan 1.3 capable | Developed on NVIDIA driver 596.71. |
 | GitHub CLI `gh` | recent | Logged in (`gh auth status`) with the `repo` scope, only needed to publish. |

@@ -2,7 +2,7 @@
 //! zero validation messages.
 //!
 //! A frame rendered by [`Headless`] carries per-segment GPU times (`upload`, `decode`, every chain slot,
-//! `encode`): positive for what ran, absent for what did not, summing to no more than the whole frame,
+//! `encode`, `ui`): positive for what ran, absent for what did not, summing to no more than the whole frame,
 //! and the whole frame no longer than the wall-clock time of the call that rendered it.
 
 mod common;
@@ -88,7 +88,8 @@ fn every_frame_has_positive_times_for_the_stages_that_ran() {
     let names = gpu.timing_names();
     assert_eq!(names.first(), Some(&"upload"));
     assert_eq!(names.get(1), Some(&"decode"));
-    assert_eq!(names.last(), Some(&"encode"));
+    // `encode`, then the settings menu and overlay pass (T-52a), which does not run without a UI.
+    assert_eq!(names[names.len() - 2..], ["encode", "ui"]);
     for s in gpu.stage_names() {
         assert!(names.contains(&s), "chain slot {s} is not timed");
     }
@@ -108,6 +109,7 @@ fn every_frame_has_positive_times_for_the_stages_that_ran() {
                 t.stage_ms(ran)
             );
         }
+        assert_eq!(t.stage_ms("ui"), None, "frame {n}: a UI pass without a UI");
         // Every slot has a value or none, never a negative one; a slot with a value that is not
         // flagged bypassed ran its stage.
         assert_eq!(t.stats_line().matches(" | ").count(), names.len());

@@ -14,11 +14,17 @@
 //! activated: to the window it came from, else the last other foreground window sampled by [`pump`],
 //! else the source window. `WM_ACTIVATE` is answered without `DefWindowProc`, so the keyboard focus
 //! never moves to the output; what remains is a foreground blip of about 0.1 s.
+//!
+//! Settings menu (T-52a, D-7): while it is open ([`set_menu_open`]) the output may be activated (no
+//! `WS_EX_NOACTIVATE`, no hand-back: the menu took the foreground on purpose), its input messages are queued
+//! for the UI ([`take_ui_messages`], `crate::ui::input::routed`), the mouse is captured during a button press
+//! and the cursor shape is the one ImGui asks for ([`set_menu_cursor`]).
 
+use std::cell::RefCell;
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use windows::{
-    core::{w, Result, HSTRING},
+    core::{w, Result, HSTRING, PCWSTR},
     Win32::{
         Foundation::{E_INVALIDARG, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
@@ -27,11 +33,119 @@ use windows::{
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
-            Input::KeyboardAndMouse::{RegisterHotKey, UnregisterHotKey, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT},
+            Input::KeyboardAndMouse::{
+                GetCapture, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey, MOD_ALT,
+                MOD_CONTROL, MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT,
+            },
             WindowsAndMessaging::*,
         },
     },
 };
+
+use crate::ui::input as ui_input;
+
+/// The settings menu is open (T-52a): input goes to the UI and the output may be active.
+static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+/// `NO_ACTIVATE` before the menu opened, restored when it closes.
+static MENU_SAVED_NO_ACTIVATE: AtomicBool = AtomicBool::new(false);
+/// System cursor (`IDC_*` number) shown over the client area while the menu is open; 0 hides it.
+static MENU_CURSOR: AtomicU32 = AtomicU32::new(32512);
+/// `WM_MOUSELEAVE` is requested (`TrackMouseEvent`) for the current stay of the mouse over the window.
+static MOUSE_TRACKED: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    /// Input messages of the output window for the UI (message, `WPARAM`, `LPARAM`), queued by the window
+    /// procedure while the menu is open (and DPI changes always), taken by the app every frame.
+    static UI_MESSAGES: RefCell<Vec<(u32, usize, isize)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Opens or closes the menu mode of the output window `hwnd` (T-52a, called by `crate::ui::menu::Menu`).
+/// Open: `WS_EX_NOACTIVATE` off and the T-07 hand-back off (the menu takes the foreground on purpose, the
+/// hand-back would undo it), input queued for the UI. Close: queueing stops, `WS_EX_NOACTIVATE` and the
+/// hand-back are restored as they were. The caller moves the foreground afterwards.
+pub fn set_menu_open(hwnd: HWND, open: bool) {
+    if MENU_OPEN.load(Ordering::Relaxed) == open {
+        return;
+    }
+    let no_activate = if open {
+        MENU_SAVED_NO_ACTIVATE.store(NO_ACTIVATE.load(Ordering::Relaxed), Ordering::Relaxed);
+        false
+    } else {
+        MENU_SAVED_NO_ACTIVATE.load(Ordering::Relaxed)
+    };
+    MENU_OPEN.store(open, Ordering::Relaxed);
+    NO_ACTIVATE.store(no_activate, Ordering::Relaxed);
+    MOUSE_TRACKED.store(false, Ordering::Relaxed);
+    if !open {
+        UI_MESSAGES.with(|q| q.borrow_mut().clear());
+    }
+    // SAFETY: our own window; only the WS_EX_NOACTIVATE bit of the extended style changes.
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        let bit = WS_EX_NOACTIVATE.0 as isize;
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, if no_activate { ex | bit } else { ex & !bit });
+        if !open && GetCapture() == hwnd {
+            let _ = ReleaseCapture();
+        }
+    }
+}
+
+/// The input messages queued for the UI since the last call (see [`set_menu_open`]).
+pub fn take_ui_messages() -> Vec<(u32, usize, isize)> {
+    UI_MESSAGES.with(|q| std::mem::take(&mut *q.borrow_mut()))
+}
+
+/// The cursor shown over the client area while the menu is open: a system cursor (`IDC_*` number), or
+/// `None` to hide it (ImGui's choice, `crate::ui::input::cursor_id`).
+pub fn set_menu_cursor(id: Option<u16>) {
+    MENU_CURSOR.store(id.map_or(0, u32::from), Ordering::Relaxed);
+}
+
+/// The menu part of the window procedure: queues the routed messages for the UI, captures the mouse while
+/// a button is down, sets the cursor. `Some` when the message is answered here.
+fn menu_wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> Option<LRESULT> {
+    let open = MENU_OPEN.load(Ordering::Relaxed);
+    if !(open && ui_input::routed(msg) || msg == ui_input::WM_DPICHANGED) {
+        if open && msg == WM_SETCURSOR && lparam.0 & 0xFFFF == ui_input::HTCLIENT {
+            let id = MENU_CURSOR.load(Ordering::Relaxed);
+            // SAFETY: system cursors; a null cursor hides it.
+            unsafe {
+                let cursor = (id != 0)
+                    .then(|| LoadCursorW(None, PCWSTR(id as usize as *const u16)).ok())
+                    .flatten();
+                SetCursor(cursor);
+            }
+            return Some(LRESULT(1));
+        }
+        return None;
+    }
+    UI_MESSAGES.with(|q| q.borrow_mut().push((msg, wparam.0, lparam.0)));
+    // SAFETY: mouse capture and leave tracking of our own window; the capture is released on the button up or
+    // when the menu closes.
+    unsafe {
+        match msg {
+            // ImGui forgets the mouse when it leaves the window (hover state), which needs WM_MOUSELEAVE.
+            WM_MOUSEMOVE if !MOUSE_TRACKED.swap(true, Ordering::Relaxed) => {
+                let mut t = TRACKMOUSEEVENT {
+                    cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+                    dwFlags: TME_LEAVE,
+                    hwndTrack: hwnd,
+                    dwHoverTime: 0,
+                };
+                let _ = TrackMouseEvent(&mut t);
+            }
+            ui_input::WM_MOUSELEAVE => MOUSE_TRACKED.store(false, Ordering::Relaxed),
+            WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
+                SetCapture(hwnd);
+            }
+            WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP if GetCapture() == hwnd => {
+                let _ = ReleaseCapture();
+            }
+            _ => {}
+        }
+    }
+    ui_input::consumes(msg).then_some(LRESULT(0))
+}
 
 static NO_ACTIVATE: AtomicBool = AtomicBool::new(false);
 /// The output window, 0 before it exists.
@@ -217,6 +331,8 @@ impl Drop for Output {
 /// that monitor. It does not take the focus itself. Used when the source is lost for too long (T-56).
 pub fn drop_to_windowed(hwnd: HWND, client: (i32, i32)) {
     NO_ACTIVATE.store(false, Ordering::Relaxed);
+    // A menu open now must not restore the non-activating mode when it closes.
+    MENU_SAVED_NO_ACTIVATE.store(false, Ordering::Relaxed);
     unsafe {
         let mon = monitor_rect(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).unwrap_or(RECT {
             left: 0,
@@ -283,6 +399,9 @@ pub fn set_title(hwnd: HWND, title: &str) {
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if let Some(r) = menu_wndproc(hwnd, msg, wparam, lparam) {
+        return r;
+    }
     match msg {
         WM_MOUSEACTIVATE if NO_ACTIVATE.load(Ordering::Relaxed) => LRESULT(MA_NOACTIVATE as isize),
         WM_ACTIVATE => {
