@@ -156,6 +156,19 @@ impl Headless {
         target: (u32, u32),
         format: TargetFormat,
     ) -> Res<Rendered> {
+        let frames: Vec<_> = frames.iter().map(|&(f, v)| (f, v, params)).collect();
+        self.render_burst_params(&frames, settings, target, format)
+    }
+
+    /// [`Headless::render_burst`] with the parameters of each frame: the frames flip parameters while
+    /// they overlap in flight (identity stages skipped and run again, ARCHITECTURE 3.7).
+    pub fn render_burst_params(
+        &mut self,
+        frames: &[(Option<SourceFrame<'_>>, View, &Params)],
+        settings: &Settings,
+        target: (u32, u32),
+        format: TargetFormat,
+    ) -> Res<Rendered> {
         if target.0 == 0 || target.1 == 0 || frames.is_empty() {
             return Err("headless render: empty target or no frame".into());
         }
@@ -164,7 +177,7 @@ impl Headless {
         // submission before returning Ok; on any path the device is idled before `s` is destroyed, so
         // the GPU no longer uses the scratch objects.
         unsafe {
-            let out = self.run(&mut s, frames, settings, params, target, format);
+            let out = self.run(&mut s, frames, settings, target, format);
             let _ = self.ctx.device.device_wait_idle();
             self.pipeline.collect_all(&self.ctx);
             s.destroy(&self.ctx.device);
@@ -179,9 +192,8 @@ impl Headless {
     unsafe fn run(
         &mut self,
         s: &mut Scratch,
-        frames: &[(Option<SourceFrame<'_>>, View)],
+        frames: &[(Option<SourceFrame<'_>>, View, &Params)],
         settings: &Settings,
-        params: &Params,
         target: (u32, u32),
         format: TargetFormat,
     ) -> Res<Rendered> {
@@ -193,7 +205,7 @@ impl Headless {
 
         // Every frame but the last: recorded and submitted without waiting for the GPU.
         let (last, earlier) = frames.split_last().expect("frames is not empty");
-        for (frame, view) in earlier {
+        for (frame, view, params) in earlier {
             let t = self.next_target(s, extent, format)?;
             self.pipeline.wait_slot(ctx)?;
             if let Some(f) = frame {
@@ -203,7 +215,7 @@ impl Headless {
             self.pipeline.submit(ctx, &[], &[], &[])?;
         }
 
-        let (frame, view) = last;
+        let (frame, view, params) = last;
         let t = self.next_target(s, extent, format)?;
         self.pipeline.wait_slot(ctx)?;
         if let Some(f) = frame {
@@ -457,6 +469,18 @@ impl Headless {
     /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`.
     pub fn timing_names(&self) -> Vec<&'static str> {
         self.pipeline.timing_names()
+    }
+
+    /// Chain slots that recorded a pass in the last frame planned (a stage or a resample copy; `decode`
+    /// and `encode` are not counted): drops when identity stages are skipped.
+    pub fn last_chain_passes(&self) -> usize {
+        self.pipeline.chain_passes()
+    }
+
+    /// Chain slots the last frame planned routed around: disabled, placeholder or identity stages that
+    /// keep their domain (nothing recorded, no image, no barrier).
+    pub fn last_skipped_slots(&self) -> Vec<&'static str> {
+        self.pipeline.skipped_slots()
     }
 
     /// Names of the chain slots, in order (`signal`, `amp`, `gun`, `screen`, `phosphor`, `optics`).

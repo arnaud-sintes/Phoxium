@@ -395,7 +395,8 @@ pub(super) enum ImgRef {
 enum Mode {
     /// The slot's stage runs.
     Run,
-    /// Bypassed, same domain: nothing recorded, the next slot reads the same image.
+    /// Same domain and not run (disabled, placeholder, or an identity stage, [`Stage::is_identity`]):
+    /// nothing recorded, the next slot reads the same image.
     Skip,
     /// Bypassed, domain change: nearest resample into the slot's output image.
     Resample,
@@ -1049,7 +1050,7 @@ impl Pipeline {
     ) -> Res<()> {
         // The same constants as `record` (image sizes included), so its plan reallocates nothing.
         let fc = self.live_constants(view, settings, params, extent);
-        self.plan_frame(ctx, view, &fc, settings, format).map(|_| ())
+        self.plan_frame(ctx, view, &fc, settings, params, format).map(|_| ())
     }
 
     /// The `FrameConstants` of a live frame (before its index and time): the tube placed from the
@@ -1095,7 +1096,7 @@ impl Pipeline {
         // A frame recorded but never submitted nor abandoned: its image states are rolled back.
         self.abandon();
         let cur = self.current;
-        let planned = self.plan_frame(ctx, view, &fc, settings, target.format);
+        let planned = self.plan_frame(ctx, view, &fc, settings, params, target.format);
         // An injection is used by this frame or dropped with it (on an error).
         let inject_at = self.slots[cur].inject_at.take();
         let Planned {
@@ -1139,6 +1140,7 @@ impl Pipeline {
         view: View,
         fc: &FrameConstants,
         settings: &Settings,
+        params: &Params,
         target_format: vk::Format,
     ) -> Res<Planned> {
         settings.validate()?;
@@ -1189,9 +1191,13 @@ impl Pipeline {
             };
             for i in first..self.chain.len() {
                 let l = &self.chain[i];
-                let mode = if l.enabled && l.stage.pass().is_some() {
+                let same_domain = l.reg.input == l.reg.output;
+                // An identity stage of a same-domain slot is routed around like a disabled slot, decided
+                // again every frame from this frame's parameters.
+                let mode = if l.enabled && l.stage.pass().is_some() && !(same_domain && l.stage.is_identity(params, fc))
+                {
                     Mode::Run
-                } else if l.reg.input == l.reg.output {
+                } else if same_domain {
                     Mode::Skip
                 } else {
                     Mode::Resample
@@ -1414,6 +1420,21 @@ impl Pipeline {
     /// with the image it left for the next one (a bypassed same-domain slot names its input).
     pub(super) fn routed(&self) -> &[(&'static str, ImgRef)] {
         &self.routed
+    }
+
+    /// Chain slots that recorded a pass in the last planned frame: a stage or a resample copy (decode and
+    /// encode not counted). A slot before an injection point is not part of the frame.
+    pub(super) fn chain_passes(&self) -> usize {
+        self.plan.iter().filter(|p| p.1 != Mode::Skip).count()
+    }
+
+    /// Slots the last planned frame routed around (disabled, placeholder or identity, same domain).
+    pub(super) fn skipped_slots(&self) -> Vec<&'static str> {
+        self.plan
+            .iter()
+            .filter(|p| p.1 == Mode::Skip)
+            .map(|p| self.chain[p.0].reg.name)
+            .collect()
     }
 
     /// Records the barrier that makes image `r` a copy source (tracked like every other access) and

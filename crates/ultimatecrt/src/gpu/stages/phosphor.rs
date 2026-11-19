@@ -48,9 +48,12 @@
 //! off: `shaders/saturation.comp`; both on: `shaders/phosphor.comp` (same function, one pass); a change of
 //! `phosphor_saturation` restarts the persistence history. Both off (the defaults): the copy pass below.
 //!
-//! `phosphor_persistence` and `phosphor_saturation` off (the defaults): the pass is the exact copy of `resample.comp` (same size,
-//! FP16 texels copied without arithmetic), so the chain stays bit exact; the slot's enable flag off
-//! skips it as before.
+//! `phosphor_persistence` and `phosphor_saturation` off (the defaults): the stage is an exact identity
+//! ([`Stage::is_identity`]) and the pipeline skips the slot like a disabled one: no pass, no image, no
+//! barrier, the next slot reads the `screen` image, so the chain stays bit exact and the full-image copy
+//! is not paid. `prepare` then sees `runs` false (history freed, clear armed), so persistence on again
+//! behaves like the off to on transition. The copy pass (`COPY_SPV`) remains for a stage that runs while
+//! both are off, which no frame does any more; it is kept because the pass is the stage's standard one.
 
 use std::collections::HashMap;
 
@@ -312,6 +315,13 @@ impl Stage for Phosphor {
         )?[0];
         self.reset = true;
         Ok(())
+    }
+
+    /// Persistence and saturation both off: the exact copy, no history. The pipeline skips the slot (no
+    /// pass) and calls `prepare` with `runs` false, which frees the history and arms the clear, so
+    /// switching persistence on later starts like the first time (primed to the picture).
+    fn is_identity(&self, params: &Params, _fc: &FrameConstants) -> bool {
+        !params.phosphor_persistence && !params.phosphor_saturation
     }
 
     unsafe fn prepare(&mut self, ctx: &Context, fc: &FrameConstants, params: &Params, runs: bool) -> Res<()> {
