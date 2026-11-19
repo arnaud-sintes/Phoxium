@@ -678,6 +678,12 @@ fn client_size(hwnd: HWND) -> (u32, u32) {
     (r.right.max(0) as u32, r.bottom.max(0) as u32)
 }
 
+/// `WM_SYSCOMMAND` of a bare Alt or F10 press: `SC_KEYMENU` with no character (Alt+Space, which opens the
+/// window menu on purpose, carries the space). Pure.
+fn is_bare_key_menu(wparam: usize, lparam: isize) -> bool {
+    (wparam & 0xFFF0) as u32 == SC_KEYMENU && lparam == 0
+}
+
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_ERASEBKGND => LRESULT(1),
@@ -709,6 +715,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         // No "invalid key" beep for Alt+Enter.
         WM_SYSCHAR if wparam.0 == 0x0D => LRESULT(0),
+        // A bare Alt (or F10) press would enter the keyboard menu mode, whose modal loop stops the frame loop
+        // until the next key or click: the demo stops painting and a capture gets no frames (CAP-4, 2026-11-19).
+        // Games ignore it too.
+        WM_SYSCOMMAND if is_bare_key_menu(wparam.0, lparam.0) => LRESULT(0),
         WM_DESTROY => {
             PostQuitMessage(0);
             LRESULT(0)
@@ -928,5 +938,18 @@ fn dib_header(w: usize, h: usize) -> BITMAPINFO {
             ..Default::default()
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod key_menu_tests {
+    use super::is_bare_key_menu;
+
+    #[test]
+    fn only_the_bare_alt_menu_key_is_swallowed() {
+        assert!(is_bare_key_menu(0xF100, 0)); // SC_KEYMENU, bare Alt or F10
+        assert!(is_bare_key_menu(0xF102, 0)); // the low four bits are used by Windows
+        assert!(!is_bare_key_menu(0xF100, 0x20)); // Alt+Space: the window menu stays
+        assert!(!is_bare_key_menu(0xF060, 0)); // SC_CLOSE (Alt+F4) untouched
     }
 }
