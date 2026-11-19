@@ -1,14 +1,18 @@
-﻿<#
+<#
 .SYNOPSIS
     Live focus regression check (T-07): runs pixel-demo and ultimatecrt for N seconds under the independent
     focus monitor and prints PASS or FAIL.
 .DESCRIPTION
     Builds nothing. Starts scripts\focus-monitor.ps1 (WinEvent hook, own process), then pixel-demo --scale 4
-    (the source, expected in the foreground), then ultimatecrt with -UcrtArgs plus --exit-after. FAIL when any
-    foreground or focus event lands on an ultimatecrt window while it runs, or when the foreground at the end
-    is not the window that had it before ultimatecrt started. Refuses to run (exit 2) if the user was active
-    in the last -MinIdle seconds, and reports ABORTED if user input happens during the run (the result is
-    then meaningless). Every process it started is stopped at the end.
+    (the source; put in the foreground with a synthetic Alt press and SetForegroundWindow, which is the
+    script's own input and resets the idle clock), then ultimatecrt (or -Exe from -Bin) with -UcrtArgs plus
+    --exit-after. Result: PASS (exit 0) when no foreground change happens while it runs; MITIGATED (exit 4)
+    when the only changes are hand-backs (the output became foreground and the previous window got it back
+    within 1 s, no focus event on the output: the T-07 mitigation at work); FAIL (exit 1) otherwise.
+    Refuses to run (exit 2) if the user was active in the last -MinIdle seconds, and reports ABORTED (exit 3)
+    if user input happens after its own injection (the result is then meaningless). -ViaWmi starts the
+    program through WMI in a new hidden console instead of this shell's console. Every process it started
+    is stopped at the end.
     Output folder: the monitor CSV (titles can hold private content; delete it after review) and the
     ultimatecrt console output.
 .EXAMPLE
@@ -22,11 +26,14 @@ param(
     [string]$Label = 'run',
     [int]$MinIdle = 60,
     [switch]$NoSource,
-    [string]$Exe = 'ultimatecrt.exe'
+    [string]$Exe = 'ultimatecrt.exe',
+    [string]$DemoBin = '',
+    [switch]$ViaWmi
 )
 
 $ErrorActionPreference = 'Stop'
 $Bin = (Resolve-Path $Bin).Path
+if (-not $DemoBin) { $DemoBin = $Bin }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 if (-not ('UcrtIdle' -as [type])) {
@@ -37,6 +44,12 @@ public static class UcrtIdle {
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII i);
     [DllImport("kernel32.dll")] static extern uint GetTickCount();
     public static double Seconds() { var i = new LII(); i.cbSize = 8; GetLastInputInfo(ref i); return (GetTickCount() - i.dwTime) / 1000.0; }
+    [DllImport("user32.dll")] static extern void keybd_event(byte vk, byte scan, uint flags, UIntPtr extra);
+    [DllImport("user32.dll")] static extern bool SetForegroundWindow(IntPtr h);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    // Synthetic Alt press (resets the idle clock), then SetForegroundWindow: the usual way for a background
+    // process to hand the foreground to a window it started.
+    public static bool Activate(IntPtr h) { keybd_event(0x12, 0, 0, UIntPtr.Zero); keybd_event(0x12, 0, 2, UIntPtr.Zero); SetForegroundWindow(h); return GetForegroundWindow() == h; }
 }
 '@
 }
@@ -48,7 +61,7 @@ $csv = Join-Path $OutDir "$Label-focus.csv"
 $ucrtOut = Join-Path $OutDir "$Label-ucrt.txt"
 $monitor = Join-Path $PSScriptRoot 'focus-monitor.ps1'
 $started = @()
-$t0 = Get-Date
+$t0 = Get-Date; $inject = $t0
 try {
     $mon = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "`"$monitor`"",
         '-OutFile', "`"$csv`"", '-DurationSeconds', ($Seconds + 12)) -NoNewWindow `
@@ -56,18 +69,32 @@ try {
     $started += $mon
     Start-Sleep -Seconds 3
     if (-not $NoSource) {
-        $demo = Start-Process (Join-Path $Bin 'pixel-demo.exe') -ArgumentList '--scale 4' -PassThru
+        $demo = Start-Process (Join-Path $DemoBin 'pixel-demo.exe') -ArgumentList '--scale 4' -PassThru
         $started += $demo
-        Start-Sleep -Seconds 3
+        Start-Sleep -Seconds 2
+        $demo.Refresh(); $hDemo = $demo.MainWindowHandle
+        $ok = [UcrtIdle]::Activate($hDemo); $inject = Get-Date
+        Write-Output ("[$Label] own injection (Alt + SetForegroundWindow on pixel-demo) at {0}: foreground={1}" -f $inject.ToString('HH:mm:ss.fff'), $ok)
+        Start-Sleep -Seconds 2
     }
     $ucrtStart = Get-Date
-    $ucrt = Start-Process (Join-Path $Bin $Exe) -ArgumentList "$UcrtArgs --exit-after $Seconds" `
-        -RedirectStandardOutput $ucrtOut -RedirectStandardError "$ucrtOut.err" -NoNewWindow -PassThru
+    if ($ViaWmi) {
+        # Detached from this shell's console: started by the WMI service in a new hidden console.
+        $si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
+        $cmd = "cmd.exe /c `"`"$(Join-Path $Bin $Exe)`" $UcrtArgs --exit-after $Seconds > `"$ucrtOut`" 2>&1`""
+        $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; ProcessStartupInformation = $si }
+        Start-Sleep -Milliseconds 500
+        $ucrt = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($res.ProcessId)" | ForEach-Object { Get-Process -Id $_.ProcessId } | Select-Object -First 1
+        if (-not $ucrt) { $ucrt = Get-Process -Id $res.ProcessId }
+    } else {
+        $ucrt = Start-Process (Join-Path $Bin $Exe) -ArgumentList "$UcrtArgs --exit-after $Seconds" `
+            -RedirectStandardOutput $ucrtOut -RedirectStandardError "$ucrtOut.err" -NoNewWindow -PassThru
+    }
     $started += $ucrt
     $aborted = $false
     while (-not $ucrt.HasExited -and ((Get-Date) - $ucrtStart).TotalSeconds -lt ($Seconds + 15)) {
         Start-Sleep -Seconds 1
-        if ([UcrtIdle]::Seconds() -lt ((Get-Date) - $t0).TotalSeconds - 1) { $aborted = $true; break }
+        if ([UcrtIdle]::Seconds() -lt ((Get-Date) - $inject).TotalSeconds - 1) { $aborted = $true; break }
     }
     $ucrtEnd = Get-Date
     Start-Sleep -Seconds 2
@@ -91,7 +118,18 @@ foreach ($r in $during) {
 }
 $idle1 = [UcrtIdle]::Seconds()
 Write-Output ("[$Label] idle before {0:N0} s, after {1:N0} s" -f $idle0, $idle1)
-if ($aborted -or $idle1 -lt (($ucrtEnd - $t0).TotalSeconds)) { Write-Output "[$Label] ABORTED: user input during the run"; exit 3 }
-if (@($bad).Count -gt 0 -or @($fgChanges).Count -gt 0) { Write-Output "[$Label] FAIL"; exit 1 }
+if ($aborted -or $idle1 -lt (($ucrtEnd - $inject).TotalSeconds)) { Write-Output "[$Label] ABORTED: user input during the run"; exit 3 }
+# A hand-back (T-07 mitigation): the output became foreground and the window that had the foreground
+# before got it back within 1 s, with no keyboard focus on the output. Anything else is a failure.
+$fg = @($fgChanges); $handedBack = 0; $other = 0; $i = 0
+while ($i -lt $fg.Count) {
+    $a = $fg[$i]; $b = if ($i + 1 -lt $fg.Count) { $fg[$i + 1] } else { $null }
+    if ($a.exe -ieq $Exe -and $b -and $b.hwnd -eq $before.hwnd -and
+        ([int64]$b.t_ms - [int64]$a.t_ms) -le 1000) { $handedBack++; $i += 2 } else { $other++; $i++ }
+}
+$focusOnOutput = @($during | Where-Object { $_.exe -ieq $Exe -and $_.event -eq 'focus' }).Count
+Write-Output ("[$Label] handed back: {0}, other foreground changes: {1}, focus events on the output: {2}" -f $handedBack, $other, $focusOnOutput)
+if ($other -gt 0 -or $focusOnOutput -gt 0) { Write-Output "[$Label] FAIL"; exit 1 }
+if ($handedBack -gt 0) { Write-Output "[$Label] MITIGATED (foreground blips handed back, focus never moved)"; exit 4 }
 Write-Output "[$Label] PASS"
 exit 0

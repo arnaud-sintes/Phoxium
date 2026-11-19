@@ -291,6 +291,12 @@ pub fn run() -> Res<()> {
         }
 
         if stat_time.elapsed() >= Duration::from_secs(1) {
+            let handbacks = output::take_handbacks();
+            if handbacks > 0 {
+                println!(
+                    "focus: Windows activated the output {handbacks}x at {now:.1} s; foreground handed back (T-07)"
+                );
+            }
             let captured = captured_base + capture.as_ref().map_or(0, |c| c.frames_captured());
             // The one message to show: target lost, black or silent frames, smoothed source.
             let now_notice = if reattach.as_ref().is_some_and(|r| !r.is_attached()) {

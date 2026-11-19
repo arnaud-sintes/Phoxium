@@ -6,8 +6,16 @@
 //!
 //! Ctrl+Alt+Q is a global hotkey that always quits, since a non-activating fullscreen window
 //! cannot receive keyboard input.
+//!
+//! Hand-back (T-07): `WS_EX_NOACTIVATE`, `SW_SHOWNOACTIVATE`, `MA_NOACTIVATE`, `SWP_NOACTIVATE` and a
+//! disabled window do not stop Windows from activating the window once, about 25 s after the
+//! process starts (initiator outside the program; it happens with no Vulkan and no capture, see
+//! QUESTIONS OUT-2). A non-activating output therefore hands the foreground back at once when it is
+//! activated: to the window it came from, else the last other foreground window sampled by [`pump`],
+//! else the source window. `WM_ACTIVATE` is answered without `DefWindowProc`, so the keyboard focus
+//! never moves to the output; what remains is a foreground blip of about 0.1 s.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
 use windows::{
     core::{w, Result, HSTRING},
@@ -26,6 +34,37 @@ use windows::{
 };
 
 static NO_ACTIVATE: AtomicBool = AtomicBool::new(false);
+/// The output window, 0 before it exists.
+static OWN: AtomicIsize = AtomicIsize::new(0);
+/// The source window (`Options::follow`), 0 if none.
+static SOURCE: AtomicIsize = AtomicIsize::new(0);
+/// The last foreground window that was not the output, sampled at every [`pump`].
+static LAST_FOREGROUND: AtomicIsize = AtomicIsize::new(0);
+/// Activations handed back so far (reported by [`take_handbacks`]).
+static HANDBACKS: AtomicU32 = AtomicU32::new(0);
+
+/// Where a non-activating output sends the foreground when Windows activates it anyway: the window
+/// the activation came from (`from`, from `WM_ACTIVATE`, often 0 across threads), else the last
+/// foreground window seen that was not the output, else the source window. `None` when the output
+/// may be active (activating mode, or a deactivation) or no candidate is known. Pure.
+pub fn hand_back_target(
+    no_activate: bool,
+    activated: bool,
+    own: isize,
+    from: isize,
+    last: isize,
+    source: isize,
+) -> Option<isize> {
+    if !no_activate || !activated {
+        return None;
+    }
+    [from, last, source].into_iter().find(|&h| h != 0 && h != own)
+}
+
+/// Activations handed back since the last call (for a console line).
+pub fn take_handbacks() -> u32 {
+    HANDBACKS.swap(0, Ordering::Relaxed)
+}
 
 pub struct Options {
     pub fullscreen: bool,
@@ -67,6 +106,8 @@ fn monitor_rect(m: HMONITOR) -> Option<RECT> {
 
 pub fn create(opts: &Options) -> Result<Output> {
     NO_ACTIVATE.store(opts.no_activate || opts.fullscreen, Ordering::Relaxed);
+    SOURCE.store(opts.follow.0 as isize, Ordering::Relaxed);
+    LAST_FOREGROUND.store(unsafe { GetForegroundWindow() }.0 as isize, Ordering::Relaxed);
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
         let class = WNDCLASSW {
@@ -144,6 +185,7 @@ pub fn create(opts: &Options) -> Result<Output> {
             }
             eprintln!("warning: cannot register Ctrl+Alt+Q: {e}");
         }
+        OWN.store(hwnd.0 as isize, Ordering::Relaxed);
         let _ = ShowWindow(
             hwnd,
             if NO_ACTIVATE.load(Ordering::Relaxed) {
@@ -210,6 +252,10 @@ pub fn drop_to_windowed(hwnd: HWND, client: (i32, i32)) {
 /// Processes pending messages. Returns false once the window asked to quit.
 pub fn pump() -> bool {
     unsafe {
+        let fg = GetForegroundWindow().0 as isize;
+        if fg != 0 && fg != OWN.load(Ordering::Relaxed) {
+            LAST_FOREGROUND.store(fg, Ordering::Relaxed);
+        }
         let mut msg = MSG::default();
         while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
             if msg.message == WM_QUIT {
@@ -239,6 +285,25 @@ pub fn set_title(hwnd: HWND, title: &str) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_MOUSEACTIVATE if NO_ACTIVATE.load(Ordering::Relaxed) => LRESULT(MA_NOACTIVATE as isize),
+        WM_ACTIVATE => {
+            let target = hand_back_target(
+                NO_ACTIVATE.load(Ordering::Relaxed),
+                (wparam.0 & 0xFFFF) as u32 != WA_INACTIVE,
+                hwnd.0 as isize,
+                lparam.0,
+                LAST_FOREGROUND.load(Ordering::Relaxed),
+                SOURCE.load(Ordering::Relaxed),
+            );
+            match target {
+                // Answered without DefWindowProc, which would move the keyboard focus to the output.
+                Some(h) => {
+                    let _ = SetForegroundWindow(HWND(h as *mut std::ffi::c_void));
+                    HANDBACKS.fetch_add(1, Ordering::Relaxed);
+                    LRESULT(0)
+                }
+                None => DefWindowProcW(hwnd, msg, wparam, lparam),
+            }
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_KEYDOWN if wparam.0 == 0x1B => {
             let _ = DestroyWindow(hwnd);
@@ -253,5 +318,44 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hand_back_target;
+
+    const OWN: isize = 0x10;
+    const FROM: isize = 0x20;
+    const LAST: isize = 0x30;
+    const SOURCE: isize = 0x40;
+
+    #[test]
+    fn an_activating_output_keeps_its_activation() {
+        assert_eq!(hand_back_target(false, true, OWN, FROM, LAST, SOURCE), None);
+    }
+
+    #[test]
+    fn a_deactivation_is_left_alone() {
+        assert_eq!(hand_back_target(true, false, OWN, FROM, LAST, SOURCE), None);
+    }
+
+    #[test]
+    fn the_window_the_activation_came_from_comes_first() {
+        assert_eq!(hand_back_target(true, true, OWN, FROM, LAST, SOURCE), Some(FROM));
+    }
+
+    #[test]
+    fn across_threads_the_last_foreground_then_the_source_is_used() {
+        // WM_ACTIVATE gives 0 when the previous window belongs to another thread.
+        assert_eq!(hand_back_target(true, true, OWN, 0, LAST, SOURCE), Some(LAST));
+        assert_eq!(hand_back_target(true, true, OWN, 0, 0, SOURCE), Some(SOURCE));
+    }
+
+    #[test]
+    fn the_output_itself_and_unknown_windows_are_never_targets() {
+        assert_eq!(hand_back_target(true, true, OWN, OWN, OWN, SOURCE), Some(SOURCE));
+        assert_eq!(hand_back_target(true, true, OWN, 0, 0, 0), None);
+        assert_eq!(hand_back_target(true, true, OWN, OWN, 0, OWN), None);
     }
 }
