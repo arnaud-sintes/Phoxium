@@ -1,0 +1,32 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `screen`, warp path, pass 1 of 2 (T-91, include/beam_warp.glsl): the standard beam's pass-1 entries of every
+// raster line at raster columns on a uniform grid, into the stage's line images (set 2). Recorded by
+// src/gpu/stages/screen.rs only for a non-separable geometry (curved faceplate, pincushion, trapezoid, rotation)
+// with the standard quality; the separable geometries keep screen.comp alone.
+
+#include "params.glsl"
+#include "common.glsl"
+// Push constants (src/gpu/stages/screen.rs WarpPush): abl_runs as in screen.comp; the line image's grid.
+layout(push_constant) uniform ScreenPush {
+    uint abl_runs;
+    uint ox;
+    int pad;
+} screen_push;
+#define GEOMETRY_ABL_RUNS (screen_push.abl_runs != 0u)
+#define ABL_STATE_QUALIFIER readonly
+#define BEAM_NO_TILE
+#include "abl.glsl"
+#include "geometry.glsl"
+#include "beam.glsl"
+#include "beam_warp.glsl"
+
+// One row segment of one line per workgroup: the invocations read the same amp row.
+layout(local_size_x = 64, local_size_y = 1) in;
+
+layout(set = 0, binding = 2) uniform sampler2D current_in;
+
+void main() {
+    beam_lines_entry(current_in, ivec2(gl_GlobalInvocationID.xy));
+}

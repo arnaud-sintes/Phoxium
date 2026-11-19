@@ -414,8 +414,9 @@ fn with_margin(mut fc: FrameConstants, m: [i32; 2]) -> FrameConstants {
 /// separable path, and without spot growth it is still the exact form: standard equals reference within the
 /// FP16 storage. With the PVM-20M4U growth the mean error stays within the contract and the max within
 /// [`GEOMETRY_MAX`] (each separable part alone, then all together). A curved faceplate (or rotation,
-/// trapezoid, pincushion) bends the raster's rows and columns across a tile: the standard quality falls back to
-/// the reference form, bit for bit.
+/// trapezoid, pincushion) bends the raster's rows and columns across a tile: the standard quality takes the
+/// warp path (T-91, `beam_warp.glsl`; until T-91 it fell back to the reference form bit for bit, which this test
+/// asserted) and keeps the same contract against the reference (tests/stage_beam_warp.rs for the full matrix).
 #[test]
 fn standard_follows_the_geometry() {
     let test = "stage_beam_fast geometry";
@@ -536,7 +537,16 @@ fn standard_follows_the_geometry() {
     ] {
         let (r, _) = screen(&mut gpu, fc, &quality(&curved, BEAM_QUALITY_REFERENCE), &amp);
         let (s, _) = screen(&mut gpu, fc, &quality(&curved, BEAM_QUALITY_STANDARD), &amp);
-        assert_eq!(r.rgba, s.rgba, "{test}: {name}: standard falls back to the reference");
+        let (mae, max) = errors(&r, &s);
+        println!(
+            "{test}: {name}, warp path: MAE {:.4} %, max {:.4} % of white",
+            mae * 100.0,
+            max * 100.0
+        );
+        assert!(
+            mae <= CONTRACT_MAE && max <= GEOMETRY_MAX && max > 0.0,
+            "{test}: {name}: MAE {mae}, max {max}"
+        );
     }
     drop(gpu);
     common::assert_no_validation_messages(&counter);
@@ -545,7 +555,8 @@ fn standard_follows_the_geometry() {
 /// GPU time of `screen` with the geometry (T-37), pixel art at 1536 x 1440 (256 x 240 native), mask tier C,
 /// best / median / worst of `UCRT_PROFILE_FRAMES` frames (default 9), per quality: identity; a separable
 /// geometry (raster margin 7 px, overscan, static misconvergence: the standard path still applies); a
-/// spherical faceplate (19 in 1R, eye at 600 mm: the standard quality falls back to the reference form).
+/// spherical faceplate (19 in 1R, eye at 600 mm) and a pincushion: the standard quality takes the warp path
+/// (T-91; before T-91 it fell back to the reference form). Presets 01 and 05: tests/stage_beam_warp.rs.
 /// Printed, not asserted. Run with `cargo test -p ultimatecrt --test stage_beam_fast screen_profile_geometry
 /// -- --ignored --nocapture`.
 #[test]

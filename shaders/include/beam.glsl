@@ -303,20 +303,24 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
 // without spot growth; with it the mean error keeps the contract, the max moves with the pixel grid's alignment
 // to the samples, GEOMETRY_MAX in tests/stage_beam_fast.rs). A curved faceplate, rotation, trapezoid or pincushion bends
 // the rows and columns of the raster across the tile, so the separable form no longer applies: the standard
-// quality then falls back to the reference form, per pixel (beam_eval), at the reference cost (measured in
-// tests/stage_beam_fast.rs, screen_profile_geometry). The identity geometry keeps this path and its cost.
+// quality then takes the two-pass warp path of beam_warp.glsl (T-91: the same pass-1 entries per raster line and
+// raster column into a line image, then per host pixel the interpolated entries of the lines within reach at its
+// raster position), and the reference form only where the warp path's sampling rule does not hold (a spot under
+// 0.3 raster px). The identity geometry keeps this path and its cost.
 #define BEAM_TILE_W 8
 #define BEAM_TILE_H 32
 // Lines per shared-memory chunk: one pass-1 entry per invocation; more lines are taken in chunks.
 const int BEAM_TILE_LINES = BEAM_TILE_H;
 const int BEAM_TILE_ENTRIES = BEAM_TILE_LINES * BEAM_TILE_W;
 
+#ifndef BEAM_NO_TILE
 // Per entry: core light H (rgb) and tail light (rgb); core sigma m^1/2 and V; tail sigma.
 shared vec3 beam_sh_core[BEAM_TILE_ENTRIES];
 shared vec3 beam_sh_core_sigma[BEAM_TILE_ENTRIES];
 shared vec3 beam_sh_core_var[BEAM_TILE_ENTRIES];
 shared vec3 beam_sh_tail[BEAM_TILE_ENTRIES];
 shared vec3 beam_sh_tail_sigma[BEAM_TILE_ENTRIES];
+#endif
 
 // Pass 1 accumulators of one (line, column) entry: sum h, sum h sigma^2 and sum h sigma^4 of the core, sum
 // h and sum h sigma^2 of the tail.
@@ -384,6 +388,7 @@ vec3 beam_y_line(vec3 h, vec3 s, vec3 var, vec3 e0, vec3 e1, float far_y) {
     return h * (0.5 * (erf1 - erf0) + 0.125 * var * d3);
 }
 
+#ifndef BEAM_NO_TILE
 // Standard-quality beam of the workgroup's tile; every invocation of the workgroup must call it (barriers),
 // in uniform control flow, before any early return. Leaves the light of pixel q in beam_tile_light. Does
 // nothing (uniformly) for the reference quality, a non-separable geometry or while the tube is not placed.
@@ -503,5 +508,6 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
     }
     beam_tile_light = sum * r.pitch;
 }
+#endif
 
 #endif
