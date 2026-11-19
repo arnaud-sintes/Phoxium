@@ -116,10 +116,22 @@ unit = "1"
 default = "auto"
 values = ["auto", "integrated", "prefiltered"]
 tag = "D"
-source = "QUESTIONS PHY-2 (option A: automatic tiering by host pixels per triad); CRT.md Host-display resolution budget (masks below about 3 px per triad must be prefiltered, otherwise host-grid moire appears, which is not a real CRT artefact); crt-model mask.rs tier() and Mask::host_value"
-description = "How the mask is brought to host pixels. auto: exact area integral per host pixel from 3 host px per triad (tiers A and B), prefiltered below (tier C: the mask is averaged over one full period, so only its mean, 1, and the damper wires remain). integrated: area integral at any density (shows host-grid moire below 3 px per triad, for inspection). prefiltered: tier C at any density."
+source = "QUESTIONS PHY-2 (option A: automatic tiering by host pixels per triad; per axis since T-39c, D-15); CRT.md Host-display resolution budget (masks below about 3 px per triad must be prefiltered, otherwise host-grid moire appears, which is not a real CRT artefact); crt-model mask.rs tier() and Mask::host_value"
+description = "How the mask is brought to host pixels, per axis (T-39c). auto: each axis is area-integrated over the host pixel where its period is resolvable (horizontal from 3 host px per triad; vertical, slot mask and delta only, from a row period V / 2 or P / 2 of 2 host px) and prefiltered below (averaged over one whole period: one triad horizontally, V or P vertically), with the blend band mask_tier_blend in between; both axes prefiltered leaves only the mean, 1, and the damper wires. The decision is made once per frame on the CPU and the readouts report it. integrated: area integral at any density (shows host-grid moire below the limits, for inspection). prefiltered: both periodic axes prefiltered at any density."
 group = "Mask"
 
+[[param]]
+id = "mask_tier_blend"
+stage = "mask"
+type = "f32"
+unit = "px"
+default = 0.4
+min = 0.0
+max = 1.0
+tag = "D"
+source = "PLAN D-15, T-39c (review of T-39a: the mask snapped from flat to saturated RGB columns at 3.0 px per triad); crt-model mask.rs axis_tier"
+description = "Width of the blend band of mask_tier = auto, in host px per triad, centred on the 3 px per triad limit (0.4: 2.8 to 3.2). Inside it the horizontal prefilter box narrows linearly from one triad (lower edge) to one host pixel (upper edge), so the mask fades in instead of snapping; the vertical limit (2 px) has a band of the same relative width (blend x 2 / 3 px). 0 = hard switch at the limits."
+group = "Mask"
 [[param]]
 id = "mask_slot_period"
 stage = "mask"

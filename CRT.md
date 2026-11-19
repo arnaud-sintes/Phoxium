@@ -277,6 +277,7 @@ Triads per source pixel drives the whole look.
 - On 1080p (1440 px wide for 4:3), even the 26 in TV mask gets only about 2.2 px per triad.
 - crt-royale's README says shadow masks need 4K to 8K output. [S]
 - Masks below about 3 px per triad must be area-integrated (prefiltered) or enlarged (a "cell size" parameter), otherwise host-grid moiré appears. That moiré is not a real CRT artefact. [D]
+- The limit applies per axis. The vertical mask structure (slot rows of period V / 2 once averaged over x, delta rows of period P / 2) is the same for the three colours, so its limit is the sampling theorem's 2 host px per period, not 3. A delta mask at 3 px per triad has rows every 1.73 px and a slot mask with V = 0.83 p rows every 1.25 px: both alias vertically (27 % and 6 % ripple of the row means) although they resolve horizontally. [D]
 - An alternative is to use the host display's own subpixel layout (Sony Megatron approach), which needs knowledge of the panel (RGB stripe, BGR, WOLED, QD-OLED) and is panel-specific.
 
 ### Moiré

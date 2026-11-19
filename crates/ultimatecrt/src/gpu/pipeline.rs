@@ -135,7 +135,7 @@ impl Settings {
 }
 
 /// Per-frame constants, std140, laid out as the `FrameConstants` block of `shaders/include/common.glsl`
-/// (88 bytes, 4-byte fields only, two explicit padding fields; a test checks the offsets against the GLSL).
+/// (96 bytes, 4-byte fields only, two explicit padding fields; a test checks the offsets against the GLSL).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameConstants {
@@ -170,6 +170,11 @@ pub struct FrameConstants {
     /// the raster rectangle grown by this margin, so the spot's skirt past the raster's ends is drawn
     /// (`tube_size - 2 margin` is the raster). 0 in [`FrameConstants::new`]: the tube image is the raster.
     pub raster_margin: [i32; 2],
+    /// Mask footprint per axis, x and y (T-39c), decided on the CPU in f64 by
+    /// [`FrameConstants::with_mask_tiers`] (the pipeline applies it to every frame it records): 0 = one whole
+    /// period (prefiltered, closed form), 1 = the host pixel (area integral), between: the box width in host
+    /// px of the blend band.
+    pub mask_box_px: [f32; 2],
 }
 
 impl FrameConstants {
@@ -185,6 +190,7 @@ impl FrameConstants {
             tube_size: [(r[2] - r[0]) as i32, (r[3] - r[1]) as i32],
             amp_k: stages::AMP_K as i32,
             white_gain: [1.0; 3],
+            mask_box_px: [1.0; 2],
             ..Self::default()
         }
     }
@@ -1272,6 +1278,8 @@ impl Pipeline {
     ) -> Res<vk::CommandBuffer> {
         let cur = self.current;
         let s = &mut self.slots[cur];
+        // T-39c: the mask tiers of this frame, decided once on the CPU (the shader does not decide).
+        let fc = &fc.with_mask_tiers(params);
         // SAFETY: FrameConstants is #[repr(C)] with 4-byte fields only (no padding); both buffers are
         // mapped, host coherent, at least as large as what is copied, and not in use (fence waited).
         std::ptr::copy_nonoverlapping(
@@ -1657,11 +1665,12 @@ mod tests {
             (std::mem::offset_of!(FrameConstants, amp_k), "amp_k"),
             (std::mem::offset_of!(FrameConstants, white_gain), "white_gain"),
             (std::mem::offset_of!(FrameConstants, raster_margin), "raster_margin"),
+            (std::mem::offset_of!(FrameConstants, mask_box_px), "mask_box_px"),
         ];
         let rust: Vec<(usize, String)> = rust.iter().map(|&(o, n)| (o, n.to_string())).collect();
         assert_eq!(members, rust);
-        assert_eq!(size_of::<FrameConstants>(), 88);
-        assert!(glsl.contains("std140, 88 bytes"));
+        assert_eq!(size_of::<FrameConstants>(), 96);
+        assert!(glsl.contains("std140, 96 bytes"));
     }
 
     #[test]

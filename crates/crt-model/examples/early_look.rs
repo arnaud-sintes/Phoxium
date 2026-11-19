@@ -356,7 +356,7 @@ fn render(case: &Case, src: &[[u8; 3]]) -> Renders {
         }
     });
 
-    let ppt = case.px_per_triad();
+    let tiers = case.mask.axis_tiers(1.0 / hpx_w, mask::TierRule::default());
     let mut physical = vec![[0.0; 3]; HOST_W * HOST_H];
     let mut tier_c = vec![[0.0; 3]; HOST_W * HOST_H];
     let rect = |i: usize| {
@@ -374,7 +374,7 @@ fn render(case: &Case, src: &[[u8; 3]]) -> Renders {
         for (hx, out) in row.iter_mut().enumerate() {
             let i = hy * HOST_W + hx;
             let q = rect(i);
-            *out = [0, 1, 2].map(|c| beam[i][c] * case.mask.host_value(c, &q, ppt));
+            *out = [0, 1, 2].map(|c| beam[i][c] * case.mask.host_value(c, &q, tiers, hpx_w));
         }
     });
     Renders { beam, physical, tier_c }
