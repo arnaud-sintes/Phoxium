@@ -103,6 +103,7 @@ tag = "E"
 source = "PLAN D-13 (owner decision 2026-11-19): black rectangles around the game zone by default"
 description = "Colour of the output outside the tube rectangle, as output code values (0 to 1 per channel, red green blue). Black by default."
 group = "Source"
+widget = "color"
 
 [[param]]
 id = "source_display_aspect"
@@ -116,6 +117,7 @@ tag = "E"
 source = "CRT.md Pixel aspect ratio and QUESTIONS SRC-4: a source shown at a forced display aspect (4:3 = 1.3333) whatever its pixel count"
 description = "Forced display aspect of the picture (width over height, 4:3 = 1.3333). 0 = off: the aspect comes from source_par (raster_aspect par) or the tube (fill_tube, which wins)."
 group = "Source"
+advanced = true
 
 [[param]]
 id = "source_crop_mode"
@@ -128,6 +130,7 @@ tag = "E"
 source = "QUESTIONS SRC-1 and PLAN D-13: the client area of the window by default, a manual rectangle (--crop or the source profile), or the whole window"
 description = "Which part of the captured window is the source. auto: the client area. manual: the crop rectangle of the command line or of the source profile, inside the client area. none: the whole window, frame included."
 group = "Source"
+advanced = true
 
 [[param]]
 id = "source_divisor_mode"
@@ -140,3 +143,4 @@ tag = "E"
 source = "QUESTIONS SRC-2 and PLAN D-13: integer upscale of the source detected (src/scaling.rs), given (--divisor or the source profile), or none"
 description = "How the native raster is recovered from an upscaled source. auto: the integer factor is detected from the first informative frames. manual: the divisor of the command line or of the source profile. none: the captured pixels are the native raster (divisor 1)."
 group = "Source"
+advanced = true

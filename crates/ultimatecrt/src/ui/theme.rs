@@ -18,8 +18,8 @@
 //!   for problems ([`section`], [`kv_row`], [`callout`]).
 
 use dear_imgui_rs::{
-    Direction, FontId, FontSource, NumericFormat, StbTrueTypeFontData, Style, StyleColor, StyleVar, TreeNodeFlags,
-    Ui as Frame,
+    Direction, FontId, FontSource, NumericFormat, SliderFlags, StbTrueTypeFontData, Style, StyleColor, StyleVar,
+    TreeNodeFlags, Ui as Frame,
 };
 
 /// An sRGB colour with alpha, components in 0..1 (what ImGui's style takes).
@@ -352,7 +352,25 @@ pub fn section_closed(ui: &Frame, fonts: &Fonts, label: &str) -> (bool, [[f32; 2
     section_header(ui, fonts, label, None, false, false)
 }
 
-fn section_header(
+/// A small faint label in capitals above a group of rows inside a section (`Convergence` under Geometry).
+pub fn subheading(ui: &Frame, fonts: &Fonts, label: &str) {
+    let s = scale_of(ui);
+    ui.dummy([0.0, 2.0 * s]);
+    with_font(ui, fonts.strong, METRICS.font_small, || {
+        ui.text_colored(PALETTE.text_faint, label.to_uppercase());
+    });
+}
+
+/// A compact text button (surface fill, body text, less padding than a frame). True when clicked.
+pub fn button(ui: &Frame, label: &str) -> bool {
+    let s = scale_of(ui);
+    let _p = ui.push_style_var(StyleVar::FramePadding([10.0 * s, 4.0 * s]));
+    ui.button(label)
+}
+
+/// A section header ([`section`]) with an optional note on the right, open or closed by default (`open`),
+/// with or without the gap above (`first`). Returns whether it is open and the header's rectangle.
+pub fn section_header(
     ui: &Frame,
     fonts: &Fonts,
     label: &str,
@@ -361,7 +379,8 @@ fn section_header(
     open: bool,
 ) -> (bool, [[f32; 2]; 2]) {
     let s = scale_of(ui);
-    if !first {
+    // Sections open by default stand apart; the closed ones read as a compact list of headers.
+    if !first && open {
         ui.dummy([0.0, METRICS.section_gap * s]);
     }
     let shown = with_font(ui, fonts.strong, METRICS.font_small, || {
@@ -430,10 +449,62 @@ pub fn slider<T>(ui: &Frame, id: &str, v: &mut T, lo: T, hi: T, width: f32) -> b
 where
     T: dear_imgui_rs::internal::DataTypeKind + Copy + Into<f64>,
 {
+    slider_ex(ui, id, v, lo, hi, width, false, "%.3f")
+}
+
+/// The position (0 at `lo`, 1 at `hi`) of `v` on a slider over `lo..hi`, clamped: linear, or logarithmic as
+/// Dear ImGui's `Logarithmic` slider maps a positive range (`ln(v / lo) / ln(hi / lo)`).
+pub fn slider_fraction(v: f64, lo: f64, hi: f64, log: bool) -> f64 {
+    if hi <= lo || !v.is_finite() {
+        return 0.0;
+    }
+    let t = if log && lo > 0.0 {
+        (v.max(lo) / lo).ln() / (hi / lo).ln()
+    } else {
+        (v - lo) / (hi - lo)
+    };
+    t.clamp(0.0, 1.0)
+}
+
+/// The value at position `t` (0 to 1) of a slider over `lo..hi`: the inverse of [`slider_fraction`].
+pub fn slider_value(t: f64, lo: f64, hi: f64, log: bool) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if log && lo > 0.0 && hi > lo {
+        lo * (hi / lo).powf(t)
+    } else {
+        lo + t * (hi - lo)
+    }
+}
+
+/// [`slider`] with a logarithmic scale (`log`, positive ranges only) and the `format` Dear ImGui uses for the
+/// Ctrl+click (or Enter) text entry. The number is drawn only while it is typed in; otherwise the caller shows
+/// the value next to the slider.
+#[allow(clippy::too_many_arguments)]
+pub fn slider_ex<T>(ui: &Frame, id: &str, v: &mut T, lo: T, hi: T, width: f32, log: bool, format: &str) -> bool
+where
+    T: dear_imgui_rs::internal::DataTypeKind + Copy + Into<f64>,
+{
     let s = scale_of(ui);
     let p = PALETTE;
     ui.set_next_item_width(width);
-    let empty = NumericFormat::<T>::new("").expect("an empty numeric format is valid");
+    let format = NumericFormat::<T>::new(format)
+        .or_else(|_| NumericFormat::<T>::new(""))
+        .expect("an empty numeric format is valid");
+    let (flo, fhi): (f64, f64) = (lo.into(), hi.into());
+    let mut flags = SliderFlags::NO_ROUND_TO_FORMAT;
+    if log && flo > 0.0 {
+        flags |= SliderFlags::LOGARITHMIC;
+    }
+    // While the value is typed in (Ctrl+click, Enter), Dear ImGui draws its own text field: no custom drawing.
+    // SAFETY: plain query of the current context's state, inside a frame.
+    let typing = unsafe { dear_imgui_rs::sys::igTempInputIsActive(ui.get_id(id).raw()) };
+    if typing {
+        return ui
+            .slider_config(id, lo, hi)
+            .display_format(format)
+            .flags(flags)
+            .build(v);
+    }
     let changed = {
         let clear = [0.0; 4];
         // Separate bindings: dropped in reverse order, as Dear ImGui's colour stack requires.
@@ -442,16 +513,15 @@ where
         let _c3 = ui.push_style_color(StyleColor::FrameBgActive, clear);
         let _c4 = ui.push_style_color(StyleColor::SliderGrab, clear);
         let _c5 = ui.push_style_color(StyleColor::SliderGrabActive, clear);
-        ui.slider_config(id, lo, hi).display_format(empty).build(v)
+        let _c6 = ui.push_style_color(StyleColor::Text, clear);
+        ui.slider_config(id, lo, hi)
+            .display_format(format)
+            .flags(flags)
+            .build(v)
     };
     let (min, max) = (ui.item_rect_min(), ui.item_rect_max());
     let (hovered, active) = (ui.is_item_hovered(), ui.is_item_active());
-    let (lo, hi, x): (f64, f64, f64) = (lo.into(), hi.into(), (*v).into());
-    let t = if hi > lo {
-        ((x - lo) / (hi - lo)).clamp(0.0, 1.0) as f32
-    } else {
-        0.0
-    };
+    let t = slider_fraction((*v).into(), flo, fhi, log) as f32;
     // Where Dear ImGui puts the grab's centre: 2 px padding each side, a grab of `GrabMinSize` (floats).
     let grab = ui.clone_style().grab_min_size().min(max[0] - min[0] - 4.0).max(0.0);
     let usable = (max[0] - min[0] - 4.0 - grab).max(0.0);

@@ -16,7 +16,8 @@ use ultimatecrt::params::Params;
 use ultimatecrt::presets::Library;
 use ultimatecrt::scaling::View;
 use ultimatecrt::ui::input::{
-    key_lparam, mouse_lparam, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    key_lparam, mouse_lparam, WM_CHAR, WM_KEYDOWN, WM_KEYUP, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_MOUSEWHEEL,
 };
 use ultimatecrt::ui::menu::MenuRects;
 use ultimatecrt::ui::{Ui, UiConfig, UiOutput, UiState};
@@ -50,6 +51,8 @@ struct Rig {
     state: UiState,
     /// Everything the UI returned so far, merged (the last value of each field wins).
     out: UiOutput,
+    /// Render with the parameters the menu edits (else the identity gun, a passthrough under the UI).
+    live_params: bool,
 }
 
 impl Rig {
@@ -59,7 +62,10 @@ impl Rig {
 
     fn with_config(test: &str, w: u32, h: u32, config: UiConfig) -> Option<Rig> {
         let gpu = common::gpu_or_skip(test)?;
-        let ui = Ui::new(gpu.context(), Headless::vk_format(TargetFormat::Bgra8Unorm), config).expect("create the UI");
+        let mut ui =
+            Ui::new(gpu.context(), Headless::vk_format(TargetFormat::Bgra8Unorm), config).expect("create the UI");
+        // Headless frames are slow and irregular: a fixed 60 Hz frame time keeps ImGui's timing (double-click) stable.
+        ui.set_frame_time(Some(1.0 / 60.0));
         Some(Rig {
             ui,
             gpu,
@@ -71,6 +77,7 @@ impl Rig {
                 ..UiState::default()
             },
             out: UiOutput::default(),
+            live_params: false,
         })
     }
 
@@ -88,17 +95,28 @@ impl Rig {
             self.state.preset = out.preset.clone();
             self.out.preset = out.preset;
         }
+        if out.library.is_some() {
+            self.out.library = out.library;
+        }
+        if out.gpu_adapter.is_some() {
+            self.out.gpu_adapter = out.gpu_adapter;
+        }
         let src = SourceFrame {
             width: self.w,
             height: self.h,
             bgra: &self.bg,
+        };
+        let params = if self.live_params {
+            self.state.params
+        } else {
+            Params::identity_gun()
         };
         self.gpu
             .render_with_ui(
                 Some(src),
                 View::full(self.w, self.h),
                 &Settings::identity(),
-                &Params::identity_gun(),
+                &params,
                 (self.w, self.h),
                 TargetFormat::Bgra8Unorm,
                 &mut self.ui,
@@ -139,6 +157,125 @@ impl Rig {
     fn key(&mut self, vk: usize, scan: u32, extended: bool) {
         self.frame(&[(WM_KEYDOWN, vk, key_lparam(scan, extended, false))]);
         self.frame(&[(WM_KEYUP, vk, key_lparam(scan, extended, true))]);
+    }
+
+    /// The output for `params` without any UI (plain `render`).
+    fn plain_with(&mut self, params: Params) -> ImageF32 {
+        let src = SourceFrame {
+            width: self.w,
+            height: self.h,
+            bgra: &self.bg,
+        };
+        self.gpu
+            .render(
+                Some(src),
+                View::full(self.w, self.h),
+                &Settings::identity(),
+                &params,
+                (self.w, self.h),
+                TargetFormat::Bgra8Unorm,
+            )
+            .expect("render")
+            .output
+    }
+
+    /// The rectangle of the menu item `key` in the last frame (`widget:<id>`, `header:<panel>`, ...).
+    fn item(&self, key: &str) -> [[f32; 2]; 2] {
+        let r = self
+            .ui
+            .item_rect(key)
+            .unwrap_or_else(|| panic!("no menu item {key} in the last frame"));
+        // Above the pinned footer (its first row is the opacity slider): else a click lands on the footer.
+        let footer = self.ui.menu_rects().opacity[0][1];
+        assert!(
+            r[1][1] < footer - 8.0,
+            "menu item {key} {r:?} is scrolled under the footer ({footer})"
+        );
+        r
+    }
+
+    /// Clicks the centre of the menu item `key`, then lets one frame settle.
+    fn click_item(&mut self, key: &str) {
+        self.click(MenuRects::at(self.item(key), 0.5, 0.5));
+        self.frame(&[]);
+    }
+
+    /// Drags on a slider from fraction `from` to fraction `to` of its width.
+    fn drag(&mut self, r: [[f32; 2]; 2], from: f32, to: f32) {
+        let a = MenuRects::at(r, from, 0.5);
+        let b = MenuRects::at(r, to, 0.5);
+        let (la, lb) = (
+            mouse_lparam(a[0] as i16, a[1] as i16),
+            mouse_lparam(b[0] as i16, b[1] as i16),
+        );
+        self.frame(&[(WM_MOUSEMOVE, 0, la)]);
+        self.frame(&[(WM_LBUTTONDOWN, 1, la)]);
+        self.frame(&[(WM_MOUSEMOVE, 1, lb)]);
+        self.frame(&[(WM_LBUTTONUP, 0, lb)]);
+        self.frame(&[]);
+    }
+
+    /// Double-clicks at `p` (the second press as `WM_LBUTTONDBLCLK`, as Windows sends it).
+    fn double_click(&mut self, p: [f32; 2]) {
+        let l = mouse_lparam(p[0] as i16, p[1] as i16);
+        self.frame(&[(WM_MOUSEMOVE, 0, l)]);
+        self.frame(&[(WM_LBUTTONDOWN, 1, l)]);
+        self.frame(&[(WM_LBUTTONUP, 0, l)]);
+        self.frame(&[(WM_LBUTTONDBLCLK, 1, l)]);
+        self.frame(&[(WM_LBUTTONUP, 0, l)]);
+        self.frame(&[]);
+    }
+
+    /// Turns the wheel `notches` times towards the user (scrolls the menu body down), over the menu's middle.
+    fn scroll_down(&mut self, notches: u32) {
+        let p = MenuRects::at(self.ui.menu_rects().window, 0.5, 0.5);
+        let l = mouse_lparam(p[0] as i16, p[1] as i16);
+        self.frame(&[(WM_MOUSEMOVE, 0, l)]);
+        let down = (((-120_i16) as u16) as usize) << 16;
+        for _ in 0..notches {
+            self.frame(&[(WM_MOUSEWHEEL, down, l)]);
+        }
+        self.frame(&[]);
+    }
+
+    /// Scrolls the menu body so that the item `key` comes near its top (Dear ImGui scrolls 5 lines of the 15 px
+    /// body font per notch at 100 %).
+    fn scroll_to(&mut self, key: &str) {
+        let top = self.item("search")[0][1];
+        let y = self.ui.item_rect(key).expect("the item to scroll to")[0][1];
+        let notches = ((y - top) / 75.0).floor().max(0.0) as u32;
+        self.scroll_down(notches);
+    }
+
+    /// Types `text` into the focused text field, one character per frame.
+    fn type_text(&mut self, text: &str) {
+        for c in text.chars() {
+            self.frame(&[(WM_CHAR, c as usize, 1)]);
+        }
+        self.frame(&[]);
+    }
+
+    /// Selects the preset `id` with the preset filter (typed, then erased) and the combo (Down, Enter).
+    fn select_preset(&mut self, id: &str) {
+        let filter = self.ui.menu_rects().filter;
+        self.click(MenuRects::at(filter, 0.5, 0.5));
+        self.type_text(id);
+        self.click(MenuRects::at(self.ui.menu_rects().preset, 0.5, 0.5));
+        self.key(0x28, 0x50, true); // Down: the only entry
+        self.key(0x0D, 0x1C, false); // Enter
+        self.frame(&[]);
+        self.click(MenuRects::at(filter, 0.5, 0.5));
+        for _ in 0..id.chars().count() {
+            self.key(0x08, 0x0E, false); // Backspace
+        }
+        self.frame(&[]);
+    }
+
+    /// Opens the menu and lets it settle.
+    fn open_menu(&mut self) {
+        self.ui.request_toggle();
+        self.frame(&[]);
+        self.frame(&[]);
     }
 
     fn finish(self) {
@@ -249,6 +386,7 @@ fn slider_combo_and_text_input_through_win32_messages() {
     let hi_l = mouse_lparam(hi[0] as i16, hi[1] as i16);
     rig.frame(&[(WM_MOUSEMOVE, 0, lo_l)]);
     rig.frame(&[(WM_LBUTTONDOWN, 1, lo_l)]);
+    rig.frame(&[]); // the change of a frame comes back with the next one
     let low = rig.state.params.exposure;
     rig.frame(&[(WM_MOUSEMOVE, 1, hi_l)]);
     rig.frame(&[(WM_LBUTTONUP, 0, hi_l)]);
@@ -257,10 +395,14 @@ fn slider_combo_and_text_input_through_win32_messages() {
     let meta = ultimatecrt::params::meta("exposure").unwrap();
     let (min, max) = meta.soft_range.unwrap();
     eprintln!("exposure: {before} -> {low} (press) -> {high} (drag), soft range {min}..{max}");
+    // The exposure slider is logarithmic (its range spans two decades): compare track positions.
+    let log = ultimatecrt::ui::panels::is_log(meta);
+    let at = |v: f32| ultimatecrt::ui::theme::slider_fraction(f64::from(v), min, max, log);
     assert!(
-        high > low + 0.3 * (max - min) as f32,
-        "the drag did not move the slider"
+        at(low) < 0.1,
+        "the press did not move the slider to its left end: {low}"
     );
+    assert!(at(high) > at(low) + 0.3, "the drag did not move the slider");
     assert_eq!(
         rig.out.params.map(|p| p.exposure),
         Some(high),
@@ -406,14 +548,24 @@ fn ui_cost_at_1920x1080() {
     let overlay = median_ui_ms(&mut rig, 8).expect("overlay timed");
     rig.ui.request_toggle();
     let both = median_ui_ms(&mut rig, 8).expect("menu timed");
+    // T-53: the heaviest menu, every parameter row drawn (a search that matches nearly all of them).
+    rig.click_item("search");
+    rig.type_text("_");
+    let rows = ultimatecrt::params::PARAMS_META
+        .iter()
+        .filter(|m| rig.ui.item_rect(&format!("label:{}", m.id)).is_some())
+        .count();
+    let full = median_ui_ms(&mut rig, 8).expect("full menu timed");
     let encode = rig.gpu.last_timings().and_then(|t| t.stage_ms("encode"));
     eprintln!(
-        "UI GPU cost at 1920x1080 (median of 8 frames): overlay {overlay:.4} ms, menu + overlay {both:.4} ms \
-         (encode {encode:.4?} ms)"
+        "UI GPU cost at 1920x1080 (median of 8 frames): overlay {overlay:.4} ms, menu + overlay {both:.4} ms, \
+         menu with {rows} parameter rows + overlay {full:.4} ms (encode {encode:.4?} ms)"
     );
     // Generous bounds (headless, idle clocks): the plan's overlay budget is 0.2 ms (T-52b).
     assert!(overlay < 1.0, "overlay {overlay} ms");
     assert!(both < 2.0, "menu {both} ms");
+    assert!(rows > 50, "the search drew {rows} rows");
+    assert!(full < 3.0, "full menu {full} ms");
     rig.finish();
 }
 
@@ -445,6 +597,7 @@ fn ui_can_be_created_and_destroyed_repeatedly() {
             bg: background(320, 240),
             state: UiState::default(),
             out: UiOutput::default(),
+            live_params: false,
         };
         rig.ui.toggle_overlay();
         rig.frame(&[]);
@@ -491,6 +644,7 @@ fn preview_state() -> UiState {
     UiState {
         params,
         preset: Library::embedded().list().first().map(|p| p.id.clone()),
+        baseline: None,
         headroom: Some(crt_model::output::Headroom {
             mask_peak: 1.842,
             mask_peak_physical: 1.842,
@@ -595,4 +749,405 @@ fn menu_preview_images() {
     preview("menu-1280x720-150", 1280, 720, 1.5, false, false);
     preview("menu-2560x1440-200", 2560, 1440, 2.0, false, false);
     preview("menu-2560x1440-100-expanded", 2560, 1440, 1.0, true, false);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// T-53: the generated parameter panels, the preset tools and the GPU and system panel.
+
+fn temp_dir(name: &str) -> std::path::PathBuf {
+    let d = std::env::temp_dir().join(format!("ucrt-ui-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&d);
+    std::fs::create_dir_all(&d).expect("create the temp folder");
+    d
+}
+
+/// A tall menu (every panel fits without scrolling) on a 1280 x 1080 output.
+fn tall_config() -> UiConfig {
+    UiConfig {
+        layout: ultimatecrt::settings::UiState {
+            menu_h: 1060.0,
+            menu_w: 520.0,
+            menu_y: 4.0,
+            ..ultimatecrt::settings::UiState::default()
+        },
+        ..UiConfig::headless()
+    }
+}
+
+#[test]
+fn a_slider_changes_its_parameter_and_the_rendered_frame() {
+    let _g = lock();
+    let Some(mut rig) = Rig::new("a_slider_changes_its_parameter_and_the_rendered_frame", 800, 720) else {
+        return;
+    };
+    rig.live_params = true;
+    rig.state.params.exposure = 0.5;
+    rig.open_menu();
+    let before_img = rig.plain_with(rig.state.params);
+    rig.drag(rig.item("widget:exposure"), 0.02, 0.9);
+    let p = rig.state.params;
+    eprintln!("exposure 0.5 -> {}", p.exposure);
+    assert!(p.exposure > 2.0, "the log slider did not move: {}", p.exposure);
+    assert_eq!(
+        rig.out.params.map(|q| q.exposure),
+        Some(p.exposure),
+        "the change was not returned"
+    );
+    let after_img = rig.plain_with(p);
+    let changed = (0..after_img.height)
+        .flat_map(|y| (0..after_img.width).map(move |x| (x, y)))
+        .filter(|&(x, y)| differs(after_img.pixel(x, y), before_img.pixel(x, y)))
+        .count();
+    assert!(
+        changed > (800 * 720) / 4,
+        "the rendered frame did not follow: {changed} pixels changed"
+    );
+    // A modified parameter is marked: the output panel header counts it.
+    rig.finish();
+}
+
+#[test]
+fn double_click_and_panel_reset_restore_the_reference() {
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config(
+        "double_click_and_panel_reset_restore_the_reference",
+        1280,
+        1080,
+        tall_config(),
+    ) else {
+        return;
+    };
+    rig.state.params = Params::default();
+    rig.open_menu();
+    let default = Params::default();
+    rig.drag(rig.item("widget:exposure"), 0.5, 0.95);
+    assert_ne!(rig.state.params.exposure, default.exposure);
+    // Double-click on the label: back to the reference (no preset: the table default).
+    rig.double_click(MenuRects::at(rig.item("label:exposure"), 0.3, 0.5));
+    assert_eq!(
+        rig.state.params.exposure, default.exposure,
+        "double-click did not reset"
+    );
+    // Two changes, then the panel's reset button.
+    rig.drag(rig.item("widget:exposure"), 0.5, 0.95);
+    rig.drag(rig.item("widget:output_knee"), 0.5, 0.95);
+    assert!(rig.state.params.exposure != default.exposure && rig.state.params.output_knee != default.output_knee);
+    rig.click_item("reset:Output and headroom");
+    assert_eq!(rig.state.params, default, "the panel reset left changes");
+    assert!(
+        rig.ui.item_rect("reset:Output and headroom").is_none(),
+        "nothing left to reset"
+    );
+    rig.finish();
+}
+
+#[test]
+fn search_and_the_advanced_toggle_choose_the_rows() {
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config(
+        "search_and_the_advanced_toggle_choose_the_rows",
+        1280,
+        1080,
+        tall_config(),
+    ) else {
+        return;
+    };
+    rig.state.params = Params::default();
+    rig.open_menu();
+    // Mask panel, advanced hidden: the mask tier (advanced) has no row; the pitch has one.
+    rig.click_item("header:Mask");
+    assert!(rig.ui.item_rect("widget:mask_pitch_mm").is_some());
+    assert!(rig.ui.item_rect("widget:mask_tier").is_none(), "an advanced row shows");
+    rig.click_item("advanced");
+    assert!(
+        rig.ui.item_rect("widget:mask_tier").is_some(),
+        "Advanced did not show it"
+    );
+    rig.click_item("advanced");
+    // A search lists the matching rows of every panel, advanced ones included, and nothing else.
+    rig.click_item("search");
+    rig.type_text("tier");
+    assert_eq!(rig.ui.search(), "tier");
+    assert!(rig.ui.item_rect("widget:mask_tier").is_some());
+    assert!(
+        rig.ui.item_rect("widget:exposure").is_none(),
+        "a non-matching row shows"
+    );
+    assert!(rig.ui.item_rect("header:Mask").is_none(), "panels show during a search");
+    // A slider found by the search edits its parameter.
+    let before = rig.state.params.mask_tier_blend;
+    rig.drag(rig.item("widget:mask_tier_blend"), 0.05, 0.95);
+    assert!(rig.state.params.mask_tier_blend > before + 0.3);
+    // No match: no row at all.
+    rig.click_item("search");
+    rig.type_text("zzq");
+    assert!(rig.ui.item_rect("widget:mask_tier").is_none());
+    rig.finish();
+}
+
+#[test]
+fn every_panel_draws_every_parameter_once() {
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config("every_panel_draws_every_parameter_once", 1280, 1080, tall_config()) else {
+        return;
+    };
+    rig.state.params = Params::default();
+    rig.open_menu();
+    rig.click_item("advanced");
+    // Every header fits on the tall menu once the open output panel is closed.
+    rig.click_item("header:Output and headroom");
+    let mut seen = std::collections::BTreeSet::new();
+    for def in ultimatecrt::ui::panels::PANELS {
+        let ids: Vec<&str> = ultimatecrt::ui::panels::panel_params(def.name)
+            .iter()
+            .map(|m| m.id)
+            .collect();
+        if def.name == ultimatecrt::ui::panels::OTHER && ids.is_empty() {
+            continue;
+        }
+        let key = format!("header:{}", def.name);
+        rig.click_item(&key);
+        for id in &ids {
+            let has = rig.ui.item_rect(&format!("widget:{id}")).is_some()
+                || rig.ui.item_rect(&format!("widget:{id}.0")).is_some();
+            assert!(has, "{id} has no widget in {}", def.name);
+            assert!(seen.insert(*id), "{id} drawn twice");
+        }
+        rig.click_item(&key);
+    }
+    assert_eq!(seen.len(), ultimatecrt::params::PARAMS_META.len());
+    rig.finish();
+}
+
+#[test]
+fn user_preset_save_and_load_round_trip() {
+    let _g = lock();
+    let dir = temp_dir("presets");
+    let config = UiConfig {
+        presets_dir: Some(dir.clone()),
+        ..tall_config()
+    };
+    let Some(mut rig) = Rig::with_config("user_preset_save_and_load_round_trip", 1280, 1080, config) else {
+        return;
+    };
+    rig.state.params = Params::default();
+    rig.open_menu();
+    rig.drag(rig.item("widget:exposure"), 0.5, 0.8);
+    let edited = rig.state.params;
+    assert_ne!(edited, Params::default());
+    // A shipped preset's name is refused: nothing is written.
+    let shipped = Library::embedded().list()[0].id.clone();
+    rig.click_item("preset_name");
+    rig.type_text(&shipped);
+    rig.click_item("save_preset");
+    let (ok, msg) = rig.ui.preset_message().cloned().expect("a message");
+    assert!(!ok && msg.contains("shipped"), "{msg}");
+    assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0, "a file was written");
+    // Clear the name, type a new one, save.
+    rig.click_item("preset_name");
+    for _ in 0..shipped.len() {
+        rig.key(0x08, 0x0E, false); // Backspace
+    }
+    rig.type_text("My Test Tube");
+    rig.click_item("save_preset");
+    let (ok, msg) = rig.ui.preset_message().cloned().expect("a message");
+    assert!(ok, "{msg}");
+    assert!(dir.join("my-test-tube.toml").exists());
+    assert_eq!(
+        rig.out.preset.as_deref(),
+        Some("my-test-tube"),
+        "the new preset is not selected"
+    );
+    let lib = rig.out.library.clone().expect("the library was not handed over");
+    assert!(lib.find("my-test-tube").is_some());
+    assert_eq!(
+        lib.list().len(),
+        Library::embedded().list().len() + 1,
+        "shipped presets changed"
+    );
+    // Load: the preset read back from the file gives the edited parameters.
+    let loaded = Library::load(Some(&dir));
+    assert_eq!(loaded.find("my-test-tube").unwrap().params(), edited);
+    // Select another preset, then the saved one again: the parameters come back.
+    rig.select_preset(&shipped);
+    assert_eq!(rig.state.preset.as_deref(), Some(shipped.as_str()));
+    assert_ne!(rig.state.params, edited);
+    rig.select_preset("my-test-tube");
+    assert_eq!(rig.state.preset.as_deref(), Some("my-test-tube"));
+    assert_eq!(
+        rig.state.params, edited,
+        "the saved preset does not give the edited parameters back"
+    );
+    // Edit, then update the user preset in place, then revert after another edit.
+    rig.drag(rig.item("widget:exposure"), 0.5, 0.3);
+    let edited2 = rig.state.params;
+    rig.click_item("update_preset");
+    assert_eq!(
+        Library::load(Some(&dir)).find("my-test-tube").unwrap().params(),
+        edited2
+    );
+    rig.drag(rig.item("widget:exposure"), 0.5, 0.9);
+    assert_ne!(rig.state.params, edited2);
+    rig.click_item("revert");
+    assert_eq!(rig.state.params, edited2, "revert did not restore the preset");
+    rig.finish();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A made-up adapter list like the dev machine's: the RTX (Vulkan 0) and the Intel UHD driving the monitors.
+fn fake_gpu() -> ultimatecrt::adapters::Current {
+    use ultimatecrt::adapters::{AdapterEntry, Current, GpuSelection, Luid, Owner, Reason, VulkanDevice};
+    let rtx = Luid { high: 0, low: 0x17801 };
+    let uhd = Luid { high: 0, low: 0x10301 };
+    Current {
+        selection: GpuSelection {
+            chosen: Some(VulkanDevice {
+                index: 0,
+                name: "NVIDIA RTX A2000 Laptop GPU".into(),
+                luid: Some(rtx),
+            }),
+            reason: Reason::Default,
+            owner: Some(Owner {
+                name: "Intel(R) UHD Graphics".into(),
+                luid: uhd,
+            }),
+            warnings: vec!["the chosen adapter does not drive the covered monitor (cross-adapter present)".into()],
+        },
+        adapters: vec![
+            AdapterEntry {
+                name: "NVIDIA RTX A2000 Laptop GPU".into(),
+                luid: Some(rtx),
+                owns_monitors: false,
+                software: false,
+                vulkan_index: Some(0),
+            },
+            AdapterEntry {
+                name: "Intel(R) UHD Graphics".into(),
+                luid: Some(uhd),
+                owns_monitors: true,
+                software: false,
+                vulkan_index: Some(1),
+            },
+        ],
+        setting: "auto".into(),
+    }
+}
+
+fn system_config() -> UiConfig {
+    use ultimatecrt::ui::menu::HotkeyRow;
+    UiConfig {
+        gpu: Some(fake_gpu()),
+        hotkeys: vec![
+            HotkeyRow {
+                action: "Quit".into(),
+                bound: Some("Ctrl+Alt+Q".into()),
+                wanted: "Ctrl+Alt+Q".into(),
+            },
+            HotkeyRow {
+                action: "Settings menu".into(),
+                bound: Some("Ctrl+Alt+F10".into()),
+                wanted: "F10".into(),
+            },
+            HotkeyRow {
+                action: "Overlay".into(),
+                bound: None,
+                wanted: "Ctrl+Alt+O".into(),
+            },
+        ],
+        settings_dir: Some(std::path::PathBuf::from(
+            r"C:\Users\someone\AppData\Roaming\ultimateCRT",
+        )),
+        ..tall_config()
+    }
+}
+
+#[test]
+fn the_adapter_combo_returns_the_setting_for_the_next_start() {
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config(
+        "the_adapter_combo_returns_the_setting_for_the_next_start",
+        1280,
+        1080,
+        system_config(),
+    ) else {
+        return;
+    };
+    rig.open_menu();
+    rig.click_item("header:Output and headroom");
+    rig.click_item("header:GPU and system");
+    rig.click_item("gpu_adapter");
+    rig.key(0x28, 0x50, true); // Down: from Automatic to the first adapter
+    rig.key(0x0D, 0x1C, false);
+    rig.frame(&[]);
+    let want = fake_gpu().adapters[0].setting_value();
+    assert_eq!(rig.out.gpu_adapter.as_deref(), Some(want.as_str()));
+    assert_eq!(rig.out.params, None, "the adapter choice changed parameters");
+    rig.finish();
+}
+
+/// One panel preview: the menu at 1280 x 720 (100 %) after `setup` (clicks), written to `target/ui-preview`.
+fn panel_preview(name: &str, config: UiConfig, setup: impl FnOnce(&mut Rig)) {
+    let Some(mut rig) = Rig::with_config(name, 1280, 720, config) else {
+        return;
+    };
+    rig.bg = preview_background(1280, 720);
+    rig.state = preview_state();
+    // The preset's own parameters: only what the setup changes shows as modified.
+    rig.state.params = Library::embedded().list()[0].params();
+    rig.open_menu();
+    setup(&mut rig);
+    rig.frame(&[(WM_MOUSEMOVE, 0, mouse_lparam(i16::MAX, i16::MAX))]);
+    rig.frame(&[]);
+    let img = rig.frame(&[]);
+    let path = write_png(&img, name);
+    eprintln!("{name}: preview {}", path.display());
+    rig.finish();
+}
+
+#[test]
+fn panel_preview_images() {
+    let _g = lock();
+    let menu_at = |x: f32| UiConfig {
+        layout: ultimatecrt::settings::UiState {
+            menu_x: x,
+            menu_h: 690.0,
+            ..ultimatecrt::settings::UiState::default()
+        },
+        ..UiConfig::headless()
+    };
+    // The mask panel with the advanced rows and two changed values.
+    panel_preview("menu-panel-mask", menu_at(20.0), |rig| {
+        rig.state.params.mask_pitch_mm = 0.42;
+        rig.state.params.mask_type = ultimatecrt::params::MASK_TYPE_SLOT_MASK;
+        rig.click_item("header:Output and headroom");
+        rig.click_item("advanced");
+        rig.click_item("header:Mask");
+        rig.scroll_to("header:Mask");
+    });
+    // Gun and white: vectors (per-gun sliders, chromaticities) under subheadings.
+    panel_preview("menu-panel-gun", menu_at(20.0), |rig| {
+        rig.click_item("header:Output and headroom");
+        rig.click_item("header:Gun and white");
+        rig.scroll_to("header:Gun and white");
+    });
+    // GPU and system.
+    panel_preview(
+        "menu-panel-system",
+        UiConfig {
+            layout: menu_at(20.0).layout,
+            ..system_config()
+        },
+        |rig| {
+            rig.click_item("header:Output and headroom");
+            // The last header: scroll to the end of the body first, open it, then scroll to its rows.
+            rig.scroll_down(20);
+            rig.click_item("header:GPU and system");
+            rig.scroll_down(20);
+        },
+    );
+    // A search.
+    panel_preview("menu-search", menu_at(20.0), |rig| {
+        rig.click_item("search");
+        rig.type_text("white");
+    });
 }

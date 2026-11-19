@@ -39,6 +39,7 @@ tag = "K"
 source = "CRT.md Raster timing table: 240p consoles 5.37 to 8 MHz, VGA 640x480 25.175 MHz, UXGA 1600x1200 at 85 Hz 229.5 MHz"
 description = "Pixel clock of the source video mode: one native pixel lasts 1 / f microseconds on the scan line. With the bandwidth it sets the amplifier blur in source pixels (sigma = 0.1325 f / B). Not provided by the capture: it comes from the source's video mode."
 group = "Video amplifier"
+widget = "log"
 
 [[param]]
 id = "amp_fall_rise_ratio"
@@ -52,6 +53,7 @@ tag = "E"
 source = "CRT.md Signal path, adjacent-pixel nonlinearity (Mulligan and Stone 1989; Klein, Hu and Carney 1996; Pelli 1997): the drive amplifier slews differently up and down, the smear trails to the right; the ratio itself is an estimate"
 description = "Fall time over rise time of the amplifier (10-90 %). 1 is symmetric. Both transitions start together after an input edge and the slower one ends later, so the smear trails to the right. Above 1 (slow fall) bright detail trails right and isolated bright pixels gain light (area +22.8 % at B = 4 MHz, r = 2; the B = 5 MHz vertical-line dimming goes 19.8 % at r = 1, 11.4 % at r = 2, 3.0 % at r = 3). Below 1 (slow rise) bright detail starts late and isolated bright pixels lose light (24.0 % dimming at r = 0.5, B = 5 MHz), which is what CRT.md's 'an isolated bright pixel is dimmer than one in a run' needs. Presets must pick the direction deliberately. The output stays within the local input range (slew limiter)."
 group = "Video amplifier"
+advanced = true
 
 # Peaking (consumer "sharpness"), off by default. Linear and DC-preserving: the response gains
 # g (1 - G_p(f)), a Gaussian high-pass of -3 dB corner f_p, so every edge response becomes
@@ -82,6 +84,8 @@ tag = "E"
 source = "CRT.md Controls table, Sharpness (consumer): peaking around 3 to 4 MHz"
 description = "Corner frequency of the peaking filter: the boost starts above it (Gaussian high-pass, -3 dB corner). Only used when amp_peaking_gain is above 0."
 group = "Video amplifier"
+advanced = true
+widget = "log"
 
 [[param]]
 id = "amp_samples"
@@ -95,3 +99,4 @@ tag = "D"
 source = "T-33 follow-up (K = 4 over-dims isolated vertical lines by 2.3 / 2.6 / 2.0 / 1.1 points at 5 / 8 / 15 / 30 MHz with a 5.37 MHz clock, K = 16 by under 0.4; an edge sigma of at most 0.01 source px is an exact hold) and presets::recommended_amp_k"
 description = "Amplifier sub-samples K per source pixel (the width of the amp image is K times the source width). 4 is the pipeline default and exact when the amplifier is ideal (edge sigma 0.1325 x pixel clock / bandwidth at most 0.01 source px); a slower amplifier needs more (16 above about 0.02 px) or isolated vertical lines come out too dim, and the amp stage costs K times as much. Tube presets set it from their bandwidth. Above about 8 the image width (K x source width) can exceed the GPU limit for wide sources."
 group = "Video amplifier"
+advanced = true

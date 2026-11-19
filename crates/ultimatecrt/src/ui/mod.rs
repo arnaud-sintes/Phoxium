@@ -26,13 +26,16 @@
 //! Ctrl+Alt+F10 and Ctrl+Alt+F12) calls [`Ui::request_toggle`], the overlay key (Ctrl+Alt+O)
 //! [`Ui::toggle_overlay`]. The registration problems are shown in the menu ([`UiConfig::hotkey_problems`]).
 //! Settings: the UI holds no settings of its own; the app's session settings (`live::Live`) give the layout
-//! and take it back ([`Ui::take_layout_change`]).
+//! and take it back ([`Ui::take_layout_change`]); parameter edits, the preset, a new preset library and the
+//! adapter choice go back through [`UiOutput`] (T-53, the panels in [`panels`]).
 
 pub mod input;
 pub mod menu;
 pub mod overlay;
+pub mod panels;
 pub mod theme;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use ash::vk;
@@ -45,7 +48,7 @@ use crate::presets::Library;
 use crate::{settings, Res};
 
 use input::{UiEvent, Win32Input};
-use menu::{CloseReason, Menu, MenuModel, MenuRects};
+use menu::{CloseReason, HotkeyRow, Menu, MenuModel, MenuRects, PresetForm, SystemModel};
 
 /// Default menu key (D-17: F10, since F12 is registered system-wide by another program on the dev machine).
 pub const DEFAULT_MENU_KEY: &str = "F10";
@@ -60,6 +63,10 @@ pub struct UiState {
     pub params: Params,
     /// The id of the preset the parameters come from, if any.
     pub preset: Option<String>,
+    /// What the parameters are compared against (the modified marks) and reset to: the preset in force with
+    /// the source profile and the command-line options on top, as the app computes it. `None`: the preset of
+    /// `preset` from the menu's library, else the table defaults.
+    pub baseline: Option<Params>,
     /// SDR headroom readout of the last frame (`Renderer::headroom`, T-84).
     pub headroom: Option<crt_model::output::Headroom>,
     /// Placement of the source in the output (`placement::readout`, T-96).
@@ -75,8 +82,13 @@ pub struct UiState {
 pub struct UiOutput {
     /// New parameters to use (a widget moved or a preset was selected).
     pub params: Option<Params>,
-    /// The preset selected (its id); `params` holds its parameters, before any source profile.
+    /// The preset selected (its id); `params` holds its parameters, before any source profile. Also set when a
+    /// user preset was saved or updated (it is selected), then `params` are the current parameters.
     pub preset: Option<String>,
+    /// The preset library after a save, an update or a reload (the app hands it to the preset hotkeys).
+    pub library: Option<Library>,
+    /// The `[global.gpu] adapter` value chosen in the menu, for the settings (used at the next start).
+    pub gpu_adapter: Option<String>,
 }
 
 /// How a [`Ui`] is set up.
@@ -94,16 +106,27 @@ pub struct UiConfig {
     /// Hotkey registration problems (a chord taken by another program, a fallback in force, an action
     /// without a hotkey), one line each, shown in the menu (`hotkeys::Registration::problems`).
     pub hotkey_problems: Vec<String>,
+    /// The hotkeys as registered, listed in the GPU and system panel.
+    pub hotkeys: Vec<HotkeyRow>,
+    /// The user preset folder (`presets::user_dir`): "Save as new" writes there. `None`: no saving.
+    pub presets_dir: Option<PathBuf>,
+    /// The settings folder, shown in the GPU and system panel.
+    pub settings_dir: Option<PathBuf>,
+    /// The session's adapter selection and list (`adapters::current`).
+    pub gpu: Option<crate::adapters::Current>,
+    /// `[global.gpu] adapter` as the settings hold it now.
+    pub gpu_setting: String,
 }
 
 impl UiConfig {
-    /// The live app: the output and source windows, and what the shared session settings, the preset library
-    /// and the hotkey registration hold. The UI keeps no settings of its own: the layout goes back to the app
-    /// through [`Ui::take_layout_change`].
+    /// The live app: the output and source windows, and what the shared session settings, the preset library,
+    /// the hotkey registration and the adapter selection hold. The UI keeps no settings of its own: the layout,
+    /// the parameters and the adapter choice go back to the app ([`Ui::take_layout_change`], [`UiOutput`]).
     pub fn live(
         output: isize,
         source: isize,
         settings: &settings::Settings,
+        settings_dir: Option<PathBuf>,
         presets: Library,
         hotkeys: &crate::hotkeys::Registration,
     ) -> Self {
@@ -115,7 +138,12 @@ impl UiConfig {
                 .bound(crate::hotkeys::Action::ToggleMenu)
                 .map_or_else(|| "(no menu hotkey)".to_string(), |c| c.to_string()),
             hotkey_problems: hotkeys.problems(),
+            hotkeys: hotkey_rows(hotkeys),
             presets,
+            presets_dir: settings_dir.as_deref().map(crate::presets::user_dir),
+            settings_dir,
+            gpu: crate::adapters::current().cloned(),
+            gpu_setting: settings.global.gpu.adapter.clone(),
         }
     }
 
@@ -128,8 +156,32 @@ impl UiConfig {
             presets: Library::embedded(),
             menu_key: DEFAULT_MENU_KEY.to_string(),
             hotkey_problems: Vec::new(),
+            hotkeys: Vec::new(),
+            presets_dir: None,
+            settings_dir: None,
+            gpu: None,
+            gpu_setting: settings::GPU_ADAPTER_AUTO.to_string(),
         }
     }
+}
+
+/// The hotkey rows of the menu from the registration outcome.
+pub fn hotkey_rows(reg: &crate::hotkeys::Registration) -> Vec<HotkeyRow> {
+    reg.outcomes
+        .iter()
+        .map(|o| HotkeyRow {
+            action: capitalised(o.action.describe()),
+            bound: o.bound.map(|c| c.to_string()),
+            wanted: o.wanted.to_string(),
+        })
+        .collect()
+}
+
+fn capitalised(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
 }
 
 /// The ImGui context, its Vulkan renderer, the menu and the overlay. See the module documentation for the
@@ -157,15 +209,24 @@ pub struct Ui {
     /// What the frames drawn since the last [`Ui::frame`] changed.
     out: UiOutput,
     filter: String,
+    /// Parameter search text and the Advanced toggle.
+    search: String,
+    advanced: bool,
+    preset_form: PresetForm,
+    system: SystemModel,
     /// Give the keyboard focus to the menu window in the next frame (set when it opens).
     focus_menu: bool,
     rects: MenuRects,
+    /// Widget rectangles by key in the last frame drawn ([`Ui::item_rect`]).
+    items: Vec<(String, [[f32; 2]; 2])>,
     overlay_rect: [[f32; 2]; 2],
     cursor: Option<MouseCursor>,
     /// UI scale: the DPI scale of the output's monitor (1 at 96 dpi).
     dpi: f32,
     fonts: theme::Fonts,
     last: Option<Instant>,
+    /// A fixed frame time for ImGui instead of the measured one ([`Ui::set_frame_time`]).
+    fixed_dt: Option<f32>,
     /// Dropped last (declared last, and `Drop for Ui` shuts the renderer down before).
     imgui: ImContext,
 }
@@ -241,13 +302,27 @@ impl Ui {
             state: UiState::default(),
             out: UiOutput::default(),
             filter: String::new(),
+            search: String::new(),
+            advanced: false,
+            preset_form: PresetForm {
+                dir: config.presets_dir,
+                ..PresetForm::default()
+            },
+            system: SystemModel {
+                gpu: config.gpu,
+                gpu_setting: config.gpu_setting,
+                hotkeys: config.hotkeys,
+                settings_dir: config.settings_dir,
+            },
             focus_menu: false,
             rects: MenuRects::default(),
+            items: Vec::new(),
             overlay_rect: [[0.0; 2]; 2],
             cursor: None,
             dpi: 1.0,
             fonts,
             last: None,
+            fixed_dt: None,
             imgui,
         };
         if let Some(out) = ui.output {
@@ -337,6 +412,8 @@ impl Ui {
             }
             if out.preset.is_some() {
                 self.state.preset = out.preset.clone();
+                // The app's baseline is still the old preset's until its next frame.
+                self.state.baseline = None;
             }
         }
         out
@@ -360,6 +437,32 @@ impl Ui {
     /// The preset filter text of the menu.
     pub fn filter(&self) -> &str {
         &self.filter
+    }
+
+    /// The parameter search text of the menu.
+    pub fn search(&self) -> &str {
+        &self.search
+    }
+
+    /// The rectangle (min, max) of the widget recorded under `key` in the last frame drawn
+    /// ([`menu::MenuResult::items`]: `widget:<id>`, `label:<id>`, `header:<panel>`, `save_preset`, ...).
+    pub fn item_rect(&self, key: &str) -> Option<[[f32; 2]; 2]> {
+        self.items.iter().rev().find(|(k, _)| k == key).map(|(_, r)| *r)
+    }
+
+    /// The preset library the menu lists.
+    pub fn library(&self) -> &Library {
+        &self.presets
+    }
+
+    /// The last message of the preset tools: (success, text).
+    pub fn preset_message(&self) -> Option<&(bool, String)> {
+        self.preset_form.message.as_ref()
+    }
+
+    /// Replaces the preset library (the app reloaded it).
+    pub fn set_library(&mut self, library: Library) {
+        self.presets = library;
     }
 
     /// The menu layout (position, size, opacity, collapsed) as the last frame left it.
@@ -431,6 +534,12 @@ impl Ui {
         self.set_dpi_scale(scale);
     }
 
+    /// Makes every UI frame last `dt` seconds for ImGui (double-click and tooltip timing) instead of the measured
+    /// time; `None` goes back to the clock. Headless tests use it, as their frames are slow and irregular.
+    pub fn set_frame_time(&mut self, dt: Option<f32>) {
+        self.fixed_dt = dt;
+    }
+
     /// The UI scale in effect.
     pub fn ui_scale(&self) -> f32 {
         self.dpi
@@ -497,8 +606,8 @@ impl UiPass for Ui {
         }
         let now = Instant::now();
         let dt = self
-            .last
-            .map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32())
+            .fixed_dt
+            .unwrap_or_else(|| self.last.map_or(1.0 / 60.0, |t| now.duration_since(t).as_secs_f32()))
             .clamp(1e-4, MAX_DELTA_S);
         self.last = Some(now);
         let display = [extent.width as f32, extent.height as f32];
@@ -526,8 +635,12 @@ impl UiPass for Ui {
                     state: &self.state.clone(),
                     params: &mut self.state.params,
                     filter: &mut self.filter,
+                    search: &mut self.search,
+                    advanced: &mut self.advanced,
                     layout: &mut self.layout,
                     library: &self.presets,
+                    presets: &mut self.preset_form,
+                    system: &mut self.system,
                     key: &self.menu_key,
                     hotkey_problems: &self.hotkey_problems,
                     focus,
@@ -547,12 +660,22 @@ impl UiPass for Ui {
         }
         if let Some(r) = result {
             self.rects = r.rects;
+            self.items = r.items;
+            if let Some(lib) = r.library {
+                self.presets = lib.clone();
+                self.out.library = Some(lib);
+            }
             if r.params_changed {
                 self.out.params = Some(self.state.params);
             }
             if r.preset.is_some() {
                 self.out.preset = r.preset.clone();
                 self.state.preset = r.preset;
+                // The new preset is the reference until the app hands over its own baseline.
+                self.state.baseline = None;
+            }
+            if r.gpu_adapter.is_some() {
+                self.out.gpu_adapter = r.gpu_adapter;
             }
         }
         if open && self.output.is_some() {

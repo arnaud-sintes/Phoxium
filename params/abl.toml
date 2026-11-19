@@ -66,6 +66,7 @@ tag = "E"
 source = "CRT.md ABL (T-63): steady state about 0.5 s after the threshold is crossed (US 4,330,792); a first-order low-pass is within 5 % at 3 tau, so tau = 0.5 / 3 s. Prior-art filter about 5 fields (US 4,689,668) [T-87: was D; tau = 0.5/3 s assumes a first-order law on one RCA statement (US 4,330,792); a modelling choice, not a derivation]"
 description = "Time constant of the low-pass of the average beam current, on real frame times (63.2 % of a step after tau). 0 follows each frame at once."
 group = "ABL"
+advanced = true
 
 [[param]]
 id = "abl_breathing"
@@ -92,6 +93,7 @@ tag = "E"
 source = "Estimate: the raster size is set up at a mid picture level"
 description = "Filtered APL at which the raster has its nominal size."
 group = "ABL"
+advanced = true
 
 [[param]]
 id = "abl_probe"
@@ -103,3 +105,4 @@ tag = "E"
 source = "Diagnostic, not physical. TEST-ONLY: keep it out of the UI, profiles and presets (paramgen has no hidden flag yet, and params/_test.toml entries do not reach release shaders, which read this one)"
 description = "Test-only diagnostic (not for the UI, profiles or presets): writes the ABL state (gain, filtered APL, raster_scale, last frame APL) into texel (0, 0) of the abl output instead of the picture."
 group = "ABL"
+advanced = true

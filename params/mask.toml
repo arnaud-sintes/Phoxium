@@ -68,6 +68,7 @@ tag = "E"
 source = "CRT.md Black matrix and phosphor screen: phosphor element edges are soft, about 5 to 10 % of pitch; crt-model mask.rs: full 0-to-1 ramp width centred on the half-value edge, limited to min(stripe, p/3 - stripe)"
 description = "Full width of the linear edge ramp of a phosphor element as a fraction of the pitch (p for grille and slot mask, the diagonal P for delta), centred on the nominal edge (0 = hard edges); also the ramp of the slot-mask bridges and the radial ramp of a delta dot. The shader limits it to the stripe width and to 1/3 - stripe fill (grille, slot mask), to the bridge height and to V - bridge (slot mask), and to the dot diameter and to P / sqrt(3) - dot diameter (delta), so elements of different colours never overlap."
 group = "Mask"
+advanced = true
 
 [[param]]
 id = "mask_damper_count"
@@ -94,6 +95,7 @@ tag = "D"
 source = "CRT.md Aperture grille geometry: damper wires are tungsten, 10 to 30 micrometres in diameter (15 to 30 in another Sony patent) [T-87: was S; the default 0.02 mm is the midpoint of the sourced 10 to 30 um range]"
 description = "Width of the shadow of a damper wire, between the half-value points of its edges. A host pixel row crossed by the whole shadow is dimmed by width / row height."
 group = "Mask"
+advanced = true
 
 [[param]]
 id = "mask_damper_edge_mm"
@@ -107,6 +109,7 @@ tag = "E"
 source = "crt-model mask.rs Grille::damper_edge_mm (penumbra of the wire shadow, not sourced in CRT.md); the shadow area does not depend on it"
 description = "Full width of the linear edge ramp (penumbra) of a damper-wire shadow, centred on the nominal edge. The shader limits it to the shadow width."
 group = "Mask"
+advanced = true
 
 [[param]]
 id = "mask_tier"
@@ -119,6 +122,7 @@ tag = "D"
 source = "QUESTIONS PHY-2 (option A: automatic tiering by host pixels per triad; per axis since T-39c, D-15); CRT.md Host-display resolution budget (masks below about 3 px per triad must be prefiltered, otherwise host-grid moire appears, which is not a real CRT artefact); crt-model mask.rs tier() and Mask::host_value"
 description = "How the mask is brought to host pixels, per axis (T-39c). auto: each axis is area-integrated over the host pixel where its period is resolvable (horizontal from 3 host px per triad; vertical, slot mask and delta only, from a row period V / 2 or P / 2 of 2 host px) and prefiltered below (averaged over one whole period: one triad horizontally, V or P vertically), with the blend band mask_tier_blend in between; both axes prefiltered leaves only the mean, 1, and the damper wires. The decision is made once per frame on the CPU and the readouts report it. integrated: area integral at any density (shows host-grid moire below the limits, for inspection). prefiltered: both periodic axes prefiltered at any density."
 group = "Mask"
+advanced = true
 
 [[param]]
 id = "mask_tier_blend"
@@ -132,6 +136,7 @@ tag = "E"
 source = "[T-87: was D; the blend width 0.4 is a design choice from the T-39c review, not a derivation] PLAN D-15, T-39c (review of T-39a: the mask snapped from flat to saturated RGB columns at 3.0 px per triad); crt-model mask.rs axis_tier"
 description = "Width of the blend band of mask_tier = auto, in host px per triad, centred on the 3 px per triad limit (0.4: 2.8 to 3.2). Inside it the horizontal prefilter box narrows linearly from one triad (lower edge) to one host pixel (upper edge), so the mask fades in instead of snapping; the vertical limit (2 px) has a band of the same relative width (blend x 2 / 3 px). 0 = hard switch at the limits."
 group = "Mask"
+advanced = true
 [[param]]
 id = "mask_slot_period"
 stage = "mask"

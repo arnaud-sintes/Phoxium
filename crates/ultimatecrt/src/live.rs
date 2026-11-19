@@ -33,7 +33,12 @@ pub struct Live {
     /// Outer size of the framed window when nothing is remembered (the initial client size plus the frame).
     default_outer: (i32, i32),
     last_follow: std::time::Instant,
+    /// When the menu last changed the settings without them being written yet ([`Live::flush_settings`]).
+    dirty_since: Option<std::time::Instant>,
 }
+
+/// How long the settings wait after the last menu change before they are written (a drag writes once).
+pub const SAVE_DEBOUNCE: std::time::Duration = std::time::Duration::from_secs(1);
 
 impl Live {
     pub fn new(
@@ -62,6 +67,7 @@ impl Live {
             settings_dir,
             default_outer,
             last_follow: std::time::Instant::now(),
+            dirty_since: None,
         }
     }
 
@@ -178,6 +184,79 @@ impl Live {
         self.current_preset = id;
     }
 
+    /// The menu replaced the preset library (a user preset saved or updated, the files reloaded): the preset
+    /// hotkeys step through the new list.
+    pub fn set_library(&mut self, library: Library) {
+        self.library = library;
+    }
+
+    /// The menu selected a preset (T-53): it becomes the settings preset and its overrides start empty. Written
+    /// with the next [`Live::flush_settings`].
+    pub fn note_preset_selected(&mut self, id: Option<&str>) {
+        let id = id.unwrap_or_default();
+        let g = &mut self.settings.global;
+        if g.preset != id || !g.overrides.is_empty() {
+            g.preset = id.to_string();
+            g.overrides.clear();
+            self.mark_dirty();
+        }
+    }
+
+    /// The menu changed parameters from `before` to `after` (T-53): the touched ids are recorded as overrides of
+    /// the preset in force, against `reference` ([`settings::record_edit`]). When the settings preset is not
+    /// the preset in force (a preset stepped by a hotkey or given on the command line), the settings follow the
+    /// preset in force first. Written with the next [`Live::flush_settings`] (debounced).
+    pub fn note_params_edit(&mut self, before: &Params, after: &Params, reference: &Params) {
+        let current = self.current_preset.clone().unwrap_or_default();
+        let g = &mut self.settings.global;
+        let mut dirty = false;
+        if g.preset != current {
+            g.preset = current;
+            g.overrides.clear();
+            dirty = true;
+        }
+        dirty |= settings::record_edit(&mut g.overrides, before, after, reference);
+        if dirty {
+            self.mark_dirty();
+        }
+    }
+
+    /// The menu chose the adapter for the next start (`[global.gpu] adapter`, HW-3): written at once.
+    pub fn set_gpu_adapter(&mut self, value: String) {
+        if self.settings.global.gpu.adapter != value {
+            self.settings.global.gpu.adapter = value;
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    fn mark_dirty(&mut self) {
+        self.dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// Writes the settings when the menu changed them: once no change came for [`SAVE_DEBOUNCE`] (a slider
+    /// drag writes once, at its end), or at once with `now` (the menu closed, the app exits). A failure is a
+    /// warning, never an error. Returns whether the file was written.
+    pub fn flush_settings(&mut self, now: bool) -> bool {
+        let Some(since) = self.dirty_since else {
+            return false;
+        };
+        if !now && since.elapsed() < SAVE_DEBOUNCE {
+            return false;
+        }
+        self.dirty_since = None;
+        let Some(dir) = &self.settings_dir else {
+            return false;
+        };
+        match settings::save(dir, &self.settings) {
+            Ok(()) => true,
+            Err(e) => {
+                eprintln!("warning: cannot save the settings: {e}");
+                false
+            }
+        }
+    }
+
     /// The menu layout changed (the menu closed after a move, resize or opacity change): kept in the shared
     /// settings and written to the file. A failure is a warning, never an error.
     pub fn set_ui_layout(&mut self, layout: settings::UiState) {
@@ -206,6 +285,7 @@ impl Live {
             }
         }
         self.save_window_rect();
+        self.flush_settings(true);
     }
 
     /// Writes `global.output.windowed` when it changed. A failure is a warning, never an error.
@@ -250,6 +330,52 @@ fn describe(p: &Placement, monitors: &[IRect]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// T-53: menu edits go to the overrides of the preset in force and are written debounced or on demand; a
+    /// preset selection resets the overrides; the adapter choice is written at once.
+    #[test]
+    fn menu_changes_reach_the_settings_file() {
+        let dir = std::env::temp_dir().join(format!("ucrt-live-settings-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = Library::embedded();
+        let id = lib.list()[0].id.clone();
+        let mut live = Live::new(
+            false,
+            Settings::default(),
+            Some(dir.clone()),
+            lib.clone(),
+            Some(id.clone()),
+            (800, 600),
+        );
+        let reference = lib.list()[0].params();
+        let mut after = reference;
+        after.exposure = 1.5;
+        live.note_params_edit(&reference, &after, &reference);
+        assert!(!live.flush_settings(false), "written before the debounce delay");
+        assert!(live.flush_settings(true));
+        assert!(!live.flush_settings(true), "nothing left to write");
+        let saved = settings::load(&dir).settings;
+        assert_eq!(saved.global.preset, id);
+        assert_eq!(saved.global.overrides.get("exposure"), Some(&toml::Value::Float(1.5)));
+        assert_eq!(
+            live.settings().global.overrides,
+            saved.global.overrides,
+            "one shared instance"
+        );
+        // Selecting another preset: it becomes the settings preset, the overrides start empty.
+        let other = lib.list()[1].id.clone();
+        live.note_preset_selected(Some(&other));
+        live.flush_settings(true);
+        let saved = settings::load(&dir).settings;
+        assert_eq!(
+            (saved.global.preset.as_str(), saved.global.overrides.len()),
+            (other.as_str(), 0)
+        );
+        // The adapter choice is written without waiting.
+        live.set_gpu_adapter("Intel".to_string());
+        assert_eq!(settings::load(&dir).settings.global.gpu.adapter, "Intel");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     #[test]
     fn placements_are_described_with_the_monitor_index() {

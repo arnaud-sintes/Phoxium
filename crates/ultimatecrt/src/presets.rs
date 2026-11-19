@@ -601,7 +601,7 @@ pub fn option_d_detail(presets: &[Preset], host: (u32, u32)) -> Vec<OptionDSugge
 }
 
 /// The presets, shipped ones first, then user ones, with the problems met while loading them.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct Library {
     presets: Vec<Preset>,
     /// Files that were skipped (errors) and values outside soft ranges (warnings), in load order.

@@ -62,6 +62,7 @@ tag = "E"
 source = "T-84: physical and mask_depth modes: the readout peak lands at 1 / (1 + margin) of panel white. The readout is already an upper bound (product of independent peaks); the 2 % covers what it leaves out (geometry and convergence, FP16 rounding) without a measured value [E]"
 description = "Physical and mask depth modes: extra room left under panel white, as a fraction of the headroom readout. The derived exposure is exposure / max(1, readout x (1 + margin)). Shoulder mode: the automatic white point is the readout x (1 + margin)."
 group = "Output"
+advanced = true
 
 [[param]]
 id = "output_shoulder_white"
@@ -75,6 +76,7 @@ tag = "E"
 source = "T-84, D-16 shoulder shape: the linear input value (after exposure and colour matrix, panel white = 1) that the shoulder maps to panel white exactly; above it values clip. 0 = automatic: the headroom readout x (1 + output_headroom_margin), so the brightest element of a full-white field just reaches panel white and nothing hard-clips. A white point at or under 1 leaves nothing to compress: identity up to 1 and a hard clip above. Large values tend to the T-46 asymptotic shoulder (rate 1) [E]"
 description = "Shoulder mode only: shape of the roll-off, the input level (1 = panel white) that just reaches panel white. 0 = automatic from the headroom readout. A lower value compresses harder near the knee; a higher one keeps more highlight contrast and clips the rest."
 group = "Output"
+advanced = true
 
 [[param]]
 id = "output_dither"

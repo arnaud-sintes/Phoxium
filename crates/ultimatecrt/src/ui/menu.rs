@@ -11,23 +11,30 @@
 //! menu closes and the foreground stays where the user put it ([`on_activate`]): stealing it back would fight
 //! the user. The decisions are pure functions, unit tested; only [`Menu`] calls Win32.
 //!
-//! The menu window (this task's content; the generated parameter panels are T-53): title bar, movable,
-//! resizable, collapsible, an opacity slider; sections: preset selector (selecting applies the preset), SDR
-//! headroom readout and the output headroom parameters (T-84), the source placement readout (T-96) and the GPU
-//! milliseconds per stage (T-21). Position, size, opacity and the collapsed state persist in
-//! `settings.toml` (`[global.ui]`). The parameter panels come from a registry by stage ([`panel_for_stage`]),
-//! the extension point of T-53.
+//! The menu window (T-52a, T-53): title bar, movable, resizable, collapsible, an opacity slider. Body, top to
+//! bottom: hotkey problems; the parameter search and the Advanced toggle; the preset tools (filter, selector
+//! with a modified dot, revert, reload, save as a new user preset, update a user preset); "Output and headroom"
+//! (the SDR headroom readout of T-84 and the output panel, open by default); the pipeline panels generated from
+//! the parameter table ([`super::panels`], closed by default, each header with its count of changed
+//! parameters; the source panel starts with the placement readout of T-96); performance (GPU milliseconds per
+//! stage, T-21); GPU and system (adapter in use and the `[global.gpu] adapter` choice for the next start,
+//! hotkeys, settings folder). With a search, the body lists only the matching parameters of every panel.
+//! Position, size, opacity and the collapsed state persist in `settings.toml` (`[global.ui]`); the parameters,
+//! the preset and the adapter go back to the app through [`MenuResult`] (`super::UiOutput`).
 //!
 //! Look (`super::theme`): a flat SemiBold title bar, collapsible sections with small-capital headers, rows with
 //! the label on the left and the widget or value on the right (numbers right-aligned, tabular digits), sliders
 //! without inner text and with an accent fill, a scrolling body above a pinned footer (opacity, close hint).
 
+use std::path::PathBuf;
+
 use dear_imgui_rs::{Condition, StyleVar, Ui as Frame, WindowFlags};
 
-use crate::params::{ParamMeta, ParamType, ParamValue, Params, PARAMS_META};
-use crate::presets::Library;
+use crate::params::Params;
+use crate::presets::{Library, Origin, Preset};
 use crate::settings;
 
+use super::panels;
 use super::theme::{self, Fonts, METRICS, PALETTE};
 use super::UiState;
 
@@ -164,163 +171,13 @@ impl Menu {
 }
 
 // ---------------------------------------------------------------------------------------------------------
-// Parameter panels (extension point of T-53).
-
-/// A parameter panel: draws the widgets of one stage's parameters; true when a value changed.
-pub type Panel = fn(&Frame, &mut Params) -> bool;
-
-/// Panels by stage (`ParamMeta::stage`, the stem of the defining `params/*.toml`). T-52a registers the output
-/// headroom panel only; T-53 generates the others from `PARAMS_META` and adds them here.
-pub const PANELS: &[(&str, Panel)] = &[("output", output_panel)];
-
-/// The panel of `stage`, if one is registered.
-pub fn panel_for_stage(stage: &str) -> Option<Panel> {
-    PANELS.iter().find(|(s, _)| *s == stage).map(|&(_, p)| p)
-}
-
-/// The output headroom parameters (T-84, D-16): mode, exposure, knee, margin, shoulder white, mask depth.
-pub const HEADROOM_IDS: &[&str] = &[
-    "output_headroom_mode",
-    "exposure",
-    "output_knee",
-    "output_headroom_margin",
-    "output_shoulder_white",
-    "mask_depth",
-];
-
-fn output_panel(ui: &Frame, params: &mut Params) -> bool {
-    let mut changed = false;
-    for id in HEADROOM_IDS {
-        changed |= param_widget(ui, params, id);
-    }
-    changed
-}
-
-/// The label shown for a parameter in a section about `context` (a stage): its id in words, without the stage
-/// prefix when the parameter belongs to that stage (`output_knee` under `output` -> "Knee"; `mask_depth` under
-/// `output` -> "Mask depth").
-pub fn param_label(m: &ParamMeta, context: &str) -> String {
-    let prefix = format!("{}_", m.stage);
-    let id = if m.stage == context {
-        m.id.strip_prefix(&prefix).unwrap_or(m.id)
-    } else {
-        m.id
-    };
-    words(id)
-}
-
-/// An identifier in words with a capital first letter (`mask_depth` -> "Mask depth").
-pub fn words(id: &str) -> String {
-    let s = id.replace('_', " ");
-    let mut c = s.chars();
-    c.next()
-        .map(|f| f.to_uppercase().chain(c).collect())
-        .unwrap_or_default()
-}
-
-/// The value text of a number in a slider row: precision from the range, the unit if it has one.
-pub fn value_text(v: f64, range: (f64, f64), unit: &str) -> String {
-    let span = (range.1 - range.0).abs();
-    let digits = if span >= 100.0 {
-        1
-    } else if span >= 10.0 {
-        2
-    } else {
-        3
-    };
-    if unit == "1" {
-        format!("{v:.digits$}")
-    } else {
-        format!("{v:.digits$} {unit}")
-    }
-}
-
-/// Width of the value column of slider rows.
-fn value_width(ui: &Frame) -> f32 {
-    ui.calc_text_size("00.000 mm")[0]
-}
-
-/// One row for the parameter `id`, from its metadata: its label on the left; a slider over the soft range with
-/// the value aligned right for numbers, a check box for a bool, a combo for an enum (vectors are shown, not
-/// edited, until T-53). The description is the tooltip. True when it changed.
-pub fn param_widget(ui: &Frame, params: &mut Params, id: &str) -> bool {
-    let stage = PARAMS_META.iter().find(|m| m.id == id).map_or("", |m| m.stage);
-    param_row(ui, params, id, stage).0
-}
-
-/// [`param_widget`] in a section about the stage `context` ([`param_label`]), also returning the rectangle
-/// (min, max) of the widget itself (not the label or value).
-pub fn param_row(ui: &Frame, params: &mut Params, id: &str, context: &str) -> (bool, [[f32; 2]; 2]) {
-    let Some(m) = PARAMS_META.iter().find(|m| m.id == id) else {
-        return (false, [[0.0; 2]; 2]);
-    };
-    let width = theme::row_label(ui, &param_label(m, context));
-    let label_hovered = ui.is_item_hovered();
-    let wid = format!("##{}", m.id);
-    let range = m.soft_range.unwrap_or((0.0, 1.0));
-    let (lo, hi) = range;
-    let track = width - value_width(ui) - ui.clone_style().item_spacing()[0];
-    let mut value_shown = None;
-    let changed = match (m.ty, params.get(id)) {
-        (ParamType::F32, Some(ParamValue::F32(mut v))) => {
-            let c = theme::slider(ui, &wid, &mut v, lo as f32, hi as f32, track);
-            value_shown = Some(value_text(f64::from(v), range, m.unit));
-            c && params.set(id, ParamValue::F32(v))
-        }
-        (ParamType::I32, Some(ParamValue::I32(mut v))) => {
-            let c = theme::slider(ui, &wid, &mut v, lo as i32, hi as i32, track);
-            value_shown = Some(if m.unit == "1" {
-                v.to_string()
-            } else {
-                format!("{v} {}", m.unit)
-            });
-            c && params.set(id, ParamValue::I32(v))
-        }
-        (ParamType::Bool, Some(ParamValue::Bool(mut v))) => {
-            ui.checkbox(&wid, &mut v) && params.set(id, ParamValue::Bool(v))
-        }
-        (ParamType::Enum, Some(ParamValue::Enum(v))) => {
-            ui.set_next_item_width(width);
-            let current = m.values.get(v as usize).map_or_else(|| "?".to_string(), |s| words(s));
-            let mut pick = None;
-            if let Some(_combo) = ui.begin_combo(&wid, &current) {
-                for (i, name) in m.values.iter().enumerate() {
-                    let selected = i == v as usize;
-                    if ui.selectable_config(words(name)).selected(selected).build() {
-                        pick = Some(i as u32);
-                    }
-                    if selected {
-                        ui.set_item_default_focus();
-                    }
-                }
-            }
-            pick.is_some_and(|i| i != v && params.set(id, ParamValue::Enum(i)))
-        }
-        (_, Some(v)) => {
-            ui.text_colored(PALETTE.text, format!("{v:?}"));
-            false
-        }
-        _ => false,
-    };
-    let widget_hovered = ui.is_item_hovered();
-    let rect = [ui.item_rect_min(), ui.item_rect_max()];
-    if let Some(text) = value_shown {
-        ui.same_line();
-        theme::text_right(ui, PALETTE.text, &text);
-    }
-    if (label_hovered || widget_hovered) && !m.description.is_empty() {
-        theme::tooltip(ui, m.description);
-    }
-    (changed, rect)
-}
-
-// ---------------------------------------------------------------------------------------------------------
 // The menu window.
 
 /// Title of the menu window (the `###` part is its ImGui id, stable when the title changes).
 pub const TITLE: &str = "ultimateCRT###ucrt_menu";
 
-/// Screen rectangles (min, max) of the menu widgets in the frame just built (tests, live check).
+/// Screen rectangles (min, max) of the menu widgets in the frame just built (tests, live check). Every other
+/// widget is in [`MenuResult::items`] by key ([`super::Ui::item_rect`]).
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct MenuRects {
     pub window: [[f32; 2]; 2],
@@ -341,6 +198,39 @@ impl MenuRects {
     }
 }
 
+/// The preset tools' state: the name typed for a new preset, the last message, the user preset folder.
+#[derive(Clone, Debug, Default)]
+pub struct PresetForm {
+    pub name: String,
+    /// The outcome of the last action: (success, text).
+    pub message: Option<(bool, String)>,
+    /// The user preset folder (`presets::user_dir`), `None` when there is no settings folder (no saving).
+    pub dir: Option<PathBuf>,
+}
+
+/// One hotkey as the menu lists it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HotkeyRow {
+    /// What it does (`hotkeys::Action::describe`).
+    pub action: String,
+    /// The chord registered, `None` when the action has no hotkey.
+    pub bound: Option<String>,
+    /// The chord asked for in the settings (differs from `bound` when a fallback is in force).
+    pub wanted: String,
+}
+
+/// What the GPU and system panel shows and edits.
+#[derive(Clone, Debug, Default)]
+pub struct SystemModel {
+    /// The session's adapter selection and list (`adapters::current`), `None` before the renderer runs.
+    pub gpu: Option<crate::adapters::Current>,
+    /// `[global.gpu] adapter` as it is in the settings now (changed by the combo).
+    pub gpu_setting: String,
+    pub hotkeys: Vec<HotkeyRow>,
+    /// The settings folder, shown for reference.
+    pub settings_dir: Option<PathBuf>,
+}
+
 /// What the menu window edits in one frame.
 pub struct MenuModel<'a> {
     pub state: &'a UiState,
@@ -348,8 +238,14 @@ pub struct MenuModel<'a> {
     pub params: &'a mut Params,
     /// Text filter of the preset list.
     pub filter: &'a mut String,
+    /// Parameter search over every panel.
+    pub search: &'a mut String,
+    /// Show the parameters marked advanced.
+    pub advanced: &'a mut bool,
     pub layout: &'a mut settings::UiState,
     pub library: &'a Library,
+    pub presets: &'a mut PresetForm,
+    pub system: &'a mut SystemModel,
     /// Menu key shown in the footer hint.
     pub key: &'a str,
     /// Hotkey registration problems, shown at the top (empty: nothing shown).
@@ -363,13 +259,21 @@ pub struct MenuModel<'a> {
 /// What the menu window did in one frame.
 #[derive(Debug, Default)]
 pub struct MenuResult {
-    /// A parameter changed (through a widget or a preset).
+    /// A parameter changed (through a widget, a reset, a revert or a preset).
     pub params_changed: bool,
     /// The preset selected in this frame (its id); `params` already holds its parameters.
     pub preset: Option<String>,
+    /// The preset library changed (a preset saved, the files reloaded).
+    pub library: Option<Library>,
+    /// The `[global.gpu] adapter` value chosen in this frame (applied at the next start).
+    pub gpu_adapter: Option<String>,
     /// The layout (position, size, opacity, collapsed) changed.
     pub layout_changed: bool,
     pub rects: MenuRects,
+    /// Widget rectangles by key: `label:<id>`, `widget:<id>` (`widget:<id>.<k>` for a vector component),
+    /// `header:<panel>`, `reset:<panel>`, `search`, `advanced`, `revert`, `reload`, `preset_name`,
+    /// `save_preset`, `update_preset`, `gpu_adapter`.
+    pub items: Vec<(String, [[f32; 2]; 2])>,
 }
 
 /// The presets whose id or name contains `filter` (case insensitive), as (id, name).
@@ -454,7 +358,12 @@ fn rect(ui: &Frame) -> [[f32; 2]; 2] {
     [ui.item_rect_min(), ui.item_rect_max()]
 }
 
-/// The scrolling body: hotkey problems, preset, headroom, source, performance.
+fn record(ui: &Frame, r: &mut MenuResult, key: &str) {
+    r.items.push((key.to_string(), rect(ui)));
+}
+
+/// The scrolling body: hotkey problems, the parameter search, then (without a search) the preset tools, the
+/// output and headroom panel, the pipeline panels, performance, GPU and system.
 fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     let fonts = m.fonts;
     // Hotkey registration problems (T-54): a chord another program owns, the fallback in force.
@@ -462,139 +371,561 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
         theme::callout(ui, PALETTE.problem, m.hotkey_problems);
         ui.spacing();
     }
-
-    // Preset: filter and selector; selecting applies the preset.
-    let list = filtered_presets(m.library, m.filter);
-    let count = format!("{} of {}", list.len(), m.library.list().len());
-    if theme::section(ui, &fonts, "Preset", Some(&count), true) {
-        ui.set_next_item_width(-f32::MIN_POSITIVE);
-        ui.input_text("##filter", m.filter).hint("Filter presets").build();
-        r.rects.filter = rect(ui);
-        let current = m.state.preset.as_deref();
-        let preview = current
-            .and_then(|id| m.library.find(id))
-            .map_or("Custom".to_string(), |p| p.name.clone());
-        ui.set_next_item_width(-f32::MIN_POSITIVE);
-        if let Some(_combo) = ui.begin_combo("##preset", &preview) {
-            for (id, name) in &list {
-                let selected = current == Some(id.as_str());
-                if ui.selectable_config(format!("{name}##{id}")).selected(selected).build() {
-                    if let Some(p) = m.library.find(id) {
-                        *m.params = p.params();
-                        r.preset = Some(id.clone());
-                        r.params_changed = true;
-                    }
-                }
-                if ui.is_item_hovered() {
-                    theme::tooltip(ui, id);
-                }
-                if selected {
-                    ui.set_item_default_focus();
-                }
-            }
-        }
-        r.rects.preset = rect(ui);
+    search_row(ui, m, r);
+    let reference = panels::reference(m.state.baseline.as_ref(), m.library, m.state.preset.as_deref());
+    if !m.search.trim().is_empty() {
+        search_results(ui, m, r, &reference);
+        return;
     }
 
-    // SDR headroom (T-84): the readout, its factors, the mode in effect, the output panel.
-    if theme::section(ui, &fonts, "SDR headroom", None, false) {
-        match m.state.headroom {
-            Some(h) => {
-                let total = h.total();
-                let (colour, status) = if total > 1.0 {
-                    (PALETTE.accent, "Above panel white")
-                } else {
-                    (PALETTE.ok, "Fits panel white")
-                };
-                theme::with_font(ui, fonts.strong, METRICS.font_display, || {
-                    ui.text_colored(colour, format!("{total:.3}"));
-                });
-                let [min, max] = [ui.item_rect_min(), ui.item_rect_max()];
-                ui.same_line();
-                theme::with_font(ui, None, METRICS.font_small, || {
-                    // The unit on the number's baseline band, a status pill on the right.
-                    let y = max[1] - ui.text_line_height() - 0.22 * (max[1] - min[1]);
-                    ui.set_cursor_screen_pos([ui.cursor_screen_pos()[0], y]);
-                    ui.text_colored(PALETTE.text_muted, "\u{00D7} panel white");
-                    theme::pill(ui, status, colour, (min[1] + max[1]) * 0.5);
-                });
-                // The factors of the readout, one faint line.
-                let mask = if (h.mask_peak - h.mask_peak_physical).abs() > 5e-4 {
-                    format!("{:.3} (physical {:.3})", h.mask_peak, h.mask_peak_physical)
-                } else {
-                    format!("{:.3}", h.mask_peak)
-                };
-                theme::with_font(ui, None, METRICS.font_small, || {
-                    ui.text_colored(
-                        PALETTE.text_faint,
-                        format!(
-                            "mask {mask}  \u{00D7}  scanlines {:.3}  \u{00D7}  white {:.3}  \u{00D7}  exposure {:.3}",
-                            h.scanline_peak, h.matrix_max, h.exposure
-                        ),
-                    );
-                });
-                ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
-                let mode = crate::headroom::effective_mode(m.params, h.mask_peak_physical);
-                let name = crate::params::meta("output_headroom_mode")
-                    .and_then(|meta| meta.values.get(mode as usize))
-                    .map_or_else(|| "?".to_string(), |v| words(v));
-                theme::kv_row(ui, "Mode in effect", &name, PALETTE.text);
-            }
-            None => theme::kv_row(ui, "Readout", "no frame yet", PALETTE.text_faint),
-        }
-        ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
-        // The registered output panel; the first two rows are the mode combo and the exposure.
-        for (k, id) in HEADROOM_IDS.iter().enumerate() {
-            let (changed, widget) = param_row(ui, m.params, id, "output");
-            r.params_changed |= changed;
-            match k {
-                0 => r.rects.headroom_mode = widget,
-                1 => r.rects.exposure = widget,
-                _ => {}
-            }
-        }
-    }
+    preset_section(ui, m, r, &reference);
 
-    // Source placement (T-96).
-    let (open, header) = theme::section_closed(ui, &fonts, "Source");
-    r.rects.source_header = header;
+    // Output and headroom (T-84): the readout, the mode in effect, then the output panel (open by default).
+    let changed = panels::modified_count(m.params, &reference, panels::OUTPUT);
+    let note = (changed > 0).then(|| format!("{changed} changed"));
+    let (open, header) = theme::section_header(ui, &fonts, panels::OUTPUT, note.as_deref(), false, true);
+    r.items.push((format!("header:{}", panels::OUTPUT), header));
     if open {
-        match &m.state.placement {
-            Some(p) => placement_rows(ui, p),
-            None => theme::kv_row(ui, "Source", "no frame yet", PALETTE.text_faint),
+        headroom_readout(ui, m);
+        r.params_changed |= panel(ui, m, r, &reference, panels::OUTPUT);
+        r.rects.headroom_mode = item(r, "widget:output_headroom_mode");
+        r.rects.exposure = item(r, "widget:exposure");
+    }
+
+    // The pipeline panels, closed by default.
+    for def in panels::PANELS {
+        if def.name == panels::OUTPUT || (def.name == panels::OTHER && panels::panel_params(def.name).is_empty()) {
+            continue;
         }
+        let changed = panels::modified_count(m.params, &reference, def.name);
+        let note = (changed > 0).then(|| format!("{changed} changed"));
+        let (open, header) = theme::section_header(ui, &fonts, def.name, note.as_deref(), false, false);
+        r.items.push((format!("header:{}", def.name), header));
+        if def.name == panels::SOURCE {
+            r.rects.source_header = header;
+        }
+        if !open {
+            continue;
+        }
+        if def.name == panels::SOURCE {
+            theme::subheading(ui, &fonts, "Placement");
+            match &m.state.placement {
+                Some(p) => placement_rows(ui, p),
+                None => theme::kv_row(ui, "Source", "no frame yet", PALETTE.text_faint),
+            }
+        }
+        r.params_changed |= panel(ui, m, r, &reference, def.name);
+        ui.dummy([0.0, METRICS.section_gap * theme::scale_of(ui)]);
     }
 
     // Performance (T-21): fps and the GPU milliseconds per stage.
-    let (open, header) = theme::section_closed(ui, &fonts, "Performance");
+    let (open, header) = theme::section_closed(ui, &fonts, "Performance and diagnostics");
     r.rects.performance_header = header;
+    r.items.push(("header:Performance and diagnostics".to_string(), header));
     if open {
-        theme::kv_row(ui, "Capture", &format!("{:.0} fps", m.state.capture_fps), PALETTE.text);
-        theme::kv_row(ui, "Render", &format!("{:.0} fps", m.state.render_fps), PALETTE.text);
-        match &m.state.timings {
-            Some(t) => {
-                theme::kv_row(ui, "GPU per frame", &format!("{:.3} ms", t.frame_ms), PALETTE.accent);
-                ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
-                for st in &t.stages {
-                    let (text, colour) = match st.ms {
-                        Some(ms) if st.bypassed => (format!("bypass  {ms:.3} ms"), PALETTE.text_faint),
-                        Some(ms) => (format!("{ms:.3} ms"), PALETTE.text),
-                        None => ("off".to_string(), PALETTE.text_faint),
-                    };
-                    let share = st.ms.map_or(0.0, |ms| (ms / t.frame_ms.max(1e-9)) as f32);
-                    theme::bar_row(ui, st.name, share, &text, colour);
+        performance_rows(ui, m);
+    }
+
+    // GPU and system: the adapter (applied at the next start), the hotkeys, the settings folder.
+    let (open, header) = theme::section_closed(ui, &fonts, "GPU and system");
+    r.items.push(("header:GPU and system".to_string(), header));
+    if open {
+        system_rows(ui, m, r);
+    }
+}
+
+/// The rectangle recorded under `key` in this frame (zero when absent).
+fn item(r: &MenuResult, key: &str) -> [[f32; 2]; 2] {
+    r.items
+        .iter()
+        .rev()
+        .find(|(k, _)| k == key)
+        .map_or([[0.0; 2]; 2], |(_, rect)| *rect)
+}
+
+/// The rows of one panel ([`panels::panel_body`]).
+fn panel(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, reference: &Params, name: &'static str) -> bool {
+    let mut ctx = panels::RowCtx {
+        params: m.params,
+        reference,
+        items: &mut r.items,
+    };
+    panels::panel_body(ui, &m.fonts, &mut ctx, name, *m.advanced, "")
+}
+
+/// The parameter search field and the Advanced toggle, on one row.
+fn search_row(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let style = ui.clone_style();
+    let check_w = ui.frame_height() + style.item_inner_spacing()[0] + ui.calc_text_size("Advanced")[0];
+    let avail = ui.content_region_avail()[0];
+    ui.set_next_item_width((avail - check_w - style.item_spacing()[0]).max(60.0));
+    ui.input_text("##search", m.search).hint("Search parameters").build();
+    record(ui, r, "search");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Finds parameters by name, id or group in every panel, advanced ones included. Every word must \
+             match.",
+        );
+    }
+    ui.same_line();
+    ui.checkbox("Advanced", m.advanced);
+    record(ui, r, "advanced");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Show the advanced parameters (fine tuning, model internals) in every panel.",
+        );
+    }
+}
+
+/// With a search: the matching parameters of every panel, under the panel names.
+fn search_results(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, reference: &Params) {
+    let fonts = m.fonts;
+    let query = m.search.clone();
+    let mut found = 0;
+    let mut order: Vec<&'static str> = vec![panels::OUTPUT];
+    order.extend(panels::PANELS.iter().map(|p| p.name).filter(|n| *n != panels::OUTPUT));
+    for name in order {
+        let rows: Vec<_> = panels::panel_params(name)
+            .into_iter()
+            .filter(|p| panels::matches(p, &query))
+            .collect();
+        if rows.is_empty() {
+            continue;
+        }
+        theme::subheading(ui, &fonts, name);
+        let mut ctx = panels::RowCtx {
+            params: m.params,
+            reference,
+            items: &mut r.items,
+        };
+        for p in rows {
+            let _id = ui.push_id(p.id);
+            r.params_changed |= panels::param_row(ui, &mut ctx, p);
+            found += 1;
+        }
+    }
+    if found == 0 {
+        ui.dummy([0.0, 4.0 * theme::scale_of(ui)]);
+        ui.text_colored(
+            PALETTE.text_faint,
+            format!("No parameter matches \u{201C}{}\u{201D}.", query.trim()),
+        );
+    }
+}
+
+/// Preset: filter and selector (selecting applies the preset), revert and reload, save as a new user preset or
+/// update the user preset in force, and the outcome of the last action.
+fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, reference: &Params) {
+    let fonts = m.fonts;
+    let s = theme::scale_of(ui);
+    let list = filtered_presets(m.library, m.filter);
+    let count = format!("{} of {}", list.len(), m.library.list().len());
+    if !theme::section(ui, &fonts, "Preset", Some(&count), true) {
+        return;
+    }
+    ui.set_next_item_width(-f32::MIN_POSITIVE);
+    ui.input_text("##filter", m.filter).hint("Filter presets").build();
+    r.rects.filter = rect(ui);
+    let current = m.state.preset.as_deref();
+    let current_preset = current.and_then(|id| m.library.find(id));
+    let modified = m.params != reference;
+    let preview = current_preset.map_or("Custom".to_string(), |p| p.name.clone());
+    // The combo leaves room on its left for the modified dot (compare to the saved preset).
+    let gutter = 10.0 * s;
+    let start = ui.cursor_screen_pos();
+    ui.set_cursor_pos_x(ui.cursor_pos()[0] + gutter);
+    ui.set_next_item_width(-f32::MIN_POSITIVE);
+    if let Some(_combo) = ui.begin_combo("##preset", &preview) {
+        for (id, name) in &list {
+            let selected = current == Some(id.as_str());
+            let user = m.library.find(id).is_some_and(|p| matches!(p.origin, Origin::User(_)));
+            let text = if user {
+                format!("{name}  \u{00B7}  user##{id}")
+            } else {
+                format!("{name}##{id}")
+            };
+            if ui.selectable_config(text).selected(selected).build() {
+                if let Some(p) = m.library.find(id) {
+                    *m.params = p.params();
+                    r.preset = Some(id.clone());
+                    r.params_changed = true;
+                    m.presets.message = None;
                 }
             }
-            None => theme::kv_row(ui, "GPU timings", "none yet", PALETTE.text_faint),
+            if ui.is_item_hovered() {
+                theme::tooltip(ui, id);
+            }
+            if selected {
+                ui.set_item_default_focus();
+            }
+        }
+    }
+    r.rects.preset = rect(ui);
+    if modified {
+        let y = (r.rects.preset[0][1] + r.rects.preset[1][1]) * 0.5;
+        ui.get_window_draw_list()
+            .add_circle([start[0] + gutter * 0.5, y], 3.0 * s, PALETTE.accent)
+            .filled(true)
+            .build();
+    }
+    if ui.is_item_hovered() && modified {
+        theme::tooltip(
+            ui,
+            "Changed since the preset was applied (the dot). Revert restores the preset.",
+        );
+    }
+
+    // Revert and reload on one row, the change count on the right.
+    let disabled = ui.begin_disabled_with_cond(!modified);
+    if theme::button(ui, "Revert") {
+        *m.params = *reference;
+        r.params_changed = true;
+        m.presets.message = Some((true, "Reverted to the preset values.".to_string()));
+    }
+    drop(disabled);
+    record(ui, r, "revert");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Set every parameter back to the preset in force (else the table defaults).",
+        );
+    }
+    ui.same_line();
+    if theme::button(ui, "Reload") {
+        let lib = Library::load(m.presets.dir.as_deref());
+        let n = lib.list().len();
+        let problems = lib.warnings.len();
+        m.presets.message = Some(if problems == 0 {
+            (true, format!("Reloaded {n} presets."))
+        } else {
+            (
+                false,
+                format!(
+                    "Reloaded {n} presets; {problems} problem(s): {}",
+                    lib.warnings.join("; ")
+                ),
+            )
+        });
+        r.library = Some(lib);
+    }
+    record(ui, r, "reload");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Read the preset files again (the shipped ones and the user folder).",
+        );
+    }
+    let changed = panels::PANELS
+        .iter()
+        .map(|p| panels::modified_count(m.params, reference, p.name))
+        .sum::<usize>();
+    if changed > 0 {
+        ui.same_line();
+        theme::with_font(ui, None, METRICS.font_small, || {
+            let text = format!("{changed} changed");
+            ui.align_text_to_frame_padding();
+            theme::text_right(ui, PALETTE.accent, &text);
+        });
+    }
+
+    // Save as a new user preset, or update the user preset in force.
+    let save_w = ui.calc_text_size("Save as new")[0] + 20.0 * s;
+    let avail = ui.content_region_avail()[0];
+    ui.set_next_item_width((avail - save_w - ui.clone_style().item_spacing()[0]).max(60.0));
+    ui.input_text("##preset_name", &mut m.presets.name)
+        .hint("New preset name")
+        .build();
+    record(ui, r, "preset_name");
+    ui.same_line();
+    let can_save = m.presets.dir.is_some();
+    let disabled = ui.begin_disabled_with_cond(!can_save);
+    if theme::button(ui, "Save as new") {
+        save_new_preset(m, r);
+    }
+    drop(disabled);
+    record(ui, r, "save_preset");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            if can_save {
+                "Save the current parameters as a user preset (the shipped presets are never changed)."
+            } else {
+                "No settings folder: user presets cannot be saved."
+            },
+        );
+    }
+    if let (Some(p), Some(_)) = (current_preset, &m.presets.dir) {
+        if matches!(p.origin, Origin::User(_)) {
+            let disabled = ui.begin_disabled_with_cond(!modified);
+            if theme::button(ui, &format!("Update \u{201C}{}\u{201D}", p.name)) {
+                update_preset(m, r, p.id.clone(), p.name.clone());
+            }
+            drop(disabled);
+            record(ui, r, "update_preset");
+        }
+    }
+    if let Some((ok, text)) = &m.presets.message {
+        theme::with_font(ui, None, METRICS.font_small, || {
+            let wrap = ui.push_text_wrap_pos(0.0);
+            ui.text_colored(if *ok { PALETTE.ok } else { PALETTE.problem }, text);
+            drop(wrap);
+        });
+    }
+}
+
+/// "Save as new": checks the name, writes `<dir>\<id>.toml`, reloads the library and selects the new preset.
+fn save_new_preset(m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let Some(dir) = m.presets.dir.clone() else {
+        return;
+    };
+    let name = m.presets.name.trim().to_string();
+    let result = panels::check_new_preset(&name, m.library)
+        .and_then(|id| Preset::from_params(&id, &name, m.params).map_err(|e| e.to_string()))
+        .and_then(|p| p.save(&dir).map(|path| (p.id, path)).map_err(|e| e.to_string()));
+    match result {
+        Ok((id, path)) => {
+            m.presets.message = Some((true, format!("Saved {}.", path.display())));
+            m.presets.name.clear();
+            r.library = Some(Library::load(Some(&dir)));
+            r.preset = Some(id);
+            r.params_changed = true;
+        }
+        Err(e) => m.presets.message = Some((false, e)),
+    }
+}
+
+/// "Update": rewrites the user preset `id` with the current parameters and selects it again.
+fn update_preset(m: &mut MenuModel<'_>, r: &mut MenuResult, id: String, name: String) {
+    let Some(dir) = m.presets.dir.clone() else {
+        return;
+    };
+    match Preset::from_params(&id, &name, m.params).and_then(|p| {
+        p.save(&dir).map_err(|e| crate::presets::PresetError {
+            file: format!("{id}.toml"),
+            message: e.to_string(),
+        })
+    }) {
+        Ok(_) => {
+            m.presets.message = Some((true, format!("Updated {id}.toml.")));
+            r.library = Some(Library::load(Some(&dir)));
+            r.preset = Some(id);
+            r.params_changed = true;
+        }
+        Err(e) => m.presets.message = Some((false, e.to_string())),
+    }
+}
+
+/// The SDR headroom readout (T-84): the total, its factors, the mode in effect.
+fn headroom_readout(ui: &Frame, m: &MenuModel<'_>) {
+    let fonts = m.fonts;
+    match m.state.headroom {
+        Some(h) => {
+            let total = h.total();
+            let (colour, status) = if total > 1.0 {
+                (PALETTE.accent, "Above panel white")
+            } else {
+                (PALETTE.ok, "Fits panel white")
+            };
+            theme::with_font(ui, fonts.strong, METRICS.font_display, || {
+                ui.text_colored(colour, format!("{total:.3}"));
+            });
+            let [min, max] = [ui.item_rect_min(), ui.item_rect_max()];
+            ui.same_line();
+            theme::with_font(ui, None, METRICS.font_small, || {
+                // The unit on the number's baseline band, a status pill on the right.
+                let y = max[1] - ui.text_line_height() - 0.22 * (max[1] - min[1]);
+                ui.set_cursor_screen_pos([ui.cursor_screen_pos()[0], y]);
+                ui.text_colored(PALETTE.text_muted, "\u{00D7} panel white");
+                theme::pill(ui, status, colour, (min[1] + max[1]) * 0.5);
+            });
+            // The factors of the readout, one faint line.
+            let mask = if (h.mask_peak - h.mask_peak_physical).abs() > 5e-4 {
+                format!("{:.3} (physical {:.3})", h.mask_peak, h.mask_peak_physical)
+            } else {
+                format!("{:.3}", h.mask_peak)
+            };
+            theme::with_font(ui, None, METRICS.font_small, || {
+                ui.text_colored(
+                    PALETTE.text_faint,
+                    format!(
+                        "mask {mask}  \u{00D7}  scanlines {:.3}  \u{00D7}  white {:.3}  \u{00D7}  exposure {:.3}",
+                        h.scanline_peak, h.matrix_max, h.exposure
+                    ),
+                );
+            });
+            ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+            let mode = crate::headroom::effective_mode(m.params, h.mask_peak_physical);
+            let name = crate::params::meta("output_headroom_mode")
+                .and_then(|meta| meta.values.get(mode as usize))
+                .map_or_else(|| "?".to_string(), |v| panels::words(v));
+            theme::kv_row(ui, "Mode in effect", &name, PALETTE.text);
+        }
+        None => theme::kv_row(ui, "Readout", "no frame yet", PALETTE.text_faint),
+    }
+    ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+}
+
+/// Capture and render rates and the GPU milliseconds per stage.
+fn performance_rows(ui: &Frame, m: &MenuModel<'_>) {
+    theme::kv_row(ui, "Capture", &format!("{:.0} fps", m.state.capture_fps), PALETTE.text);
+    theme::kv_row(ui, "Render", &format!("{:.0} fps", m.state.render_fps), PALETTE.text);
+    match &m.state.timings {
+        Some(t) => {
+            theme::kv_row(ui, "GPU per frame", &format!("{:.3} ms", t.frame_ms), PALETTE.accent);
+            ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+            for st in &t.stages {
+                let (text, colour) = match st.ms {
+                    Some(ms) if st.bypassed => (format!("bypass  {ms:.3} ms"), PALETTE.text_faint),
+                    Some(ms) => (format!("{ms:.3} ms"), PALETTE.text),
+                    None => ("off".to_string(), PALETTE.text_faint),
+                };
+                let share = st.ms.map_or(0.0, |ms| (ms / t.frame_ms.max(1e-9)) as f32);
+                theme::bar_row(ui, st.name, share, &text, colour);
+            }
+        }
+        None => theme::kv_row(ui, "GPU timings", "none yet", PALETTE.text_faint),
+    }
+}
+
+/// The text the adapter combo shows for a `[global.gpu] adapter` value.
+pub fn adapter_choice_name(value: &str, adapters: &[crate::adapters::AdapterEntry]) -> String {
+    if value.trim().is_empty() || value.trim().eq_ignore_ascii_case(settings::GPU_ADAPTER_AUTO) {
+        return "Automatic".to_string();
+    }
+    adapters
+        .iter()
+        .find(|a| a.setting_value().eq_ignore_ascii_case(value.trim()))
+        .map_or_else(
+            || format!("\u{201C}{}\u{201D} (as written in the settings)", value.trim()),
+            |a| a.name.clone(),
+        )
+}
+
+/// Whether the adapter setting `now` differs from the one the session started with (a restart applies it).
+pub fn adapter_restart_needed(now: &str, at_start: &str) -> bool {
+    let norm = |s: &str| {
+        let t = s.trim();
+        if t.is_empty() {
+            settings::GPU_ADAPTER_AUTO.to_string()
+        } else {
+            t.to_lowercase()
+        }
+    };
+    norm(now) != norm(at_start)
+}
+
+/// GPU and system: the adapter in use and the choice for the next start, the hotkeys, the settings folder.
+fn system_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let fonts = m.fonts;
+    let text = PALETTE.text;
+    theme::subheading(ui, &fonts, "GPU");
+    let gpu = m.system.gpu.clone();
+    let adapters = gpu.as_ref().map(|g| g.adapters.clone()).unwrap_or_default();
+    match &gpu {
+        Some(g) => {
+            let chosen = g
+                .selection
+                .chosen
+                .as_ref()
+                .map_or("none".to_string(), |v| v.name.clone());
+            theme::kv_row(ui, "In use", &chosen, PALETTE.accent);
+            theme::kv_row(ui, "Chosen by", &g.selection.reason.to_string(), text);
+            if let Some(o) = &g.selection.owner {
+                theme::kv_row(ui, "Monitor owner", &o.name, text);
+            }
+        }
+        None => theme::kv_row(ui, "In use", "not known yet", PALETTE.text_faint),
+    }
+    // The choice for the next start: automatic, or one adapter with a Vulkan device.
+    let width = theme::row_label(ui, "Next start");
+    ui.set_next_item_width(width);
+    let current = adapter_choice_name(&m.system.gpu_setting, &adapters);
+    if let Some(_combo) = ui.begin_combo("##gpu_adapter", &current) {
+        let mut options: Vec<(String, String, bool)> = vec![(
+            settings::GPU_ADAPTER_AUTO.to_string(),
+            adapter_choice_name(settings::GPU_ADAPTER_AUTO, &adapters),
+            true,
+        )];
+        for a in &adapters {
+            let mut label = a.name.clone();
+            if a.owns_monitors {
+                label.push_str("  \u{00B7}  drives a monitor");
+            }
+            if a.vulkan_index.is_none() {
+                label.push_str("  \u{00B7}  no Vulkan device");
+            }
+            options.push((a.setting_value(), label, a.vulkan_index.is_some() && !a.software));
+        }
+        for (value, label, usable) in options {
+            let selected = value.eq_ignore_ascii_case(m.system.gpu_setting.trim());
+            let disabled = ui.begin_disabled_with_cond(!usable);
+            if ui
+                .selectable_config(format!("{label}##{value}"))
+                .selected(selected)
+                .build()
+                && !selected
+            {
+                m.system.gpu_setting = value.clone();
+                r.gpu_adapter = Some(value);
+            }
+            drop(disabled);
+        }
+    }
+    record(ui, r, "gpu_adapter");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "The adapter that runs capture and rendering ([global.gpu] adapter in settings.toml). Automatic takes \
+             the adapter driving the monitor the output covers. A change applies at the next start; --gpu wins.",
+        );
+    }
+    let at_start = gpu.as_ref().map_or(settings::GPU_ADAPTER_AUTO, |g| g.setting.as_str());
+    if adapter_restart_needed(&m.system.gpu_setting, at_start) {
+        ui.spacing();
+        theme::callout(
+            ui,
+            PALETTE.accent,
+            &["Restart required: the new adapter is used from the next start of ultimateCRT.".to_string()],
+        );
+    }
+    if let Some(g) = &gpu {
+        if !g.selection.warnings.is_empty() {
+            ui.spacing();
+            theme::callout(ui, PALETTE.problem, &g.selection.warnings);
         }
     }
 
-    // Further stage panels registered by T-53 (the output panel is drawn under the headroom).
-    for (stage, panel) in PANELS.iter().filter(|(s, _)| *s != "output") {
-        if theme::section_closed(ui, &fonts, &words(stage)).0 {
-            r.params_changed |= panel(ui, m.params);
-        }
+    theme::subheading(ui, &fonts, "Hotkeys");
+    for h in &m.system.hotkeys {
+        let (value, colour) = match &h.bound {
+            Some(b) if *b == h.wanted => (b.clone(), text),
+            Some(b) => (format!("{b}  ({} taken)", h.wanted), PALETTE.accent),
+            None => ("none".to_string(), PALETTE.problem),
+        };
+        theme::kv_row(ui, &h.action, &value, colour);
     }
+    theme::with_font(ui, None, METRICS.font_small, || {
+        let wrap = ui.push_text_wrap_pos(0.0);
+        ui.text_colored(
+            PALETTE.text_faint,
+            "Chords are set in [global.hotkeys] of settings.toml and registered at start.",
+        );
+        drop(wrap);
+    });
+
+    theme::subheading(ui, &fonts, "Files");
+    let dir = m
+        .system
+        .settings_dir
+        .as_ref()
+        .map_or("none (no APPDATA)".to_string(), |d| d.display().to_string());
+    theme::with_font(ui, None, METRICS.font_small, || {
+        let wrap = ui.push_text_wrap_pos(0.0);
+        ui.text_colored(PALETTE.text_muted, format!("Settings and user presets: {dir}"));
+        drop(wrap);
+    });
 }
 
 /// The source placement readout as label and value rows.
@@ -653,7 +984,7 @@ fn footer(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     theme::rule(ui);
     ui.dummy([0.0, 2.0 * s]);
     let width = theme::row_label(ui, "Opacity");
-    let track = width - value_width(ui) - ui.clone_style().item_spacing()[0];
+    let track = width - ui.calc_text_size("00.000 mm")[0] - ui.clone_style().item_spacing()[0];
     theme::slider(ui, "##opacity", &mut m.layout.menu_opacity, 0.2, 1.0, track);
     r.rects.opacity = rect(ui);
     ui.same_line();
@@ -747,12 +1078,23 @@ mod tests {
     }
 
     #[test]
-    fn panel_registry_has_the_output_panel_and_every_headroom_id_exists() {
-        assert!(panel_for_stage("output").is_some());
-        assert!(panel_for_stage("no_such_stage").is_none());
-        for id in HEADROOM_IDS {
-            assert!(crate::params::meta(id).is_some(), "{id}");
-        }
+    fn adapter_choice_names_and_restart_note() {
+        use crate::adapters::{AdapterEntry, Luid};
+        let rtx = AdapterEntry {
+            name: "NVIDIA RTX A2000 Laptop GPU".into(),
+            luid: Some(Luid { high: 0, low: 0x17801 }),
+            owns_monitors: false,
+            software: false,
+            vulkan_index: Some(0),
+        };
+        let list = [rtx.clone()];
+        assert!(adapter_choice_name("auto", &list).starts_with("Automatic"));
+        assert!(adapter_choice_name("", &list).starts_with("Automatic"));
+        assert_eq!(adapter_choice_name(&rtx.setting_value(), &list), rtx.name);
+        assert!(adapter_choice_name("Intel", &list).contains("Intel"));
+        assert!(!adapter_restart_needed("auto", "AUTO"));
+        assert!(!adapter_restart_needed("", "auto"));
+        assert!(adapter_restart_needed(&rtx.setting_value(), "auto"));
     }
 
     #[test]

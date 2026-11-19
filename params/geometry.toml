@@ -42,6 +42,7 @@ tag = "E"
 source = "CRT.md Faceplate curvature: typical monitor viewing distance 500 to 650 mm (1.0 to 1.3 diagonals of a 19 in tube); 0 = eye at infinity (parallel projection)"
 description = "Distance from the eye to the centre of the faceplate, on the tube axis. The eye looks through each host pixel at the curved surface (ray cast, no refraction). 0 puts the eye at infinity (parallel view)."
 group = "Geometry"
+advanced = true
 
 [[param]]
 id = "geometry_overscan_x"
@@ -211,6 +212,7 @@ tag = "K"
 source = "CRT.md Convergence, purity and landing: errors grow with the distance from the centre (21 in datasheet 0.30 mm centre, 0.50 mm corners; TVs up to 2 mm in corners); quadratic model [E] [T-87: was S; the zero default is the neutral identity (perfect convergence), not a sourced value; CRT.md gives errors per tube class]"
 description = "Radial misconvergence of the red beam at the picture corner (positive: outward), growing with the square of the distance from the centre, added to the static offset."
 group = "Convergence"
+advanced = true
 
 [[param]]
 id = "geometry_conv_green_radial_mm"
@@ -224,6 +226,7 @@ tag = "K"
 source = "CRT.md Convergence, purity and landing (radial growth toward the corners, quadratic model [E]) [T-87: was S; the zero default is the neutral identity (perfect convergence), not a sourced value; CRT.md gives errors per tube class]"
 description = "Radial misconvergence of the green beam at the picture corner (positive: outward)."
 group = "Convergence"
+advanced = true
 
 [[param]]
 id = "geometry_conv_blue_radial_mm"
@@ -237,3 +240,4 @@ tag = "K"
 source = "CRT.md Convergence, purity and landing (radial growth toward the corners, quadratic model [E]) [T-87: was S; the zero default is the neutral identity (perfect convergence), not a sourced value; CRT.md gives errors per tube class]"
 description = "Radial misconvergence of the blue beam at the picture corner (positive: outward)."
 group = "Convergence"
+advanced = true

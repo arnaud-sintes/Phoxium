@@ -54,6 +54,7 @@ tag = "K"
 source = "CRT.md What the user controls do physically: brightness = DC bias relative to cutoff = k_o, an offset before the power law"
 description = "Brightness: offset k_o added to the drive inside the gog law, before the power. Positive lifts the blacks (lowers the effective gamma near black), negative crushes the shadows."
 group = "Gun"
+advanced = true
 
 [[param]]
 id = "gun_cutoff_rgb"
@@ -93,6 +94,7 @@ tag = "S"
 source = "ITU-R BT.1886 (CRT.md Gun law) with the broadcast reference white 100 cd/m2 (CRT.md Luminance and contrast)"
 description = "White luminance Lw of the bt1886 law. The stage outputs the relative current L / Lw, so Lw matters only through the ratio Lb / Lw (changing Lw alone, with Lb scaled with it, changes nothing); it is not an absolute luminance of the picture."
 group = "Gun"
+advanced = true
 
 [[param]]
 id = "gun_bt1886_black"
@@ -106,6 +108,7 @@ tag = "E"
 source = "ITU-R BT.1886 (CRT.md Gun law); CRT.md Luminance and contrast: practical black floor 0.01 to 0.05 cd/m2, 0.1 is the black level of the effective-gamma note (2.40 at black level 0.1, 2.60 at zero)"
 description = "Black luminance Lb of the bt1886 law, which sets the lift b = Lb^(1/2.4) / (Lw^(1/2.4) - Lb^(1/2.4)). Must stay below Lw."
 group = "Gun"
+advanced = true
 
 [[param]]
 id = "gun_annex1_lift"
@@ -119,6 +122,7 @@ tag = "E"
 source = "ITU-R BT.1886 Annex 1 (CRT.md Gun law): b is the black-level lift of the two-exponent law; the value is a user choice"
 description = "Black lift b of the bt1886_annex1 law, I = (1 + b)^-2.6 (V + b)^2.6 above V = 0.35 and the continuous 3.0-exponent branch below. Values at or below -0.35 are not allowed (the knee term is undefined)."
 group = "Gun"
+advanced = true
 
 [[param]]
 id = "gun_white_balance"
@@ -143,3 +147,4 @@ tag = "K"
 source = "T-34 review (gate 11): target of the relative retune; same default as the tube white of colour.toml (CRT.md White point: D65). Colour temperature as a per-gun gain: CRT.md White point"
 description = "Target white chromaticity of the white retune (used only when gun_white_balance is on). A D65 tube retuned to 9300 K (0.2831, 0.2971) gets gains about (0.621, 0.753, 1). Set it equal to tube_white_xy for no change. A white outside the triangle of the tube primaries is ignored (neutral gains)."
 group = "Gun"
+advanced = true

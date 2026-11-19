@@ -310,6 +310,21 @@ pub fn run() -> Res<()> {
         .or(Some(stored.global.preset.as_str()).filter(|p| !p.is_empty()))
         .and_then(|id| library.find(id))
         .map(|p| p.id.clone());
+    // T-53: what the menu compares against and resets to: the preset in force (else the table defaults) with
+    // the source profile and the command-line options on top, as at start but without the settings overrides.
+    let baseline_of = |library: &presets::Library, preset: Option<&str>| -> crate::params::Params {
+        let mut p = preset
+            .and_then(|id| library.find(id))
+            .map(presets::Preset::params)
+            .unwrap_or_default();
+        let _ = profile.apply_to(&mut p);
+        if let Err(e) = args.apply_source(&mut p) {
+            eprintln!("warning: {e}");
+        }
+        p
+    };
+    let mut baseline = baseline_of(&library, current_preset.as_deref());
+    let ui_settings_dir = settings_dir.clone();
     let mut live = live::Live::new(
         args.fullscreen,
         stored,
@@ -328,11 +343,13 @@ pub fn run() -> Res<()> {
             win.hwnd.0 as isize,
             follow.0 as isize,
             live.settings(),
+            ui_settings_dir,
             live.library().clone(),
             &win.hotkeys,
         ),
     )?;
     let mut ui_state = crate::ui::UiState::default();
+    let mut stepped_preset = live.current_preset().map(str::to_string);
     loop {
         if !output::pump() {
             break;
@@ -458,14 +475,25 @@ pub fn run() -> Res<()> {
         for (m, w, l) in output::take_ui_messages() {
             ui.handle_win32_message(m, w, l);
         }
+        // A preset hotkey stepped to another preset: it is the new reference of the menu.
+        if live.current_preset() != stepped_preset.as_deref() {
+            stepped_preset = live.current_preset().map(str::to_string);
+            baseline = baseline_of(live.library(), stepped_preset.as_deref());
+        }
         if ui.is_open() || ui.overlay_on() {
             ui_state.params = params;
             // The preset in force, also when a preset hotkey stepped to it.
             ui_state.preset = live.current_preset().map(str::to_string);
+            ui_state.baseline = Some(baseline);
             ui_state.headroom = renderer.headroom();
             ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
         }
+        // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
+        // (applied live, recorded in the shared settings, written debounced), the adapter for the next start.
         let changes = ui.frame(&ui_state);
+        if let Some(lib) = changes.library {
+            live.set_library(lib);
+        }
         if let Some(mut p) = changes.params {
             if changes.preset.is_some() {
                 // A new preset: the source profile and the command-line options apply on top again.
@@ -475,11 +503,24 @@ pub fn run() -> Res<()> {
                 args.apply_source(&mut p)?;
                 // The preset hotkeys step on from the preset chosen in the menu.
                 live.set_current_preset(changes.preset.clone());
+                live.note_preset_selected(changes.preset.as_deref());
+                stepped_preset = changes.preset.clone();
+                baseline = baseline_of(live.library(), changes.preset.as_deref());
+                // A saved user preset keeps the edits made before the save: recorded against the new preset.
+                live.note_params_edit(&baseline, &p, &baseline);
                 ui_state.preset = changes.preset;
+            } else {
+                live.note_params_edit(&params, &p, &baseline);
             }
             params = p;
             renderer.set_params(params);
         }
+        if let Some(adapter) = changes.gpu_adapter {
+            println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
+            live.set_gpu_adapter(adapter);
+        }
+        // The settings the menu changed: once the edits pause, at once when the menu is closed.
+        live.flush_settings(!ui.is_open());
         // The menu layout, once the menu closed after a change: into the shared settings and the file.
         if let Some(layout) = ui.take_layout_change() {
             live.set_ui_layout(layout);

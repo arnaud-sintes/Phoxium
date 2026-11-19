@@ -27,6 +27,7 @@ tag = "E"
 source = "CRT.md Display rate: at 60 Hz every output frame is one tube frame, so the frame period of the trail is the output refresh period; 50 and 120 Hz rows of the Decay and persistence table"
 description = "Frame rate of the trail: the decay between two output frames lasts 1 / rate. Set it to the refresh rate of the output display. 0: automatic, the smoothed measured frame period of the render loop (clamped to 10 to 240 Hz, whole hertz). The per-frame weights are recomputed (and cached) when it changes."
 group = "Phosphor"
+advanced = true
 
 [[param]]
 id = "phosphor_tail_strength_rgb"
