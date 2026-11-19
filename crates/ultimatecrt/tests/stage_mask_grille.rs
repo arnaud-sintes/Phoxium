@@ -9,8 +9,9 @@
 //! `beam_eval` then returns the amp sample under the pixel (its documented fallback, ARCHITECTURE 3.7), so
 //! with a uniform current I the tube image is I x mask. The oracle works in host pixels: pitch = px per mm
 //! x pitch in mm (the f32 product, which is the pitch the shader uses), stripe = fill x pitch, edge =
-//! softness x pitch, host pixel (x, y) = the rectangle [x, x + 1] x [y, y + 1], origin at the top-left of
-//! the tube rectangle; damper wires at the oracle's fractions of the visible height (`damper_positions_mm`)
+//! softness x pitch, host pixel (x, y) = the rectangle [x - c, x + 1 - c] x [y, y + 1], c = half the tube
+//! width: the grille's origin (a triad start) is the tube centre (T-37; it was the left edge of the tube
+//! rectangle before), y from the top of the tube rectangle; damper wires at the oracle's fractions of the visible height (`damper_positions_mm`)
 //! minus the rows of the visible area above the tube rectangle, (visible height - rectangle height) / 2
 //! (the picture is centred in the visible area, T-30).
 //!
@@ -70,6 +71,14 @@
 //! D9. Tier C [Host-display resolution budget; Moire: threshold 1.4 %]. Below 3 px per triad the mask is
 //!     averaged over one full period: every value is 1 (flat-field ripple 0, under 1.4 %), while the
 //!     area integral at the same density has a ripple far above 1.4 % (the moire of D2).
+//! D10. Origin at the tube centre (T-37). The hand tables D5 and D6 count pixels from a triad start: their
+//!     tubes put one on the left edge as well, since half their width is a whole number of triads (D5: 240 px
+//!     wide at 3 px per triad, 120 = 40 triads; D6: 4096 px at 16, 2048 = 128 triads). PAR: the default
+//!     placement of 256 x 240 on 2560 x 1440 at full height (1440 / 290 = 4.9655 px per mm either way) is
+//!     1536 px wide at PAR 1 and 1920 px at PAR 1.25; the centres are columns 768 and 960 (whole pixels), so
+//!     column 768 + d of the first and 960 + d of the second are the same place on the mask: equal values.
+//!     The left edges are 192 px apart, 192 / 1.53931 = 124.73 triads (not whole): with the old left-edge
+//!     origin the two would differ at the centre.
 
 mod common;
 
@@ -78,7 +87,8 @@ use std::ops::Range;
 use crt_model::mask::{alias_period_px, damper_positions_mm, tier, Grille, Mask, Rect, Tier, BARTEN_THRESHOLD};
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{
-    Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK,
+    ParamValue, Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA,
+    MASK_TYPE_SLOT_MASK,
 };
 
 /// One FP16 step relative to the value, at most: 2^-10 (11 significant bits).
@@ -187,16 +197,23 @@ fn oracle(fc: &FrameConstants, p: &Params) -> Mask {
     mask
 }
 
-/// Footprint of host pixel (x, y).
-fn footprint(x: u32, y: u32) -> Rect {
-    Rect::new(f64::from(x), f64::from(y), f64::from(x + 1), f64::from(y + 1))
+/// The mask's horizontal origin in the tube image (T-37): the tube centre, half the tube width (a half pixel
+/// for an odd width). The oracle's x = 0 is there.
+fn centre_x(fc: &FrameConstants) -> f64 {
+    0.5 * f64::from(fc.tube_size[0])
+}
+
+/// Footprint of host pixel (x, y) in the oracle's coordinates: x from the tube centre, y from the top.
+fn footprint(fc: &FrameConstants, x: u32, y: u32) -> Rect {
+    let x0 = f64::from(x) - centre_x(fc);
+    Rect::new(x0, f64::from(y), x0 + 1.0, f64::from(y + 1))
 }
 
 /// The oracle's value of every host pixel and channel, rows from the top.
 fn oracle_image(fc: &FrameConstants, value: impl Fn(usize, &Rect) -> f64) -> Vec<[f64; 3]> {
     let (w, h) = (fc.tube_size[0] as u32, fc.tube_size[1] as u32);
     (0..h)
-        .flat_map(|y| (0..w).map(move |x| footprint(x, y)))
+        .flat_map(|y| (0..w).map(move |x| footprint(fc, x, y)))
         .map(|q| [value(0, &q), value(1, &q), value(2, &q)])
         .collect()
 }
@@ -377,13 +394,15 @@ fn dominant_period(v: &[f64]) -> f64 {
 /// Least-squares displacement, in host pixels, of the rendered stripes against the oracle's over the
 /// columns `xs` of row 0: a pattern moved by +d reads want(x - d) = want(x) - d x slope, with the slope
 /// taken from the oracle by a central difference. `None` when the row has no structure. It averages the
-/// FP16 noise over the columns, so it resolves a drift of the stripe phase far below one FP16 step.
-fn stripe_displacement(got: &[[f64; 3]], mask: &Mask, xs: Range<u32>) -> Option<f64> {
+/// FP16 noise over the columns, so it resolves a drift of the stripe phase far below one FP16 step. The
+/// oracle's x is measured from `origin` (the tube centre, [`centre_x`]).
+fn stripe_displacement(got: &[[f64; 3]], mask: &Mask, xs: Range<u32>, origin: f64) -> Option<f64> {
     let h = 1e-3;
     let (mut num, mut den) = (0.0, 0.0);
     for x in xs {
+        let x0 = f64::from(x) - origin;
         for (c, value) in got[x as usize].iter().enumerate() {
-            let at = |d: f64| mask.area_mean(c, &Rect::new(f64::from(x) + d, 0.0, f64::from(x) + 1.0 + d, 1.0));
+            let at = |d: f64| mask.area_mean(c, &Rect::new(x0 + d, 0.0, x0 + 1.0 + d, 1.0));
             let slope = (at(h) - at(-h)) / (2.0 * h);
             num -= (value - at(0.0)) * slope;
             den += slope * slope;
@@ -508,7 +527,7 @@ fn plan_densities_flat_white_and_no_phase_drift() {
                 }
             }
         }
-        match stripe_displacement(&got, &mask, w - 512..w) {
+        match stripe_displacement(&got, &mask, w - 512..w, centre_x(&fc)) {
             Some(d) => {
                 println!("{what}: stripes displaced by {d:+.2e} px in the last 512 columns");
                 assert!(d.abs() <= 1e-4, "{what}: stripe phase drift {d} px");
@@ -613,6 +632,59 @@ fn stripe_positions_and_colour_order() {
         assert!(r < g && g < b);
         assert!((g - r - 16.0 / 3.0).abs() <= 0.004 && (b - g - 16.0 / 3.0).abs() <= 0.004);
     }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// D10: the grille phase at the tube centre is unchanged when PAR changes. The placement of 256 x 240 on
+/// 2560 x 1440 at PAR 1 and PAR 1.25 (application code, `FrameConstants::placed`) gives the same px per mm
+/// and tubes 1536 and 1920 px wide; each width is rendered (2 rows, area integral forced, PVM-20M4U pitch,
+/// 1.539 px per triad) and matches the oracle centred on its tube; the 128 columns around the two centres
+/// are equal value for value, while the first columns of the two tubes differ (the left edges are not 124.73
+/// triads apart by a whole number: the origin is not the left edge any more).
+#[test]
+fn grille_phase_at_the_tube_centre_is_unchanged_when_par_changes() {
+    let test = "stage_mask_grille par";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut tubes = Vec::new();
+    let mut ppm = None;
+    for (par, width) in [(1.0_f32, 1536_u32), (1.25, 1920)] {
+        let mut p = Params::default();
+        assert!(p.set("source_par", ParamValue::F32(par)));
+        let placed = FrameConstants::placed((256, 240), (2560, 1440), false, &p);
+        assert_eq!(placed.tube_size, [width as i32, 1440], "PAR {par}");
+        assert!(
+            (placed.px_per_mm - 1440.0 / 290.0).abs() < 1e-5,
+            "PAR {par}: full height"
+        );
+        assert_eq!(
+            *ppm.get_or_insert(placed.px_per_mm),
+            placed.px_per_mm,
+            "PAR {par}: same px per mm"
+        );
+        let fc = tube(width, 2, placed.px_per_mm);
+        let p = Params {
+            mask_tier: MASK_TIER_INTEGRATED,
+            tube_visible_height_mm: 2.0 / placed.px_per_mm,
+            ..p
+        };
+        assert!((px_per_triad(&fc, &p) - 1.539_310).abs() < 1e-5);
+        let mask = oracle(&fc, &p);
+        let want = oracle_image(&fc, |c, q| mask.area_mean(c, q));
+        let got = assert_matches(&mut gpu, &format!("{test} PAR {par}"), fc, &p, &want);
+        tubes.push((width, got));
+    }
+    let (wa, a) = &tubes[0];
+    let (wb, b) = &tubes[1];
+    for d in -64_i64..64 {
+        let xa = (i64::from(*wa / 2) + d) as usize;
+        let xb = (i64::from(*wb / 2) + d) as usize;
+        assert_eq!(a[xa], b[xb], "{test}: column {d:+} from the centre");
+    }
+    assert_ne!(a[..16], b[..16], "{test}: left edges at different phases");
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
@@ -905,7 +977,7 @@ fn screen_is_mask_times_beam() {
         for x in 0..256 {
             let (a, b) = (with.pixel(x, y), without.pixel(x, y));
             for c in 0..3 {
-                let want = f64::from(b[c]) * mask.area_mean(c, &footprint(x, y));
+                let want = f64::from(b[c]) * mask.area_mean(c, &footprint(&fc, x, y));
                 let err = (f64::from(a[c]) - want).abs();
                 assert!(
                     // The absolute floor covers the FP16 subnormal step 2^-24 = 6e-8: since T-36b the

@@ -4,15 +4,16 @@
 //!
 //! Set-up as in `stage_mask_grille.rs`: line pitch 0 with px per mm set, so the tube image is the uniform beam
 //! current I times the mask, compared with the `crt-model` f64 oracle (`crt_model::mask`, T-38) and with
-//! numbers derived by hand from `CRT.md` (below). The oracle works in host pixels, origin at the top-left of the
-//! tube rectangle, host pixel (x, y) = [x, x + 1] x [y, y + 1]:
+//! numbers derived by hand from `CRT.md` (below). The oracle works in host pixels, origin at the tube centre
+//! (cx, cy) = tube size / 2 (T-37: the mask lattice is centred on the tube on both axes; it was the top-left of
+//! the tube rectangle before), host pixel (x, y) = [x - cx, x + 1 - cx] x [y - cy, y + 1 - cy]:
 //! - slot mask: pitch p = px per mm x pitch (the f32 product the shader uses), stripe = fill x p, edge =
 //!   softness x p, slot period V = slot period x p (f32 product), bridge fraction as given;
 //! - delta: the shader reduces x modulo the cell width X = f32(P x sqrt 3) and y modulo P (P = the f32 product
 //!   px per mm x pitch), so its lattice is X wide and P tall, both f32 values. The oracle lattice is built on X
 //!   (diagonal pitch X / sqrt 3, in f64) and its rows are matched to the shader's by scaling y by
-//!   sigma = P / (X / sqrt 3) = 1 + O(1e-7): pixel (x, y) is the oracle rectangle [x, x + 1] x [y / sigma,
-//!   (y + 1) / sigma]. This only lines up the two lattices (no drift over many rows); everything else differs
+//!   sigma = P / (X / sqrt 3) = 1 + O(1e-7): pixel (x, y) is the oracle rectangle [x - cx, x + 1 - cx] x
+//!   [(y - cy) / sigma, (y + 1 - cy) / sigma]. This only lines up the two lattices (no drift over many rows); everything else differs
 //!   by O(1e-7) relative. Dot diameter = f32(fill x P), edge = f32(softness x P).
 //!
 //! Tolerance: FP16 storage window, nearest since T-fp16 ([`Stored::detect`] asserts it), several beam currents, plus an
@@ -51,12 +52,17 @@
 //!     48), ...) have bridges centred on rows 0, 12, 24, ...: rows [11, 13] mod 12 dark, i.e. rows 11 and 0
 //!     of each 12; odd columns centred on 6 + 12 k: rows 5 and 6 dark. Peak 1 / (0.25 x 5/6) = 4.8. So
 //!     pixel 2 (red, inside its stripe) reads 4.8 on rows 1 to 10 and 0 on rows 0 and 11; pixel 18 (red,
-//!     odd column) reads 4.8 except rows 5 and 6; pixel 0 reads 1/3 x 4.8 = 1.6 where lit.
+//!     odd column) reads 4.8 except rows 5 and 6; pixel 0 reads 1/3 x 4.8 = 1.6 where lit. The test tube
+//!     is 64 x 24 px: its centre (32, 12) is the start of an even column (32 = 2 x 16) and of a slot period
+//!     (12 = V), so the table counts from the top-left corner as well (T-37 origin at the centre).
 //! E5. Delta lattice, P = 0.28 mm at 100 px per mm (P = 28 px) [Delta (dot) triad geometry table]: same
 //!     colour repeat along a row P sqrt 3 = 0.485 mm, same colour between adjacent rows horizontally P sqrt(3)
 //!     / 2 = 0.242 mm, row spacing P / 2 = 0.140 mm, adjacent dots of any colour in a row P / sqrt 3 = 0.162
 //!     mm; colours R G B left to right along a row; nearest same colour in the next row at distance P, 30
-//!     degrees from horizontal. Measured as dot centroids of the rendered channels.
+//!     degrees from horizontal. Measured as dot centroids of the rendered channels. Position: on the 200 x 90
+//!     px test tube the lattice origin is the centre (100, 45) (T-37); a = X / 3 = 28 sqrt 3 / 3 = 16.1658 px,
+//!     rows every P / 2 = 14 px, so row j = -1 is at y = 31 px and its red dot (colour 0) at
+//!     x = 100 + (0 - 1.5) a = 75.7513 px, green and blue a and 2 a to the right.
 //! E6. Zoomed tube, 16 px per triad [Slot mask geometry; Delta geometry]. Slot, default slot period 0.8333
 //!     and bridge 0.15: one column has the vertical period V = 13.333 px; the row means over whole 2 p (32
 //!     px) have period V / 2 = 6.667 px (stagger). Delta: X = 32 px, P = 32 / sqrt 3 = 18.475 px; the row
@@ -161,10 +167,12 @@ fn px_per_triad(fc: &FrameConstants, p: &Params) -> f64 {
     }
 }
 
-/// The oracle of a frame (module header) and the y scale sigma that maps host rows to its rows.
+/// The oracle of a frame (module header), the y scale sigma that maps host rows to its rows, and the mask
+/// origin in the tube image (T-37: the tube centre, half the tube size on each axis).
 struct Oracle {
     mask: Mask,
     sigma: f64,
+    centre: (f64, f64),
 }
 
 impl Oracle {
@@ -193,10 +201,14 @@ impl Oracle {
             )
         };
         mask.validate().expect("the test tube is a valid mask");
-        Self { mask, sigma }
+        let centre = (0.5 * f64::from(fc.tube_size[0]), 0.5 * f64::from(fc.tube_size[1]));
+        Self { mask, sigma, centre }
     }
 
+    /// The oracle rectangle of the host rectangle [x, x + w] x [y, y + h] (tube image): moved to the mask
+    /// origin at the tube centre, rows scaled by 1 / sigma about it.
     fn rect(&self, x: f64, y: f64, w: f64, h: f64) -> Rect {
+        let (x, y) = (x - self.centre.0, y - self.centre.1);
         Rect::new(x, y / self.sigma, x + w, (y + h) / self.sigma)
     }
 
@@ -700,19 +712,20 @@ fn delta_dot_positions_and_distances() {
         assert!((mm(dist) - 0.28).abs() < 0.0006);
         assert!((angle - 30.0).abs() < 0.2);
     }
-    // Any colour in a row: R G B left to right, spacing 0.162 mm. Row of y = 0.28 mm (row j = 2), R at x =
-    // 3 a = 0.485 mm.
+    // Any colour in a row: R G B left to right, spacing 0.162 mm. Row j = -1 from the lattice origin at the
+    // tube centre (100, 45): y = 45 - 14 = 31 px, R at x = 100 - 1.5 a = 75.7513 px (E5).
     let pick = |c: usize, x: f64, y: f64| {
         *dots[c]
             .iter()
             .min_by(|a, b| (a.0 - x).hypot(a.1 - y).total_cmp(&(b.0 - x).hypot(b.1 - y)))
             .unwrap()
     };
-    let (r, g, b) = (pick(0, 48.5, 28.0), pick(1, 64.7, 28.0), pick(2, 80.8, 28.0));
-    println!("{test}: row at 0.28 mm: R {r:?} G {g:?} B {b:?} px");
+    let (r, g, b) = (pick(0, 75.8, 31.0), pick(1, 91.9, 31.0), pick(2, 108.1, 31.0));
+    println!("{test}: row at y = 31 px: R {r:?} G {g:?} B {b:?} px");
     assert!(same_row(&r, &g) && same_row(&g, &b));
     assert!((mm(g.0 - r.0) - 0.162).abs() < 0.0006 && (mm(b.0 - g.0) - 0.162).abs() < 0.0006);
-    assert!((r.0 - 48.497).abs() < 0.05 && (r.1 - 28.0).abs() < 0.05);
+    let a = 28.0 * 3.0_f64.sqrt() / 3.0;
+    assert!((r.0 - (100.0 - 1.5 * a)).abs() < 0.05 && (r.1 - 31.0).abs() < 0.05);
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
@@ -963,7 +976,8 @@ fn displacement(
 
 /// The coordinate reductions do not drift: on a 4096 px row and a 4096 px column, 8 px per triad, both
 /// types, the rendered pattern in the last 512 px is where the oracle puts it within 1e-4 px (a phase error
-/// of 1e-4 triad changes a pixel by about 0.1 %, PLAN T-39a).
+/// of 1e-4 triad changes a pixel by about 0.1 %, PLAN T-39a). Since T-37 the origin is the tube centre, so
+/// those pixels are 1536 to 2048 px from it, the farthest a pixel of a 4096 px tube can be.
 #[test]
 fn no_phase_drift_far_from_the_origin() {
     let test = "stage_mask_slot_delta drift";

@@ -13,7 +13,7 @@
 //   widened to one full mask period (tier C), which leaves the mean, 1, and the damper wires.
 //
 // Aperture grille (CRT.md, Aperture grille geometry): vertical stripes of pitch p, R, G, B centred at
-// (c + 1/2) p / 3 from the left edge of the tube rectangle, width `mask_stripe_fill` p, edge ramp
+// (c + 1/2) p / 3 from the start of each triad, triads starting at the tube centre (below), width `mask_stripe_fill` p, edge ramp
 // `mask_edge_softness` p; damper-wire shadows are horizontal dark bands at fixed fractions of the visible
 // height. The emitter is separable, e_c(x, y) = stripes_c(x) dampers(y), so the area mean of a pixel is the
 // product of a column term and a row term, each a closed form (piecewise quadratic).
@@ -22,8 +22,11 @@
 // a pixel by about 0.1 %, as a slow beat pattern). The horizontal pitch in host px is the f32 product
 // px_per_mm * mask_pitch_mm, and the position of column q.x inside its triad is reduced exactly with integer
 // arithmetic on the mantissa of that pitch (mask_triad_phase), so every column is as accurate as the first.
-// Until T-37 maps host pixels through the tube geometry, the triad grid starts at the left edge of the tube
-// rectangle.
+// Origin (T-37): the mask lattice of every type has its origin (a triad start for the grille and the slot
+// columns, a slot-period start for the slot rows, a lattice cell corner for the delta) at the tube centre,
+// tube_size / 2 of the tube image, on both axes (mask_centred_phase). The mask is fixed to the tube, so its
+// phase at the centre does not change with the picture width (PAR, raster aspect) or the raster margin; the
+// geometry (geometry.glsl) moves the beam only. The damper wires stay at fractions of the visible height.
 #ifndef UCRT_MASK_GLSL
 #define UCRT_MASK_GLSL
 
@@ -82,22 +85,36 @@ bool mask_area_integrated(float px_per_triad) {
 // without rounding drift. ppt = m 2^-s with m its 24-bit mantissa; qx 2^s - k m is computed modulo 2^32 with
 // unsigned integers, which is exact because the true remainder is below 2^25 in magnitude (k = floor(qx / ppt)
 // from a float division, wrong by at most one, then corrected). The result is the exact remainder divided by m.
+// A negative qx is reduced as |qx| and reflected exactly (remainder m - r), T-37.
 float mask_triad_phase(int qx, float ppt) {
     uint bits = floatBitsToUint(ppt);
     int s = 150 - int((bits >> 23) & 0xFFu);
-    if (qx < 0 || s < 0 || s > 31) {
+    if (s < 0 || s > 31) {
         // Pitch of 2^24 px or more, or below 2^-8 px: no drift to speak of, or no mask to speak of.
         return fract(float(qx) / ppt);
     }
+    uint ax = uint(abs(qx));
     uint m = (bits & 0x7FFFFFu) | 0x800000u;
-    uint k = uint(floor(float(qx) / ppt));
-    int r = int((uint(qx) << uint(s)) - k * m);
+    uint k = uint(floor(float(ax) / ppt));
+    int r = int((ax << uint(s)) - k * m);
     if (r < 0) {
         r += int(m);
     } else if (r >= int(m)) {
         r -= int(m);
     }
+    if (qx < 0 && r != 0) {
+        r = int(m) - r;
+    }
     return float(r) / float(m);
+}
+
+// Position of the left (top) edge of host column (row) q of the tube image inside its mask period `period`,
+// in periods, [0, 1), with the mask origin at the tube centre c = size / 2 (T-37: the mask is centred on the
+// tube axis, so its phase at the centre does not depend on the picture's width, the PAR or the raster margin):
+// fract((q - c) / period) = fract((2 q - size) / (2 period)). Doubling the f32 period is exact (exponent + 1),
+// so the integer reduction of mask_triad_phase stays exact for every column, size odd or even.
+float mask_centred_phase(int q, int size, float period) {
+    return mask_triad_phase(2 * q - size, 2.0 * period);
 }
 
 // Aperture grille, column term: area mean of the three stripe trains over [a, a + width] (triad pitches, a the
@@ -139,18 +156,20 @@ float mask_damper_row(int qy) {
 }
 
 // Aperture grille: column term times row term. In tier C the column term is its mean over a full period, 1.
+// `q` in the tube image: the stripes are centred on the tube centre (mask_centred_phase), the damper rows count
+// from the raster's top (inside the margin, T-37).
 vec3 mask_grille(ivec2 q) {
     float ppt = frame.px_per_mm * params.mask_pitch_mm;
     if (!(ppt > 0.0)) {
         return vec3(1.0);
     }
-    float rows = mask_damper_row(q.y);
+    float rows = mask_damper_row(q.y - frame.raster_margin.y);
     if (!mask_area_integrated(ppt)) {
         return vec3(rows);
     }
     float fill = clamp(params.mask_stripe_fill, 1e-4, 1.0 / 3.0);
     float soft = clamp(params.mask_edge_softness, 0.0, min(fill, 1.0 / 3.0 - fill));
-    return mask_grille_columns(mask_triad_phase(q.x, ppt), 1.0 / ppt, fill, soft) * rows;
+    return mask_grille_columns(mask_centred_phase(q.x, frame.tube_size.x, ppt), 1.0 / ppt, fill, soft) * rows;
 }
 
 // ---- Slot mask (T-39b) -------------------------------------------------------------------------------------
@@ -199,14 +218,14 @@ vec3 mask_slot(ivec2 q) {
         min(min(fill, 1.0 / 3.0 - fill) * ppt, min(bridge, 1.0 - bridge) * v));
 
     // Columns, in units of two triads: even columns hold their stripes at centre / 2, odd ones at (1 + centre) / 2.
-    float a2 = mask_triad_phase(q.x, 2.0 * ppt);
+    float a2 = mask_centred_phase(q.x, frame.tube_size.x, 2.0 * ppt);
     float w2 = 0.5 / ppt;
     float s2 = 0.5 * soft / ppt;
     vec3 even = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE, 0.5 * fill, s2), 0.0) / w2;
     vec3 odd = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE + 0.5, 0.5 * fill, s2), 0.0) / w2;
 
     // Rows, in slot periods: mean over the row of 1 - bridges, bridges centred on 0 (even) or 1/2 (odd).
-    float b = mask_triad_phase(q.y, v);
+    float b = mask_centred_phase(q.y, frame.tube_size.y, v);
     float hv = 1.0 / v;
     float sv = soft / v;
     float rows_even = max(1.0 - max(mask_train(b, hv, 0.0, bridge, sv), 0.0) / hv, 0.0);
@@ -351,8 +370,8 @@ vec3 mask_delta(ivec2 q) {
     float row = 0.5 * pp;
 
     // Pixel footprint inside its lattice cell, exact phases.
-    float x0 = mask_triad_phase(q.x, cell) * cell;
-    float y0 = mask_triad_phase(q.y, pp) * pp;
+    float x0 = mask_centred_phase(q.x, frame.tube_size.x, cell) * cell;
+    float y0 = mask_centred_phase(q.y, frame.tube_size.y, pp) * pp;
     float x1 = x0 + 1.0;
     float y1 = y0 + 1.0;
 
@@ -386,16 +405,16 @@ vec3 mask_eval(ivec2 q) {
     if (!params.mask_enabled || !(frame.px_per_mm > 0.0)) {
         return vec3(1.0);
     }
-    // T-37: the mask grid starts at the raster's top-left corner, inside the tube image's margin.
-    ivec2 r = q - frame.raster_margin;
+    // T-37: the mask lattice is centred on the tube centre (mask_centred_phase), which is also the raster's
+    // centre (the margin is the same on both sides), so q is taken in the tube image as it is.
     switch (params.mask_type) {
     case MASK_TYPE_SLOT_MASK:
-        return mask_slot(r);
+        return mask_slot(q);
     case MASK_TYPE_DELTA:
-        return mask_delta(r);
+        return mask_delta(q);
     case MASK_TYPE_APERTURE_GRILLE:
     default:
-        return mask_grille(r);
+        return mask_grille(q);
     }
 }
 
