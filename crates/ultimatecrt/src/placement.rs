@@ -21,8 +21,12 @@
 //! With the defaults (`par`, PAR 1, fraction 1) this is the native raster letterboxed into the output,
 //! exactly as before T-30 ([`crate::gpu::tube_rect_letterbox`]), with the physical scale added.
 
+use crt_model::mask::{AxisTier, AxisTiers, Delta, Grille, Mask, Slot, TierMode, TierRule};
+
 use crate::gpu::FrameConstants;
-use crate::params::{Params, RASTER_ASPECT_FILL_TUBE};
+use crate::params::{
+    Params, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE,
+};
 
 /// How the picture takes its shape on the tube (`params.raster_aspect`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -132,7 +136,80 @@ pub fn place(i: &PlacementInput) -> Placement {
     }
 }
 
+/// The mask geometry of the parameter table as the `crt-model` oracle sees it, in tube mm (T-39c): the
+/// periods and shapes of `mask.toml` (no damper wires: they do not enter the tier decision). The source of
+/// the tier decision and of the mask readouts, so both see the same f64 numbers.
+pub fn mask_model(p: &Params) -> Mask {
+    let pitch = f64::from(p.mask_pitch_mm);
+    let edge = f64::from(p.mask_edge_softness) * pitch;
+    match p.mask_type {
+        MASK_TYPE_SLOT_MASK => Mask::Slot(Slot {
+            pitch_mm: pitch,
+            stripe_mm: f64::from(p.mask_stripe_fill) * pitch,
+            edge_mm: edge,
+            slot_period_mm: f64::from(p.mask_slot_period) * pitch,
+            bridge_fraction: f64::from(p.mask_slot_bridge),
+        }),
+        MASK_TYPE_DELTA => Mask::Delta(Delta {
+            pitch_mm: pitch,
+            dot_mm: f64::from(p.mask_dot_fill) * pitch,
+            edge_mm: edge,
+        }),
+        _ => Mask::Grille(Grille {
+            pitch_mm: pitch,
+            stripe_mm: f64::from(p.mask_stripe_fill) * pitch,
+            edge_mm: edge,
+            damper_y_mm: Vec::new(),
+            damper_mm: 0.0,
+            damper_edge_mm: 0.0,
+        }),
+    }
+}
+
+/// The tier rule of the parameter table: `mask_tier` and `mask_tier_blend`.
+pub fn mask_tier_rule(p: &Params) -> TierRule {
+    TierRule {
+        mode: match p.mask_tier {
+            MASK_TIER_INTEGRATED => TierMode::Integrated,
+            MASK_TIER_PREFILTERED => TierMode::Prefiltered,
+            _ => TierMode::Auto,
+        },
+        blend: f64::from(p.mask_tier_blend),
+    }
+}
+
+/// The per-axis mask tiers at `px_per_mm` host px per tube mm (T-39c): decided once, on the CPU, in f64 from
+/// the f32 frame and parameter values (`crt_model::mask::Mask::axis_tiers`). The shader draws what this
+/// returns ([`FrameConstants::with_mask_tiers`]) and the readouts report it, so they cannot disagree (an f32
+/// product of px per mm and pitch can fall on the other side of a limit than the f64 one).
+pub fn mask_tiers(px_per_mm: f32, p: &Params) -> AxisTiers {
+    mask_model(p).axis_tiers(f64::from(px_per_mm), mask_tier_rule(p))
+}
+
+/// The footprint widths `FrameConstants::mask_box_px` encodes for an axis tier: 0 for a whole period
+/// (prefiltered, drawn in closed form), 1 for the host pixel (integrated), the box width in host px between.
+pub fn mask_box_code(t: AxisTier) -> f32 {
+    match t {
+        AxisTier::Integrated => 1.0,
+        AxisTier::Blended { box_px } => box_px as f32,
+        AxisTier::Prefiltered => 0.0,
+    }
+}
+
 impl FrameConstants {
+    /// Fills `mask_box_px` from [`mask_tiers`] (T-39c). The pipeline applies it to every frame it records,
+    /// live or injected, so the decision is always the CPU's. Unplaced constants (px per mm not positive:
+    /// the mask is off) get the host pixel on both axes.
+    pub fn with_mask_tiers(mut self, params: &Params) -> Self {
+        self.mask_box_px = if self.px_per_mm > 0.0 {
+            let t = mask_tiers(self.px_per_mm, params);
+            [mask_box_code(t.horizontal), mask_box_code(t.vertical)]
+        } else {
+            [1.0, 1.0]
+        };
+        self
+    }
+
     /// The constants of a `native` raster placed into `target` by the tube parameters ([`place`]): tube
     /// rectangle and size, `px_per_mm` and `line_pitch_mm` filled; K = `amp_samples` (default 4), frame index
     /// and time 0.
@@ -224,6 +301,27 @@ mod tests {
     use super::*;
     use crate::gpu::tube_rect_letterbox;
     use crate::params::ParamValue;
+
+    /// T-39c: the mask footprint codes of the frame. Default parameters (PVM grille, 0.31 mm) placed on
+    /// 2560 x 1440 at full height: 1440 / 290 x 0.31 = 1.5393 px per triad, prefiltered horizontally (code 0),
+    /// no vertical period (code 1). Unplaced: 1 and 1. Slot defaults at 4 px per mm with p = 0.75 mm (3.0 px
+    /// per triad, u = 0.5): horizontal box 0.5 x 3 + 0.5 = 2 px, vertical V / 2 = 1.25 px: prefiltered (0).
+    #[test]
+    fn mask_box_codes_from_the_parameter_table() {
+        let p = Params::default();
+        let fc = FrameConstants::placed((256, 240), (2560, 1440), false, &p).with_mask_tiers(&p);
+        assert_eq!(fc.mask_box_px, [0.0, 1.0]);
+        let unplaced = FrameConstants::new((256, 240), (2560, 1440), false).with_mask_tiers(&p);
+        assert_eq!(unplaced.mask_box_px, [1.0, 1.0]);
+        let slot = Params {
+            mask_type: MASK_TYPE_SLOT_MASK,
+            mask_pitch_mm: 0.75,
+            ..Params::default()
+        };
+        let mut fc = FrameConstants::new((256, 240), (2560, 1440), false);
+        fc.px_per_mm = 4.0;
+        assert_eq!(fc.with_mask_tiers(&slot).mask_box_px, [2.0, 0.0]);
+    }
 
     fn pvm(native: (u32, u32), target: (u32, u32), aspect: RasterAspect) -> PlacementInput {
         PlacementInput {

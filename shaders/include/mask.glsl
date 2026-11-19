@@ -9,8 +9,12 @@
 //   opening); every edge is a linear ramp whose full 0-to-1 width is centred on the nominal (half-value) edge;
 // - the value of a host pixel is the exact area mean of e_c over its footprint divided by the mean coverage of
 //   colour c, so a flat white field has mean 1 per channel (no hidden gain: a lit stripe is 1 / coverage);
-// - tiers (PHY-2): from 3 host px per triad the area mean itself (tiers A and B); below, the footprint is
-//   widened to one full mask period (tier C), which leaves the mean, 1, and the damper wires.
+// - tiers (PHY-2, per axis since T-39c, D-15): the footprint of each axis is the host pixel itself (area
+//   integral), a box of one whole period (prefiltered: one triad horizontally, the slot period V or the delta
+//   pitch P vertically) or, in the blend band, a box between the two, centred on the pixel. The decision is
+//   made once per frame on the CPU in f64 (src/placement.rs, FrameConstants::with_mask_tiers, crt-model
+//   axis_tiers) and arrives as frame.mask_box_px: 0 = whole period, else the box width in host px (1 = the
+//   pixel). Both periodic axes prefiltered leaves the mean, 1, and the damper wires.
 //
 // Aperture grille (CRT.md, Aperture grille geometry): vertical stripes of pitch p, R, G, B centred at
 // (c + 1/2) p / 3 from the start of each triad, triads starting at the tube centre (below), width `mask_stripe_fill` p, edge ramp
@@ -30,9 +34,6 @@
 #ifndef UCRT_MASK_GLSL
 #define UCRT_MASK_GLSL
 
-// Area-integrated mask (tiers A and B) from this many host pixels per triad, prefiltered (tier C) below [D]
-// (QUESTIONS PHY-2; CRT.md, Host-display resolution budget; crt-model TIER_B_MIN_PX_PER_TRIAD).
-const float MASK_AREA_MIN_PX_PER_TRIAD = 3.0;
 // Stripe centres of R, G, B in triad pitches from the start of a triad, (c + 1/2) / 3 [D] (CRT.md, Slot mask
 // geometry: each colour p / 3 wide; crt-model stripe_centre).
 const vec3 MASK_STRIPE_CENTRE = vec3(1.0 / 6.0, 0.5, 5.0 / 6.0);
@@ -69,16 +70,14 @@ vec3 mask_pulse_cumulative(vec3 r, float w, float s) {
     return mix(inside, vec3(0.0), lessThanEqual(r, vec3(-reach)));
 }
 
-// True when the mask is area-integrated per host pixel (tiers A and B), false when it is prefiltered (tier C),
-// for a mask of `px_per_triad` host pixels per horizontal triad pitch (`mask_tier`, params/mask.toml).
-bool mask_area_integrated(float px_per_triad) {
-    if (params.mask_tier == MASK_TIER_INTEGRATED) {
-        return true;
-    }
-    if (params.mask_tier == MASK_TIER_PREFILTERED) {
-        return false;
-    }
-    return px_per_triad >= MASK_AREA_MIN_PX_PER_TRIAD;
+// Footprint width in host px along an axis from its code in frame.mask_box_px (0 = one whole period, given
+// here as `period` px; else the box width, 1 = the host pixel), and true when the axis is prefiltered.
+bool mask_prefiltered(float code) {
+    return !(code > 0.0);
+}
+
+float mask_box(float code, float period) {
+    return mask_prefiltered(code) ? period : code;
 }
 
 // Position of the left edge of host column `qx` inside its triad, in triad pitches, [0, 1): fract(qx / ppt)
@@ -155,7 +154,9 @@ float mask_damper_row(int qy) {
     return max(1.0 - shadow, 0.0);
 }
 
-// Aperture grille: column term times row term. In tier C the column term is its mean over a full period, 1.
+// Aperture grille: column term times row term. Prefiltered horizontally, the column term is its mean over a
+// full period, 1; in the blend band it is the mean over a box of mask_box_px.x px centred on the pixel. The
+// grille has no vertical period: its rows are always the host row (the damper wires stay in every tier).
 // `q` in the tube image: the stripes are centred on the tube centre (mask_centred_phase), the damper rows count
 // from the raster's top (inside the margin, T-37).
 vec3 mask_grille(ivec2 q) {
@@ -164,12 +165,15 @@ vec3 mask_grille(ivec2 q) {
         return vec3(1.0);
     }
     float rows = mask_damper_row(q.y - frame.raster_margin.y);
-    if (!mask_area_integrated(ppt)) {
+    if (mask_prefiltered(frame.mask_box_px.x)) {
         return vec3(rows);
     }
     float fill = clamp(params.mask_stripe_fill, 1e-4, 1.0 / 3.0);
     float soft = clamp(params.mask_edge_softness, 0.0, min(fill, 1.0 / 3.0 - fill));
-    return mask_grille_columns(mask_centred_phase(q.x, frame.tube_size.x, ppt), 1.0 / ppt, fill, soft) * rows;
+    // Box of bx px centred on the pixel: its left end is (1 - bx) / 2 px from the pixel's (0 for the pixel).
+    float bx = frame.mask_box_px.x;
+    float a = mask_centred_phase(q.x, frame.tube_size.x, ppt) + 0.5 * (1.0 - bx) / ppt;
+    return mask_grille_columns(a, bx / ppt, fill, soft) * rows;
 }
 
 // ---- Slot mask (T-39b) -------------------------------------------------------------------------------------
@@ -207,8 +211,9 @@ vec3 mask_slot(ivec2 q) {
     if (!(ppt > 0.0) || !(v > 0.0)) {
         return vec3(1.0);
     }
-    // Tier C: a box of p x V holds a whole period of both column phases, its mean is 1 (crt-model prefiltered).
-    if (!mask_area_integrated(ppt)) {
+    // Both axes prefiltered: a box of p x V holds a whole period of both column phases, its mean is 1
+    // (crt-model prefiltered).
+    if (mask_prefiltered(frame.mask_box_px.x) && mask_prefiltered(frame.mask_box_px.y)) {
         return vec3(1.0);
     }
     float fill = clamp(params.mask_stripe_fill, 1e-4, 1.0 / 3.0);
@@ -218,18 +223,26 @@ vec3 mask_slot(ivec2 q) {
         min(min(fill, 1.0 / 3.0 - fill) * ppt, min(bridge, 1.0 - bridge) * v));
 
     // Columns, in units of two triads: even columns hold their stripes at centre / 2, odd ones at (1 + centre) / 2.
-    float a2 = mask_centred_phase(q.x, frame.tube_size.x, 2.0 * ppt);
-    float w2 = 0.5 / ppt;
+    // Footprint: a box of bx px centred on the pixel (one triad when prefiltered horizontally).
+    float bx = mask_box(frame.mask_box_px.x, ppt);
+    float a2 = mask_centred_phase(q.x, frame.tube_size.x, 2.0 * ppt) + 0.5 * (1.0 - bx) / (2.0 * ppt);
+    float w2 = 0.5 * bx / ppt;
     float s2 = 0.5 * soft / ppt;
     vec3 even = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE, 0.5 * fill, s2), 0.0) / w2;
     vec3 odd = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE + 0.5, 0.5 * fill, s2), 0.0) / w2;
 
-    // Rows, in slot periods: mean over the row of 1 - bridges, bridges centred on 0 (even) or 1/2 (odd).
-    float b = mask_centred_phase(q.y, frame.tube_size.y, v);
-    float hv = 1.0 / v;
-    float sv = soft / v;
-    float rows_even = max(1.0 - max(mask_train(b, hv, 0.0, bridge, sv), 0.0) / hv, 0.0);
-    float rows_odd = max(1.0 - max(mask_train(b, hv, 0.5, bridge, sv), 0.0) / hv, 0.0);
+    // Rows, in slot periods: mean over the footprint's rows of 1 - bridges, bridges centred on 0 (even) or 1/2
+    // (odd). Prefiltered vertically (a box of V): 1 - bridge for both phases, in closed form.
+    float rows_even = 1.0 - bridge;
+    float rows_odd = rows_even;
+    if (!mask_prefiltered(frame.mask_box_px.y)) {
+        float by = frame.mask_box_px.y;
+        float b = mask_centred_phase(q.y, frame.tube_size.y, v) + 0.5 * (1.0 - by) / v;
+        float hv = by / v;
+        float sv = soft / v;
+        rows_even = max(1.0 - max(mask_train(b, hv, 0.0, bridge, sv), 0.0) / hv, 0.0);
+        rows_odd = max(1.0 - max(mask_train(b, hv, 0.5, bridge, sv), 0.0) / hv, 0.0);
+    }
 
     // Mean coverage of a colour: fill (1 - bridge) (crt-model coverage).
     return (even * rows_even + odd * rows_odd) / (fill * (1.0 - bridge));
@@ -240,7 +253,7 @@ vec3 mask_slot(ivec2 q) {
 // hexagonal lattice of spacing a = P / sqrt(3): row j at y = j P / 2, dot i of row j at x = (i + 1.5 j) a with
 // colour i mod 3. Dot diameter `mask_dot_fill` P, edge ramp `mask_edge_softness` P (radial, full width
 // centred on the nominal edge). The pattern repeats over the cell 3 a x P = sqrt(3) P x P (two dots of each
-// colour); the horizontal triad pitch 1.5 a = 0.866 P sets the tier.
+// colour); the horizontal triad pitch 1.5 a = 0.866 P sets the horizontal tier, the row spacing P / 2 the vertical.
 //
 // Numerics: P is the f32 product px_per_mm x pitch (in host px) and the cell width X the f32 product P x
 // sqrt(3); the pixel position is reduced exactly modulo X in x and modulo P in y (mask_triad_phase), so no
@@ -356,11 +369,14 @@ vec3 mask_delta(ivec2 q) {
     if (!(pp > 0.0)) {
         return vec3(1.0);
     }
-    // Tier on the horizontal triad pitch 1.5 a = cell / 2. Tier C: a box of 1.5 a x P is a whole period of two
-    // rows, its mean is 1 (crt-model prefiltered).
-    if (!mask_area_integrated(0.5 * cell)) {
+    // Both axes prefiltered: a box of 1.5 a x P (one horizontal triad pitch, cell / 2, by one vertical period)
+    // is a whole period of two rows, its mean is 1 (crt-model prefiltered).
+    if (mask_prefiltered(frame.mask_box_px.x) && mask_prefiltered(frame.mask_box_px.y)) {
         return vec3(1.0);
     }
+    // Footprint: a box of bx x by px centred on the pixel (cell / 2 or P when that axis is prefiltered).
+    float bx = mask_box(frame.mask_box_px.x, 0.5 * cell);
+    float by = mask_box(frame.mask_box_px.y, pp);
     float a = cell / 3.0;
     float dot_px = clamp(params.mask_dot_fill, 1e-4, 1.0 / MASK_SQRT3) * pp;
     // crt-model validate(): edge <= dot, dot + edge <= a.
@@ -370,10 +386,10 @@ vec3 mask_delta(ivec2 q) {
     float row = 0.5 * pp;
 
     // Pixel footprint inside its lattice cell, exact phases.
-    float x0 = mask_centred_phase(q.x, frame.tube_size.x, cell) * cell;
-    float y0 = mask_centred_phase(q.y, frame.tube_size.y, pp) * pp;
-    float x1 = x0 + 1.0;
-    float y1 = y0 + 1.0;
+    float x0 = mask_centred_phase(q.x, frame.tube_size.x, cell) * cell + 0.5 * (1.0 - bx);
+    float y0 = mask_centred_phase(q.y, frame.tube_size.y, pp) * pp + 0.5 * (1.0 - by);
+    float x1 = x0 + bx;
+    float y1 = y0 + by;
 
     vec3 sum = vec3(0.0);
     int j0 = int(floor((y0 - rmax) / row));
@@ -396,7 +412,7 @@ vec3 mask_delta(ivec2 q) {
     }
     // Mean coverage of a colour: two dots of area pi (R^2 + s^2 / 12) per cell X x P (crt-model coverage).
     float coverage = 2.0 * MASK_PI * (r * r + soft * soft / 12.0) / (cell * pp);
-    return sum / coverage;
+    return sum / (coverage * bx * by);
 }
 
 // Emitter weight per channel of host pixel q. Exactly 1 when the mask is off or the tube is not placed (px per

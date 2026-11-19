@@ -82,11 +82,14 @@ mod common;
 
 use std::ops::Range;
 
-use crt_model::mask::{alias_period_px, tier, Delta, Mask, Rect, Slot, Tier, BARTEN_THRESHOLD};
+use crt_model::mask::{
+    alias_period_px, readouts, tier, AxisTier, AxisTiers, Delta, Grille, Mask, Rect, Slot, Tier, BARTEN_THRESHOLD,
+};
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{
     Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK,
 };
+use ultimatecrt::placement::{mask_model, mask_tier_rule, mask_tiers};
 
 /// One FP16 step relative to the value, at most: 2^-10.
 const FP16_STEP: f64 = 1.0 / 1024.0;
@@ -178,7 +181,19 @@ struct Oracle {
 impl Oracle {
     fn new(fc: &FrameConstants, p: &Params) -> Self {
         let (pp, cell) = pitches(fc, p);
-        let (mask, sigma) = if p.mask_type == MASK_TYPE_DELTA {
+        let (mask, sigma) = if p.mask_type == MASK_TYPE_APERTURE_GRILLE {
+            (
+                Mask::Grille(Grille {
+                    pitch_mm: f64::from(pp),
+                    stripe_mm: f64::from(p.mask_stripe_fill * pp),
+                    edge_mm: f64::from(p.mask_edge_softness * pp),
+                    damper_y_mm: vec![],
+                    damper_mm: 0.0,
+                    damper_edge_mm: 0.0,
+                }),
+                1.0,
+            )
+        } else if p.mask_type == MASK_TYPE_DELTA {
             let pitch = f64::from(cell) / 3.0_f64.sqrt();
             (
                 Mask::Delta(Delta {
@@ -226,6 +241,15 @@ impl Oracle {
 
     fn area_image(&self, fc: &FrameConstants) -> Vec<[f64; 3]> {
         self.image(fc, |c, x, y| self.area_mean(c, x, y))
+    }
+
+    /// The oracle's `host_value` of every pixel under the per-axis tiers `tiers` (T-39c). Host px are the
+    /// oracle's units (1 px = 1, rows scaled by 1 / sigma = 1 + O(1e-7), within the f32 budget).
+    fn host_image(&self, fc: &FrameConstants, tiers: AxisTiers) -> Vec<[f64; 3]> {
+        self.image(fc, |c, x, y| {
+            let q = self.rect(f64::from(x), f64::from(y), 1.0, 1.0);
+            self.mask.host_value(c, &q, tiers, 1.0)
+        })
     }
 }
 
@@ -831,12 +855,14 @@ fn tier_c_slot_and_delta() {
     let counter = gpu.validation_counter();
     let (w, h) = (240_u32, 24_u32);
     let ones = vec![[1.0_f64; 3]; (w * h) as usize];
-    for (ppt_hand, expect) in [
-        (1.0, Tier::C),
-        (1.54, Tier::C),
-        (2.9, Tier::C),
-        (3.0, Tier::B),
-        (4.4, Tier::B),
+    for (ppt_hand, expect, blend) in [
+        (1.0, Tier::C, 0.4_f32),
+        (1.54, Tier::C, 0.4),
+        (2.9, Tier::C, 0.0),
+        (3.0, Tier::B, 0.0),
+        (2.9, Tier::C, 0.4),
+        (3.0, Tier::B, 0.4),
+        (4.4, Tier::B, 0.4),
     ] {
         for delta in [false, true] {
             let (fc, base) = if delta {
@@ -848,6 +874,7 @@ fn tier_c_slot_and_delta() {
             };
             let p = Params {
                 mask_tier: MASK_TIER_AUTO,
+                mask_tier_blend: blend,
                 mask_damper_count: 2,
                 tube_visible_height_mm: h as f32 / fc.px_per_mm,
                 ..base
@@ -856,12 +883,17 @@ fn tier_c_slot_and_delta() {
             assert_eq!(tier(ppt), expect, "{ppt}");
             let oracle = Oracle::new(&fc, &p);
             let kind = if delta { "delta" } else { "slot" };
-            let what = format!("{test} {kind} auto at {ppt:.4} px per triad");
-            let rect = |x: u32, y: u32| oracle.rect(f64::from(x), f64::from(y), 1.0, 1.0);
-            let want = oracle.image(&fc, |c, x, y| oracle.mask.host_value(c, &rect(x, y), ppt));
+            let what = format!("{test} {kind} auto at {ppt:.4} px per triad, blend {blend}");
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            let want = oracle.host_image(&fc, tiers);
             let got = assert_matches(&mut gpu, &what, fc, &p, &want);
             let r = ripple(&got.iter().map(|px| px[1]).collect::<Vec<_>>());
-            println!("{what}: tier {expect:?}, green ripple {r:.4}");
+            println!("{what}: tier {expect:?}, {tiers:?}, green ripple {r:.4}");
+            if matches!(tiers.horizontal, AxisTier::Blended { .. }) {
+                // T-39c, in the default band (2.9 and 3.0): between flat and the full structure.
+                assert!(r > 0.0 && r < 1.0, "{what}: ripple {r}");
+                continue;
+            }
             if expect == Tier::C {
                 assert_eq!(got, ones, "{what}: tier C is exactly 1");
                 assert!(r < BARTEN_THRESHOLD);
@@ -883,6 +915,257 @@ fn tier_c_slot_and_delta() {
             if delta { "delta" } else { "slot" }
         );
         assert!(r > 10.0 * BARTEN_THRESHOLD);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// A frame and parameters of `kind` (grille, slot, delta) at `ppt` host px per horizontal triad, auto tier:
+/// grille and slot at 4 px per mm (pitch ppt / 4 mm), delta with P = 0.28 mm (px per mm = ppt / 0.242487).
+fn at_density(kind: u32, ppt: f64, (w, h): (u32, u32)) -> (FrameConstants, Params) {
+    let (ppm, pitch) = if kind == MASK_TYPE_DELTA {
+        (ppt / (0.28 * 0.75_f64.sqrt()), 0.28)
+    } else {
+        (4.0, ppt / 4.0)
+    };
+    let p = Params {
+        mask_type: kind,
+        mask_pitch_mm: pitch as f32,
+        mask_tier: MASK_TIER_AUTO,
+        ..Params::default()
+    };
+    (tube(w, h, ppm as f32), p)
+}
+
+fn kind_name(kind: u32) -> &'static str {
+    match kind {
+        MASK_TYPE_SLOT_MASK => "slot",
+        MASK_TYPE_DELTA => "delta",
+        _ => "grille",
+    }
+}
+
+/// Michelson ripple over the rows of the row means of channel c (each over all columns).
+fn row_mean_ripple(img: &[[f64; 3]], (w, h): (u32, u32), c: usize) -> f64 {
+    ripple(
+        &(0..h)
+            .map(|y| window_mean(img, w, c, 0..w, y..y + 1))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// E9 (T-39c, D-15): the per-axis rule, decided on the CPU (`mask_tiers`), drawn by the shader. Hand
+/// decisions (blend 0.4: horizontal band 2.8 to 3.2 px per triad, vertical band 1.8667 to 2.1333 px of
+/// V / 2 or P / 2): slot 3.6 px per triad (V / 2 = 0.41665 x 3.6 = 1.5 px): horizontal integrated, vertical
+/// prefiltered; slot with slot period 1.6 at 2.7 (V / 2 = 0.8 x 2.7 = 2.16 px): horizontal prefiltered,
+/// vertical integrated; slot 4.8 (V / 2 = 1.99992 px, u = 0.4997): vertical blended, box 0.5003 x V +
+/// 0.4997 = 2.4999 px; delta 3.1 (P / 2 = 3.1 / sqrt 3 = 1.79 px): horizontal blended, vertical
+/// prefiltered; delta 3.6 (P / 2 = 2.078 px, u = 0.79): vertical blended; delta 4.0 (P / 2 = 2.309):
+/// both integrated. Every pixel equals the oracle's `host_value` under the same tiers, and the readouts
+/// (`crt_model::mask::readouts` on `mask_model`) report the same tiers. Row ripple (row means over all
+/// columns, whole horizontal periods: 192 px = 32 x 6 px at 3.0 px per triad): delta at 3.0 and slot
+/// defaults at 3.0, rows integrated (forced) above the 1.4 % Barten threshold (the oracle measured 27 %
+/// and 6.1 %), with the rule's vertical prefilter under it.
+#[test]
+fn per_axis_tiers_follow_the_oracle() {
+    let test = "stage_mask_slot_delta per-axis";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let size = (192_u32, 48_u32);
+    type Class = fn(AxisTier) -> bool;
+    let int: Class = |t| t == AxisTier::Integrated;
+    let pre: Class = |t| t == AxisTier::Prefiltered;
+    let bl: Class = |t| matches!(t, AxisTier::Blended { .. });
+    let cases: [(u32, f64, f32, Class, Class); 6] = [
+        (MASK_TYPE_SLOT_MASK, 3.6, 0.8333, int, pre),
+        (MASK_TYPE_SLOT_MASK, 2.7, 1.6, pre, int),
+        (MASK_TYPE_SLOT_MASK, 4.8, 0.8333, int, bl),
+        (MASK_TYPE_DELTA, 3.1, 0.8333, bl, pre),
+        (MASK_TYPE_DELTA, 3.6, 0.8333, int, bl),
+        (MASK_TYPE_DELTA, 4.0, 0.8333, int, int),
+    ];
+    for (kind, ppt, period, horizontal, vertical) in cases {
+        let (fc, base) = at_density(kind, ppt, size);
+        let p = Params {
+            mask_slot_period: period,
+            ..base
+        };
+        let tiers = mask_tiers(fc.px_per_mm, &p);
+        let what = format!("{test} {} {ppt} px per triad: {tiers:?}", kind_name(kind));
+        assert!(horizontal(tiers.horizontal) && vertical(tiers.vertical), "{what}");
+        if let AxisTier::Blended { box_px } = tiers.vertical {
+            if kind == MASK_TYPE_SLOT_MASK {
+                assert!((box_px - 2.4999).abs() < 2e-3, "{what}");
+            }
+        }
+        let r = readouts(
+            &mask_model(&p),
+            f64::from(fc.px_per_mm),
+            1.0,
+            1.0,
+            1.0,
+            mask_tier_rule(&p),
+        );
+        assert_eq!(r.axis_tiers, tiers, "{what}: readout");
+        let oracle = Oracle::new(&fc, &p);
+        assert_matches(&mut gpu, &what, fc, &p, &oracle.host_image(&fc, tiers));
+    }
+    for kind in [MASK_TYPE_SLOT_MASK, MASK_TYPE_DELTA] {
+        // Delta: 3.0 exactly is not representable through P sqrt(3) / 2: just above it.
+        let (fc, p) = at_density(kind, 3.0 * 1.000_01, size);
+        let tiers = mask_tiers(fc.px_per_mm, &p);
+        assert_eq!(tiers.vertical, AxisTier::Prefiltered);
+        let rule = mask_image(&mut gpu, fc, &p, 1.0);
+        let forced = Params {
+            mask_tier: MASK_TIER_INTEGRATED,
+            ..p
+        };
+        let integrated = mask_image(&mut gpu, fc, &forced, 1.0);
+        for c in 0..3 {
+            let (before, after) = (row_mean_ripple(&integrated, size, c), row_mean_ripple(&rule, size, c));
+            println!(
+                "{test} {} 3.0: channel {c} row ripple integrated {before:.4}, per-axis rule {after:.2e}",
+                kind_name(kind)
+            );
+            assert!(before > BARTEN_THRESHOLD && after < BARTEN_THRESHOLD / 4.0);
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// E10 (T-39c, D-15): the blend band on the GPU, all three types, 2.8071 to 3.2071 px per triad by 0.02
+/// (the offset keeps the densities 0.007 or more from fractions of small denominator, 3 and 29 / 10 among them, so the 2048 columns sweep every phase of the triad: at 3.0071 the three phases of the columns drift by 2048 x 0.0071 / 9 = 1.6 triads; at 3.0013 they drifted by 0.3 only and the sampled ripple dipped). Every
+/// pixel equals the oracle's `host_value`; the rendered flat-field ripple (Michelson, channel 0, row 0) is
+/// small at the lower edge (hand bound (1 - rho) / (2 f + rho - 1) with rho = 1 - 0.0178 x (1 - 1 / 2.807):
+/// 0.024 for f = 0.25, under 0.05), never falls as the pitch grows (0.02 of sampling slack), moves by at most 0.25 per
+/// step (hand: up to 0.21 per 0.02 for hard edges, crt-model `blend_band_is_continuous_and_monotone`) and
+/// reaches the full structure (> 0.5) at the upper edge. With the hard switch (blend 0) it jumps from
+/// exactly 1 everywhere at 2.99 to above 0.5 at 3.01 (the D-15 snap).
+#[test]
+fn blend_band_is_monotone_on_the_gpu() {
+    let test = "stage_mask_slot_delta blend";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let size = (2048_u32, 1_u32);
+    for kind in [MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_SLOT_MASK, MASK_TYPE_DELTA] {
+        let mut r = Vec::new();
+        for k in 0..=20 {
+            let ppt = 2.8071 + 0.02 * f64::from(k);
+            let (fc, p) = at_density(kind, ppt, size);
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            // Inside the band, and just past its upper edge for the last one.
+            let blended = matches!(tiers.horizontal, AxisTier::Blended { .. });
+            assert_eq!(blended, k < 20, "{ppt}: {tiers:?}");
+            let oracle = Oracle::new(&fc, &p);
+            let what = format!("{test} {} {ppt:.4} px per triad", kind_name(kind));
+            let got = assert_matches(&mut gpu, &what, fc, &p, &oracle.host_image(&fc, tiers));
+            r.push(ripple(
+                &got[..size.0 as usize].iter().map(|px| px[0]).collect::<Vec<_>>(),
+            ));
+        }
+        let steps: Vec<f64> = r.windows(2).map(|s| s[1] - s[0]).collect();
+        let worst = steps.iter().cloned().fold(0.0, f64::max);
+        println!(
+            "{test} {}: ripple {:?}, largest step {worst:.3}",
+            kind_name(kind),
+            r.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>()
+        );
+        assert!(r[0] < 0.05, "{}: {}", kind_name(kind), r[0]);
+        assert!(steps.iter().all(|&s| s >= -0.02), "{}: ripple falls", kind_name(kind));
+        assert!(worst <= 0.25, "{}: step {worst}", kind_name(kind));
+        assert!(r[20] > 0.5, "{}: {}", kind_name(kind), r[20]);
+        // The hard switch snaps.
+        let hard = |ppt: f64| {
+            let (fc, p) = at_density(kind, ppt, size);
+            let p = Params {
+                mask_tier_blend: 0.0,
+                ..p
+            };
+            (fc, p)
+        };
+        let (fc, p) = hard(2.99);
+        let below = mask_image(&mut gpu, fc, &p, 1.0);
+        assert!(
+            below.iter().all(|px| *px == [1.0; 3]),
+            "{}: hard switch below",
+            kind_name(kind)
+        );
+        let (fc, p) = hard(3.01);
+        let above = mask_image(&mut gpu, fc, &p, 1.0);
+        let ra = ripple(&above[..size.0 as usize].iter().map(|px| px[0]).collect::<Vec<_>>());
+        println!("{test} {}: hard switch 0 -> {ra:.3}", kind_name(kind));
+        assert!(ra > 0.5);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// (C) of T-39c: the tier is decided once, on the CPU, in f64 (exact: the product of two f32 values has 48
+/// significant bits), and the shader draws that decision. Before T-39c the shader decided on the f32 product
+/// px per mm x pitch, which rounds to the other side of 3.0 for some pitches meant to land on it (the review
+/// measured 14 %). Grille, hard switch (blend 0), pitches within 3 f32 ulp of 3 / px per mm for random px per
+/// mm: the cases where the f32 and the f64 decisions differ are collected (at least 8); for each, the readout
+/// (`readouts` on `mask_model`) equals `mask_tiers`, and the image is what the f64 decision says: exactly 1
+/// everywhere when prefiltered, the primaries of about 3 px per triad (peak near 3) when integrated.
+#[test]
+fn tier_decision_agrees_on_the_limit() {
+    let test = "stage_mask_slot_delta limit";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut rng = Lcg(3039);
+    let size = (60_u32, 2_u32);
+    let (mut differ, mut tried) = (Vec::new(), 0);
+    while differ.len() < 8 && tried < 20_000 {
+        tried += 1;
+        let ppm = (2.0 + 38.0 * rng.next()) as f32;
+        let centre = 3.0 / ppm;
+        for d in -3_i32..=3 {
+            let pitch = f32::from_bits((centre.to_bits() as i32 + d) as u32);
+            let f32_integrated = ppm * pitch >= 3.0;
+            let f64_integrated = f64::from(ppm) * f64::from(pitch) >= 3.0;
+            if f32_integrated != f64_integrated {
+                differ.push((ppm, pitch, f64_integrated));
+            }
+        }
+    }
+    println!(
+        "{test}: {} pitches where f32 and f64 disagree, {tried} px per mm tried",
+        differ.len()
+    );
+    assert!(differ.len() >= 8);
+    for (ppm, pitch, f64_integrated) in differ {
+        let fc = tube(size.0, size.1, ppm);
+        let p = Params {
+            mask_type: MASK_TYPE_APERTURE_GRILLE,
+            mask_pitch_mm: pitch,
+            mask_tier: MASK_TIER_AUTO,
+            mask_tier_blend: 0.0,
+            ..Params::default()
+        };
+        let tiers = mask_tiers(ppm, &p);
+        let r = readouts(&mask_model(&p), f64::from(ppm), 1.0, 1.0, 1.0, mask_tier_rule(&p));
+        assert_eq!(r.axis_tiers, tiers);
+        assert_eq!(tiers.horizontal == AxisTier::Integrated, f64_integrated);
+        let got = mask_image(&mut gpu, fc, &p, 1.0);
+        let peak = got.iter().flatten().cloned().fold(0.0, f64::max);
+        println!(
+            "{test}: {ppm} px/mm x {pitch} mm = {} (f64) / {} (f32): {:?}, peak {peak:.3}",
+            f64::from(ppm) * f64::from(pitch),
+            ppm * pitch,
+            tiers.horizontal
+        );
+        if f64_integrated {
+            assert!(peak > 2.5, "integrated: peak {peak}");
+        } else {
+            assert!(got.iter().all(|px| *px == [1.0; 3]), "prefiltered: not flat");
+        }
     }
     drop(gpu);
     common::assert_no_validation_messages(&counter);

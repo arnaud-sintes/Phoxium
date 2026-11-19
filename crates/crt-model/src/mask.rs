@@ -144,6 +144,150 @@ pub fn tier(px_per_triad: f64) -> Tier {
     }
 }
 
+/// Smallest vertical mask period, in host px, that is drawn by its area
+/// integral (T-39c, D-15). [D] The vertical structure (slot rows of period V / 2
+/// once averaged over x, delta rows of period P / 2) is the same for the three
+/// colours: there is no colour sub-element to give its own pixel, which is what
+/// sets the horizontal limit at 3 px (one per primary, CRT.md "Host-display
+/// resolution budget"). What remains is the sampling theorem: a period under
+/// 2 px puts its fundamental above the host Nyquist frequency of 0.5 cycle per
+/// px, where it aliases to a lower frequency, a ripple that is not on the tube.
+/// Measured on the integrated host grid (row means, tests below and the GPU
+/// tests): delta at 3.0 px per triad (P / 2 = 1.73 px) 27 % and slot defaults
+/// (V / 2 = 1.25 px) 5.4 to 6.1 % depending on the row phase, both above
+/// the Barten threshold of 1.4 %, so they must be prefiltered. At 2 px and
+/// above the dominant row component is drawn at its own frequency (no alias).
+pub const VERTICAL_MIN_PERIOD_PX: f64 = 2.0;
+
+/// Default width of the blend band, in px per triad, centred on the horizontal
+/// limit (2.8 to 3.2). `mask_tier_blend`, D-15. The vertical band is the same
+/// relative width around its limit: blend x 2 / 3 px (1.867 to 2.133 px).
+pub const DEFAULT_TIER_BLEND: f64 = 0.4;
+
+/// `mask_tier`: how the tier of each axis is chosen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TierMode {
+    /// Per axis from the host px per period, with the blend band ([`axis_tiers`]).
+    Auto,
+    /// Area integral over the host pixel on both axes, at any density.
+    Integrated,
+    /// Both periodic axes averaged over one whole period (the old tier C).
+    Prefiltered,
+}
+
+/// The tier rule: mode and blend band width (px per triad, 0 = hard switch).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TierRule {
+    pub mode: TierMode,
+    pub blend: f64,
+}
+
+impl Default for TierRule {
+    fn default() -> Self {
+        Self {
+            mode: TierMode::Auto,
+            blend: DEFAULT_TIER_BLEND,
+        }
+    }
+}
+
+/// How one axis of the mask is brought to host pixels (T-39c).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum AxisTier {
+    /// The host pixel itself: exact area integral over its footprint.
+    Integrated,
+    /// Blend band: the footprint is a box of `box_px` host px (1 < box < one
+    /// period) centred on the pixel. Its mean over all positions is still 1.
+    Blended { box_px: f64 },
+    /// The footprint is a box of one whole period: the axis shows its mean only.
+    Prefiltered,
+}
+
+impl AxisTier {
+    /// Width in host px of the footprint along this axis, for an axis whose
+    /// prefilter period is `period_px`.
+    pub fn box_px(&self, period_px: f64) -> f64 {
+        match *self {
+            AxisTier::Integrated => 1.0,
+            AxisTier::Blended { box_px } => box_px,
+            AxisTier::Prefiltered => period_px,
+        }
+    }
+}
+
+/// Tier of both axes. The grille has no vertical period: its vertical is always
+/// integrated (the damper wires are not periodic and stay in every tier).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AxisTiers {
+    pub horizontal: AxisTier,
+    pub vertical: AxisTier,
+}
+
+/// Tier of one axis whose deciding period is `period_px` host px, against
+/// `limit_px` with a blend band `band_px` wide centred on the limit; `box_period_px`
+/// is the prefilter box of the axis (one whole period). Under the band:
+/// prefiltered; over it: integrated; inside it the box width falls linearly
+/// from `box_period_px` at the lower edge to 1 px at the upper edge, so the
+/// footprint, and every pixel value, is continuous in the pitch. `band_px <= 0`
+/// is the hard switch at the limit (integrated from the limit up).
+pub fn axis_tier(period_px: f64, limit_px: f64, band_px: f64, box_period_px: f64) -> AxisTier {
+    if band_px <= 0.0 || band_px.is_nan() {
+        return if period_px >= limit_px {
+            AxisTier::Integrated
+        } else {
+            AxisTier::Prefiltered
+        };
+    }
+    let (lo, hi) = (limit_px - 0.5 * band_px, limit_px + 0.5 * band_px);
+    if period_px >= hi {
+        AxisTier::Integrated
+    } else if period_px <= lo {
+        AxisTier::Prefiltered
+    } else {
+        let u = (period_px - lo) / (hi - lo);
+        AxisTier::Blended {
+            box_px: (1.0 - u) * box_period_px + u,
+        }
+    }
+}
+
+/// Per-axis tier decision (T-39c, D-15). `triad_px`: horizontal triad pitch in
+/// host px (the box of a horizontal prefilter is one triad); `vertical`: for the
+/// slot and delta masks, (deciding period, prefilter period) in host px, that
+/// is (V / 2, V) and (P / 2, P), none for the grille. Horizontal limit
+/// [`TIER_B_MIN_PX_PER_TRIAD`] with band `rule.blend`; vertical limit
+/// [`VERTICAL_MIN_PERIOD_PX`] with band `rule.blend` x 2 / 3 (same relative width).
+///
+/// Why the vertical box is the whole period V (P) while V / 2 (P / 2) decides:
+/// a separable box must hold a whole period of every column, otherwise the
+/// stagger component (1 / 2p, 1 / V) of the slot (delta: the hexagonal
+/// fundamentals (1 / 2t, 1 / P)) survives at 2 / pi of its amplitude and the
+/// two-axis prefilter is no longer flat. The boxes one triad x V (one triad x P)
+/// are those of the former tier C, whose mean is exactly 1 at every position.
+pub fn axis_tiers(triad_px: f64, vertical: Option<(f64, f64)>, rule: TierRule) -> AxisTiers {
+    match rule.mode {
+        TierMode::Integrated => AxisTiers {
+            horizontal: AxisTier::Integrated,
+            vertical: AxisTier::Integrated,
+        },
+        TierMode::Prefiltered => AxisTiers {
+            horizontal: AxisTier::Prefiltered,
+            vertical: vertical.map_or(AxisTier::Integrated, |_| AxisTier::Prefiltered),
+        },
+        TierMode::Auto => AxisTiers {
+            horizontal: axis_tier(triad_px, TIER_B_MIN_PX_PER_TRIAD, rule.blend, triad_px),
+            vertical: vertical.map_or(AxisTier::Integrated, |(decide, full)| {
+                axis_tier(
+                    decide,
+                    VERTICAL_MIN_PERIOD_PX,
+                    rule.blend * VERTICAL_MIN_PERIOD_PX / TIER_B_MIN_PX_PER_TRIAD,
+                    full,
+                )
+            }),
+        },
+    }
+}
+
 /// Trapezoid pulse centred on 0 with nominal (half-value) width `w` and edge
 /// ramps of full width `s`: 1 for |r| <= (w - s) / 2, 0 for |r| >= (w + s) / 2.
 fn pulse(r: f64, w: f64, s: f64) -> f64 {
@@ -521,8 +665,9 @@ impl Mask {
     /// The flat-field ripple is therefore 0, under the 1.4 % Barten threshold.
     ///
     /// Tier C caveat: in tier C the mask vanishes entirely (no visible structure
-    /// remains), so there is a hard visual jump at 3.0 px per triad, and the
-    /// unfiltered ripple is 100 % from 2.9 to 3.05 px per triad. Renders at less
+    /// remains), so a hard switch jumps at 3.0 px per triad (the unfiltered ripple
+    /// is 100 % from 2.9 to 3.05 px per triad); the blend band of T-39c
+    /// ([`axis_tiers`]) narrows the box continuously instead. Renders at less
     /// than 3 px per triad must therefore use `area_mean` over a box-filtered
     /// footprint (see `tier_c_area_mean_box_ripple`), not the unfiltered pitch grid.
     /// This function returns the constant 1 (damper wires aside) by construction, so
@@ -534,11 +679,62 @@ impl Mask {
         }
     }
 
-    /// Host-pixel value of channel c for the tier given by `px_per_triad`.
-    pub fn host_value(&self, c: usize, q: &Rect, px_per_triad: f64) -> f64 {
-        match tier(px_per_triad) {
-            Tier::A | Tier::B => self.area_mean(c, q),
-            Tier::C => self.prefiltered(c, q),
+    /// Per-axis tiers of this mask seen at `host_px_per_mm` (T-39c, [`axis_tiers`]).
+    pub fn axis_tiers(&self, host_px_per_mm: f64, rule: TierRule) -> AxisTiers {
+        let vertical = self
+            .vertical_period_mm()
+            .zip(self.vertical_box_mm())
+            .map(|(v, full)| (host_px_per_mm * v, host_px_per_mm * full));
+        axis_tiers(host_px_per_mm * self.triad_pitch_mm(), vertical, rule)
+    }
+
+    /// Footprint of a host pixel `q` under `tiers` (T-39c): each axis is the
+    /// pixel itself (integrated), a box of `box_px` pixels or of one whole period
+    /// (prefiltered: one triad horizontally, V or P vertically) centred on the
+    /// pixel centre. `px_mm` is the size of one host pixel in mask units.
+    pub fn footprint(&self, q: &Rect, tiers: AxisTiers, px_mm: f64) -> Rect {
+        let width = |t: AxisTier, pixel: f64, period: f64| match t {
+            AxisTier::Integrated => pixel,
+            AxisTier::Blended { box_px } => box_px * px_mm,
+            AxisTier::Prefiltered => period,
+        };
+        let w = width(tiers.horizontal, q.x1 - q.x0, self.triad_pitch_mm());
+        let h = width(
+            tiers.vertical,
+            q.y1 - q.y0,
+            self.vertical_box_mm().unwrap_or(q.y1 - q.y0),
+        );
+        let (cx, cy) = (0.5 * (q.x0 + q.x1), 0.5 * (q.y0 + q.y1));
+        Rect::new(cx - 0.5 * w, cy - 0.5 * h, cx + 0.5 * w, cy + 0.5 * h)
+    }
+
+    /// Host-pixel value of channel c under the per-axis tiers `tiers` (T-39c):
+    /// the area mean over [`Mask::footprint`]. Both periodic axes prefiltered is
+    /// [`Mask::prefiltered`] (the closed form, exactly 1 aside from damper wires),
+    /// and so is a grille prefiltered horizontally (its vertical is never periodic).
+    /// A box over a whole number of periods keeps every value at the mean; a box of
+    /// a fraction rho of a period (blend band) leaves a ripple, bounded for hard
+    /// edges and coverage f per period by (1 - rho) / (2 f + rho - 1) when
+    /// rho >= max(f, 1 - f) (the window holds between rho - (1 - f) and f of one
+    /// element): it falls to 0 linearly as rho reaches 1, so the band is continuous.
+    pub fn host_value(&self, c: usize, q: &Rect, tiers: AxisTiers, px_mm: f64) -> f64 {
+        let prefiltered = tiers.horizontal == AxisTier::Prefiltered
+            && (tiers.vertical == AxisTier::Prefiltered || matches!(self, Mask::Grille(_)));
+        if prefiltered {
+            self.prefiltered(c, q)
+        } else {
+            self.area_mean(c, &self.footprint(q, tiers, px_mm))
+        }
+    }
+
+    /// Vertical prefilter box: the whole vertical period of one column, V for the
+    /// slot mask and P for delta (rows j and j + 2 hold the same colour at the
+    /// same x); none for the grille. See [`axis_tiers`] for why not V / 2 or P / 2.
+    pub fn vertical_box_mm(&self) -> Option<f64> {
+        match self {
+            Mask::Grille(_) => None,
+            Mask::Slot(m) => Some(m.slot_period_mm),
+            Mask::Delta(d) => Some(d.pitch_mm),
         }
     }
 
@@ -615,7 +811,13 @@ pub struct Readouts {
     /// that is the horizontal triad pitch 0.866 P (not P): the spot-MTF rule applies
     /// at the lattice's fundamental horizontal frequency 1 / (0.866 P).
     pub product_form_valid: bool,
+    /// Horizontal tier class A, B or C from px per triad (hard thresholds, UI label).
     pub tier: Tier,
+    /// The per-axis decision the shader draws (T-39c): the same function and the
+    /// same f64 inputs as the frame constants (`FrameConstants::with_mask_tiers`).
+    pub axis_tiers: AxisTiers,
+    /// Deciding vertical period in host px (slot V / 2, delta P / 2), none for a grille.
+    pub vertical_period_px: Option<f64>,
     /// Host-grid moire: host pixel pitch against triad pitch, p1 p2 / |p1 - p2|, in
     /// mm. This is the moire of the display's pixel grid, not CRT.md's video moire
     /// (see `source_moire_mm`). Only a low-frequency beat within a factor of 2.
@@ -637,13 +839,14 @@ pub struct Readouts {
 }
 
 /// Readouts for a mask shown at `host_px_per_mm`, a source pixel `source_px_mm`
-/// wide on the tube, a raster line pitch and a spot FWHM.
+/// wide on the tube, a raster line pitch and a spot FWHM, under the tier `rule`.
 pub fn readouts(
     mask: &Mask,
     host_px_per_mm: f64,
     source_px_mm: f64,
     line_pitch_mm: f64,
     spot_fwhm_mm: f64,
+    rule: TierRule,
 ) -> Readouts {
     let pitch = mask.triad_pitch_mm();
     let ppt = host_px_per_mm * pitch;
@@ -655,6 +858,8 @@ pub fn readouts(
         fwhm_over_pitch,
         product_form_valid: fwhm_over_pitch >= PRODUCT_FORM_MIN_FWHM_OVER_PITCH,
         tier: tier(ppt),
+        axis_tiers: mask.axis_tiers(host_px_per_mm, rule),
+        vertical_period_px: vertical.map(|v| host_px_per_mm * v),
         host_moire_mm: moire_beat(1.0 / host_px_per_mm, pitch),
         source_moire_mm: moire_beat(source_px_mm, pitch),
         host_harmonic_alias_px: (2.0..3.0)
@@ -901,7 +1106,7 @@ mod tests {
                     y0 + (j + 1) as f64 * h,
                 );
                 let v = if filtered {
-                    m.host_value(c, &q, ppt)
+                    m.host_value(c, &q, m.axis_tiers(1.0 / h, TierRule::default()), h)
                 } else {
                     m.area_mean(c, &q)
                 };
@@ -1028,7 +1233,14 @@ mod tests {
             damper_mm: 0.0,
             damper_edge_mm: 0.0,
         });
-        let r = readouts(&m, 1920.0 / 386.0, 386.0 / 320.0, 290.0 / 240.0, 0.6);
+        let r = readouts(
+            &m,
+            1920.0 / 386.0,
+            386.0 / 320.0,
+            290.0 / 240.0,
+            0.6,
+            TierRule::default(),
+        );
         assert!(close(r.px_per_triad, 1.542, 0.0005));
         assert!(close(r.triads_per_source_px, 3.891, 0.0005));
         assert!(close(r.fwhm_over_pitch, 1.935, 0.0005));
@@ -1038,7 +1250,14 @@ mod tests {
         assert_eq!(r.scan_moire_mm, None);
         assert_eq!(r.scan_harmonic, None);
         assert_eq!(r.host_harmonic_alias_px, None); // 1.542 px per triad, outside 2 to 3
-        let r = readouts(&m, 1920.0 / 386.0, 386.0 / 320.0, 290.0 / 240.0, 0.4);
+        let r = readouts(
+            &m,
+            1920.0 / 386.0,
+            386.0 / 320.0,
+            290.0 / 240.0,
+            0.4,
+            TierRule::default(),
+        );
         assert!(close(r.fwhm_over_pitch, 1.290, 0.0005));
         assert!(!r.product_form_valid);
     }
@@ -1059,10 +1278,10 @@ mod tests {
             damper_mm: 0.0,
             damper_edge_mm: 0.0,
         });
-        let r = readouts(&m, 2.0, 0.5, 1.0, 0.6);
+        let r = readouts(&m, 2.0, 0.5, 1.0, 0.6, TierRule::default());
         assert!(close(r.source_moire_mm, 0.815_789, 0.000_001));
         assert!(close(r.host_moire_mm, 0.815_789, 0.000_001));
-        let r = readouts(&m, 4.0, 0.5, 1.0, 0.6);
+        let r = readouts(&m, 4.0, 0.5, 1.0, 0.6, TierRule::default());
         assert!(close(r.source_moire_mm, 0.815_789, 0.000_001));
         assert!(close(r.host_moire_mm, 1.291_667, 0.000_001));
     }
@@ -1081,12 +1300,16 @@ mod tests {
             damper_mm: 0.0,
             damper_edge_mm: 0.0,
         });
-        let r = readouts(&m, 1.0, 1.0, 1.0, 5.0);
+        let r = readouts(&m, 1.0, 1.0, 1.0, 5.0, TierRule::default());
         let [a2, a3] = r.host_harmonic_alias_px.unwrap();
         assert!(close(a2, 2.9 / 0.9, 1e-9));
         assert!(close(a3, 29.0, 1e-9));
-        assert!(readouts(&m, 3.0 / 2.9, 1.0, 1.0, 5.0).host_harmonic_alias_px.is_none());
-        assert!(readouts(&m, 1.9 / 2.9, 1.0, 1.0, 5.0).host_harmonic_alias_px.is_none());
+        assert!(readouts(&m, 3.0 / 2.9, 1.0, 1.0, 5.0, TierRule::default())
+            .host_harmonic_alias_px
+            .is_none());
+        assert!(readouts(&m, 1.9 / 2.9, 1.0, 1.0, 5.0, TierRule::default())
+            .host_harmonic_alias_px
+            .is_none());
     }
 
     /// Real scan beats by hand. Slot 26 in (line 1.65 mm, V / 2 = 1/3 mm): mask
@@ -1097,11 +1320,18 @@ mod tests {
     /// Grille: none.
     #[test]
     fn scan_harmonic_hand_values() {
-        let r = readouts(&slot(), 1920.0 / 528.0, 528.0 / 320.0, 396.0 / 240.0, 2.0);
+        let r = readouts(
+            &slot(),
+            1920.0 / 528.0,
+            528.0 / 320.0,
+            396.0 / 240.0,
+            2.0,
+            TierRule::default(),
+        );
         let h = r.scan_harmonic.unwrap();
         assert_eq!(h.harmonic, 5);
         assert!(close(h.beat_mm, 33.0, 1e-9));
-        let r = readouts(&delta(), 1920.0 / 280.0, 280.0 / 640.0, 0.44, 0.5);
+        let r = readouts(&delta(), 1920.0 / 280.0, 280.0 / 640.0, 0.44, 0.5, TierRule::default());
         let h = r.scan_harmonic.unwrap();
         assert_eq!(h.harmonic, 3);
         assert!(close(h.beat_mm, 3.08, 1e-9));
@@ -1114,9 +1344,16 @@ mod tests {
     #[test]
     fn scan_moire_hand_values() {
         let s = slot();
-        let r = readouts(&s, 1920.0 / 528.0, 528.0 / 320.0, 396.0 / 240.0, 2.0);
+        let r = readouts(
+            &s,
+            1920.0 / 528.0,
+            528.0 / 320.0,
+            396.0 / 240.0,
+            2.0,
+            TierRule::default(),
+        );
         assert!(close(r.scan_moire_mm.unwrap(), 0.41772, 0.00001));
-        let r = readouts(&delta(), 1920.0 / 280.0, 280.0 / 640.0, 0.44, 0.5);
+        let r = readouts(&delta(), 1920.0 / 280.0, 280.0 / 640.0, 0.44, 0.5, TierRule::default());
         assert!(close(r.scan_moire_mm.unwrap(), 0.205_333, 0.000_001));
     }
 
@@ -1180,6 +1417,215 @@ mod tests {
             option_d(&presets, 1920.0, OPTION_D_THRESHOLD_PX_PER_TRIAD),
             vec![3, 5, 6, 8]
         );
+    }
+
+    // ---- T-39c: per-axis tiers and the blend band. Masks in host px (1 px per mm), default shapes of
+    // params/mask.toml: stripe 0.25 p, edge 0.07 p (P for delta), slot bridge 0.15, dot 0.45 P.
+
+    fn grille_px(ppt: f64) -> Mask {
+        Mask::Grille(Grille {
+            pitch_mm: ppt,
+            stripe_mm: 0.25 * ppt,
+            edge_mm: 0.07 * ppt,
+            damper_y_mm: vec![],
+            damper_mm: 0.0,
+            damper_edge_mm: 0.0,
+        })
+    }
+
+    fn slot_px(ppt: f64, period: f64) -> Mask {
+        Mask::Slot(Slot {
+            pitch_mm: ppt,
+            stripe_mm: 0.25 * ppt,
+            edge_mm: 0.07 * ppt,
+            slot_period_mm: period * ppt,
+            bridge_fraction: 0.15,
+        })
+    }
+
+    /// Delta of `ppt` px per horizontal triad: P = ppt / (sqrt 3 / 2).
+    fn delta_px(ppt: f64) -> Mask {
+        let p = ppt / (0.75_f64).sqrt();
+        Mask::Delta(Delta {
+            pitch_mm: p,
+            dot_mm: 0.45 * p,
+            edge_mm: 0.07 * p,
+        })
+    }
+
+    /// Per-axis rule by hand (blend 0.4: horizontal band 2.8 to 3.2 px per triad; vertical band 2 -/+
+    /// 0.4 / 3 = 1.8667 to 2.1333 px; inside a band, u = position in it and box = (1 - u) period + u px).
+    /// Grille: no vertical period, vertical always integrated; 2.79 px per triad prefiltered; 3.0 (u = 0.5)
+    /// box 0.5 x 3 + 0.5 = 2.0 px; 3.2 and above integrated. Hard switch (blend 0): 2.999 prefiltered, 3.0
+    /// integrated (the old tier B threshold). Delta at 3.0 px per triad: P = 3 / 0.866025 = 3.4641 px,
+    /// P / 2 = 1.7321 px, under 1.8667: prefiltered vertically. Delta with P = 4 px (P / 2 = 2.0, u = 0.5):
+    /// vertical box 0.5 x 4 + 0.5 = 2.5 px; its triad 3.4641 px is over 3.2: integrated. Slot, default
+    /// period 0.8333 p, at 3.0 px per triad: V / 2 = 1.25 px, prefiltered; at 6: V / 2 = 2.5 px,
+    /// integrated. Modes: integrated forces both axes, prefiltered both periodic axes (grille vertical stays).
+    #[test]
+    fn per_axis_tier_rule_hand_values() {
+        let auto = TierRule::default();
+        let hard = TierRule {
+            mode: TierMode::Auto,
+            blend: 0.0,
+        };
+        let (i, p) = (AxisTier::Integrated, AxisTier::Prefiltered);
+        let blended = |t: AxisTier| match t {
+            AxisTier::Blended { box_px } => box_px,
+            other => panic!("not blended: {other:?}"),
+        };
+        for ppt in [1.0, 2.79, 3.0, 3.2, 8.0] {
+            assert_eq!(grille_px(ppt).axis_tiers(1.0, auto).vertical, i, "{ppt}");
+        }
+        assert_eq!(grille_px(2.79).axis_tiers(1.0, auto).horizontal, p);
+        assert_eq!(grille_px(2.8).axis_tiers(1.0, auto).horizontal, p);
+        assert!(close(
+            blended(grille_px(3.0).axis_tiers(1.0, auto).horizontal),
+            2.0,
+            1e-12
+        ));
+        assert_eq!(grille_px(3.2).axis_tiers(1.0, auto).horizontal, i);
+        assert_eq!(grille_px(2.999).axis_tiers(1.0, hard).horizontal, p);
+        assert_eq!(grille_px(3.0).axis_tiers(1.0, hard).horizontal, i);
+
+        let d = delta_px(3.0);
+        assert!(close(d.vertical_period_mm().unwrap(), 1.732_051, 1e-6));
+        assert_eq!(d.axis_tiers(1.0, auto).vertical, p);
+        assert_eq!(d.axis_tiers(1.0, hard).vertical, p);
+        let d4 = Mask::Delta(Delta {
+            pitch_mm: 4.0,
+            dot_mm: 1.8,
+            edge_mm: 0.28,
+        });
+        let t = d4.axis_tiers(1.0, auto);
+        assert_eq!(t.horizontal, i);
+        assert!(close(blended(t.vertical), 2.5, 1e-12));
+
+        let s3 = slot_px(3.0, 0.8333);
+        assert!(close(s3.vertical_period_mm().unwrap(), 1.24995, 1e-9));
+        assert_eq!(s3.axis_tiers(1.0, auto).vertical, p);
+        assert_eq!(slot_px(6.0, 0.8333).axis_tiers(1.0, auto).vertical, i);
+
+        let forced = |mode| TierRule { mode, blend: 0.4 };
+        for m in [grille_px(1.5), slot_px(1.5, 0.8333), delta_px(1.5)] {
+            let t = m.axis_tiers(1.0, forced(TierMode::Integrated));
+            assert_eq!((t.horizontal, t.vertical), (i, i));
+            let t = m.axis_tiers(1.0, forced(TierMode::Prefiltered));
+            let v = if matches!(m, Mask::Grille(_)) { i } else { p };
+            assert_eq!((t.horizontal, t.vertical), (p, v));
+        }
+    }
+
+    /// Michelson ripple over host rows 0..rows of the row means of channel c (each row averaged over
+    /// [0.37, 0.37 + xwin], a whole number of horizontal periods), the rows integrated over the host row
+    /// or over the vertical footprint of `vertical`.
+    fn row_ripple(m: &Mask, c: usize, vertical: AxisTier, xwin: f64, rows: usize) -> f64 {
+        let tiers = AxisTiers {
+            horizontal: AxisTier::Integrated,
+            vertical,
+        };
+        let v: Vec<f64> = (0..rows)
+            .map(|y| {
+                let q = Rect::new(0.37, y as f64 + 0.21, 0.37 + xwin, y as f64 + 1.21);
+                m.area_mean(c, &m.footprint(&q, tiers, 1.0))
+            })
+            .collect();
+        let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        (hi - lo) / (hi + lo)
+    }
+
+    /// The vertical rule removes the vertical host-grid ripple (D-15). At 3.0 px per triad the horizontal
+    /// periods are whole numbers of px: slot 2 p = 6 px, delta cell X = 2 x 3 = 6 px, so a row mean over 6 px
+    /// is the x-averaged profile, whose period is V / 2 (slot) or P / 2 (delta). Integrated over host rows
+    /// that period is under 2 px (slot 1.25, delta 1.732) and aliases: the ripple of the row means is above
+    /// the 1.4 % Barten threshold (the reviews measured 5.4 % and 27 %; this test prints its own numbers).
+    /// Prefiltered vertically (box V or P, the rule's decision here) each row holds whole periods of every
+    /// column: 0 up to the quadrature (1e-6). Grille: no vertical period, its rows are flat without wires.
+    #[test]
+    fn vertical_rule_removes_the_row_ripple() {
+        let auto = TierRule::default();
+        for (name, m) in [("slot", slot_px(3.0, 0.8333)), ("delta", delta_px(3.0))] {
+            let decided = m.axis_tiers(1.0, auto).vertical;
+            assert_eq!(decided, AxisTier::Prefiltered, "{name}");
+            for c in 0..3 {
+                let before = row_ripple(&m, c, AxisTier::Integrated, 6.0, 48);
+                let after = row_ripple(&m, c, decided, 6.0, 48);
+                println!("{name} 3.0 px per triad c{c}: row ripple integrated {before:.4}, rule {after:.2e}");
+                assert!(before > BARTEN_THRESHOLD, "{name} c{c}: {before}");
+                assert!(after < 1e-6, "{name} c{c}: {after}");
+            }
+        }
+        // At the vertical limit (delta P / 2 = 2.0 px, P = 4) the rule blends (u = 0.5); integrated rows
+        // there are informative only (period 2 px, at the Nyquist limit, no alias to a slower beat).
+        let d = delta_px(4.0 * 0.75_f64.sqrt());
+        let r = row_ripple(&d, 1, AxisTier::Integrated, 2.0 * 4.0 * 0.75_f64.sqrt() * 50.0, 48);
+        println!("delta P / 2 = 2 px: integrated row ripple {r:.4}");
+        let g = grille_px(3.0);
+        assert_eq!(g.axis_tiers(1.0, auto).vertical, AxisTier::Integrated);
+        assert!(row_ripple(&g, 0, AxisTier::Integrated, 3.0, 24) < 1e-12);
+    }
+
+    /// Ripple of channel 0 of the host values of `m` under `rule`, over 160 host pixels at dense
+    /// sub-pixel phases (x = 0.0371 k): the continuous-phase Michelson ripple of the rendered flat field.
+    fn band_ripple(m: &Mask, rule: TierRule) -> f64 {
+        let tiers = m.axis_tiers(1.0, rule);
+        let (lo, hi) = (0..160)
+            .map(|k| {
+                let x = 0.0371 * k as f64;
+                m.host_value(0, &Rect::new(x, 0.3, x + 1.0, 1.3), tiers, 1.0)
+            })
+            .fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
+        (hi - lo) / (hi + lo)
+    }
+
+    /// Blend band (D-15), all three types, 2.8 to 3.2 px per triad by 0.01. Inside the band the box is
+    /// rho = (1 - u) + u / t triads (t px per triad, u the position in the band): for a train of elements
+    /// of coverage f per period with hard edges a box of rho periods holds between max(0, rho - (1 - f))
+    /// and min(rho, f) of one element, so the ripple is (1 - rho) / (2 f + rho - 1) once rho >= max(f,
+    /// 1 - f), 1 below: it rises from 0 at the lower edge linearly in 1 - rho. Hand, grille f = 0.25: at
+    /// 2.82 (u = 0.05, rho = 0.9677) 0.069; at 2.90 (rho = 0.8362) 0.488; 1 from rho = 0.75 (2.95)
+    /// up. The soft edges only lower these. Asserted: 0 at 2.8 (exactly 1 everywhere), non-decreasing
+    /// with the pitch, no step over 0.15 per 0.01 px per triad, saturated at 3.2; with the hard switch
+    /// (blend 0) the step at 3.0 is a jump from 0 to above 0.5. The mean of a box average over all
+    /// positions is the mask mean, 1, for any width (a convolution keeps the mean).
+    #[test]
+    fn blend_band_is_continuous_and_monotone() {
+        let auto = TierRule::default();
+        let hard = TierRule {
+            mode: TierMode::Auto,
+            blend: 0.0,
+        };
+        type Make = fn(f64) -> Mask;
+        let makers: [(&str, Make); 3] = [
+            ("grille", grille_px),
+            ("slot", |t| slot_px(t, 0.8333)),
+            ("delta", delta_px),
+        ];
+        for (name, make) in makers {
+            let r: Vec<f64> = (0..=40)
+                .map(|k| band_ripple(&make(2.8 + 0.01 * k as f64), auto))
+                .collect();
+            println!(
+                "{name} band ripple: {:?}",
+                r.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>()
+            );
+            assert!(r[0] < 1e-9, "{name}: {}", r[0]);
+            let mut worst: f64 = 0.0;
+            for k in 0..40 {
+                assert!(
+                    r[k + 1] >= r[k] - 1e-3,
+                    "{name}: ripple falls at {}",
+                    2.8 + 0.01 * k as f64
+                );
+                worst = worst.max(r[k + 1] - r[k]);
+            }
+            assert!(worst <= 0.15, "{name}: step {worst}");
+            assert!(r[40] > 0.5, "{name}: {}", r[40]);
+            let below = band_ripple(&make(2.995), hard);
+            let above = band_ripple(&make(3.0), hard);
+            println!("{name}: hard switch {below:.3} -> {above:.3}; band largest step {worst:.3}");
+            assert!(below < 1e-9 && above > 0.5);
+        }
     }
 
     /// The 8-point Gauss-Legendre rule integrates x^14 exactly on [-1, 1] (2 / 15).

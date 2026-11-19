@@ -70,7 +70,10 @@
 //!     drawn with softness 1/3 - 0.27 = 0.0633.
 //! D9. Tier C [Host-display resolution budget; Moire: threshold 1.4 %]. Below 3 px per triad the mask is
 //!     averaged over one full period: every value is 1 (flat-field ripple 0, under 1.4 %), while the
-//!     area integral at the same density has a ripple far above 1.4 % (the moire of D2).
+//!     area integral at the same density has a ripple far above 1.4 % (the moire of D2). T-39c: with the
+//!     default blend band (`mask_tier_blend` 0.4) this holds below 2.8; from 2.8 to 3.2 the footprint is a
+//!     box of (1 - u) t + u px (u = (t - 2.8) / 0.4), the oracle's `host_value` under `mask_tiers`; with
+//!     blend 0 the switch is hard at 3.0 as before. The grille has no vertical period (always integrated).
 //! D10. Origin at the tube centre (T-37). The hand tables D5 and D6 count pixels from a triad start: their
 //!     tubes put one on the left edge as well, since half their width is a whole number of triads (D5: 240 px
 //!     wide at 3 px per triad, 120 = 40 triads; D6: 4096 px at 16, 2048 = 128 triads). PAR: the default
@@ -84,12 +87,15 @@ mod common;
 
 use std::ops::Range;
 
-use crt_model::mask::{alias_period_px, damper_positions_mm, tier, Grille, Mask, Rect, Tier, BARTEN_THRESHOLD};
+use crt_model::mask::{
+    alias_period_px, damper_positions_mm, tier, AxisTier, Grille, Mask, Rect, Tier, BARTEN_THRESHOLD,
+};
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{
     ParamValue, Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA,
     MASK_TYPE_SLOT_MASK,
 };
+use ultimatecrt::placement::mask_tiers;
 
 /// One FP16 step relative to the value, at most: 2^-10 (11 significant bits).
 const FP16_STEP: f64 = 1.0 / 1024.0;
@@ -136,7 +142,8 @@ impl Stored {
 fn f32_budget(fc: &FrameConstants, p: &Params) -> f64 {
     let ppt = px_per_triad(fc, p);
     let fill = f64::from(p.mask_stripe_fill);
-    let integrated = p.mask_tier == MASK_TIER_INTEGRATED || (p.mask_tier == MASK_TIER_AUTO && tier(ppt) != Tier::C);
+    // The CPU decision the shader draws (T-39c): any footprint but a whole period integrates columns.
+    let integrated = mask_tiers(fc.px_per_mm, p).horizontal != AxisTier::Prefiltered;
     let (columns, peak) = if integrated {
         (4e-7 * ppt / fill, 1.0 / fill)
     } else {
@@ -765,7 +772,8 @@ fn damper_wires_dim_their_host_row() {
             assert_eq!(tier(ppt) == Tier::C, period == 1);
             let what = format!("{test} {h} rows, {visible_mm} mm, {wires} wires, {ppt:.2} px per triad");
             let mask = oracle(&fc, &p);
-            let want = oracle_image(&fc, |c, q| mask.host_value(c, q, ppt));
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            let want = oracle_image(&fc, |c, q| mask.host_value(c, q, tiers, 1.0));
             let got = assert_matches(&mut gpu, &what, fc, &p, &want);
             assert_damper_rows(&what, &got, (w, h), period, dimmed, FP16_STEP + f32_budget(&fc, &p));
             let dim: Vec<String> = dimmed
@@ -779,11 +787,16 @@ fn damper_wires_dim_their_host_row() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// Tiers (D9, D5, D4). Default tier: below 3 px per triad every value is exactly 1 (ripple 0, under the
-/// 1.4 % threshold) and equals the oracle's `host_value`; from 3.0 the area integral appears at once, at
-/// 3.0 as pure primaries of value 3. Forced area integral at 1.54: the moire ripple is far above 1.4 %
-/// (so the tier C check is not vacuous), and at 1.0 px per triad every value is 1. Forced prefilter at 8
-/// px per triad: 1 everywhere.
+/// Tiers (D9, D5, D4, T-39c). Hard switch (`mask_tier_blend` = 0, the behaviour before T-39c): below 3 px
+/// per triad every value is exactly 1 (ripple 0, under the 1.4 % threshold) and equals the oracle's
+/// `host_value`; from 3.0 the area integral appears at once, at 3.0 as pure primaries of value 3 (D5).
+/// Default blend band (0.4, 2.8 to 3.2 px per triad): unchanged at 1.0 and 1.54 (exactly 1) and from 4.4
+/// (structure); intentionally changed at 2.9, 2.99 and 3.0, which lie in the band: the footprint is a box
+/// of (1 - u) t + u px (crt-model `axis_tier`, t px per triad, u = (t - 2.8) / 0.4), so the values are
+/// the oracle's box means, between flat and the full structure (at 2.9: box 2.425 px, ripple about 0.49 by
+/// the hand bound of crt-model `blend_band_is_continuous_and_monotone`). Forced area integral at 1.54: the
+/// moire ripple is far above 1.4 % (so the tier C check is not vacuous), and at 1.0 px per triad every value
+/// is 1. Forced prefilter at 8 px per triad: 1 everywhere.
 #[test]
 fn tiers_follow_the_oracle() {
     let test = "stage_mask_grille tiers";
@@ -794,44 +807,57 @@ fn tiers_follow_the_oracle() {
     let (w, h) = (240_u32, 2_u32);
     let fc = tube(w, h, 4.0);
     let ones = vec![[1.0_f64; 3]; (w * h) as usize];
-    for (pitch, expect) in [
-        (0.25_f32, Tier::C),
-        (0.385, Tier::C),
-        (0.725, Tier::C),
-        (0.7475, Tier::C),
-        (0.75, Tier::B),
-        (1.1, Tier::B),
-        (1.5, Tier::A),
-        (2.0, Tier::A),
-    ] {
-        let p = Params {
-            mask_tier: MASK_TIER_AUTO,
-            ..grille(&fc, pitch)
-        };
-        let ppt = px_per_triad(&fc, &p);
-        assert_eq!(tier(ppt), expect, "{ppt} px per triad");
-        let mask = oracle(&fc, &p);
-        let want = oracle_image(&fc, |c, q| mask.host_value(c, q, ppt));
-        let what = format!("{test} auto at {ppt:.4} px per triad");
-        let got = assert_matches(&mut gpu, &what, fc, &p, &want);
-        let r = ripple(&row(&got, w, 0, 0, 0..w));
-        println!("{what}: tier {expect:?}, red ripple {r:.4}");
-        if expect == Tier::C {
-            assert_eq!(got, ones, "{what}: tier C is exactly 1");
-            assert!(r < BARTEN_THRESHOLD);
-        } else {
-            assert!(r > 0.5, "{what}: the resolved mask has structure");
-        }
-        if pitch == 0.75 {
-            // D5: pure primaries of value 3.
-            for (x, px) in got.iter().take(w as usize).enumerate() {
-                let mut hand = [0.0; 3];
-                hand[x % 3] = 3.0;
-                for c in 0..3 {
-                    assert!(
-                        (px[c] - hand[c]).abs() <= 3.0 * FP16_STEP + 1e-5,
-                        "{what}: column {x} is {px:?}"
-                    );
+    // (pitch, horizontal class, in the default blend band).
+    let cases = [
+        (0.25_f32, Tier::C, false),
+        (0.385, Tier::C, false),
+        (0.725, Tier::C, true),
+        (0.7475, Tier::C, true),
+        (0.75, Tier::B, true),
+        (1.1, Tier::B, false),
+        (1.5, Tier::A, false),
+        (2.0, Tier::A, false),
+    ];
+    for blend in [0.0_f32, 0.4] {
+        for (pitch, expect, in_band) in cases {
+            let p = Params {
+                mask_tier: MASK_TIER_AUTO,
+                mask_tier_blend: blend,
+                ..grille(&fc, pitch)
+            };
+            let ppt = px_per_triad(&fc, &p);
+            assert_eq!(tier(ppt), expect, "{ppt} px per triad");
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            let blended = matches!(tiers.horizontal, AxisTier::Blended { .. });
+            assert_eq!(blended, blend > 0.0 && in_band, "{ppt}: {tiers:?}");
+            let mask = oracle(&fc, &p);
+            let want = oracle_image(&fc, |c, q| mask.host_value(c, q, tiers, 1.0));
+            let what = format!("{test} auto at {ppt:.4} px per triad, blend {blend}");
+            let got = assert_matches(&mut gpu, &what, fc, &p, &want);
+            let r = ripple(&row(&got, w, 0, 0, 0..w));
+            println!("{what}: tier {expect:?}, {:?}, red ripple {r:.4}", tiers.horizontal);
+            if blended {
+                // In the band: neither flat nor the full structure (the values are the oracle's above).
+                assert!(r > 0.0 && r < 1.0, "{what}: ripple {r}");
+                continue;
+            }
+            if expect == Tier::C {
+                assert_eq!(got, ones, "{what}: tier C is exactly 1");
+                assert!(r < BARTEN_THRESHOLD);
+            } else {
+                assert!(r > 0.5, "{what}: the resolved mask has structure");
+            }
+            if pitch == 0.75 {
+                // D5: pure primaries of value 3.
+                for (x, px) in got.iter().take(w as usize).enumerate() {
+                    let mut hand = [0.0; 3];
+                    hand[x % 3] = 3.0;
+                    for c in 0..3 {
+                        assert!(
+                            (px[c] - hand[c]).abs() <= 3.0 * FP16_STEP + 1e-5,
+                            "{what}: column {x} is {px:?}"
+                        );
+                    }
                 }
             }
         }
