@@ -99,20 +99,36 @@ fn messenger_info(counter: &ValidationCounter) -> vk::DebugUtilsMessengerCreateI
         .user_data(Arc::as_ptr(&counter.0) as *mut c_void)
 }
 
+#[derive(Clone)]
 pub struct GpuInfo {
     pub index: usize,
     pub name: String,
     pub kind: vk::PhysicalDeviceType,
     pub vendor_id: u32,
     pub api_version: u32,
+    /// `VkPhysicalDeviceIDProperties::deviceLUID` (Windows LUID, little-endian bytes: low part then high
+    /// part), `None` when the driver reports `deviceLUIDValid` false.
+    pub luid: Option<[u8; 8]>,
 }
 
 const NVIDIA: u32 = 0x10DE;
 
+/// Instance for the read-only queries (no layers, no extensions, no surface). Vulkan 1.3 like the renderer,
+/// which also makes `vkGetPhysicalDeviceProperties2` available.
+///
+/// # Safety
+/// `entry` is a loaded Vulkan entry; the caller destroys the instance.
+unsafe fn query_instance(entry: &Entry) -> Res<Instance> {
+    let app = vk::ApplicationInfo::default()
+        .application_name(c"ultimatecrt")
+        .api_version(vk::API_VERSION_1_3);
+    Ok(entry.create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)?)
+}
+
 /// Lists the Vulkan devices without creating a surface.
 pub fn list_gpus() -> Res<Vec<GpuInfo>> {
     let entry = unsafe { Entry::load()? };
-    let instance = unsafe { entry.create_instance(&vk::InstanceCreateInfo::default(), None)? };
+    let instance = unsafe { query_instance(&entry)? };
     let out = unsafe { instance.enumerate_physical_devices() }.map(|devices| {
         devices
             .into_iter()
@@ -124,9 +140,94 @@ pub fn list_gpus() -> Res<Vec<GpuInfo>> {
     Ok(out?)
 }
 
+/// Whether a Vulkan device can import or export Direct3D 11 textures as external memory, from queries only
+/// (T-03): no allocation, no image creation.
+#[derive(Clone, Debug, Default)]
+pub struct ExternalMemoryProbe {
+    /// `VK_KHR_external_memory_win32` is offered by the device.
+    pub win32_extension: bool,
+    /// `VK_KHR_external_memory` (core in 1.1) or Vulkan 1.1 or later.
+    pub base_extension: bool,
+    /// `vkGetPhysicalDeviceImageFormatProperties2` for B8G8R8A8 with the D3D11 texture handle type:
+    /// (importable, exportable), `None` when the query fails (type unsupported).
+    pub d3d11_texture: Option<(bool, bool)>,
+    /// The same for the D3D11 texture KMT handle type (legacy shared handle).
+    pub d3d11_texture_kmt: Option<(bool, bool)>,
+}
+
+/// The Vulkan side of the adapter topology (T-03), see [`vulkan_report`].
+pub struct VulkanReport {
+    /// Every physical device, in enumeration order, with its external-memory probe.
+    pub gpus: Vec<(GpuInfo, ExternalMemoryProbe)>,
+    /// `GpuInfo::index` of the device the renderer picks today without `--gpu` (a window context).
+    pub picked: Option<usize>,
+}
+
+/// Lists the Vulkan devices with LUID and external-memory support, and tells which one the renderer
+/// picks by default today. Creates no surface, no logical device and no window.
+pub fn vulkan_report() -> Res<VulkanReport> {
+    let entry = unsafe { Entry::load()? };
+    let instance = unsafe { query_instance(&entry)? };
+    let out = (|| -> Res<VulkanReport> {
+        let devices = unsafe { instance.enumerate_physical_devices()? };
+        let gpus: Vec<_> = devices
+            .iter()
+            .enumerate()
+            .map(|(i, &pd)| (gpu_info(&instance, pd, i), external_memory_probe(&instance, pd)))
+            .collect();
+        // Same candidates as `create_device` without a surface: Vulkan 1.3 and a graphics queue (a window
+        // context additionally needs presentation support, which cannot be asked without a window).
+        let usable: Vec<GpuInfo> = gpus
+            .iter()
+            .zip(&devices)
+            .filter(|((g, _), &pd)| unsafe { usable_family(&instance, pd, g.api_version, None) }.is_some())
+            .map(|((g, _), _)| g.clone())
+            .collect();
+        let picked = choose_device(&usable, None).map(|p| usable[p].index);
+        Ok(VulkanReport { gpus, picked })
+    })();
+    unsafe { instance.destroy_instance(None) };
+    out
+}
+
+fn external_memory_probe(instance: &Instance, pd: vk::PhysicalDevice) -> ExternalMemoryProbe {
+    let exts = unsafe { instance.enumerate_device_extension_properties(pd) }.unwrap_or_default();
+    let has = |name: &CStr| exts.iter().any(|e| e.extension_name_as_c_str() == Ok(name));
+    let version = unsafe { instance.get_physical_device_properties(pd) }.api_version;
+    let query = |handle: vk::ExternalMemoryHandleTypeFlags| -> Option<(bool, bool)> {
+        let mut external = vk::PhysicalDeviceExternalImageFormatInfo::default().handle_type(handle);
+        let info = vk::PhysicalDeviceImageFormatInfo2::default()
+            .format(vk::Format::B8G8R8A8_UNORM)
+            .ty(vk::ImageType::TYPE_2D)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
+            .push_next(&mut external);
+        let mut ext_props = vk::ExternalImageFormatProperties::default();
+        let mut props = vk::ImageFormatProperties2::default().push_next(&mut ext_props);
+        // SAFETY: `pd` belongs to the live `instance` (1.3); the structs outlive the call.
+        unsafe { instance.get_physical_device_image_format_properties2(pd, &info, &mut props) }.ok()?;
+        let f = ext_props.external_memory_properties.external_memory_features;
+        Some((
+            f.contains(vk::ExternalMemoryFeatureFlags::IMPORTABLE),
+            f.contains(vk::ExternalMemoryFeatureFlags::EXPORTABLE),
+        ))
+    };
+    ExternalMemoryProbe {
+        win32_extension: has(khr::external_memory_win32::NAME),
+        base_extension: has(khr::external_memory::NAME) || version >= vk::API_VERSION_1_1,
+        d3d11_texture: query(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE),
+        d3d11_texture_kmt: query(vk::ExternalMemoryHandleTypeFlags::D3D11_TEXTURE_KMT),
+    }
+}
+
 fn gpu_info(instance: &Instance, pd: vk::PhysicalDevice, index: usize) -> GpuInfo {
     let p = unsafe { instance.get_physical_device_properties(pd) };
+    let mut id = vk::PhysicalDeviceIDProperties::default();
+    let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut id);
+    // SAFETY: `pd` belongs to `instance`, which is Vulkan 1.1 or later in every caller.
+    unsafe { instance.get_physical_device_properties2(pd, &mut p2) };
     GpuInfo {
+        luid: (id.device_luid_valid == vk::TRUE).then_some(id.device_luid),
         index,
         name: p
             .device_name_as_c_str()
@@ -415,6 +516,35 @@ pub(super) unsafe fn create_win32_surface(
     )?)
 }
 
+/// Graphics queue family of a candidate device, or `None` when the device is not a candidate: it must be
+/// Vulkan 1.3 and, with a surface, the family must present to it.
+///
+/// # Safety
+/// `pd` belongs to `instance`; the surface, if any, is live and made by that instance.
+unsafe fn usable_family(
+    instance: &Instance,
+    pd: vk::PhysicalDevice,
+    api_version: u32,
+    surface: Option<(&khr::surface::Instance, vk::SurfaceKHR)>,
+) -> Option<u32> {
+    if api_version < vk::API_VERSION_1_3 {
+        return None;
+    }
+    instance
+        .get_physical_device_queue_family_properties(pd)
+        .iter()
+        .enumerate()
+        .position(|(qi, q)| {
+            q.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+                && surface.is_none_or(|(surface_fn, s)| {
+                    surface_fn
+                        .get_physical_device_surface_support(pd, qi as u32, s)
+                        .unwrap_or(false)
+                })
+        })
+        .map(|f| f as u32)
+}
+
 /// Chooses the physical device and creates the logical device. With a surface, only devices
 /// with a queue family that does graphics and presents to it are candidates, and the device gets
 /// `VK_KHR_swapchain`.
@@ -431,24 +561,9 @@ unsafe fn create_device(
     let mut handles = Vec::new();
     for (i, pd) in instance.enumerate_physical_devices()?.into_iter().enumerate() {
         let g = gpu_info(instance, pd, i);
-        if g.api_version < vk::API_VERSION_1_3 {
-            continue;
-        }
-        let family = instance
-            .get_physical_device_queue_family_properties(pd)
-            .iter()
-            .enumerate()
-            .position(|(qi, q)| {
-                q.queue_flags.contains(vk::QueueFlags::GRAPHICS)
-                    && surface.is_none_or(|s| {
-                        surface_fn
-                            .get_physical_device_surface_support(pd, qi as u32, s)
-                            .unwrap_or(false)
-                    })
-            });
-        if let Some(f) = family {
+        if let Some(f) = usable_family(instance, pd, g.api_version, surface.map(|s| (surface_fn, s))) {
             infos.push(g);
-            handles.push((pd, f as u32));
+            handles.push((pd, f));
         }
     }
     let chosen = choose_device(&infos, gpu).ok_or(if surface.is_some() {
@@ -509,6 +624,7 @@ mod tests {
             kind,
             vendor_id,
             api_version: vk::API_VERSION_1_3,
+            luid: None,
         }
     }
 

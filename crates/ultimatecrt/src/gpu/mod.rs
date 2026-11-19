@@ -24,7 +24,7 @@ mod timing;
 pub use timing::{csv_columns, FrameTimings, StageTiming, TimingAverager};
 
 pub use context::{gpu_required, validation_layer_available, ValidationCounter};
-pub use context::{list_gpus, Context, GpuInfo};
+pub use context::{list_gpus, vulkan_report, Context, ExternalMemoryProbe, GpuInfo, VulkanReport};
 pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
 pub use headless::{StageInput, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};

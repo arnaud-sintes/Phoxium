@@ -50,7 +50,7 @@ DRAFT by the T-13 task for the owner. Nothing below is decided: the owner approv
 | T-09 headless harness, T-10 parameter table | Implemented (A16, section 3.6 of ARCHITECTURE) | TEC-7, TEC-3 |
 | T-11 SP-11 antivirus | PASS for Defender, PROVISIONAL (0 detections in about 20 runs; no anti-cheat title, no other antivirus, no SmartScreen test) | PRJ-4 |
 | T-12 SP-5 capture fidelity | PASS bit-exact, max diff 0 codes, all tested scales and the 125 % monitor; bottom window corners excepted (36 px, 54 at 125 %); Night Light not tested | CAP-3 |
-| T-03 SP-1a adapters | NOT RUN | HW-3 |
+| T-03 SP-1a adapters | DIAGNOSTIC RUN 2026-11-19 (topology measured; LUID-based default and warning not implemented) | HW-3 |
 | T-04 SP-1b shared handle | NOT RUN | CAP-2 |
 | T-16 SP-7 early look | Rendered; owner judgement pending (proposal 6) | SCP-7 |
 
@@ -308,6 +308,13 @@ Each has a recommended default so you can reply with exceptions only.
 - **Who:** USER, plus SPIKE if yes.
 - **Default:** Your own GPU is the only certified target, others best effort. Single adapter only: select the Vulkan device by the capture adapter's LUID and warn on mismatch.
 - **IMPLEMENTED differently (2026-11-18):** the scaffold does not match LUIDs yet. The Direct3D capture device uses the default adapter (NVIDIA on the dev machine) and the Vulkan device is the requested `--gpu`, else an NVIDIA discrete GPU, else any discrete GPU. The two agree on the dev machine, but nothing checks it and nothing warns on a mismatch. Which GPU composes the desktop is still unmeasured.
+- **RESULT of the adapter diagnostic (2026-11-19, T-03, one run of `ultimatecrt --list-adapters`, no window, no capture session, about one second):**
+  - Windows lists three adapters. The NVIDIA RTX A2000 (LUID 00000000:00017801) has an attached monitor output (`\\.\DISPLAY5`, "Generic PnP Monitor", 1920x1080 at (0, 0)). The Intel UHD Graphics (LUID 00000000:00017426) also has one (`\\.\DISPLAY1`, "Generic PnP Monitor", 1920x1200 at (1920, -116)). The Microsoft Basic Render Driver (software) has none. So the monitors are split across the two GPUs, not only on the Intel iGPU. This corrects the 2026-11-18 finding that Windows showed the RTX with no display mode, and the monitor sizes differ from the two 2560x1440 Dell P2418D recorded in the study phase (the diagnostic reports what Windows sees now; the setup may have changed).
+  - Vulkan lists two devices with a valid deviceLUID: the RTX A2000 (LUID 00000000:00017801, Vulkan 1.4) and the Intel UHD Graphics 770 (LUID 00000000:00017426, Vulkan 1.4). Each Vulkan LUID equals the LUID of the DXGI adapter of the same GPU.
+  - The Direct3D 11 capture device, created on the default adapter, is on the RTX A2000. The renderer, with no `--gpu`, also picks the RTX A2000. Verdict printed: capture and render on the same adapter.
+  - Which monitor the output covers decides whether presenting crosses adapters: on the monitor driven by the RTX there is no cross-adapter step for capture, render and present; on the monitor driven by the Intel GPU, the finished frame must reach the Intel GPU (done by Windows). That crossing was not measured. Not determined: which adapter runs the captured game (Windows graphics settings, per application).
+  - External memory, from queries only (nothing allocated): both Vulkan devices offer `VK_KHR_external_memory_win32`. For B8G8R8A8 images, the D3D11 texture handle type and the D3D11 texture KMT handle type are both import yes, export no on both devices. So a shared-handle import of a D3D11 texture into Vulkan looks possible on the same adapter; exporting a Vulkan image to D3D11 does not. Whether the import really works is not tested (T-04).
+  - The monitor names are the generic driver string "Generic PnP Monitor"; the diagnostic does not read the EDID model name.
 
 ### HW-4 Host display classes
 - **Note (2026-11-18):** with SDR output, HDR display classes drop out of scope. Rolling scan (120 Hz or more) is deferred with it.

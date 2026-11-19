@@ -37,6 +37,8 @@ use windows::{
     },
 };
 
+use crate::adapters::Luid;
+
 /// One captured frame: tightly packed BGRA8, top-down.
 #[derive(Default)]
 pub struct Frame {
@@ -57,12 +59,14 @@ pub struct Capture {
     pool: Direct3D11CaptureFramePool,
     session: GraphicsCaptureSession,
     pub adapter: String,
+    /// LUID of that adapter (T-03).
+    pub adapter_luid: Luid,
 }
 
 impl Capture {
     /// Starts capturing `hwnd`. With `crop`, only the client area is kept (no title bar, no borders).
     pub fn start(hwnd: HWND, crop: bool) -> Result<Self> {
-        let (device, context, adapter) = create_device()?;
+        let (device, context, adapter, adapter_luid) = create_device()?;
         let direct3d_device = to_winrt_device(&device)?;
 
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
@@ -118,6 +122,7 @@ impl Capture {
             pool,
             session,
             adapter,
+            adapter_luid,
         })
     }
 
@@ -232,7 +237,14 @@ impl Worker {
     }
 }
 
-fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String)> {
+/// Name and LUID of the adapter the capture's Direct3D 11 device is created on (the default adapter, see
+/// [`create_device`]), found by creating and dropping such a device: no window, no capture session.
+pub fn capture_adapter() -> Result<(String, Luid)> {
+    let (_device, _context, name, luid) = create_device()?;
+    Ok((name, luid))
+}
+
+fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String, Luid)> {
     let mut device = None;
     let mut context = None;
     unsafe {
@@ -261,7 +273,7 @@ fn create_device() -> Result<(ID3D11Device, ID3D11DeviceContext, String)> {
     let name = String::from_utf16_lossy(&adapter.Description)
         .trim_end_matches('\0')
         .to_string();
-    Ok((device, context, name))
+    Ok((device, context, name, Luid::from_windows(adapter.AdapterLuid)))
 }
 
 fn to_winrt_device(device: &ID3D11Device) -> Result<IDirect3DDevice> {

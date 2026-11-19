@@ -27,6 +27,9 @@ pub fn run() -> Res<()> {
         RoInitialize(RO_INIT_MULTITHREADED)?;
     }
 
+    if args.list_adapters {
+        return crate::adapters::run();
+    }
     if args.list_gpus {
         for g in gpu::list_gpus()? {
             println!(
