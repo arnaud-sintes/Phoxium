@@ -65,18 +65,19 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 
 Cargo workspace, Windows only. Private GitHub repository `arnaud-sintes/ultimateCRT`.
 - `crates/pixel-demo`: demo source app (Win32 and GDI), shows a pixel-art scene or test card at an integer scale. It is the capture target.
-- `crates/ultimatecrt`: the main app. `sources.rs` finds the window, `capture.rs` captures it (Windows.Graphics.Capture, CPU copy), `scaling.rs` is the pure integer-upscale detection and crop logic (unit tested), `output.rs` is the Win32 output window, `gpu/` is the Vulkan renderer (ash): `context`, `present`, `upload`, `passthrough`, `Renderer` facade in `mod.rs`.
-- `shaders/`: GLSL, compiled to SPIR-V by `crates/ultimatecrt/build.rs` with `glslc`.
-- `scripts/`: `package.ps1` (release zip) and `release.ps1` (GitHub release).
+- `crates/crt-model`: f64 CPU oracle of the physics (gun, beam, mask, geometry, ABL, phosphor, output, tube, units), used by the GPU tests and the placement code.
+- `crates/paramgen`: build-time generator of the Rust and GLSL parameter code from `params/*.toml`.
+- `crates/ultimatecrt`: the main app. Modules: `app` (live loop), `capture` (Windows.Graphics.Capture, CPU copy), `cli`, `diag` (`--log`), `gpu/{context, present, headless, pipeline, stages, timing}` (Vulkan renderer, ash), `lifecycle` (lost source, reattach), `output` (Win32 output window), `params` (generated parameter table), `patterns`, `placement`, `presets`, `render_cmd` (offline `render`), `scaling` (pure integer-upscale detection and crop logic), `settings`, `source`, `sources` (window lookup), `white`. Tests in `crates/ultimatecrt/tests/`.
+- `shaders/`: GLSL (`*.comp`, `*.frag`, `*.vert`, `include/`), compiled to SPIR-V by `crates/ultimatecrt/build.rs` with `glslc`.
+- `params/`: the declarative parameter table, one TOML file per stage.
+- `presets/tubes/`: the 10 shipped tube presets (data files).
+- `spikes/imgui-spike`: own Cargo workspace, the TEC-5 (T-08) Dear ImGui spike, not part of the product build.
+- `scripts/`: `check.ps1` (local gate), `check-capture.ps1` (capture fidelity), `poll-foreground.ps1` (focus checks), `package.ps1` (release zip) and `release.ps1` (GitHub release).
 - `rust-toolchain.toml`, `rustfmt.toml`: pinned toolchain and formatting.
 
 ## Status
 
-Study phase done, scaffold in place (2026-11-18).
-`CRT.md` (physics knowledge base) and `QUESTIONS.md` (open questions, blockers, spikes) are written.
-Blocking decisions were answered on 2026-11-18, see "Decisions recorded" in `QUESTIONS.md`.
-The scaffold captures a window client area exactly, and duplicates it with Vulkan (passthrough shader) in a windowed or fullscreen non-activating output. No CRT model yet.
-Source scaling is handled: manual `--crop` and `--divisor`, and automatic integer-divisor detection (details in `README.md`).
-First observations on the dev machine: capture on the NVIDIA GPU works, and a fullscreen output covering the source kept receiving about 60 capture frames per second without taking focus. Not yet a full SP-1 or SP-2 result.
-Still open: which GPU drives the monitors (hybrid graphics risk), capture rate on an unfocused or occluded real game, latency.
-Next step: first CRT pass in `shaders/` (gun law, beam, area-averaged mask), then the remaining parts of spikes SP-1 and SP-2 against Mina the Hollower.
+Study phase done (2026-11-18); `CRT.md` (physics knowledge base) and `QUESTIONS.md` (open questions, decisions, spikes) are written.
+What exists (see `ARCHITECTURE.md` for the detail): window capture with source scaling and target lifecycle, test patterns and image sources, the full physical chain on the GPU with analytic tests against the `crt-model` oracle (source decode, video amplifier, gun law and white balance, automatic beam limiting, beam with spot growth, geometry and convergence, aperture grille, slot mask and delta dot mask, phosphor saturation and persistence, output transform), 10 tube presets, a settings file, the offline `render` command, diagnostics (`--log`, GPU timestamps with `--stats`), and the check and capture-fidelity scripts.
+What does not exist yet: the ImGui settings menu, the hotkeys F11 and F12, the optics stage (halation, glare), the optional modules (composite, interlace, ageing, burn-in), the output modes, and any live validation of the chain on a real game (SP-1, SP-2 are only partly answered, see `QUESTIONS.md`).
+Next step: the live spikes T-03, T-06, T-07, T-08, then the T-13 decision gate, then T-52a (ImGui integration).

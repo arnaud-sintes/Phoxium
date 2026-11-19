@@ -2,7 +2,7 @@
 
 A physically based CRT shader for Windows. It captures a window, runs it through a virtual CRT tube on the GPU and shows the result in a separate output window. See `CLAUDE.md` for the vision, `CRT.md` for the physics and `QUESTIONS.md` for decisions and open questions.
 
-Current state: the pipeline core runs (decode to an FP16 native raster, encode with an explicit host EOTF: drive voltage, then the gun law of `params/gun.toml` (default pure power 2.4; power, GOG, BT.1886 and Annex 1 laws, optional per-gun white balance from the tube primaries and white), host pure 2.2). The rest of the CRT model comes next.
+Current state: the physical chain runs on the GPU in linear light (FP16): source decode, video amplifier, gun law and white balance, automatic beam limiting, scanline beam with spot growth, geometry and convergence, aperture grille, slot mask or delta dot mask, phosphor saturation and persistence, and an output transform (tube colour to sRGB, shoulder, dither), with 10 tube presets and a settings file. Not there yet: the ImGui settings menu and the F11 and F12 hotkeys (parameters are changed through `--preset`, `--set` of `render`, and the settings file), the optics stage (halation, glare), the optional composite, interlace, ageing and burn-in modules, and any validation on a real game. See `ARCHITECTURE.md` for the stage table and `CHANGELOG.md` for the detail.
 
 ## Requirements
 
@@ -18,7 +18,7 @@ Setup, tests, packaging and releases are in `ENV.md`. Architecture is in `ARCHIT
 cargo build --release
 ```
 
-## Try it
+## How to run
 
 1. Start the demo source: `target\release\pixel-demo.exe`
    - Space cycles the scene, the test card and an optional PNG, 1 to 9 sets the integer scale, Esc quits.
@@ -34,7 +34,13 @@ cargo build --release
    - `--pattern name[:args]` shows a generated test pattern instead of capturing a window (no capture target needed, divisor 1): `flat[:level]`, `ramp`, `vline[:N]`, `hline[:N]`, `grating[:N]`, `checker[:N]`, `crosshatch[:N]`, `point`, `window[:APL]` (10, 25, 50, 100 % area on black), `bar[:width[:px-per-frame]]` (moving), `pluge`, `moire[:N]`. `--pattern-size WxH` sets its size (default 320x240). Values are 8-bit sRGB codes.
    - `--image file.png` shows a still PNG (any colour type, alpha flattened over black, divisor 1) instead of capturing. It is exclusive with `--pattern`.
    - `--help` prints all options, `--version` the version.
-3. Offline render, no window: `ultimatecrt render (--pattern name[:args] [--pattern-size WxH] | --image f.png) [--set id=value]... [--size WxH] --out out.png|out.pfm`. It runs one frame through the same GPU pipeline headless (default transfer settings and parameters of the live path, `--set` overrides a parameter by id: numbers, `a,b` for vectors, `true`/`false`, enum value names). `--size` is the output size (default: the source size). A `.png` is 8-bit RGB (the codes the output window would show); a `.pfm` is 32-bit float RGB (little-endian, no dependency) holding the same encoded values unquantised, in [0, 1], not linear light. `--validation` enables the validation layer. The `--preset` flag comes with T-50.
+3. Offline render, no window: `ultimatecrt render (--pattern name[:args] [--pattern-size WxH] | --image f.png) [--set id=value]... [--size WxH] --out out.png|out.pfm`. It runs one frame through the same GPU pipeline headless (default transfer settings and parameters of the live path, `--set` overrides a parameter by id: numbers, `a,b` for vectors, `true`/`false`, enum value names). `--size` is the output size (default: the source size). A `.png` is 8-bit RGB (the codes the output window would show); a `.pfm` is 32-bit float RGB (little-endian, no dependency) holding the same encoded values unquantised, in [0, 1], not linear light. `--validation` enables the validation layer. `--preset <id|file.toml>` applies a tube preset before the `--set` overrides. `render` has no `--gpu` option.
+
+## Tube presets and parameters
+
+- `--preset <id>` (live and `render`) starts from a shipped preset, a user preset (a `.toml` file in `%APPDATA%\ultimateCRT\presets\`, whose `id` replaces a shipped one of the same id) or a preset file path. Shipped ids (`presets\tubes\`): `pvm-20m4u` (Sony PVM-20M4U), `bvm-20f1u` (Sony BVM-20F1U), `kv-trinitron-tv` (Sony KV-class Trinitron TV), `gdm-f520` (Sony GDM-F520 PC monitor), `slot-tv-26in` (26 in slot-mask TV class), `tv-13in` (13 in consumer TV class), `cromaclear-17in` (NEC CromaClear 17 in), `arcade-19in` (19 in arcade monitor class), `vga-15in` (15 in delta-dot VGA class), `delta-17in` (17 in delta-dot monitor class). They are starting points built from published data, each tagged with its source, not measurements of a given unit.
+- Every parameter (id, unit, default, range, confidence tag, source, description) is declared in `params\*.toml`, one file per stage. `--set id=value` of `render` takes those ids.
+- Without `--preset`, the live app starts from the preset named in `%APPDATA%\ultimateCRT\settings.toml` (else the parameter defaults), with the parameter overrides stored in that file on top.
 
 Only the client area of the target window is captured, so a 256×240 source at 3× arrives as exactly 768×720 pixels.
 

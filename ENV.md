@@ -30,9 +30,11 @@ cargo build              # debug, target\debug
 cargo build --release    # optimised, target\release
 ```
 
-`crates/ultimatecrt/build.rs` compiles `shaders/*.vert` and `*.frag` with `glslc` (from `%VULKAN_SDK%\Bin`, else `PATH`). If it fails with "cannot run glslc", install the Vulkan SDK or set `VULKAN_SDK`.
+`crates/ultimatecrt/build.rs` compiles `shaders/*.vert`, `*.frag` and `*.comp` with `glslc` (after `crates/paramgen` has generated `params.glsl` from `params/*.toml`) (from `%VULKAN_SDK%\Bin`, else `PATH`). If it fails with "cannot run glslc", install the Vulkan SDK or set `VULKAN_SDK`.
 
 On Windows an `.exe` cannot be replaced while it runs: close `pixel-demo` and `ultimatecrt` before rebuilding ("Access is denied" on the exe).
+
+**Disk space:** a Cargo `target` folder (debug plus release, with the test binaries) takes about 1 to 3 GB, and every git worktree or spike workspace has its own. Build with `$env:CARGO_INCREMENTAL = '0'` (no incremental cache, which is a large part of that size) and delete the `target` folders of worktrees and of `spikes\imgui-spike` when done (`Remove-Item -Recurse -Force target`), or share one with `CARGO_TARGET_DIR`.
 
 ## 3. Static checks and tests
 
@@ -42,14 +44,14 @@ cargo clippy --all-targets -- -D warnings
 cargo test
 ```
 
-`cargo test` runs the unit tests (scaling, patterns, sources, diagnostics, device choice) and the headless GPU tests (`crates/ultimatecrt/tests/gpu_*.rs`, no window is opened). On the dev machine, run them with the GPU required:
+`cargo test` runs the unit tests (scaling, patterns, sources, diagnostics, lifecycle, presets, settings, placement, device choice) and the headless GPU tests: `crates/ultimatecrt/tests/gpu_*.rs`, the analytic stage tests `stage_*.rs` against the `crt-model` oracle, `pipeline_skip.rs`, `presets.rs` and `render_cmd.rs` (no window is opened). On the dev machine, run them with the GPU required:
 
 ```
 $env:UCRT_REQUIRE_GPU = '1'; cargo test
 ```
 
 - The GPU tests create a surface-less Vulkan 1.3 device, run the pipeline into an offscreen RGBA16F, RGBA32F or BGRA8 image and read it back. When `VK_LAYER_KHRONOS_validation` is installed (Vulkan SDK) it is enabled with synchronization validation (including the accesses shaders make through descriptors, `syncval_shader_accesses_heuristic` set through `VK_EXT_layer_settings`: without it layer 1.4.363 reports no hazard between shader stages), every message is printed on stderr, and any validation or performance warning or error fails the test.
-- Without a Vulkan 1.3 device a GPU test prints `<test> skipped: ...` (visible with `cargo test -- --nocapture`) and passes. With `UCRT_REQUIRE_GPU=1`, a missing device or a missing validation layer fails the test instead (a count of 0 proves nothing without the layer).
+- Without a Vulkan 1.3 device a GPU test prints `<test> skipped: ...` (visible with `cargo test -- --nocapture`) and passes. `UCRT_REQUIRE_GPU` is read by `gpu_required()`: any non-empty value except `0` counts as set (`1`, `true`; empty or `0` means not required). When set, a missing device, a missing validation layer or missing synchronization validation fails the test instead (a count of 0 proves nothing without the layer). Never set it on a machine without a GPU.
 - `gpu_passthrough` checks that every 8-bit code k of a BGRA8 ramp reads back with `round(v * 255) == k`. FP16 cannot hold k/255 exactly (254/255 is not an FP16 value). The Vulkan spec leaves the rounding of a float to FP16 conversion to the implementation, and the NVIDIA driver converts toward zero (254 reads 253.879, a bias of -2^-10 to 0 per store, different on other vendors), so since T-fp16 every chain stage rounds its value itself before `imageStore` (`round_f16` in `shaders/include/common.glsl`: round to nearest, ties to even, exact under any hardware rounding mode, +-inf from 65520 up, NaN and inf unchanged) and the chain images are the nearest FP16 values on any device; a new stage that stores into an `rgba16f` image must call it. `gpu_fp16_store` checks it bit for bit against a CPU reference for 138765 awkward values (ties, subnormals, 65504, tiny values, every k/255) through `abl`, `gun`, `amp`, `screen` and the real `decode`. What is still device defined is the conversion of the `encode` output into an RGBA16F test target (not a chain store; truncating on this device, below 255 * 2^-11 = 0.1245 of a code), so the RGBA16F identity tolerance is 0.32 of a code (derivation in `gpu_identity.rs`) and the BGRA8 one is exact. The test runs through the pipeline with identity transfers, so the FP32 target carries the FP16 error of the native raster too (now at most half an FP16 step).
 - `gpu_identity` (T-20a) runs decode then encode with the same transfer on both sides (pure 2.4, pure 2.2, sRGB, identity): every code comes back exact on an RGBA16F and a BGRA8 target, the native raster matches the `crt-model` oracle within FP16 precision, and the FP16 subnormals of the dark codes (1 to 4 at gamma 2.4) are not flushed to zero. It also changes the native size (256x240, 320x240, back), decodes a 2x upscale at block centres, checks the black surround, and submits a burst of frames that overlap on the GPU (two frames in flight) so synchronization validation sees the cross-frame accesses.
 - Software Vulkan for a future CI (report only, unverified on Windows): Mesa lavapipe (llvmpipe Vulkan driver, Vulkan 1.3; Windows builds exist from third parties such as mesa-dist-win) and Google SwiftShader are candidates. Installing either as an ICD (`VK_DRIVER_FILES` pointing at its JSON manifest) would let a GPU-less runner run these tests with `UCRT_REQUIRE_GPU=1`. Neither has been tried here; check its Vulkan 1.3, dynamic rendering and synchronization2 support and its licence first.
@@ -57,6 +59,16 @@ $env:UCRT_REQUIRE_GPU = '1'; cargo test
 `scripts/check.ps1` runs all of the above in one go (fmt, clippy `-D warnings`, tests with `UCRT_REQUIRE_GPU=1`, licence check) and exits non-zero on the first failure. `-Smoke` adds a 10 s live run (`--pattern ramp --exit-after 10 --validation`, opens a window) that fails on any validation line on stderr. The licence check runs `cargo deny check licenses` against `deny.toml` when cargo-deny is installed (`cargo install cargo-deny --locked`), else warns, and always runs the declared-licence check shared in policy with `package.ps1`.
 
 There is no automated test of capture or output, and no CI yet: a hosted runner has no GPU and cannot capture windows.
+
+### Scripts (`scripts/`)
+
+| Script | Use |
+|---|---|
+| `check.ps1` | The local gate above. `-Smoke` adds the 10 s live run, `-SkipTests` skips `cargo test`. |
+| `check-capture.ps1` | Capture fidelity (T-12, CAP-3): runs `pixel-demo --image` at several integer scales, saves a capture with `ultimatecrt --save-capture` and compares it with the known pixels. Parameters `-TargetDir` (default `..\target`, needs release builds of both programs), `-Scales`, `-Occlude`, `-MoveTo "x,y"`, `-KeepFiles`. Opens windows: hands off the keyboard and mouse. |
+| `poll-foreground.ps1` | Foreground-window poll for focus checks, see "Foreground poll" below. |
+| `package.ps1`, `release.ps1` | Release, sections 5 and 6. |
+| `spikes\imgui-spike\scripts\run-t08-live.ps1` | Live run of the T-08 ImGui spike (F12 menu focus hand-off, F11 toggle) in windowed then fullscreen mode, unattended: it synthesises key presses and moves the foreground window, so it needs a hands-off desktop (about 2 minutes) and must not run with another live task. The spike is its own workspace (own `target`, see the disk-space note). |
 
 ### Manual end-to-end test
 
