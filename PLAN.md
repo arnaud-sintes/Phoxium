@@ -778,6 +778,20 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 - **Accept:** `gh release view v0.5.0` lists the zip and `.sha256`; the notes equal the changelog section.
 - **Model:** Sonnet low. **Owner:** yes.
 
+### 8b. Audit follow-ups (T-49 audit of 2026-11-19, exec/integration 64cc4b7)
+
+Findings of the independent physics audit, turned into tasks. Ids T-84 to T-90 are new; they extend M3/M4 and gate the audit item of T-49. B = blocker, M = major, m = minor of the audit report.
+
+- **T-84 SDR headroom and the white-field test (B1, M1, M6).** Compute on the CPU a headroom readout: mask peak (resolved tiers: 1/fill) x scanline peak (sigma/P) x white-matrix maximum x exposure; a preset test renders a flat white field through the whole chain (beam, mask, saturation, persistence, encode) and fails when the mean loses more than a stated tolerance to clipping; fix the preset exposures and the false 'no clip' provenance notes (presets 01, 02, 03, 05, 06, 08 at least) according to owner decision D-16. Deps: D-16. Opus high, review Fable medium.
+- **T-85 Persistence normalisation and tail strength (M2, M3).** Normalise the persistence weights over a short sourced horizon (for example 3 frames) instead of 1 s, add a first-frame-deficit readout (green 24 % low today), tag the preset persistence values E, and make `phosphor_tail_strength_rgb` scale only the late part (cut-off time or steeper n) so that it spans the documented 4 to 13 times residual cut. Opus high, review Fable medium.
+- **T-86 Saturation per element (M4).** Apply the saturation curve to light divided by coverage and rescale so that tiers agree (blue differs by 14.5 % between prefiltered and resolved today). Sonnet high.
+- **T-87 Provenance tags honesty (m5).** Retag E where the source does not support S/D (geometry and convergence zero defaults, `mask_damper_count`, `abl_tau_s`, `mask_tier_blend`, RCA ABL threshold on non-RCA tubes, SMPTE-C/EBU primaries on named tubes) and add a data-driven test that every S tag cites a source URL or reference id. Sonnet medium.
+- **T-88 Spot-growth provenance (M5).** Take (d0, peak) as the preset inputs instead of (mid, peak); settle the Hitachi fit (n = 0.71 in the model's own form vs apparent 0.27) and re-derive presets 01 to 10 consistently within CRT.md's black-to-white width range. Research plus Sonnet medium.
+- **T-89 Documentation refresh (m9).** ARCHITECTURE 3.7 `screen` row and the mask bullet are stale (nearest amp sample, mask stub, hard jump at 3.0, slot/delta fall back to grille); CLAUDE.md status and repository layout; README for the CLI as built. Sonnet low.
+- **T-90 Minor physics (m2 to m4, m6, m7, m10).** Raster-scale luminance (T-37fix F3), breathing from the limited current, mid-drive constant from the active gun law, anisotropic convergence (separate x and y coefficients), eye distance for the curvature presets and the flat-face tube, pixel clock derived from the native width. Sonnet high.
+
+Not modelled and ranked by visual impact (audit): optics (T-45: glare, halation, glass tint, vignette), SDR headroom (T-84), corner defocus, spot halo (tail weight default 0), amplifier slew nonlinearity, composite, interlace.
+
 ## 9. Quality gates (every task, before merge)
 
 1. `cargo fmt --all --check` clean.
@@ -817,6 +831,7 @@ Rows marked **Decided** are settled (2026-11-18) and the plan above already refl
 | D-13 | Which real pixel-art game runs on this machine as the stand-in for Mina until the final test (T-06, T-47, T-58, T-61)? Ideally one with an integer-scaled windowed mode. | pixel-demo plus the first game you name; with none, the T-06 CAP-4 verdict stays provisional until T-83 |
 | D-14 | Ratify the T-41 gate change: the plan's 'stop if the green trail per frame is outside 0.5 to 4 %' is withdrawn (T-63 found that range came from residual luminances, not per-frame energy ratios; the Kuhn P22 values give green 5.36 %, 2.97 %, 2.03 %). T-41 was built on that reading and is off by default. | Ratified (T-63, two independent reviews agree); overrule and the persistence stage stays disabled until a source is found |
 | D-15 | The mask snaps from flat to saturated RGB columns when the pitch crosses 3.0 px per triad (tier C below, area integral above). Blend over 2.8 to 3.2 (box prefilter narrowing continuously) or keep the hard switch (PHY-2 as written)? Also the mask tier rule should prefilter whenever the vertical period (delta P/2, slot V/2) is under 2 px (delta 27 % host-grid ripple at 3.0 px per triad). | Blend band and the vertical-period rule (new task after T-37) |
+| D-16 | SDR headroom (audit B1, M1): the mask and the scanline peaks exceed the frame mean (a lit stripe reads 3 to 4 x the mean at resolved densities, scanline peaks 1.35 x at 0.8 mm FWHM), and SDR hard-clips anything above 1, so full white loses 12 to 60 % and shows bands or a tint on presets 03, 05, 06, 08 and 12 % on the default. Options: (A) physical: exposure = 1/peak for resolved tiers (honest, dimmer picture), (B) a soft shoulder (output_knee below 1) by default, labelled non-physical, keeps brightness and rolls peaks off, (C) a user 'mask depth' limit (non-physical) that lowers peak/mean. | Hybrid: A as the readout (headroom shown), B default shoulder knee about 0.6 so no hard clip, exposure per preset documented; the user may switch to A or C |
 
 ### Proposals (not part of the plan until the owner agrees)
 
