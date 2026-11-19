@@ -10,6 +10,7 @@
 //! - `Fit` picks `N = floor(min(cw * m / (nw * n), ch / nh))` clipped to 1..=10, `Integer(n)` uses
 //!   N as given (the destination may be larger than the client, it is then clipped by the window).
 //! - `FitFree` fills the client in the limiting direction and keeps the aspect, sizes floored.
+//! - `Stretch` fills the whole client, aspect (and PAR) not kept, no bars.
 //! - The destination is centred (`(client - size) / 2`, floored, also when negative) or put at the
 //!   top-left corner. The bars are the client area minus the destination.
 
@@ -64,6 +65,37 @@ pub enum ScaleMode {
     Fit,
     /// Non-integer fit to the client, aspect preserved.
     FitFree,
+    /// Fills the whole client, aspect not preserved.
+    Stretch,
+}
+
+impl ScaleMode {
+    /// True for the non-integer modes, where a smoothing filter applies.
+    pub fn is_free(self) -> bool {
+        matches!(self, ScaleMode::FitFree | ScaleMode::Stretch)
+    }
+
+    /// The M key order: native, integer (at `last`), fit, fit-free, stretch, native.
+    pub fn next(self, last: u32) -> ScaleMode {
+        match self {
+            ScaleMode::Native => ScaleMode::Integer(last.clamp(1, MAX_SCALE)),
+            ScaleMode::Integer(_) => ScaleMode::Fit,
+            ScaleMode::Fit => ScaleMode::FitFree,
+            ScaleMode::FitFree => ScaleMode::Stretch,
+            ScaleMode::Stretch => ScaleMode::Native,
+        }
+    }
+
+    /// Name in the `--present` vocabulary (`1to1`, `integer`, `autofit`, `fit`, `stretch`).
+    pub fn present_name(self) -> &'static str {
+        match self {
+            ScaleMode::Native => "1to1",
+            ScaleMode::Integer(_) => "integer",
+            ScaleMode::Fit => "autofit",
+            ScaleMode::FitFree => "fit",
+            ScaleMode::Stretch => "stretch",
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -125,6 +157,7 @@ pub fn layout(cw: u32, ch: u32, nw: u32, nh: u32, par: Par, mode: ScaleMode, ali
                 ((ch * nw * pn / (pm * nh)).max(1), ch, None)
             }
         }
+        ScaleMode::Stretch => (cw, ch, None),
     };
     let (dw, dh) = (dw as i64, dh as i64);
     let (x, y) = match align {
@@ -382,6 +415,7 @@ mod tests {
             ScaleMode::Integer(4),
             ScaleMode::Fit,
             ScaleMode::FitFree,
+            ScaleMode::Stretch,
         ];
         for &(cw, ch) in &clients {
             for &(nw, nh) in &natives {
@@ -401,7 +435,7 @@ mod tests {
                                 assert!(b.intersect(&r.dest).is_empty());
                                 assert!(b.intersect(&client) == *b);
                             }
-                            if let ScaleMode::Fit | ScaleMode::FitFree = mode {
+                            if let ScaleMode::Fit | ScaleMode::FitFree | ScaleMode::Stretch = mode {
                                 if r.scale.is_none_or(|s| s > 1) {
                                     assert!(r.dest.w <= cw as i32 && r.dest.h <= ch as i32);
                                 }
@@ -417,6 +451,106 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn stretch_fills_the_client_without_bars() {
+        for &(cw, ch) in &[(1920u32, 1080u32), (333, 777), (17, 19), (256, 240)] {
+            for align in [Align::Center, Align::TopLeft] {
+                let r = l(cw, ch, 256, 240, Par { n: 8, m: 7 }, ScaleMode::Stretch, align);
+                assert_eq!(r.dest, Rect::new(0, 0, cw as i32, ch as i32));
+                assert_eq!(r.scale, None);
+                assert!(r.bars.is_empty());
+            }
+        }
+        // Native larger than the client: still exactly the client (a downscale).
+        let r = l(800, 600, 1920, 1080, SQ, ScaleMode::Stretch, Align::Center);
+        assert_eq!(r.dest, Rect::new(0, 0, 800, 600));
+    }
+
+    #[test]
+    fn mode_cycle_visits_every_mode_and_returns() {
+        let mut m = ScaleMode::Native;
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(m.present_name());
+            m = m.next(4);
+        }
+        assert_eq!(m, ScaleMode::Native);
+        assert_eq!(seen, ["1to1", "integer", "autofit", "fit", "stretch"]);
+        assert_eq!(ScaleMode::Native.next(4), ScaleMode::Integer(4));
+        assert_eq!(ScaleMode::Native.next(0), ScaleMode::Integer(1));
+        assert_eq!(ScaleMode::Native.next(99), ScaleMode::Integer(MAX_SCALE));
+    }
+
+    #[test]
+    fn is_free_marks_the_non_integer_modes() {
+        assert!(ScaleMode::FitFree.is_free() && ScaleMode::Stretch.is_free());
+        assert!(!ScaleMode::Native.is_free() && !ScaleMode::Fit.is_free() && !ScaleMode::Integer(2).is_free());
+    }
+
+    #[test]
+    fn integer_every_scale_1_to_10() {
+        for n in 1..=MAX_SCALE {
+            // Exact client: no bars, origin.
+            let (cw, ch) = client_for_scale(256, 240, SQ, n);
+            assert_eq!((cw, ch), (256 * n, 240 * n));
+            let r = l(cw, ch, 256, 240, SQ, ScaleMode::Integer(n), Align::Center);
+            assert_eq!(r.dest, Rect::new(0, 0, cw as i32, ch as i32), "x{n}");
+            assert_eq!(r.scale, Some(n));
+            assert!(r.bars.is_empty());
+            // A 2560x1440 host: centred, floor of half the remainder.
+            let r = l(2560, 1440, 320, 200, SQ, ScaleMode::Integer(n), Align::Center);
+            let (dw, dh) = (320 * n as i32, 200 * n as i32);
+            assert_eq!(
+                r.dest,
+                Rect::new((2560 - dw).div_euclid(2), (1440 - dh).div_euclid(2), dw, dh)
+            );
+            assert_eq!(covered(&r, 2560, 1440), 2560 * 1440);
+        }
+    }
+
+    #[test]
+    fn fit_reaches_every_scale_1_to_10() {
+        // A client exactly k times the native (plus a margin smaller than one native size) gives k.
+        for k in 1..=MAX_SCALE {
+            let (cw, ch) = (160 * k + 159, 144 * k + 143);
+            let r = l(cw, ch, 160, 144, SQ, ScaleMode::Fit, Align::Center);
+            assert_eq!(r.scale, Some(k), "client {cw}x{ch}");
+            assert!(r.dest.w <= cw as i32 && r.dest.h <= ch as i32);
+        }
+    }
+
+    #[test]
+    fn odd_sizes_centre_with_floor() {
+        // Odd native and odd client: 257x241 x1 in 1000x777: x = floor(743/2) = 371, y = floor(536/2) = 268.
+        let r = l(1000, 777, 257, 241, SQ, ScaleMode::Native, Align::Center);
+        assert_eq!(r.dest, Rect::new(371, 268, 257, 241));
+        // The right bar gets the extra column: 1000 - 371 - 257 = 372.
+        assert_eq!(r.bars[3], Rect::new(628, 268, 372, 241));
+        assert_eq!(covered(&r, 1000, 777), 1000 * 777);
+        // Odd fit: 255x239 in 801x601: min(3.14, 2.51) -> 2: 510x478 at (145, 61).
+        let r = l(801, 601, 255, 239, SQ, ScaleMode::Fit, Align::Center);
+        assert_eq!(r.dest, Rect::new(145, 61, 510, 478));
+        // Fit-free with a 1 pixel remainder: 3x2 in 10x5: height limited, w = floor(5*3/2) = 7, x = 1.
+        let r = l(10, 5, 3, 2, SQ, ScaleMode::FitFree, Align::Center);
+        assert_eq!(r.dest, Rect::new(1, 0, 7, 5));
+    }
+
+    #[test]
+    fn native_larger_than_client_clamps_fit_to_one() {
+        // 1920x1080 native in a 1280x720 client: fit stays x1 (never below), centred, clipped by the
+        // window; fit-free downscales instead.
+        let r = l(1280, 720, 1920, 1080, SQ, ScaleMode::Fit, Align::Center);
+        assert_eq!(r.scale, Some(1));
+        assert_eq!(r.dest, Rect::new(-320, -180, 1920, 1080));
+        assert!(r.bars.is_empty());
+        let r = l(1280, 720, 1920, 1080, SQ, ScaleMode::FitFree, Align::Center);
+        assert_eq!(r.dest, Rect::new(0, 0, 1280, 720));
+        // Only one axis too large: 640x480 in 1000x400: by_h = 0 -> 1; vertical overflow, side bars.
+        let r = l(1000, 400, 640, 480, SQ, ScaleMode::Fit, Align::Center);
+        assert_eq!(r.dest, Rect::new(180, -40, 640, 480));
+        assert_eq!(r.bars, vec![Rect::new(0, 0, 180, 400), Rect::new(820, 0, 180, 400)]);
     }
 
     #[test]

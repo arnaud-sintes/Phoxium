@@ -66,7 +66,7 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 ## Repository layout
 
 Cargo workspace, Windows only. Private GitHub repository `arnaud-sintes/ultimateCRT`.
-- `crates/pixel-demo`: demo source app (Win32 and GDI), shows a pixel-art scene or test card at an integer scale. It is the capture target.
+- `crates/pixel-demo`: demo source app (Win32 and GDI), emulates a game presenting a native surface (1:1, integer, autofit, fit, stretch, bars, presets, test contents, corner markers, frame counter; options and keys, see `pixel-demo --help`). It is the capture target.
 - `crates/crt-model`: f64 CPU oracle of the physics (gun, beam, mask, geometry, ABL, phosphor, output, tube, units), used by the GPU tests and the placement code.
 - `crates/paramgen`: build-time generator of the Rust and GLSL parameter code from `params/*.toml`.
 - `crates/ultimatecrt`: the main app. Modules: `app` (live loop), `capture` (Windows.Graphics.Capture, CPU copy), `cli`, `diag` (`--log`), `gpu/{context, present, headless, pipeline, stages, timing}` (Vulkan renderer, ash), `lifecycle` (lost source, reattach), `output` (Win32 output window), `params` (generated parameter table), `patterns`, `placement`, `presets`, `render_cmd` (offline `render`), `scaling` (pure integer-upscale detection and crop logic), `settings`, `source`, `sources` (window lookup), `white`. Tests in `crates/ultimatecrt/tests/`.

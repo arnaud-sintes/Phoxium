@@ -90,6 +90,127 @@ pub fn draw_motion(buf: &mut [u32], w: usize, h: usize, frame: u64, fps: u32) {
     fill(buf, w, h, (w as i32 - 16) / 2, by, 16, 16, rgb(255, 200, 0));
 }
 
+/// Alignment grid: black, dim lines every 8 native pixels, white lines every 32 and a white
+/// one-pixel outline on the image edges (crop and divisor detection see every edge).
+pub fn draw_grid(buf: &mut [u32], w: usize, h: usize) {
+    for y in 0..h {
+        for x in 0..w {
+            let edge = x == 0 || y == 0 || x + 1 == w || y + 1 == h;
+            buf[y * w + x] = if edge || x % 32 == 0 || y % 32 == 0 {
+                rgb(255, 255, 255)
+            } else if x % 8 == 0 || y % 8 == 0 {
+                rgb(64, 64, 64)
+            } else {
+                rgb(0, 0, 0)
+            };
+        }
+    }
+}
+
+/// Corner marker colours: top-left, top-right, bottom-left, bottom-right.
+pub const MARKER_COLORS: [u32; 4] = [rgb(255, 0, 0), rgb(0, 255, 0), rgb(0, 0, 255), rgb(255, 255, 0)];
+
+/// Side of the corner markers in native pixels: a sixteenth of the smaller side, 1 to 16.
+pub fn marker_size(w: usize, h: usize) -> usize {
+    (w.min(h) / 16).clamp(1, 16).min(w.min(h))
+}
+
+/// Solid squares in the four corners of the native image (red, green, blue, yellow from the top
+/// left, clockwise reading order), so a capture shows where every corner of the picture went.
+pub fn draw_markers(buf: &mut [u32], w: usize, h: usize) {
+    let s = marker_size(w, h) as i32;
+    let (wi, hi) = (w as i32, h as i32);
+    let at = [(0, 0), (wi - s, 0), (0, hi - s), (wi - s, hi - s)];
+    for ((x, y), c) in at.into_iter().zip(MARKER_COLORS) {
+        fill(buf, w, h, x, y, s, s, c);
+    }
+}
+
+/// Fill of the bars around the picture: plain colour or a pattern that tests surround detection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BarPattern {
+    None,
+    Checker,
+    Stripes,
+    Noise,
+}
+
+impl BarPattern {
+    pub const ALL: [BarPattern; 4] = [
+        BarPattern::None,
+        BarPattern::Checker,
+        BarPattern::Stripes,
+        BarPattern::Noise,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            BarPattern::None => "none",
+            BarPattern::Checker => "checker",
+            BarPattern::Stripes => "stripes",
+            BarPattern::Noise => "noise",
+        }
+    }
+
+    pub fn parse(s: &str) -> Option<BarPattern> {
+        BarPattern::ALL.into_iter().find(|p| p.name() == s)
+    }
+
+    pub fn next(self) -> BarPattern {
+        let i = BarPattern::ALL.iter().position(|p| *p == self).unwrap_or(0);
+        BarPattern::ALL[(i + 1) % BarPattern::ALL.len()]
+    }
+}
+
+/// Second colour of a bar pattern: each channel 64 codes away from `color` (up if dark, down if light).
+pub fn contrast(color: u32) -> u32 {
+    let ch = |s: u32| {
+        let c = (color >> s) & 0xFF;
+        (if c < 128 { c + 64 } else { c - 64 }) << s
+    };
+    ch(16) | ch(8) | ch(0)
+}
+
+/// Tile of a bar pattern (`w`, `h`, pixels), repeated over the bars by a GDI pattern brush.
+/// `None` for the plain colour.
+pub fn bar_tile(kind: BarPattern, color: u32) -> Option<(usize, usize, Vec<u32>)> {
+    let color = color & 0x00FF_FFFF;
+    let alt = contrast(color);
+    match kind {
+        BarPattern::None => None,
+        BarPattern::Checker => Some((
+            8,
+            8,
+            (0..64)
+                .map(|i| {
+                    if ((i % 8) / 4 + (i / 8) / 4) % 2 == 0 {
+                        color
+                    } else {
+                        alt
+                    }
+                })
+                .collect(),
+        )),
+        BarPattern::Stripes => Some((
+            8,
+            8,
+            (0..64)
+                .map(|i| if (i % 8 + i / 8) % 8 < 4 { color } else { alt })
+                .collect(),
+        )),
+        BarPattern::Noise => {
+            let mut rng = Rng::new(0xBA25);
+            Some((
+                64,
+                64,
+                (0..64 * 64)
+                    .map(|_| if rng.next_u32() & 1 == 0 { color } else { alt })
+                    .collect(),
+            ))
+        }
+    }
+}
+
 /// Deterministic xorshift32 generator (hash seeding so that seed 0 works).
 pub struct Rng(u32);
 
@@ -285,6 +406,83 @@ mod tests {
         let mut d = blank();
         draw_motion(&mut d, 128, 64, 61, 60);
         assert_ne!(b, d);
+    }
+
+    #[test]
+    fn grid_has_white_edges_and_lines() {
+        let mut b = blank();
+        draw_grid(&mut b, W, H);
+        let white = rgb(255, 255, 255);
+        for x in 0..W {
+            assert_eq!(b[x], white);
+            assert_eq!(b[(H - 1) * W + x], white);
+        }
+        for y in 0..H {
+            assert_eq!(b[y * W], white);
+            assert_eq!(b[y * W + W - 1], white);
+        }
+        assert_eq!(b[5 * W + 32], white); // line every 32
+        assert_eq!(b[5 * W + 8], rgb(64, 64, 64)); // dim line every 8
+        assert_eq!(b[5 * W + 5], 0);
+        assert!(b.iter().all(|p| *p != SENTINEL));
+    }
+
+    #[test]
+    fn markers_sit_in_the_four_corners() {
+        let mut b = vec![0u32; 256 * 240];
+        draw_markers(&mut b, 256, 240);
+        assert_eq!(marker_size(256, 240), 15);
+        let px = |x: usize, y: usize| b[y * 256 + x];
+        assert_eq!(px(0, 0), MARKER_COLORS[0]);
+        assert_eq!(px(14, 14), MARKER_COLORS[0]);
+        assert_eq!(px(15, 15), 0);
+        assert_eq!(px(255, 0), MARKER_COLORS[1]);
+        assert_eq!(px(0, 239), MARKER_COLORS[2]);
+        assert_eq!(px(255, 239), MARKER_COLORS[3]);
+        assert_eq!(px(241, 225), MARKER_COLORS[3]);
+        assert_eq!(px(240, 224), 0);
+        // Tiny images still get 1 px markers, never out of bounds.
+        assert_eq!(marker_size(16, 16), 1);
+        let mut t = vec![0u32; 16 * 16];
+        draw_markers(&mut t, 16, 16);
+        assert_eq!(
+            (t[0], t[15], t[240], t[255]),
+            (MARKER_COLORS[0], MARKER_COLORS[1], MARKER_COLORS[2], MARKER_COLORS[3])
+        );
+        // Large images cap at 16.
+        assert_eq!(marker_size(1920, 1080), 16);
+    }
+
+    #[test]
+    fn bar_patterns_use_two_colours() {
+        assert_eq!(bar_tile(BarPattern::None, 0), None);
+        assert_eq!(contrast(0), rgb(64, 64, 64));
+        assert_eq!(contrast(0xFFFFFF), rgb(191, 191, 191));
+        assert_eq!(contrast(rgb(200, 10, 128)), rgb(136, 74, 64));
+        for kind in [BarPattern::Checker, BarPattern::Stripes, BarPattern::Noise] {
+            let (w, h, px) = bar_tile(kind, 0x102030).unwrap();
+            assert_eq!(px.len(), w * h);
+            let alt = contrast(0x102030);
+            assert!(px.iter().all(|p| *p == 0x102030 || *p == alt), "{kind:?}");
+            assert!(px.contains(&0x102030) && px.contains(&alt), "{kind:?}");
+        }
+        let (_, _, c) = bar_tile(BarPattern::Checker, 0).unwrap();
+        assert_eq!((c[0], c[3], c[4], c[32], c[36]), (0, 0, contrast(0), contrast(0), 0));
+        // Deterministic noise.
+        assert_eq!(bar_tile(BarPattern::Noise, 0), bar_tile(BarPattern::Noise, 0));
+    }
+
+    #[test]
+    fn bar_pattern_names_and_cycle() {
+        for p in BarPattern::ALL {
+            assert_eq!(BarPattern::parse(p.name()), Some(p));
+        }
+        assert_eq!(BarPattern::parse("dots"), None);
+        let mut p = BarPattern::None;
+        for _ in 0..BarPattern::ALL.len() {
+            p = p.next();
+        }
+        assert_eq!(p, BarPattern::None);
     }
 
     #[test]
