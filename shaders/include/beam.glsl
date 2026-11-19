@@ -172,25 +172,30 @@ void beam_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
 // the larger of x and y, less the convergence offsets), the truncation the window gives the widest spot;
 // dark runs have narrower spots and cost less.
 vec3 beam_run(BeamSpot spot, vec3 i, float a0, float a1, float x0, float x1, vec3 e0, vec3 e1, vec3 dx,
-              float far_y, float off_x, float w, float ratio, float widen) {
+              float far_y, float off_x, float w, float ratio, float widen, vec2 im) {
     if (all(equal(i, vec3(0.0)))) {
         return vec3(0.0);
     }
     vec3 sigma = beam_sigma_px(spot, i);
     float core = BEAM_REACH_SIGMAS * max(sigma.r, max(sigma.g, sigma.b));
-    float far = max(far_y, max(x0 - a1, a0 - x1) - off_x);
+    // Distances in raster px back to host px (im per axis), so each axis has the reach of its own sigma (as
+    // the standard path); exact at the identity (im = 1).
+    float far = max(far_y / im.y, (max(x0 - a1, a0 - x1) - off_x) / im.x);
     if (far > core * widen) {
         return vec3(0.0);
     }
     vec3 s0 = vec3(a0) + dx;
     vec3 s1 = vec3(a1) + dx;
     vec3 f = vec3(0.0);
+    // T-37 review F3: the spot keeps its size in mm, so in raster px its sigma is divided by the raster's
+    // magnification per axis (im = 1 / magnification, geometry_inv_magnification).
+    vec3 sx = sigma * im.x;
+    vec3 sy = sigma * im.y;
     if (far <= core) {
-        f = beam_x_fraction(s0, s1, x0, x1, sigma) * beam_y_fraction(e0, e1, sigma);
+        f = beam_x_fraction(s0, s1, x0, x1, sx) * beam_y_fraction(e0, e1, sy);
     }
     if (w > 0.0) {
-        vec3 st = sigma * ratio;
-        f = (1.0 - w) * f + w * beam_x_fraction(s0, s1, x0, x1, st) * beam_y_fraction(e0, e1, st);
+        f = (1.0 - w) * f + w * beam_x_fraction(s0, s1, x0, x1, sx * ratio) * beam_y_fraction(e0, e1, sy * ratio);
     }
     return i * f;
 }
@@ -213,10 +218,14 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
     BeamSpot spot = beam_spot();
     float w = clamp(params.beam_tail_weight, 0.0, 1.0);
     float ratio = max(params.beam_tail_sigma_ratio, 1e-3);
+    // T-37 review F3: raster px per host px (overscan and raster_scale); offsets and sigmas in raster px.
+    vec2 im = geometry_inv_magnification();
     vec3 dx;
     vec3 dy;
     beam_convergence_px(vec2(q) + 0.5, dx, dy);
-    float reach = BEAM_REACH_SIGMAS * beam_sigma_max_px(spot) * (w > 0.0 ? max(1.0, ratio) : 1.0);
+    dx *= im.x;
+    dy *= im.y;
+    float reach = BEAM_REACH_SIGMAS * beam_sigma_max_px(spot) * (w > 0.0 ? max(1.0, ratio) : 1.0) * max(im.x, im.y);
     vec3 adx = abs(dx);
     vec3 ady = abs(dy);
     float reach_x = reach + max(adx.r, max(adx.g, adx.b));
@@ -224,7 +233,7 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
 
     vec2 g0 = geometry_footprint(q); // T-37 hook (geometry.glsl): footprint origin in the raster
     float y0 = g0.y;
-    float y1 = y0 + 1.0;
+    float y1 = y0 + im.y; // the host pixel's footprint in the raster: 1 / magnification raster px
     float n0 = max(0.0, ceil((y0 - reach_y - r.first) / r.pitch));
     float n1 = min(float(r.lines - 1), floor((y1 + reach_y - r.first) / r.pitch));
     n1 = min(n1, n0 + float(BEAM_MAX_LINES - 1));
@@ -232,7 +241,7 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
     int samples = amp_size().x;
     float a = float(geometry_raster_size().x) / float(samples); // T-37 hook: raster width
     float x0 = g0.x;
-    float x1 = x0 + 1.0;
+    float x1 = x0 + im.x;
     float j0 = max(0.0, floor((x0 - reach_x) / a));
     float j1 = min(float(samples - 1), floor((x1 + reach_x) / a));
     j1 = min(j1, j0 + float(BEAM_MAX_SAMPLES - 1));
@@ -259,12 +268,12 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
                 if (all(equal(i, run))) {
                     continue;
                 }
-                sum += beam_run(spot, run, run0, float(j) * a, x0, x1, e0, e1, dx, far_y, off_x, w, ratio, widen);
+                sum += beam_run(spot, run, run0, float(j) * a, x0, x1, e0, e1, dx, far_y, off_x, w, ratio, widen, im);
             }
             run = i;
             run0 = float(j) * a;
         }
-        sum += beam_run(spot, run, run0, (j1 + 1.0) * a, x0, x1, e0, e1, dx, far_y, off_x, w, ratio, widen);
+        sum += beam_run(spot, run, run0, (j1 + 1.0) * a, x0, x1, e0, e1, dx, far_y, off_x, w, ratio, widen, im);
     }
     return sum * r.pitch;
 }
@@ -322,13 +331,14 @@ struct BeamColumn {
 // Pass 1 term of one run (current i over [a0, a1)) at the column [x0, x0 + 1). Same reach as beam_run
 // along x.
 void beam_run_x(BeamSpot spot, vec3 i, float a0, float a1, float x0, vec3 dx, float off_x, float w, float ratio,
-                float widen, inout BeamColumn col) {
+                float widen, float imx, inout BeamColumn col) {
     if (all(equal(i, vec3(0.0)))) {
         return;
     }
     vec3 sigma = beam_sigma_px(spot, i);
-    float core = BEAM_REACH_SIGMAS * max(sigma.r, max(sigma.g, sigma.b));
-    float far = max(x0 - a1, a0 - (x0 + 1.0)) - off_x;
+    float core = BEAM_REACH_SIGMAS * max(sigma.r, max(sigma.g, sigma.b)) * imx;
+    float x1 = x0 + imx;
+    float far = max(x0 - a1, a0 - x1) - off_x;
     if (far > core * widen) {
         return;
     }
@@ -336,13 +346,13 @@ void beam_run_x(BeamSpot spot, vec3 i, float a0, float a1, float x0, vec3 dx, fl
     vec3 s1 = vec3(a1) + dx;
     vec3 s2 = sigma * sigma;
     if (far <= core) {
-        vec3 e = i * beam_x_fraction(s0, s1, x0, x0 + 1.0, sigma);
+        vec3 e = i * beam_x_fraction(s0, s1, x0, x1, sigma * imx);
         col.h += e;
         col.v += e * s2;
         col.v2 += e * s2 * s2;
     }
     if (w > 0.0) {
-        vec3 e = i * beam_x_fraction(s0, s1, x0, x0 + 1.0, sigma * ratio);
+        vec3 e = i * beam_x_fraction(s0, s1, x0, x1, sigma * (ratio * imx));
         col.ht += e;
         col.vt += e * s2;
     }
@@ -388,7 +398,9 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
     float w = clamp(params.beam_tail_weight, 0.0, 1.0);
     float ratio = max(params.beam_tail_sigma_ratio, 1e-3);
     float widen = w > 0.0 ? max(1.0, ratio) : 1.0;
-    float reach = BEAM_REACH_SIGMAS * beam_sigma_max_px(spot) * widen;
+    // T-37 review F3: raster px per host px (overscan and raster_scale, uniform); offsets and sigmas in raster px.
+    vec2 im = geometry_inv_magnification();
+    float reach = BEAM_REACH_SIGMAS * beam_sigma_max_px(spot) * widen * max(im.x, im.y);
     vec3 fallback = beam_sigma_px(spot, vec3(0.0));
 
     // Lines and samples within reach of the tile; the convergence offsets bounded at the tile corners
@@ -402,13 +414,13 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
         beam_convergence_px(vec2(tile) + vec2(k & 1, k >> 1) * vec2(BEAM_TILE_W, BEAM_TILE_H), cdx, cdy);
         vec3 ax = abs(cdx);
         vec3 ay = abs(cdy);
-        dx_max = max(dx_max, max(ax.r, max(ax.g, ax.b)));
-        dy_max = max(dy_max, max(ay.r, max(ay.g, ay.b)));
+        dx_max = max(dx_max, max(ax.r, max(ax.g, ax.b)) * im.x);
+        dy_max = max(dy_max, max(ay.r, max(ay.g, ay.b)) * im.y);
     }
     // Raster rows covered by the tile: the footprints of its first and last rows (geometry_separable: the
     // vertical map is increasing and independent of x).
     float tile_y0 = geometry_footprint(tile).y;
-    float tile_y1 = geometry_footprint(tile + ivec2(0, BEAM_TILE_H - 1)).y + 1.0;
+    float tile_y1 = geometry_footprint(tile + ivec2(0, BEAM_TILE_H - 1)).y + im.y;
     float reach_y = reach + dy_max;
     float n0 = max(0.0, ceil((tile_y0 - reach_y - r.first) / r.pitch));
     float n1 = min(float(r.lines - 1), floor((tile_y1 + reach_y - r.first) / r.pitch));
@@ -427,10 +439,11 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
     vec3 dx;
     vec3 dy;
     beam_convergence_px(vec2(q) + 0.5, dx, dy);
+    dy *= im.y;
     vec3 ady = abs(dy);
     float off_y = max(ady.r, max(ady.g, ady.b));
     float y0 = geometry_footprint(q).y;
-    float y1 = y0 + 1.0;
+    float y1 = y0 + im.y;
     float wc = w > 0.0 ? 1.0 - w : 1.0;
     vec3 sum = vec3(0.0);
     for (int base = int(n0); base <= int(n1); base += BEAM_TILE_LINES) {
@@ -443,8 +456,9 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
             vec3 cdy;
             // At the host position of the column centre and of the line centre.
             beam_convergence_px(vec2(float(hx) + 0.5, geometry_separable_host_y(cn)), cdx, cdy);
+            cdx *= im.x;
             float j0 = max(0.0, floor((x0 - reach_x) / a));
-            float j1 = min(float(samples - 1), floor((x0 + 1.0 + reach_x) / a));
+            float j1 = min(float(samples - 1), floor((x0 + im.x + reach_x) / a));
             j1 = min(j1, j0 + float(BEAM_MAX_SAMPLES - 1));
             int row = n / r.mult;
             BeamColumn col = BeamColumn(vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
@@ -456,19 +470,20 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
                     if (all(equal(i, run))) {
                         continue;
                     }
-                    beam_run_x(spot, run, run0, float(j) * a, x0, cdx, off_x, w, ratio, widen, col);
+                    beam_run_x(spot, run, run0, float(j) * a, x0, cdx, off_x, w, ratio, widen, im.x, col);
                 }
                 run = i;
                 run0 = float(j) * a;
             }
-            beam_run_x(spot, run, run0, (j1 + 1.0) * a, x0, cdx, off_x, w, ratio, widen, col);
+            beam_run_x(spot, run, run0, (j1 + 1.0) * a, x0, cdx, off_x, w, ratio, widen, im.x, col);
             vec3 hs = max(col.h, vec3(1e-30));
             vec3 m = col.v / hs;
             beam_sh_core[entry] = col.h * wc;
-            beam_sh_core_sigma[entry] = beam_mean_sigma(col.h, col.v, fallback);
-            beam_sh_core_var[entry] = max(col.v2 / hs - m * m, vec3(0.0));
+            // Vertical sigma in raster px (F3): the host-px sigma times im.y, its variance of sigma^2 times im.y^4.
+            beam_sh_core_sigma[entry] = beam_mean_sigma(col.h, col.v, fallback) * im.y;
+            beam_sh_core_var[entry] = max(col.v2 / hs - m * m, vec3(0.0)) * (im.y * im.y * im.y * im.y);
             beam_sh_tail[entry] = col.ht * w;
-            beam_sh_tail_sigma[entry] = beam_mean_sigma(col.ht, col.vt * ratio * ratio, fallback * ratio);
+            beam_sh_tail_sigma[entry] = beam_mean_sigma(col.ht, col.vt * ratio * ratio, fallback * ratio) * im.y;
         }
         barrier();
         // Pass 2: pixel q over the lines of the chunk.

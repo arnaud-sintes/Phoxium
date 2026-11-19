@@ -109,6 +109,19 @@ description = "Raster rotation (tilt) about the tube centre, positive clockwise 
 group = "Geometry"
 
 [[param]]
+id = "geometry_opening_corner_radius_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = 0.0
+max = 60.0
+tag = "E"
+source = "CRT.md Visible area, overscan, corners: the visible opening is a rounded rectangle (phosphor area and bezel), corner radius about 15 to 40 mm (3 to 8 % of the screen height) on older tubes, near zero on flat ones"
+description = "Corner radius of the visible opening, the tube's visible area (tube_visible_height_mm x tube_aspect). The light is clipped to the opening: exactly 0 on host pixels whose centre is half a pixel or more outside, antialiased over one host pixel at the edge. 0 = square corners."
+group = "Geometry"
+
+[[param]]
 id = "geometry_conv_red_dx_mm"
 stage = "geometry"
 type = "f32"

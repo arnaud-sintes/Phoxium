@@ -60,13 +60,46 @@
 //!     I integral_0^inf Q(x / sigma) dx = I sigma / sqrt(2 pi) = 0.3989 I sigma; per row, averaged over whole
 //!     line periods (the line deposits I P per unit length per pitch P), the same. PVM-20M4U peak spot:
 //!     FWHM 0.8 mm, sigma 0.8 / 2.3548 x (1440 / 290) = 1.6870 px, skirt 0.6730 px of light per row and per
-//!     bright edge (previously cut). The tube image is grown by at least 4 sigma at I = 2 per side.
+//!     bright edge. The tube image is grown by at least 4 sigma at I = 2 per side, but since the T-37 review
+//!     (F1) the margin is only the evaluated area: it lies outside the visible opening (G12), so its light is
+//!     exactly 0; the skirt that falls inside the opening (the raster's own edge pixels) stays and matches the
+//!     oracle.
+//! G6b. Radial convergence, landing point [T-37 review F4]. The shader evaluates the offset where the light
+//!     lands: p = s + 0.5 p |p| / 400 mm (s = (13, 9) mm). Fixed-point iteration in f64 (50 steps): p - s =
+//!     (0.267623, 0.185278) mm = (1.07049, 0.74111) px; the oracle's source-point value (1.0278, 0.7115) px
+//!     is its first-order inverse.
+//! G12. Visible opening [Visible area, overscan, corners: rounded rectangle, corner radius 15 to 40 mm]. The
+//!     opening is the tube's visible area (the raster rectangle at zero overscan when the raster has the tube's
+//!     aspect, 4:3 here; a narrower par raster gets the tube's full width) with corners of radius r. Tube
+//!     64 x 48 native at n = 4, 2 px per mm (256 x 192 px, 128 x 96 mm), r = 20 mm = 40 px: the corner arc is
+//!     centred at (40, 40) px from the top-left; the pixel (5, 5) (centre (5.5, 5.5)) is at 40 sqrt(2) -
+//!     34.5 sqrt(2) = 7.78 px outside the arc, so exactly 0; (40, 2) is on the straight edge, inside by 2.5
+//!     px: as without the opening. With overscan 5 % the full-white picture is cut at the opening (the raster
+//!     edge at zero overscan, x = 0 and 256), whatever the spot size.
+//! G13. Trapezoid [Raster distortions: trapezoid residual under 1 %; forward x (1 + t y / half height)]. t =
+//!     0.03, box centre s = (49, 37) mm on the G10 tube: x = 49 (1 + 0.03 x 37 / 48) = 50.13313 mm, host
+//!     128 + 100.2663 = 228.2663; y unchanged, 170.
+//! G14. Rotation [rotation up to 1 to 2 deg]. +1.5 deg (clockwise on the screen, y down): (cos 49 - sin 37,
+//!     sin 49 + cos 37) = (48.01466, 38.26999) mm, host (224.0293, 172.5400).
+//! G15. Barrel (negative pincushion) [same table]. k = -0.02 at s = (49, 37): factor 1 - 0.02 x 3770 / 6400
+//!     = 0.98821875, host (128 + 98 f, 96 + 74 f) = (224.8454, 169.1282).
+//! G16. Spherical corner with the eye at 600 mm [Faceplate curvature]. Native (180, 135), |s| = 210 mm,
+//!     phi = 0.246248: lateral R sin(phi) = 207.884 mm, depth R (1 - cos(phi)) = 25.726 mm, seen radius
+//!     207.884 x 600 / 625.726 = 199.337 mm along (168, 126) / 210: host (352.4698, 264.6024).
+//! G17. Cylinder with the eye at 600 mm. Column 180 (arc 168 mm): lateral 166.9155, depth 16.4944, seen x
+//!     = 166.9155 x 600 / 616.4944 = 162.4496 mm, host 355.4496 on every row (the depth depends on x only,
+//!     so vertical lines stay straight); y is scaled by the same 0.973245: native row 135 (y 126 mm) is seen
+//!     at host y 145 + 122.6289 = 267.6289.
+//! G18. ABL state [T-37 review F2]. abl disabled while abl_breathing != 0: raster_scale 1, bit-identical to
+//!     breathing 0. Cold start: the state is seeded with apl_f = abl_breathing_ref, so with frame_time_ms 0
+//!     (alpha 0, apl_f kept) the first frame has scale 1 + b (ref - ref) = 1 exactly: bit-identical.
 
 mod common;
 
 use crt_model::beam::{AmpRaster, BeamOracle, Spot, SpotGrowth};
 use crt_model::geometry::{
-    arc_from_projected_mm, convergence_offset_mm, cylinder_seen_mm, projected_from_arc_mm, sphere_seen_mm,
+    arc_from_projected_mm, convergence_offset_mm, cylinder_seen_eye_mm, cylinder_seen_mm, projected_from_arc_mm,
+    sphere_seen_mm,
 };
 use crt_model::units::sigma_from_fwhm;
 use ultimatecrt::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
@@ -317,9 +350,11 @@ fn convergence_shifts_each_channel() {
         (g.0 - 116.0).abs() <= 0.05 && (g.1 - 84.0).abs() <= 0.05,
         "{test} radial: green {g:?}"
     );
+    // G6b: the shader takes the offset at the landing point; the implied value (1.07049, 0.74111) px.
+    let implied = (1.07049, 0.74111);
     assert!(
-        (r.0 - g.0 - want.0).abs() <= 0.1 && (r.1 - g.1 - want.1).abs() <= 0.1,
-        "{test} radial: red {r:?} vs green {g:?}"
+        (r.0 - g.0 - implied.0).abs() <= 0.02 && (r.1 - g.1 - implied.1).abs() <= 0.02,
+        "{test} radial: red {r:?} vs green {g:?}, landing-point offset {implied:?}"
     );
     drop(gpu);
     common::assert_no_validation_messages(&counter);
@@ -479,8 +514,9 @@ fn pincushion_moves_the_beam_not_the_mask() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// G11: the spot's skirt past the raster's ends is drawn in the tube image's margin (review of T-36b) and
-/// matches the oracle; the skirt energy per row at a flat-field edge is I sigma / sqrt(2 pi).
+/// G11: the tube image's margin (review of T-36b) is evaluated but lies outside the visible opening (T-37
+/// review F1): exactly 0 there; inside, the raster's edge matches the oracle; the clipped skirt energy per row
+/// at a flat-field edge is I sigma / sqrt(2 pi).
 #[test]
 fn skirt_past_the_raster_ends_matches_the_oracle() {
     let test = "stage_geometry skirt";
@@ -537,34 +573,37 @@ fn skirt_past_the_raster_ends_matches_the_oracle() {
         },
         &spot,
     );
-    // Rows m + 12 .. m + 36: four whole line periods inside the raster; left margin columns.
+    // Rows m + 12 .. m + 36: four whole line periods inside the raster. Left margin columns: outside the
+    // visible opening (G12), exactly 0 (the oracle's skirt there is the light the opening clips). The first 6
+    // columns of the raster (inside the opening, where the edge's own skirt deficit shows) match the oracle.
     let (mx, my) = (m[0] as u32, m[1] as u32);
     let rows = my + 12..my + 36;
-    let (mut got, mut want) = (0.0, 0.0);
+    let mut clipped = 0.0;
     for y in rows.clone() {
-        for x in 0..mx {
+        let ry = f64::from(y) - f64::from(my);
+        for x in 0..mx + 6 {
             let rx = f64::from(x) - f64::from(mx);
-            let ry = f64::from(y) - f64::from(my);
             let w = oracle.pixel_mean((0.0, 0.0), (rx, rx + 1.0), (ry, ry + 1.0));
             let g = f64::from(out.pixel(x, y)[1]);
-            assert!(
-                (g - w).abs() <= 1e-3 * w + 3e-4,
-                "{test}: ({x}, {y}) GPU {g} vs oracle {w}"
-            );
-            got += g;
-            want += w;
+            if x < mx {
+                assert_eq!(g, 0.0, "{test}: ({x}, {y}) outside the opening");
+                clipped += w;
+            } else {
+                assert!(
+                    (g - w).abs() <= 1e-3 * w + 3e-4,
+                    "{test}: ({x}, {y}) GPU {g} vs oracle {w}"
+                );
+            }
         }
     }
     let n_rows = f64::from(rows.end - rows.start);
     let hand = sigma(1.0) / (2.0 * std::f64::consts::PI).sqrt();
     println!(
-        "{test}: skirt energy per row GPU {:.4}, oracle {:.4}, hand sigma / sqrt(2 pi) = {hand:.4} px",
-        got / n_rows,
-        want / n_rows
+        "{test}: skirt energy per row clipped by the opening (oracle) {:.4}, hand sigma / sqrt(2 pi) = {hand:.4} px",
+        clipped / n_rows
     );
-    assert!((got / want - 1.0).abs() <= 0.01, "{test}: skirt {got} vs oracle {want}");
     assert!(
-        (want / n_rows / hand - 1.0).abs() <= 0.01,
+        (clipped / n_rows / hand - 1.0).abs() <= 0.01,
         "{test}: oracle skirt vs hand"
     );
     assert!((hand - 0.673).abs() <= 0.002, "{test}: hand {hand}");
@@ -599,6 +638,350 @@ fn identity_is_bit_exact() {
     );
     let with_abl = run(&mut gpu, &["abl", "screen"], fc, &base(), &amp);
     assert_eq!(with_abl.rgba, reference.rgba, "{test}: abl slot, breathing 0");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// G12: the visible opening. Rounded corners clip to exactly 0; the straight edge and the inside are
+/// unchanged (bit-exact); with overscan the picture is cut at the opening whatever the spot size.
+#[test]
+fn opening_clips_the_light() {
+    let test = "stage_geometry opening";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let fc = tube(64, 48, 4, 2.0);
+    let full = currents(&fc, |_, _| WHITE);
+    let square = run(&mut gpu, &["screen"], fc, &base(), &full);
+    let p = Params {
+        geometry_opening_corner_radius_mm: 20.0,
+        ..base()
+    };
+    let round = run(&mut gpu, &["screen"], fc, &p, &full);
+    // Corner arcs of radius 40 px centred 40 px in from each corner of the 256 x 192 opening.
+    let (w, h, r) = (256.0_f64, 192.0_f64, 40.0_f64);
+    let (mut zeros, mut same) = (0, 0);
+    for y in 0..192_u32 {
+        for x in 0..256_u32 {
+            let (cx, cy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let ax = if cx < r {
+                r - cx
+            } else if cx > w - r {
+                cx - (w - r)
+            } else {
+                0.0
+            };
+            let ay = if cy < r {
+                r - cy
+            } else if cy > h - r {
+                cy - (h - r)
+            } else {
+                0.0
+            };
+            let d = ax.hypot(ay) - r; // distance outside the arc (corner regions; <= 0 elsewhere)
+            let (a, b) = (square.pixel(x, y), round.pixel(x, y));
+            if d >= 0.5 {
+                assert!(b[..3].iter().all(|&v| v == 0.0), "{test}: ({x}, {y}) outside: {b:?}");
+                zeros += 1;
+            } else if d <= -0.5 {
+                assert_eq!(a[..3], b[..3], "{test}: ({x}, {y}) inside");
+                same += 1;
+            }
+        }
+    }
+    println!("{test}: {zeros} pixels outside (exactly 0), {same} inside (unchanged)");
+    // G12 by hand: (5, 5) is 7.78 px outside the arc; (40, 2) is on the straight edge.
+    assert!(round.pixel(5, 5)[..3].iter().all(|&v| v == 0.0));
+    assert_eq!(round.pixel(40, 2)[..3], square.pixel(40, 2)[..3]);
+    assert!(square.pixel(5, 5)[1] > 0.5);
+
+    // Overscan 5 % on a tube with a skirt margin: the margin (outside the opening) is exactly 0 for a small
+    // and a large spot, the first column inside is lit.
+    for fwhm in [0.5_f32, 1.6] {
+        let p = Params {
+            beam_fwhm_mid_mm: fwhm,
+            beam_fwhm_peak_mm: fwhm,
+            geometry_overscan_x: 0.05,
+            ..base()
+        };
+        let mut fc = tube(16, 8, 6, 1440.0 / 290.0);
+        fc.target_size = [160, 100];
+        fc.tube_rect_px = [32.0, 26.0, 128.0, 74.0];
+        let fc = fc.with_skirt_margin(&p);
+        let (mx, my) = (fc.raster_margin[0] as u32, fc.raster_margin[1] as u32);
+        assert!(mx > 0, "{test}: no margin");
+        let out = run(&mut gpu, &["screen"], fc, &p, &currents(&fc, |_, _| WHITE));
+        let tw = fc.tube_size[0] as u32;
+        for y in my + 12..my + 36 {
+            for x in (0..mx).chain(tw - mx..tw) {
+                assert!(
+                    out.pixel(x, y)[..3].iter().all(|&v| v == 0.0),
+                    "{test}: FWHM {fwhm}: ({x}, {y}) outside the opening"
+                );
+            }
+            assert!(out.pixel(mx, y)[1] > 0.0 && out.pixel(tw - mx - 1, y)[1] > 0.0);
+        }
+    }
+
+    // A par raster narrower than the tube (48 x 48 px, square, in a 4:3 tube): the opening is the tube's full
+    // visible width, 48 x 4 / 3 = 64 px, so the skirt in the side margins (inside the opening) is drawn; the
+    // opening's height is the raster's, so the top and bottom margins are exactly 0.
+    let mut fc = tube(12, 12, 4, 2.0);
+    fc.target_size = [100, 60];
+    fc.tube_rect_px = [26.0, 6.0, 74.0, 54.0];
+    let fc = fc.with_skirt_margin(&base());
+    let (mx, my) = (fc.raster_margin[0] as u32, fc.raster_margin[1] as u32);
+    assert!(mx > 0 && my > 0, "{test}: margin {mx} {my}");
+    let out = run(&mut gpu, &["screen"], fc, &base(), &currents(&fc, |_, _| WHITE));
+    let (tw, th) = (fc.tube_size[0] as u32, fc.tube_size[1] as u32);
+    let side = (my + 8..my + 40)
+        .map(|y| f64::from(out.pixel(mx - 1, y)[1]))
+        .sum::<f64>();
+    println!("{test}: par narrower raster: side margin column light {side:.4}");
+    assert!(side > 0.0, "{test}: no skirt in the side margin inside the opening");
+    for x in 0..tw {
+        for y in (0..my).chain(th - my..th) {
+            assert!(
+                out.pixel(x, y)[..3].iter().all(|&v| v == 0.0),
+                "{test}: ({x}, {y}) above or below the opening"
+            );
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Centroid of channel 1 of a single lit native pixel `dot` on the G10 tube (64 x 48, n = 4, 2 px per mm).
+fn dot_centroid(gpu: &mut Headless, p: &Params, dot: (u32, u32), want: (f64, f64)) -> (f64, f64) {
+    let fc = tube(64, 48, 4, 2.0);
+    let amp = currents(&fc, |x, y| if (x, y) == dot { WHITE } else { [0.0; 3] });
+    let out = run(gpu, &["screen"], fc, p, &amp);
+    centroid(&out, 1, window(want.0, 12, 256), window(want.1, 12, 192))
+}
+
+/// G13, G14, G15: trapezoid, rotation and barrel move a dot where the forward maps put it.
+#[test]
+fn trapezoid_rotation_barrel_match_the_oracle() {
+    let test = "stage_geometry distortions";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let s = (49.0_f64, 37.0_f64); // box centre of native (56, 42), mm from the centre
+    let host = |m: (f64, f64)| (128.0 + 2.0 * m.0, 96.0 + 2.0 * m.1);
+    // G13: forward trapezoid x (1 + t y / half height), half height 48 mm.
+    let t = 0.03_f64;
+    let trap = host((s.0 * (1.0 + t * s.1 / 48.0), s.1));
+    assert!((trap.0 - 228.2663).abs() < 1e-3 && trap.1 == 170.0, "{trap:?}");
+    // G14: forward rotation by +1.5 deg (clockwise on the screen, y down).
+    let a = 1.5_f64.to_radians();
+    let rot = host((a.cos() * s.0 - a.sin() * s.1, a.sin() * s.0 + a.cos() * s.1));
+    assert!(
+        (rot.0 - 224.0293).abs() < 1e-3 && (rot.1 - 172.5400).abs() < 1e-3,
+        "{rot:?}"
+    );
+    // G15: forward barrel s (1 + k |s|^2 / rc^2), k = -0.02, rc^2 = 6400.
+    let k = -0.02_f64;
+    let f = 1.0 + k * (s.0 * s.0 + s.1 * s.1) / 6400.0;
+    let barrel = host((s.0 * f, s.1 * f));
+    assert!(
+        (barrel.0 - 224.8454).abs() < 1e-3 && (barrel.1 - 169.1282).abs() < 1e-3,
+        "{barrel:?}"
+    );
+    let cases = [
+        (
+            "trapezoid",
+            Params {
+                geometry_trapezoid: t as f32,
+                ..base()
+            },
+            trap,
+        ),
+        (
+            "rotation",
+            Params {
+                geometry_rotation_deg: 1.5,
+                ..base()
+            },
+            rot,
+        ),
+        (
+            "barrel",
+            Params {
+                geometry_pincushion: k as f32,
+                ..base()
+            },
+            barrel,
+        ),
+    ];
+    for (name, p, want) in cases {
+        let got = dot_centroid(&mut gpu, &p, (56, 42), want);
+        println!("{test} {name}: centroid {got:?}, expected {want:?}");
+        assert!(
+            (got.0 - want.0).abs() <= 0.05 && (got.1 - want.1).abs() <= 0.05,
+            "{test} {name}: {got:?} vs {want:?}"
+        );
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// G16, G17: the eye at 600 mm, spherical corner dot and cylindrical column, against the oracle.
+#[test]
+fn finite_eye_matches_the_oracle() {
+    let test = "stage_geometry finite eye";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let fc = tube(193, 145, 2, 1.0);
+    // G16: spherical, corner dot (180, 135).
+    let p = Params {
+        geometry_curvature: GEOMETRY_CURVATURE_SPHERICAL,
+        geometry_radius_mm: R_1R as f32,
+        geometry_eye_distance_mm: 600.0,
+        ..wide()
+    };
+    let (sx, sy) = sphere_seen_mm(R_1R, (168.0, 126.0), 600.0);
+    let want = (193.0 + sx, 145.0 + sy);
+    assert!(
+        (want.0 - 352.4698).abs() < 2e-3 && (want.1 - 264.6024).abs() < 2e-3,
+        "{want:?}"
+    );
+    let amp = currents(&fc, |x, y| if x == 180 && y == 135 { WHITE } else { [0.0; 3] });
+    let out = run(&mut gpu, &["screen"], fc, &p, &amp);
+    let got = centroid(&out, 1, window(want.0, 8, 386), window(want.1, 8, 290));
+    println!("{test} sphere corner: centroid {got:?}, oracle {want:?}");
+    assert!(
+        (got.0 - want.0).abs() <= 0.05 && (got.1 - want.1).abs() <= 0.05,
+        "{test} sphere corner: {got:?} vs {want:?}"
+    );
+
+    // G17: cylindrical, column 180 straight at x = 355.4496, and the dot (180, 135) at y 267.6289.
+    let p = Params {
+        geometry_curvature: GEOMETRY_CURVATURE_CYLINDRICAL,
+        ..p
+    };
+    let (cx, cy) = cylinder_seen_eye_mm(R_1R, (168.0, 126.0), 600.0);
+    let want = (193.0 + cx, 145.0 + cy);
+    assert!(
+        (want.0 - 355.4496).abs() < 2e-3 && (want.1 - 267.6289).abs() < 2e-3,
+        "{want:?}"
+    );
+    let amp = currents(&fc, |x, _| if x == 180 { WHITE } else { [0.0; 3] });
+    let out = run(&mut gpu, &["screen"], fc, &p, &amp);
+    for y0 in [10_u32, 60, 144, 230, 276] {
+        let (gx, _) = centroid(&out, 1, window(want.0, 10, 386), y0..y0 + 2);
+        println!(
+            "{test} cylinder rows {y0}..{}: centroid {gx:.4}, oracle {:.4}",
+            y0 + 2,
+            want.0
+        );
+        assert!((gx - want.0).abs() <= 0.05, "{test} cylinder rows {y0}: {gx}");
+    }
+    let amp = currents(&fc, |x, y| if x == 180 && y == 135 { WHITE } else { [0.0; 3] });
+    let out = run(&mut gpu, &["screen"], fc, &p, &amp);
+    let got = centroid(&out, 1, window(want.0, 8, 386), window(want.1, 8, 290));
+    println!("{test} cylinder dot: centroid {got:?}, oracle {want:?}");
+    assert!(
+        (got.0 - want.0).abs() <= 0.05 && (got.1 - want.1).abs() <= 0.05,
+        "{test} cylinder dot: {got:?} vs {want:?}"
+    );
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// G18: raster_scale is 1 when the abl slot does not run, and exactly 1 on the first frame of a cold start.
+#[test]
+fn abl_state_is_well_defined() {
+    let test = "stage_geometry abl state";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut fc = tube(12, 10, 6, 1440.0 / 290.0);
+    fc.frame_time_ms = 0.0;
+    let value = |x: u32, y: u32| (1 + (x * 5 + y * 3) % 11) as f32 / 16.0;
+    let amp = currents(&fc, |x, y| [value(x, y), value(y, x), value(x + 1, y)]);
+    let reference = run(&mut gpu, &["screen"], fc, &base(), &amp);
+    let breathing = Params {
+        abl_enable: false,
+        abl_breathing: 0.03,
+        abl_breathing_ref: 0.5,
+        abl_tau_s: 0.1,
+        ..base()
+    };
+    // abl disabled: its state is not current, raster_scale 1.
+    let off = run(&mut gpu, &["screen"], fc, &breathing, &amp);
+    assert_eq!(off.rgba, reference.rgba, "{test}: abl disabled, breathing on");
+    // abl runs again (cold start, after a frame without it): apl_f seeded with the reference, alpha 0.
+    let cold = run(&mut gpu, &["abl", "screen"], fc, &breathing, &amp);
+    assert_eq!(cold.rgba, reference.rgba, "{test}: cold start, first frame");
+    // The next frame with a real frame time follows the APL (not 0.5): the picture changes.
+    fc.frame_time_ms = 16.7;
+    let next = run(&mut gpu, &["abl", "screen"], fc, &breathing, &amp);
+    assert_ne!(next.rgba, reference.rgba, "{test}: the state follows the APL");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// G19: overscan spreads the beam over a larger raster: the spot keeps its size in mm and the picture is
+/// dimmer by 1 / (1 + overscan) (T-37 review F3).
+#[test]
+fn overscan_keeps_the_spot_size_and_dims() {
+    let test = "stage_geometry overscan spot";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let fc = tube(64, 48, 4, 2.0);
+    let ys = 64..128; // 16 whole line periods (pitch 4 px, unchanged by a horizontal overscan)
+    let full = currents(&fc, |_, _| WHITE);
+    let mean = |img: &ImageF32| {
+        let s = column_sums(img, ys.clone());
+        s[120..136].iter().sum::<f64>() / (16.0 * 64.0)
+    };
+    let p0 = base();
+    let p1 = Params {
+        geometry_overscan_x: 0.05,
+        ..base()
+    };
+    let m0 = mean(&run(&mut gpu, &["screen"], fc, &p0, &full));
+    let m1 = mean(&run(&mut gpu, &["screen"], fc, &p1, &full));
+    println!(
+        "{test}: flat white mean {m0:.6} -> {m1:.6} with 5 % overscan, ratio {:.6}",
+        m1 / m0
+    );
+    assert!((m0 - 1.0).abs() <= 1e-3, "{test}: flat white {m0}");
+    assert!((m1 / m0 - 1.0 / 1.05).abs() <= 1e-3, "{test}: dimming {}", m1 / m0);
+
+    // A lit native column 32 with a 2 mm spot: seen box width 4 x 1.05 = 4.2 px, centre 128 + 2 x 1.05 =
+    // 130.1; profile variance (box, spot, pixel) 4.2^2 / 12 + sigma^2 + 1 / 12 with sigma = 2 / 2.35482 x 2
+    // = 1.698644 px (kept in mm): 1.47 + 2.885391 + 0.083333 = 4.438724 (the spot magnified with the raster
+    // would give 4.734563).
+    let p = Params {
+        geometry_overscan_x: 0.05,
+        ..wide()
+    };
+    let col = currents(&fc, |x, _| if x == 32 { WHITE } else { [0.0; 3] });
+    let out = run(&mut gpu, &["screen"], fc, &p, &col);
+    let s = column_sums(&out, ys.clone());
+    let (mut e, mut m1x, mut m2x) = (0.0, 0.0, 0.0);
+    for (x, v) in s.iter().enumerate().take(150).skip(110) {
+        let c = x as f64 + 0.5;
+        e += v;
+        m1x += v * c;
+        m2x += v * c * c;
+    }
+    let c = m1x / e;
+    let var = m2x / e - c * c;
+    let sigma: f64 = 2.0 / 2.354_82 * 2.0;
+    let want = 4.2 * 4.2 / 12.0 + sigma * sigma + 1.0 / 12.0;
+    assert!((want - 4.438_724).abs() < 1e-4, "{want}");
+    println!("{test}: column centroid {c:.4} (130.1), variance {var:.5} (expected {want:.5})");
+    assert!((c - 130.1).abs() <= 0.02, "{test}: centroid {c}");
+    assert!((var - want).abs() <= 0.02, "{test}: variance {var} vs {want}");
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

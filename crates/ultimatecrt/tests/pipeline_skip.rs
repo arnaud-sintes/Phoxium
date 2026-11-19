@@ -347,8 +347,10 @@ fn abl_state_updates_with_breathing_on_and_limiter_off() {
     run(&mut gpu, &bgra, &Params::default(), 3, false);
     assert!(gpu.last_skipped_slots().contains(&"abl"));
     let r1 = run(&mut gpu, &bgra, &p, 1, false);
-    // The apply pass of the first frame reads the state the cold start cleared: x = 0 (one frame of latency).
-    assert_eq!(probe(&r1)[1], 0.0, "cold start after the skip");
+    // The apply pass of the first frame reads the state the cold start set (one frame of latency): with the
+    // breathing on, x = abl_breathing_ref (T-37 review F2), so the raster scale starts at exactly 1.
+    assert_eq!(probe(&r1)[1], 0.25, "cold start after the skip");
+    assert_eq!(probe(&r1)[2], 1.0, "cold start: raster scale 1");
     let r2 = run(&mut gpu, &bgra, &p, 1, false);
     let s = probe(&r2);
     assert!(s[1] > 0.1, "the filtered APL follows the picture: {s:?}");

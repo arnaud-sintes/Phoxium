@@ -8,7 +8,13 @@
 
 #include "params.glsl"
 #include "common.glsl"
-// T-37: the ABL state (set 1, read only) for raster_scale, and the geometry hooks beam.glsl calls.
+// T-37: the ABL state (set 1, read only) for raster_scale, and the geometry hooks beam.glsl calls. abl_runs (push
+// constant, src/gpu/stages/screen.rs): the `abl` slot runs in this frame, so its state is current (otherwise
+// raster_scale is 1).
+layout(push_constant) uniform ScreenPush {
+    uint abl_runs;
+} screen_push;
+#define GEOMETRY_ABL_RUNS (screen_push.abl_runs != 0u)
 #define ABL_STATE_QUALIFIER readonly
 #include "abl.glsl"
 #include "geometry.glsl"
@@ -31,5 +37,7 @@ void main() {
         return;
     }
     vec3 l = mask_eval(q) * beam_eval(current_in, q);
+    // T-37 review F1: the light is clipped to the visible opening (geometry.glsl): exactly 1 inside, 0 outside.
+    l *= geometry_opening_coverage(q);
     imageStore(light_out, q, round_f16(vec4(l, 1.0)));
 }
