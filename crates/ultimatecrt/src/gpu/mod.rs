@@ -27,7 +27,7 @@ pub use timing::{csv_columns, FrameTimings, StageTiming, TimingAverager};
 pub use ui_render::UiPass;
 
 pub use context::{gpu_required, validation_layer_available, ValidationCounter};
-pub use context::{list_gpus, vulkan_report, Context, ExternalMemoryProbe, GpuInfo, VulkanReport};
+pub use context::{list_gpus, vulkan_report, Context, DeviceRequest, ExternalMemoryProbe, GpuInfo, VulkanReport};
 pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
 pub use headless::{StageInput, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
@@ -58,9 +58,9 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Creates the Vulkan context on a device that can present to `hwnd` (the `--gpu` index if
-    /// given), its presenter and the pipeline.
-    pub fn new(hwnd: isize, hinstance: isize, gpu: Option<usize>, validation: bool, integer_scale: bool) -> Res<Self> {
+    /// Creates the Vulkan context on a device that can present to `hwnd` (the requested one, see
+    /// [`DeviceRequest`]; the chosen device is [`Context::gpu`]), its presenter and the pipeline.
+    pub fn new(hwnd: isize, hinstance: isize, gpu: DeviceRequest, validation: bool, integer_scale: bool) -> Res<Self> {
         // SAFETY: `hwnd` is the live output window of `hinstance`, owned by the application, which
         // drops the renderer before destroying the window. The presenter and pipeline are destroyed
         // by `Drop for Renderer` before `ctx`.

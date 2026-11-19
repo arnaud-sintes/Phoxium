@@ -8,9 +8,32 @@ use windows::Win32::{
 };
 
 use crate::{
-    capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output, placement, presets, scaling, settings, source,
-    sources, Res,
+    adapters, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output, placement, presets, scaling, settings,
+    source, sources, Res,
 };
+
+/// The rectangle the output window will cover, as far as it is known before the window exists (HW-3): in
+/// fullscreen the `--monitor` or the monitor of the source window `follow`; windowed, the remembered rectangle
+/// when it is still on a monitor (else Windows places the window: unknown).
+fn predicted_cover(
+    fullscreen: bool,
+    monitor: Option<usize>,
+    follow: Option<windows::Win32::Foundation::HWND>,
+    saved: Option<[i32; 4]>,
+) -> Option<adapters::Rect> {
+    let monitors = output::monitor_irects();
+    let r = if fullscreen {
+        match monitor {
+            Some(i) => monitors.get(i).copied(),
+            None => follow.map(output::monitor_of),
+        }
+    } else {
+        saved
+            .map(modes::IRect::from_array)
+            .filter(|s| modes::usable_rect(s, &monitors))
+    };
+    r.map(|r| (r.left, r.top, r.right, r.bottom))
+}
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
@@ -28,7 +51,11 @@ pub fn run() -> Res<()> {
     }
 
     if args.list_adapters {
-        return crate::adapters::run();
+        let stored = settings::default_dir()
+            .map(|d| settings::load(&d).settings)
+            .unwrap_or_default();
+        let covered = predicted_cover(args.fullscreen, args.monitor, None, stored.global.output.windowed);
+        return adapters::run(args.gpu, &stored.global.gpu.adapter, covered);
     }
     if args.list_gpus {
         for g in gpu::list_gpus()? {
@@ -103,10 +130,31 @@ pub fn run() -> Res<()> {
     for w in &warnings {
         eprintln!("warning: {w}");
     }
+    // T-54, T-57, HW-3: the hotkey chords, the remembered window rectangle and the GPU choice come from the
+    // settings file.
+    let settings_dir = settings::default_dir();
+    let stored = settings_dir
+        .as_deref()
+        .map(|d| settings::load(d).settings)
+        .unwrap_or_default();
+    // HW-3: the adapter that runs the chain. A first guess from where the output will go starts the capture; the
+    // real choice is made once the output window exists (below), and the capture follows it if it differs.
+    let topology = adapters::Topology::read()?;
+    let gpu_spec = adapters::AdapterSpec::parse(&stored.global.gpu.adapter);
+    let guess = topology.select(
+        args.gpu,
+        &gpu_spec,
+        predicted_cover(
+            args.fullscreen,
+            args.monitor,
+            found.as_ref().map(|(s, _)| s.hwnd),
+            stored.global.output.windowed,
+        ),
+    );
     let (mut capture, follow, mut reattach) = match found {
         None => (None, windows::Win32::Foundation::HWND::default(), None),
         Some((source, target)) => {
-            let capture = capture::Capture::start(source.hwnd, map.client_area)?;
+            let capture = capture::Capture::start(source.hwnd, map.client_area, guess.capture_luid())?;
             println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
             let reattach = lifecycle::Reattacher::new(target, source.hwnd.0 as isize);
             (Some(capture), source.hwnd, Some(reattach))
@@ -159,12 +207,6 @@ pub fn run() -> Res<()> {
         .map_or((1280, 720), |r| (r.right - r.left, r.bottom - r.top));
     let fit = |avail: i32, size: u32| (avail.max(1) as u32 * 5 / 6) / size.max(1);
     let scale = fit(screen.1, frame.height).min(fit(screen.0, frame.width)).max(1) as i32;
-    // T-54, T-57: the hotkey chords and the remembered window rectangle come from the settings file.
-    let settings_dir = settings::default_dir();
-    let stored = settings_dir
-        .as_deref()
-        .map(|d| settings::load(d).settings)
-        .unwrap_or_default();
     let (bindings, hotkey_warnings) = hotkeys::Bindings::from_settings(&stored.global.hotkeys);
     for w in &hotkey_warnings {
         eprintln!("warning: {w}");
@@ -178,15 +220,52 @@ pub fn run() -> Res<()> {
         hotkeys: bindings,
         saved_rect: stored.global.output.windowed.map(modes::IRect::from_array),
     })?;
+    // HW-3: the adapter owning the monitor the output window really covers (auto), or the requested one.
+    let cover = output::outer_rect(win.hwnd);
+    let mut selection = topology.select(
+        args.gpu,
+        &gpu_spec,
+        Some((cover.left, cover.top, cover.right, cover.bottom)),
+    );
     let mut renderer = gpu::Renderer::new(
         win.hwnd.0 as isize,
         win.hinstance,
-        args.gpu,
+        selection.device_request(),
         args.validation,
         args.integer,
     )?;
+    let got = &renderer.context().gpu;
+    selection.note_renderer(adapters::VulkanDevice {
+        index: got.index,
+        name: got.name.clone(),
+        luid: got.luid.map(adapters::Luid::from_vulkan),
+    });
+    // The capture device on the renderer's adapter: restart the session when the first guess differs.
+    let mut captured_base = 0u64; // frames of the sessions already closed
+    let wanted = selection.capture_luid();
+    if let Some(old) = capture.take_if(|c| wanted.is_some_and(|l| l != c.adapter_luid)) {
+        captured_base += old.frames_captured();
+        drop(old); // the old session closes before the new one starts
+        let c = capture::Capture::start(follow, map.client_area, wanted)?;
+        println!("capture: restarted on {} (the renderer's adapter)", c.adapter);
+        frame.seq = 0; // the new session counts from 1
+        capture = Some(c);
+    }
+    if let Some(c) = &capture {
+        selection.note_capture(&c.adapter, c.adapter_luid);
+    }
     renderer.set_params(params);
     println!("render: Vulkan on {}", renderer.gpu_name);
+    println!("{}", selection.summary());
+    for w in &selection.warnings {
+        eprintln!("warning: gpu: {w}");
+    }
+    let capture_luid = selection.capture_luid();
+    adapters::publish(adapters::Current {
+        selection,
+        adapters: topology.entries(),
+        setting: stored.global.gpu.adapter.clone(),
+    });
     println!(
         "quit: Ctrl+Alt+Q{}",
         if args.fullscreen || args.no_activate {
@@ -218,7 +297,6 @@ pub fn run() -> Res<()> {
     let mut health = lifecycle::Health::new(0.0);
     let mut smoothing = lifecycle::SmoothingWatch::default();
     let mut size_watch = lifecycle::SizeWatch::default();
-    let mut captured_base = 0u64; // frames of the sessions already closed
     let mut notice: Option<String> = None;
     // Lost source (T-56): reminders, then a fullscreen output drops to a window, or the app exits.
     let mut lost_watch = lifecycle::LostWatch::new(args.lost, args.fullscreen);
@@ -278,7 +356,7 @@ pub fn run() -> Res<()> {
                 }
                 lifecycle::Step::TryAttach(hwnd) => {
                     let h = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
-                    match capture::Capture::start(h, map.client_area) {
+                    match capture::Capture::start(h, map.client_area, capture_luid) {
                         Ok(c) => {
                             capture = Some(c);
                             r.attach_result(now, hwnd, true);

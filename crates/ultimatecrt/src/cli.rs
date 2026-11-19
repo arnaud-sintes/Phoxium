@@ -11,9 +11,11 @@ Usage: ultimatecrt [options]
                        (default \"pixel-demo\")
   --list-windows       list capturable windows and monitors, then exit
   --list-gpus          list Vulkan devices, then exit
-  --list-adapters      adapter topology (DXGI adapters and monitors, Vulkan devices, LUIDs, capture adapter,
-                       render adapter, verdict), then exit; opens no window
-  --gpu <index>        Vulkan device to use (default: NVIDIA discrete, else any discrete)
+  --list-adapters      adapter topology (DXGI adapters and monitors, Vulkan devices, LUIDs, the chosen adapter,
+                       capture adapter, verdict, warnings), then exit; opens no window
+  --gpu <index>        Vulkan device (see --list-gpus) that runs the chain, capture included; wins over the
+                       settings file's [global.gpu] adapter (default auto: the adapter driving the monitor the
+                       output covers)
   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
   --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
   --no-activate        windowed output that never takes focus (Esc cannot reach it)
