@@ -1346,6 +1346,76 @@ mod tests {
     /// energy ratios of the oracle are the CRT.md table (green 5.36 %, blue 4.72 %); ABL is on exactly for the
     /// consumer TV presets with the sourced RCA 1.4 mA threshold; raster breathing and saturation keep their
     /// defaults; mask_tier_blend stays the parameter default (D-15).
+    // T-87 (audit m5): the confidence tags must be honest and the loader data must enforce it.
+
+    const WEAK_WORDS: [&str; 6] = ["estimate", "borrowed", "weak", "sibling", "fitted", "chosen"];
+
+    fn strength(c: Confidence) -> u8 {
+        match c {
+            Confidence::Sourced => 3,
+            Confidence::Derived | Confidence::Known => 2,
+            Confidence::Estimate => 1,
+        }
+    }
+
+    /// A recognisable reference: patent number, URL or DOI, author and year, a standard id, or CRT.md.
+    fn has_reference(s: &str) -> bool {
+        let b = s.as_bytes();
+        let digits_after = |p: usize| b.get(p).is_some_and(|c| c.is_ascii_digit());
+        let patent = s.match_indices("US ").any(|(i, _)| digits_after(i + 3));
+        let author_year = s.match_indices(|c: char| c.is_ascii_digit()).any(|(i, _)| {
+            i >= 2
+                && s.is_char_boundary(i + 4)
+                && s[i..i + 4].chars().all(|c| c.is_ascii_digit())
+                && (s[i - 1..i] == *" " || s[i - 1..i] == *"(")
+                && s[..i].trim_end_matches([' ', '(']).chars().last().is_some_and(|c| c.is_alphabetic())
+                && ["19", "20"].contains(&&s[i..i + 2])
+        });
+        patent
+            || author_year
+            || ["http://", "https://", "doi", "BT.1886", "BT.709", "BT.601", "SMPTE", "EBU", "ITU-R", "CRT.md"]
+                .iter()
+                .any(|k| s.contains(k))
+    }
+
+    fn check_entry(what: &str, tag: Confidence, source: &str, bad: &mut Vec<String>) {
+        if source.trim().is_empty() {
+            bad.push(format!("{what}: empty source"));
+        }
+        if matches!(tag, Confidence::Sourced | Confidence::Derived) {
+            let low = source.to_lowercase();
+            if let Some(w) = WEAK_WORDS.iter().find(|w| low.contains(**w)) {
+                bad.push(format!("{what}: {} with the word '{w}' in its source", tag.tag()));
+            }
+        }
+        if tag == Confidence::Sourced && !has_reference(source) {
+            bad.push(format!("{what}: S without a recognisable reference"));
+        }
+    }
+
+    #[test]
+    fn parameter_tags_are_honest() {
+        let mut bad = Vec::new();
+        for m in PARAMS_META.iter().filter(|m| m.stage != "_test") {
+            check_entry(&format!("param {}", m.id), m.confidence, m.source, &mut bad);
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn preset_tags_are_honest_and_not_stronger_than_the_parameter_without_a_new_source() {
+        let mut bad = Vec::new();
+        for p in lib().list() {
+            for (id, pv) in &p.provenance {
+                check_entry(&format!("preset {} {id}", p.id), pv.tag, &pv.source, &mut bad);
+                let m = meta(id).unwrap();
+                if strength(pv.tag) > strength(m.confidence) && pv.source == m.source {
+                    bad.push(format!("preset {} {id}: stronger than the parameter with the same source", p.id));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
     #[test]
     fn m4_values_follow_the_recorded_policies() {
         use crt_model::phosphor::{KUHN_BLUE, KUHN_GREEN};
