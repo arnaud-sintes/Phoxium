@@ -36,6 +36,87 @@ Still open:
 - OUT-2, OUT-3 (no-focus window and menu placement): defaults stand, decided by SP-2.
 - TIM-1 (latency), PHY-12 (temporal scope): defaults stand.
 
+## Decision gate T-13 (draft 2026-11-19, awaiting owner approval)
+
+DRAFT by the T-13 task for the owner. Nothing below is decided: the owner approves, amends or rejects each proposal, and only then do `ARCHITECTURE.md` (statuses now read "Proposed (T-13 draft)"), `PLAN.md` and `CLAUDE.md` change. Numbers are quoted from the entries cited; none is new, except where marked. The "535 tests" figure comes from the T-13 brief and is not written in any repo document (re-run `cargo test` to confirm). T-03 (adapter topology) and T-04 (shared-handle spike) were not run; T-26 depends on T-04's question.
+
+### Spike pass/fail lines
+
+| Spike | Line | Entry |
+|---|---|---|
+| T-06 SP-1c covered game | Throughput FAIL by 1.0 fps (57.0, limited by the pixel-demo source, 8 ms timer); gaps PASS (max 66.3 ms, none above 100 ms); foreground FAIL then MITIGATED (below); input and cursor not tested; synthetic source only | CAP-4 |
+| T-07 SP-2 non-activating present | Focus leak is Windows-side (reproduces without Vulkan and capture, `spikes/focus-leak`), mitigated by hand-back, blip about 0.1 s at about 25 s; PresentMon present mode and missed-refresh count NOT recorded; click-through result NOT recorded | OUT-2, OUT-4 |
+| T-08 TEC-5 ImGui | PASS: set A builds, dynamic rendering, 0 validation messages; hand-off 48/48 with plain `SetForegroundWindow`; F12 unavailable (1409) | TEC-5 |
+| T-09 headless harness, T-10 parameter table | Implemented (A16, section 3.6 of ARCHITECTURE) | TEC-7, TEC-3 |
+| T-11 SP-11 antivirus | PASS for Defender, PROVISIONAL (0 detections in about 20 runs; no anti-cheat title, no other antivirus, no SmartScreen test) | PRJ-4 |
+| T-12 SP-5 capture fidelity | PASS bit-exact, max diff 0 codes, all tested scales and the 125 % monitor; bottom window corners excepted (36 px, 54 at 125 %); Night Light not tested | CAP-3 |
+| T-03 SP-1a adapters | NOT RUN | HW-3 |
+| T-04 SP-1b shared handle | NOT RUN | CAP-2 |
+| T-16 SP-7 early look | Rendered; owner judgement pending (proposal 6) | SCP-7 |
+
+### Proposal 1: stack, keep Rust + Vulkan (ash) + GLSL (TEC-1, TEC-2, A1, A4, A5)
+
+- **Evidence:** the pipeline is built end to end (decode, amp, gun, abl, screen with grille, slot and delta masks, phosphor, encode; ARCHITECTURE 3.7), with a headless GPU harness whose validation count is 0 (T-09; synchronization validation on) and "535 tests" (brief, unverified here). No spike result needs D3D12: the one real finding of SP-2, the focus leak, reproduces with no Vulkan and no capture (OUT-2, `spikes/focus-leak`), so it belongs to Windows, not to the API. The main argument for a D3D present path, HDR output, left with COL-1 (SDR only).
+- **Alternative rejected:** capture and present on D3D12 (TEC-1 trigger: SP-1 or SP-2 "painful"). It would rewrite T-20 onward (PLAN T-13 text) for no measured gain. Not weighed further: wgpu and vulkano (TEC-2 default stays ash).
+- **Risks and unknown:** present mode and compositor latency of the Vulkan output are not measured (PresentMon not run; T-59 result not consolidated here, see TIM-1); behaviour on other vendors is untested (HW-3 default: the dev GPU is the only certified target). Revisit trigger: a measured missed-refresh or latency cost traced to the Vulkan present path.
+
+### Proposal 2: capture path, keep the CPU copy; cancel T-26 unless a measurement says otherwise (CAP-2, A3)
+
+- **Evidence:** the CPU round trip works: capture holds 56.8 / 57.0 / 57.2 fps (3 covered runs) against a source that itself makes about 57 distinct frames per second, and render holds 60.3 fps (CAP-4 hands-off rerun). With patterns as source, `upload` and `decode` are under 0.06 ms per frame (ARCHITECTURE 3.7 measured-cost bullet, 320x240; the T-47 table shows `upload` absent because patterns bypass capture). No CPU-copy cost at a real window size is recorded in the repo.
+- **T-04 was not run**, so the shared handle is neither validated nor measured (extension support on both GPUs unverified). Proposal: do not spend T-04 and T-26 now; mark T-26 cancelled.
+- **Reopen condition (the number to measure):** callback CPU time (copy to staging, map, row copy) plus Vulkan staging upload, and capture-to-submit latency, at 1920x1080 and 2560x1440 sources, read from `--stats` and `--log` (`diag.rs`, T-59 QPC points) with `pixel-demo` at its largest sizes (T-95) and later the real game. T-04's own fail rule is the budget: if the CPU path costs more than 3 ms at the real size, or the capture rate falls below the source rate, then T-04 runs (pass rule: saves at least 1 ms per frame or 30 % of capture-to-submit) and T-26 is reinstated; the alternative named there is a D3D11 decimation pass before readback.
+- **Rejected:** shared handle now (unvalidated cross-API synchronisation, Opus xhigh task, for a gain not shown to be needed); GPU-to-GPU copy (same interop risk, same lack of a need). **Risk:** at a large source (a 4K window) the copy may exceed the budget; hybrid graphics (proposal 4) could make the shared handle unavailable anyway.
+
+### Proposal 3: ImGui crate set A, focus hand-off, menu key F10 (TEC-5, A17, OUT-3, D-7, D-17)
+
+- **Crates:** `dear-imgui-rs`, `dear-imgui-sys` `=0.22.0` and `dear-imgui-ash` `=0.22.0` (default features off, `dynamic-rendering`), our own Win32 `input.rs`, exact pins because the crate went 0.20 to 0.22 in three weeks. Evidence (TEC-5, `spikes/imgui-spike/RESULTS.md`): builds from crates.io with no submodule and no libclang (MSVC C++ needed), MIT OR Apache-2.0 and `cargo deny check licenses` clean, `ash 0.38` shared, headless validation 0 messages, overlay pass 0.15 ms windowed (about 1280x720) and 0.27 ms fullscreen 2560x1440, cold release build 54 s.
+- **Hand-off design:** on the menu key drop `WS_EX_NOACTIVATE`, remember the foreground, plain `SetForegroundWindow(output)`; on close restore the style and plain `SetForegroundWindow(remembered)`. Evidence: 10/10 opens, 10/10 text, 10/10 closes in each of two modes, a 28-cycle 94 s run 28/28, independent poll exactly 56 changes of 56, plain method every time (no synthetic Alt or input needed). The T-07 hand-back must be off while the menu is open (OUT-2).
+- **Menu key:** F10 default (D-17; F12 is held system-wide by another program on the dev machine, `RegisterHotKey` error 1409; F10, F11 and Ctrl+Alt+F12 register), configurable, with a visible message on failure. PLAN T-94 and RESULTS section 7 still say "F12 default": superseded by D-17. Caveat (RESULTS 9.2): a global F10 swallows the menu-bar key of every application.
+- **Rejected:** `imgui` 0.12 plus `imgui-rs-vulkan-renderer` 1.16.0 (builds, not run, not needed; tracks Dear ImGui 1.89); an own ash renderer (kept as the fail order); a non-ImGui toolkit (D-9).
+- **Unknown:** real mouse and keyboard by a person, a real game as the source, and a hand-off not triggered by an input event were not tested; the missing LICENSE files in the crate packages mean the release zip must carry upstream notices.
+
+### Proposal 4: render adapter policy (HW-3; T-03 not run)
+
+- **Default proposed:** the Vulkan device is the adapter that drives the output monitor, matched by LUID (`VkPhysicalDeviceIDProperties::deviceLUID` against the DXGI adapter owning the output), with the D3D11 capture device created on the same adapter where possible; `--gpu` overrides; a visible warning on mismatch. Note the wording difference: HW-3 and T-03 say "the capture adapter's LUID", this draft says the output monitor's adapter; T-03 settles which matches reality.
+- **Evidence for the need:** Windows lists the Intel UHD as the adapter with the 2560x1440 desktop and the RTX A2000 as a second adapter with no display mode (HW-3 finding); today the D3D device uses the default adapter and Vulkan prefers an NVIDIA discrete GPU, and nothing checks that they agree (HW-3 IMPLEMENTED, ARCHITECTURE 3.5). The runs so far (render 60.3 fps, capture 57 fps) were all on that unchecked combination.
+- **Unverified:** the behaviour on a laptop where the iGPU drives the display. T-03 would measure: DXGI adapters with LUID and `EnumOutputs` desktop rectangles; Vulkan devices with `deviceLUID`; the capture device LUID; the printed line "capture and render on the same adapter" or the mismatch warning; and the per-application GPU preference in Windows graphics settings (UI path unverified). Fail case (monitors only on the Intel iGPU): a cross-adapter copy is unavoidable and T-04 would have to measure it.
+- **Rejected:** always NVIDIA (silent wrong choice on other machines, D-18 says the software must adapt to any host); always the capture adapter without a warning.
+
+### Proposal 5: one-screen go/no-go: GO with conditions (OUT-1, CAP-4, D-1)
+
+- **Evidence:** covered on the same monitor, 3 runs of 117 s: capture 57.0 fps mean (49.8 minimum), no capture interval above 100 ms (max 66.3 ms), render 60.3 fps with no render gap above 50 ms; the capture never fell to 0; covering costs nothing measurable against the uncovered control (CAP-4). The Windows external activation at about 25 s (7 of 7 runs, also without capture or Vulkan) is mitigated by `output::hand_back_target`: one hand-back, foreground back on the source 0.10 s later (OUT-2, `check-focus.ps1` reports MITIGATED, not PASS). Antivirus clean on Defender (PRJ-4); captured pixels bit-exact (CAP-3).
+- **Conditions:** (a) the verdict stays PROVISIONAL until a real game runs: the stand-in is pixel-demo (D-13), Mina the Hollower on the owner's other machine at the end (T-83), with D-1 as the answer if a real game stops delivering frames (fallbacks: output 1 px smaller, second monitor); (b) input reaching the game and cursor behaviour are untested; (c) a game that pauses on deactivation may stutter once at the blip; (d) minimised sources deliver no frames, exclusive fullscreen is out (CAP-5); (e) the initiator of the 25 s activation is unidentified (T-94 asks to find it).
+- **Rejected:** NO-GO (nothing shows the covered source throttled); "GO" unconditional (the real-game case, the hard one, is untested).
+
+### Proposal 6: early-look renders (T-16, SP-7): owner judgement pending
+
+- **Files:** `C:\projects\personal\ultimateCRT-wt\T-16\target\early_look\` (gitignored output of `cargo run --release -p crt-model --example early_look`; regenerate in any checkout): `pvm20_grille_1p54_montage.png`, `tv26_grille_2p9_montage.png`, `tv26_slot_2p9_montage.png` (left physical, right scanlines only; also `_physical.png`, `_scanlines.png`, `_2x` and `source_256x240.png`), and `metrics.txt`. View at 100 %.
+- **Numbers (metrics.txt, host 1920x1440):** physical against scanlines-only, mean abs diff 30.84 codes at 1.542 px per triad (88.9 % of pixels differ by 5 codes or more), 67.86 at 2.909 (92.7 %), 67.93 for the slot mask at 2.909; flat-white horizontal luminance ripple (Michelson) 0.5338, 0.8162 and 0.8169 against the Barten threshold 0.014; vertical ripple 0.0255, 0.0185 and 0.0632 (slot, dominant period 5.69 px); the dominant horizontal period (2.84 and 2.91 px) equals the beat period of the host grid (2.85 and 2.91 px).
+- **Reading the numbers (assistant's, for the owner to weigh):** the difference in these renders is largely that host-grid beat, which CRT.md calls a non-physical artefact, and the product's tier C (below 3 px per triad) prefilters it away: the same file records the tier C path differing from scanlines-only by 0.006 codes at 1.54 px per triad. So on a 2560x1440 panel the visible differentiator at most presets rests on the scanline and beam model, and the mask matters only where it is resolved (3 px per triad and more; the two tubes rendered give 1.54 and 2.9 on this panel, and PLAN P-1 lists presets at 1.0 to 1.7). The images cannot say whether that is enough.
+- **Question for the owner:** do the montages show a difference worth the project as scoped? If not: PLAN T-16 fail path (a stronger option D, host-subpixel masks HW-6, or re-scoping). Verdict to be written into SCP-7 and PHY-2 after the owner's look.
+
+### Proposal 7: performance position (PRF-1, T-47, T-91; PRF-2, T-48)
+
+- **Measured (T-47, release build, RTX A2000, 1920x1200 monitor since no 2560x1440 monitor exists on the machine, pattern sources; pixel-bound times expected about 1.4 times higher at the design size, not measured):** budget 4.2 ms (25 % of 16.7 ms) is met by no configuration. Defaults 4.6 to 6.0 ms; preset 09 7.2 ms; preset 01 flat 7.8 ms; flat-tube `screen` 5.2 to 6.4 ms against the 2.5 ms target of the M3 chain; curved presets 28.6 ms (01) and 59.1 ms (05); 5 % tail 162.5 ms. Presets 09 and 01 flat still hold 60 fps because the budget is a share of the frame, not the frame.
+- **Since T-47:** T-91 (warp path) brings a curved tube to 0.35 to 0.39 times the flat tile path (headless debug build with validation, so not comparable with the live table, and the flat tile path is now the slower one: input for T-48).
+- **Work to meet the budget:** T-92 (beam tail on a coarse pass, 6x cost), T-93 (flat `screen` 5.2 to 6.4 ms to about 2.5, `encode` 1.8 to 6.1 ms on detailed content, `phosphor` about 1.0, `abl` 0.5 to 0.8, `amp_samples` cap), then T-48. A live re-measure after T-91 to T-93 on a quiet GPU is needed (the GPU hit its power cap and then 86 to 87 C in the heavy runs).
+- **Fallback if the budget is still missed:** quality tiers (T-48): reduce beam reach and tail, lower-resolution beam, FP16 arithmetic, tiers that change only approximation (mean abs error against reference at most 1 % of white), with automatic drop on sustained overrun (OUT-6).
+- **Decision needed from the owner:** is 60 fps at the 4.2 ms budget a hard requirement on the dev laptop (and at which output size, since D-18 says there is no single target), or is 60 fps held with a documented higher share, falling to a faster tier, acceptable? The plan default is 4.2 ms at the standard tier with the stand-in game running (T-48).
+
+### Proposal 8: first-version scope (PRJ-6, D-5, D-6)
+
+All three mask types stay in (D-5, already implemented: T-39a to T-39c); halation off in the first usable version (D-6, "No", M4; optics is still a placeholder slot); persistence, saturation, ABL stay settings off by default as built.
+
+### Not settled by this gate
+
+- The real-game CAP-4 verdict, input reaching the game, cursor behaviour (T-83).
+- Hybrid-graphics behaviour and the shared-handle path (T-03, T-04 not run).
+- PresentMon present mode, missed refreshes, latency and click-through results (OUT-2, OUT-4, T-59).
+- Performance at 2560x1440 and after T-91 to T-93 on a live GPU.
+- Visible value of the mask on this panel (owner's look at the T-16 images).
+- Identity of the 25 s activation initiator; Night Light and 150 % scaling in CAP-3; other antivirus and anti-cheat (PRJ-4).
+- Anything not in the eight proposals: D-15, D-3, D-4, D-8, D-10 and the remaining defaults keep their status.
+
 ## How to read this file
 
 Each question has an id, the question, why it matters, who can answer, options when useful, and a recommended default.
