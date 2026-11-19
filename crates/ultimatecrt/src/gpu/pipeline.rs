@@ -135,7 +135,7 @@ impl Settings {
 }
 
 /// Per-frame constants, std140, laid out as the `FrameConstants` block of `shaders/include/common.glsl`
-/// (76 bytes, 4-byte fields only, one explicit padding field; a test checks the offsets against the GLSL).
+/// (88 bytes, 4-byte fields only, two explicit padding fields; a test checks the offsets against the GLSL).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct FrameConstants {
@@ -164,6 +164,12 @@ pub struct FrameConstants {
     /// White balance gains of the `gun` stage (T-34): per-channel factors on the beam current. `new` gives
     /// (1, 1, 1); `placed` computes them from the parameter table (`src/white.rs`).
     pub white_gain: [f32; 3],
+    /// Padding to the 8-byte alignment of the std140 `ivec2` below (bytes 76 to 79).
+    pub(crate) pad1: i32,
+    /// Margin (host px, per side, x and y) of the tube image around the raster (T-37): the tube image is
+    /// the raster rectangle grown by this margin, so the spot's skirt past the raster's ends is drawn
+    /// (`tube_size - 2 margin` is the raster). 0 in [`FrameConstants::new`]: the tube image is the raster.
+    pub raster_margin: [i32; 2],
 }
 
 impl FrameConstants {
@@ -576,6 +582,12 @@ impl Pipeline {
         self.resample.create(d, RESAMPLE_SPV, 0)?;
         for l in &mut self.chain {
             l.stage.create(d)?;
+        }
+        // T-37: the ABL state buffer (owned by `abl`) is read by `screen` for raster_scale.
+        if let Some(abl) = self.chain.iter().find_map(|l| l.stage.abl_state()) {
+            for l in &mut self.chain {
+                l.stage.link_abl_state(d, abl);
+            }
         }
         self.sampler = d.create_sampler(
             &vk::SamplerCreateInfo::default()
@@ -1622,11 +1634,12 @@ mod tests {
             (std::mem::offset_of!(FrameConstants, tube_size), "tube_size"),
             (std::mem::offset_of!(FrameConstants, amp_k), "amp_k"),
             (std::mem::offset_of!(FrameConstants, white_gain), "white_gain"),
+            (std::mem::offset_of!(FrameConstants, raster_margin), "raster_margin"),
         ];
         let rust: Vec<(usize, String)> = rust.iter().map(|&(o, n)| (o, n.to_string())).collect();
         assert_eq!(members, rust);
-        assert_eq!(size_of::<FrameConstants>(), 76);
-        assert!(glsl.contains("std140, 76 bytes"));
+        assert_eq!(size_of::<FrameConstants>(), 88);
+        assert!(glsl.contains("std140, 88 bytes"));
     }
 
     #[test]

@@ -1,0 +1,226 @@
+# Geometry and convergence (T-37, QUESTIONS PHY-11, part of OUT-7). Format: crates/paramgen/src/lib.rs. Each id
+# is defined once in the whole params/ folder. Units: "1" means dimensionless.
+# Read by the `screen` slot (shaders/include/geometry.glsl, called from beam_eval in shaders/include/beam.glsl;
+# oracle crates/crt-model/src/geometry.rs). Every default is the identity: flat faceplate, no residual
+# distortion, no overscan, no misconvergence. The mask stays in tube coordinates (host pixels of the tube
+# rectangle); only the beam position is moved.
+
+[[param]]
+id = "geometry_curvature"
+stage = "geometry"
+type = "enum"
+unit = "1"
+default = "flat"
+values = ["flat", "spherical", "cylindrical"]
+tag = "S"
+source = "CRT.md Faceplate curvature: spherical 1R to 8R, cylindrical (Trinitron, Diamondtron: curved horizontally, flat vertically), flat outer face"
+description = "Shape of the phosphor surface. Flat: no curvature (identity). Spherical: radius geometry_radius_mm in both axes. Cylindrical: radius geometry_radius_mm horizontally, flat vertically."
+group = "Geometry"
+
+[[param]]
+id = "geometry_radius_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 852.8
+min = 300.0
+max = 50000.0
+tag = "D"
+source = "CRT.md Faceplate curvature: 1R = 1.767 x viewable diagonal; 19 in viewable (482.6 mm): 852.8 mm, corner sagitta 34.85 mm. Trinitron horizontal radius about 1600 to 2100 mm (US 5,386,174)"
+description = "Radius of curvature of the phosphor surface (horizontal radius for a cylindrical faceplate). Unused when flat."
+group = "Geometry"
+
+[[param]]
+id = "geometry_eye_distance_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = 0.0
+max = 5000.0
+tag = "E"
+source = "CRT.md Faceplate curvature: typical monitor viewing distance 500 to 650 mm (1.0 to 1.3 diagonals of a 19 in tube); 0 = eye at infinity (parallel projection)"
+description = "Distance from the eye to the centre of the faceplate, on the tube axis. The eye looks through each host pixel at the curved surface (ray cast, no refraction). 0 puts the eye at infinity (parallel view)."
+group = "Geometry"
+
+[[param]]
+id = "geometry_overscan_x"
+stage = "geometry"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -0.1
+max = 0.15
+tag = "S"
+source = "CRT.md Visible area, overscan, corners: BVM-D 5 % normal scan, 3 % underscan; PVM-20S1WU 7 %; consumer TVs 5 to 10 % per axis; PC monitors underscanned"
+description = "Horizontal overscan: the raster is wider than the visible area by this fraction (0.05 puts the source edges 5 % of the width outside). Negative values underscan."
+group = "Geometry"
+
+[[param]]
+id = "geometry_overscan_y"
+stage = "geometry"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -0.1
+max = 0.15
+tag = "S"
+source = "CRT.md Visible area, overscan, corners: BVM-D 5 % normal scan, 3 % underscan; PVM-20S1WU 7 %; consumer TVs 5 to 10 % per axis"
+description = "Vertical overscan: the raster is taller than the visible area by this fraction. Negative values underscan."
+group = "Geometry"
+
+[[param]]
+id = "geometry_pincushion"
+stage = "geometry"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -0.05
+max = 0.05
+tag = "S"
+source = "CRT.md Raster distortions and corrections: pincushion/barrel residual under 0.5 to 1 % on monitors, 1 to 3 % on TVs"
+description = "Residual pincushion (positive) or barrel (negative): radial displacement of the raster at the picture corner, as a fraction of the half diagonal, growing with the square of the distance from the centre."
+group = "Geometry"
+
+[[param]]
+id = "geometry_trapezoid"
+stage = "geometry"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -0.05
+max = 0.05
+tag = "S"
+source = "CRT.md Raster distortions and corrections: trapezoid (keystone) residual under 1 %"
+description = "Residual trapezoid: relative change of the raster width at the bottom edge (positive: wider at the bottom, narrower at the top), linear in the height."
+group = "Geometry"
+
+[[param]]
+id = "geometry_rotation_deg"
+stage = "geometry"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Raster distortions and corrections: rotation (tilt) from the Earth's field, up to 1 to 2 degrees uncorrected"
+description = "Raster rotation (tilt) about the tube centre, positive clockwise as seen on the screen."
+group = "Geometry"
+
+[[param]]
+id = "geometry_conv_red_dx_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing: BVM-D20 under 0.4 mm centre, PC monitors 0.2 to 0.3 mm, consumer TVs 0.5 to 1.5 mm; model: static centre offset plus a quadratic polynomial per channel [E]"
+description = "Static horizontal misconvergence of the red beam (positive: red lands to the right)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_red_dy_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (static centre offset per channel)"
+description = "Static vertical misconvergence of the red beam (positive: red lands lower)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_green_dx_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (static centre offset per channel)"
+description = "Static horizontal misconvergence of the green beam (positive: right)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_green_dy_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (static centre offset per channel)"
+description = "Static vertical misconvergence of the green beam (positive: lower)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_blue_dx_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (static centre offset per channel)"
+description = "Static horizontal misconvergence of the blue beam (positive: right)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_blue_dy_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (static centre offset per channel)"
+description = "Static vertical misconvergence of the blue beam (positive: lower)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_red_radial_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing: errors grow with the distance from the centre (21 in datasheet 0.30 mm centre, 0.50 mm corners; TVs up to 2 mm in corners); quadratic model [E]"
+description = "Radial misconvergence of the red beam at the picture corner (positive: outward), growing with the square of the distance from the centre, added to the static offset."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_green_radial_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (radial growth toward the corners, quadratic model [E])"
+description = "Radial misconvergence of the green beam at the picture corner (positive: outward)."
+group = "Convergence"
+
+[[param]]
+id = "geometry_conv_blue_radial_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -2.0
+max = 2.0
+tag = "S"
+source = "CRT.md Convergence, purity and landing (radial growth toward the corners, quadratic model [E])"
+description = "Radial misconvergence of the blue beam at the picture corner (positive: outward)."
+group = "Convergence"

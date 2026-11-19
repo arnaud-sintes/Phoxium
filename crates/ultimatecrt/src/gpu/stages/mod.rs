@@ -148,6 +148,18 @@ pub(super) trait Stage {
     /// the stage restores what `prepare` or `record` consumed for it (a pending history clear, a layout
     /// transition of new images), so the next frame does them again. Default: nothing.
     fn abandon(&mut self) {}
+
+    /// The ABL state buffer (`AblState` of `abl.glsl`) when this stage owns it (`abl`, T-35). Default: none.
+    fn abl_state(&self) -> Option<vk::Buffer> {
+        None
+    }
+
+    /// Receives the ABL state buffer of the chain once every stage is created (T-37: `screen` reads
+    /// `raster_scale` from it). Default: nothing.
+    ///
+    /// # Safety
+    /// `d` is the device of the stage's objects and `buffer` a live buffer of `abl` on it.
+    unsafe fn link_abl_state(&mut self, _d: &ash::Device, _buffer: vk::Buffer) {}
 }
 
 /// A slot whose stage is not written yet: always bypassed (exact identity).

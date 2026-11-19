@@ -11,7 +11,7 @@
 #endif
 
 // Per-frame constants, written by the CPU once per frame in flight (src/gpu/pipeline.rs,
-// `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 76 bytes.
+// `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 88 bytes.
 layout(std140, set = 0, binding = UCRT_FRAME_BINDING) uniform FrameConstants {
     // Tube rectangle in target pixels: x0, y0, x1, y1 (x1, y1 exclusive). Outside it: black surround.
     layout(offset = 0) vec4 tube_rect_px;
@@ -34,6 +34,10 @@ layout(std140, set = 0, binding = UCRT_FRAME_BINDING) uniform FrameConstants {
     // White balance gains of the gun stage (T-34, src/white.rs): per-channel factors on the beam current,
     // (1, 1, 1) when `gun_white_balance` is off. vec3 alignment: bytes 60 to 63 are padding.
     layout(offset = 64) vec3 white_gain;
+    // Margin (host px per side, x and y) of the tube image around the beam raster (T-37): the raster is
+    // tube_size - 2 raster_margin, centred, and the margin holds the spot's skirt. 0: the tube image is the
+    // raster. Bytes 76 to 79 are padding.
+    layout(offset = 80) ivec2 raster_margin;
 } frame;
 
 // Size of the amp-domain images (amp and gun outputs).

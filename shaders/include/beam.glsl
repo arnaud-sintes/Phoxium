@@ -148,7 +148,7 @@ struct BeamRaster {
 BeamRaster beam_raster() {
     BeamRaster r;
     r.pitch = frame.line_pitch_mm * frame.px_per_mm;
-    float h = float(frame.tube_size.y);
+    float h = float(geometry_raster_size().y); // T-37 hook: the raster, inside the tube image's margin
     int rows = max(frame.native_size.y, 1);
     r.mult = int(clamp(round(h / (r.pitch * float(rows))), 1.0, 16.0));
     r.lines = rows * r.mult;
@@ -161,8 +161,7 @@ BeamRaster beam_raster() {
 // position `p`. Zero until T-37 (static offset plus a quadratic polynomial in x and y, per channel); a
 // positive offset moves that channel's picture right or down.
 void beam_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
-    dx = vec3(0.0);
-    dy = vec3(0.0);
+    geometry_convergence_px(p, dx, dy); // T-37 hook (geometry.glsl)
 }
 
 // Light (times 1 / P) of a run of samples of current i covering [a0, a1) on one line, in the pixel
@@ -223,15 +222,16 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
     float reach_x = reach + max(adx.r, max(adx.g, adx.b));
     float reach_y = reach + max(ady.r, max(ady.g, ady.b));
 
-    float y0 = float(q.y);
+    vec2 g0 = geometry_footprint(q); // T-37 hook (geometry.glsl): footprint origin in the raster
+    float y0 = g0.y;
     float y1 = y0 + 1.0;
     float n0 = max(0.0, ceil((y0 - reach_y - r.first) / r.pitch));
     float n1 = min(float(r.lines - 1), floor((y1 + reach_y - r.first) / r.pitch));
     n1 = min(n1, n0 + float(BEAM_MAX_LINES - 1));
 
     int samples = amp_size().x;
-    float a = float(frame.tube_size.x) / float(samples);
-    float x0 = float(q.x);
+    float a = float(geometry_raster_size().x) / float(samples); // T-37 hook: raster width
+    float x0 = g0.x;
     float x1 = x0 + 1.0;
     float j0 = max(0.0, floor((x0 - reach_x) / a));
     float j1 = min(float(samples - 1), floor((x1 + reach_x) / a));

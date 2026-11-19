@@ -52,6 +52,70 @@ pub fn moire_beat(p1: f64, p2: f64) -> f64 {
     p1 * p2 / (p1 - p2).abs()
 }
 
+/// Curved faceplate seen from the front (T-37, CRT.md "Faceplate curvature"): the phosphor surface point at
+/// arc length `arc_mm` from the centre, along a plane through the tube axis, on a circle of radius `r_mm`
+/// (a sphere's meridian, or the horizontal section of a cylinder), is at the polar angle phi = arc / R about
+/// the centre of curvature: lateral R sin(phi), depth R (1 - cos(phi)) behind the centre. Seen from an eye on
+/// the axis at `eye_mm` in front of the centre (0: at infinity, parallel view), it projects on the tangent
+/// plane at the centre to lateral x eye / (eye + depth). Returns that projected distance (mm). [D]
+///
+/// The raster is laid on the surface uniform in arc length (CRT.md "Raster distortions": position = R theta
+/// for a sphere centred on the deflection centre), so this maps a raster position to where it is seen.
+pub fn projected_from_arc_mm(r_mm: f64, arc_mm: f64, eye_mm: f64) -> f64 {
+    let phi = arc_mm / r_mm;
+    let lateral = r_mm * phi.sin();
+    if eye_mm > 0.0 {
+        lateral * eye_mm / (eye_mm + r_mm * (1.0 - phi.cos()))
+    } else {
+        lateral
+    }
+}
+
+/// Inverse of [`projected_from_arc_mm`] on |arc| < R pi / 2 (the function is increasing there), by
+/// bisection to 1e-12 mm. [D]
+pub fn arc_from_projected_mm(r_mm: f64, projected_mm: f64, eye_mm: f64) -> f64 {
+    let (mut lo, mut hi) = (-r_mm * std::f64::consts::FRAC_PI_2, r_mm * std::f64::consts::FRAC_PI_2);
+    for _ in 0..200 {
+        let mid = 0.5 * (lo + hi);
+        if projected_from_arc_mm(r_mm, mid, eye_mm) < projected_mm {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+        if hi - lo < 1e-12 {
+            break;
+        }
+    }
+    0.5 * (lo + hi)
+}
+
+/// Seen position (mm from the centre, tangent plane) of the raster point `s` (arc-length coordinates, mm) on
+/// a spherical faceplate of radius `r_mm`: the radial direction is kept, the radius maps through
+/// [`projected_from_arc_mm`]. [D]
+pub fn sphere_seen_mm(r_mm: f64, s: (f64, f64), eye_mm: f64) -> (f64, f64) {
+    let rho = s.0.hypot(s.1);
+    if rho == 0.0 {
+        return (0.0, 0.0);
+    }
+    let k = projected_from_arc_mm(r_mm, rho, eye_mm) / rho;
+    (s.0 * k, s.1 * k)
+}
+
+/// Seen position of the raster point `s` on a cylindrical faceplate (horizontal radius `r_mm`, flat
+/// vertically) seen from infinity: x maps through [`projected_from_arc_mm`], y is unchanged. [D]
+pub fn cylinder_seen_mm(r_mm: f64, s: (f64, f64)) -> (f64, f64) {
+    (projected_from_arc_mm(r_mm, s.0, 0.0), s.1)
+}
+
+/// Misconvergence of one beam at the picture position `u` (mm from the centre) of a picture of half size
+/// `half` (mm): the static offset `stat` (mm) plus `radial` (mm) times (r / rc)^2 along the radius, rc the
+/// half diagonal (CRT.md "Convergence": static centre offset plus a quadratic polynomial per channel [E]).
+pub fn convergence_offset_mm(stat: (f64, f64), radial: f64, u: (f64, f64), half: (f64, f64)) -> (f64, f64) {
+    let rc2 = half.0 * half.0 + half.1 * half.1;
+    let r = u.0.hypot(u.1);
+    (stat.0 + radial * u.0 * r / rc2, stat.1 + radial * u.1 * r / rc2)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -159,6 +223,41 @@ mod tests {
         for (g, e) in got.iter().zip([0.485, 0.242, 0.140, 0.162]) {
             assert!(close(*g, e, 0.0006), "{g} vs {e}");
         }
+    }
+
+    /// T-37: on the axis of a 19 in 1R tube (R = 1.767 x 482.6 = 852.75 mm) the projection of the
+    /// corner (arc length to the corner) has the corner sagitta as its depth: R (1 - cos(phi)) with
+    /// R sin(phi) = 241.3 mm is 34.85 mm, so the eye at 600 mm sees the corner at 241.3 x 600 / 634.85.
+    #[test]
+    fn projection_of_a_1r_faceplate() {
+        let d = inch_to_mm(19.0);
+        let r = 1.767 * d;
+        let h = d / 2.0;
+        let arc = r * (h / r).asin();
+        assert!(close(projected_from_arc_mm(r, arc, 0.0), h, 1e-9));
+        let seen = projected_from_arc_mm(r, arc, 600.0);
+        assert!(close(seen, h * 600.0 / (600.0 + sagitta_mm(r, h)), 1e-9), "{seen}");
+        assert!(close(seen, 228.05, 0.01), "{seen}");
+        for eye in [0.0, 600.0] {
+            for x in [-200.0, -1.0, 0.0, 3.0, 240.0] {
+                let a = arc_from_projected_mm(r, x, eye);
+                assert!(close(projected_from_arc_mm(r, a, eye), x, 1e-9));
+            }
+        }
+        // Radial: a raster point at 210 mm from the centre is seen at R sin(210 / R) = 207.885 mm.
+        let (x, y) = sphere_seen_mm(852.8, (168.0, 126.0), 0.0);
+        assert!(close(x.hypot(y), 207.885, 0.001) && close(y / x, 0.75, 1e-12));
+        assert_eq!(cylinder_seen_mm(852.8, (168.0, 126.0)).1, 126.0);
+    }
+
+    #[test]
+    fn convergence_quadratic() {
+        let (dx, dy) = convergence_offset_mm((0.1, -0.2), 0.5, (13.0, 9.0), (16.0, 12.0));
+        // (r / rc)^2 = 250 / 400 = 0.625, 0.3125 mm along (13, 9) / 15.8114.
+        assert!(
+            close(dx, 0.1 + 0.256_94, 1e-5) && close(dy, -0.2 + 0.177_88, 1e-5),
+            "{dx} {dy}"
+        );
     }
 
     #[test]

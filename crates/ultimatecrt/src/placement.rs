@@ -152,6 +152,68 @@ impl FrameConstants {
             ..Self::new(native, target, integer)
         }
     }
+
+    /// Grows the tube image around the placed raster by the spot's reach (T-37, review of T-36b): 4 sigma
+    /// of the spot at twice the peak current (`BEAM_REACH_CURRENT` and `BEAM_REACH_SIGMAS` of `beam.glsl`;
+    /// the tail's sigma when a tail is on) plus the largest misconvergence (static plus radial, mm), rounded
+    /// up to whole pixels, per side and per axis, limited by the target on each axis (the raster stays
+    /// centred). The beam is then evaluated over the margin, so the skirt past the raster's ends is drawn
+    /// instead of cut; `raster_margin` tells the shaders where the raster is. Unplaced constants are
+    /// returned unchanged.
+    ///
+    /// Not yet applied by `Pipeline::record` (T-37 report): with the `screen` slot bypassed, the
+    /// nearest-neighbour resample would stretch the raster over the margin, and the surround tests of
+    /// `gpu_identity` and `stage_source` check the tube rectangle without margin. Tests inject it.
+    pub fn with_skirt_margin(mut self, params: &Params) -> Self {
+        if self.px_per_mm.is_nan() || self.px_per_mm <= 0.0 {
+            return self;
+        }
+        let growth = crt_model::beam::SpotGrowth {
+            fwhm_mid: f64::from(params.beam_fwhm_mid_mm),
+            fwhm_peak: f64::from(params.beam_fwhm_peak_mm),
+            n: f64::from(params.beam_growth_exponent),
+        };
+        let mut sigma_mm = growth.fwhm(2.0).max(growth.fwhm(0.0)) / 2.354_820_045;
+        if params.beam_tail_weight > 0.0 {
+            sigma_mm *= f64::from(params.beam_tail_sigma_ratio).max(1.0);
+        }
+        let conv = |s: f32, d: f32, r: f32| f64::from(s.abs().max(d.abs()) + r.abs());
+        let conv_mm = conv(
+            params.geometry_conv_red_dx_mm,
+            params.geometry_conv_red_dy_mm,
+            params.geometry_conv_red_radial_mm,
+        )
+        .max(conv(
+            params.geometry_conv_green_dx_mm,
+            params.geometry_conv_green_dy_mm,
+            params.geometry_conv_green_radial_mm,
+        ))
+        .max(conv(
+            params.geometry_conv_blue_dx_mm,
+            params.geometry_conv_blue_dy_mm,
+            params.geometry_conv_blue_radial_mm,
+        ));
+        let want = ((4.0 * sigma_mm + conv_mm) * f64::from(self.px_per_mm)).ceil();
+        if !want.is_finite() || want <= 0.0 {
+            return self;
+        }
+        let want = want.min(4096.0) as i32;
+        let r = self.tube_rect_px;
+        let room = |lo: f32, hi: f32, size: i32| (lo as i32).min(size - hi as i32).max(0);
+        let m = [
+            want.min(room(r[0], r[2], self.target_size[0])),
+            want.min(room(r[1], r[3], self.target_size[1])),
+        ];
+        self.tube_rect_px = [
+            r[0] - m[0] as f32,
+            r[1] - m[1] as f32,
+            r[2] + m[0] as f32,
+            r[3] + m[1] as f32,
+        ];
+        self.tube_size = [self.tube_size[0] + 2 * m[0], self.tube_size[1] + 2 * m[1]];
+        self.raster_margin = m;
+        self
+    }
 }
 
 #[cfg(test)]
