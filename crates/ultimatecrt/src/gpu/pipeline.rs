@@ -1411,6 +1411,7 @@ impl Pipeline {
             have_source.then_some(s.encode_set),
             target.view,
             target.extent,
+            fc.tube_rect_px,
             settings.host,
             params,
             target.format,

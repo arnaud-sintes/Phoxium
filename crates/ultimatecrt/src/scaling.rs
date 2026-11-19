@@ -61,6 +61,62 @@ pub fn parse_divisor(s: &str) -> Result<(u32, u32), String> {
     }
 }
 
+/// What the app captures and how it recovers the native raster (T-96), resolved from the crop and
+/// divisor modes (`source_crop_mode`, `source_divisor_mode`) and the manual values (command line, else the
+/// source profile).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct SourceMap {
+    /// Capture the client area (`auto`, `manual`), else the whole window (`none`).
+    pub client_area: bool,
+    /// Manual crop rectangle inside the captured area (`manual`).
+    pub crop: Option<Rect>,
+    /// Fixed divisor (`manual`; `none` gives 1 x 1), `None` = detected.
+    pub divisor: Option<(u32, u32)>,
+}
+
+impl SourceMap {
+    /// Resolves the modes of `params` with the manual `crop` and `divisor`. A manual mode without its value
+    /// falls back to the automatic one, with a warning.
+    pub fn resolve(
+        params: &crate::params::Params,
+        crop: Option<Rect>,
+        divisor: Option<(u32, u32)>,
+    ) -> (SourceMap, Vec<String>) {
+        use crate::params::{
+            SOURCE_CROP_MODE_MANUAL, SOURCE_CROP_MODE_NONE, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_DIVISOR_MODE_NONE,
+        };
+        let mut warnings = Vec::new();
+        let (client_area, crop) = match params.source_crop_mode {
+            SOURCE_CROP_MODE_NONE => (false, None),
+            SOURCE_CROP_MODE_MANUAL => {
+                if crop.is_none() {
+                    warnings.push("crop mode manual without a crop rectangle: the client area is used".to_string());
+                }
+                (true, crop)
+            }
+            _ => (true, None),
+        };
+        let divisor = match params.source_divisor_mode {
+            SOURCE_DIVISOR_MODE_NONE => Some((1, 1)),
+            SOURCE_DIVISOR_MODE_MANUAL => {
+                if divisor.is_none() {
+                    warnings.push("divisor mode manual without a divisor: the divisor is detected".to_string());
+                }
+                divisor
+            }
+            _ => None,
+        };
+        (
+            SourceMap {
+                client_area,
+                crop,
+                divisor,
+            },
+            warnings,
+        )
+    }
+}
+
 /// Informative frames analysed before the detected divisor is locked (unless x1 is certain earlier).
 /// A flat frame (a black boot screen, a fade) is not informative and does not count.
 const DETECT_FRAMES: u32 = 30;
@@ -348,6 +404,41 @@ mod tests {
             );
         }
         assert_eq!(d.divisor(), (3, 3));
+    }
+
+    /// T-96: the crop and divisor modes. Defaults: client area, detected divisor (as before T-96).
+    #[test]
+    fn source_map_modes() {
+        use crate::params::{ParamValue, Params};
+        let r = Rect {
+            x: 1,
+            y: 2,
+            w: 30,
+            h: 40,
+        };
+        let mut p = Params::default();
+        let (m, w) = SourceMap::resolve(&p, Some(r), Some((2, 2)));
+        assert_eq!((m.client_area, m.crop, m.divisor), (true, None, None));
+        assert!(w.is_empty());
+        assert!(crate::settings::set_enum_by_name(&mut p, "source_crop_mode", "manual"));
+        assert!(crate::settings::set_enum_by_name(
+            &mut p,
+            "source_divisor_mode",
+            "manual"
+        ));
+        let (m, w) = SourceMap::resolve(&p, Some(r), Some((2, 3)));
+        assert_eq!((m.client_area, m.crop, m.divisor), (true, Some(r), Some((2, 3))));
+        assert!(w.is_empty());
+        let (m, w) = SourceMap::resolve(&p, None, None);
+        assert_eq!((m.client_area, m.crop, m.divisor), (true, None, None));
+        assert_eq!(w.len(), 2);
+        assert!(p.set(
+            "source_crop_mode",
+            ParamValue::Enum(crate::params::SOURCE_CROP_MODE_NONE)
+        ));
+        assert!(crate::settings::set_enum_by_name(&mut p, "source_divisor_mode", "none"));
+        let (m, _) = SourceMap::resolve(&p, Some(r), Some((2, 2)));
+        assert_eq!((m.client_area, m.crop, m.divisor), (false, None, Some((1, 1))));
     }
 
     #[test]

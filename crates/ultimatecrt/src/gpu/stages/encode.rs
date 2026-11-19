@@ -84,6 +84,30 @@ fn levels(format: vk::Format) -> f32 {
     }
 }
 
+/// The scissor of the encode draw (T-96): the tube rectangle (x0, y0, x1, y1 exclusive, whole pixels)
+/// intersected with the target; `None` when empty. Outside it the target keeps the clear colour.
+fn tube_scissor(r: [f32; 4], extent: vk::Extent2D) -> Option<vk::Rect2D> {
+    let clamp = |v: f32, hi: u32| {
+        if v.is_finite() {
+            v.floor().clamp(0.0, hi as f32) as u32
+        } else {
+            0
+        }
+    };
+    let (x0, y0) = (clamp(r[0], extent.width), clamp(r[1], extent.height));
+    let (x1, y1) = (clamp(r[2], extent.width), clamp(r[3], extent.height));
+    (x1 > x0 && y1 > y0).then(|| vk::Rect2D {
+        offset: vk::Offset2D {
+            x: x0 as i32,
+            y: y0 as i32,
+        },
+        extent: vk::Extent2D {
+            width: x1 - x0,
+            height: y1 - y0,
+        },
+    })
+}
+
 /// Vulkan objects of the encode stage. The graphics pipeline depends on the target format, so one is
 /// created per format on first use.
 #[derive(Default)]
@@ -143,10 +167,16 @@ impl Encode {
         set: Option<vk::DescriptorSet>,
         target: vk::ImageView,
         extent: vk::Extent2D,
+        tube_rect: [f32; 4],
         host: Transfer,
         params: &Params,
         format: vk::Format,
     ) {
+        // T-96: the surround (outside the tube rectangle) is the clear colour, `source_surround_color` as
+        // output code values (black by default); the draw is scissored to the tube rectangle.
+        let c = params
+            .source_surround_color
+            .map(|v| if v.is_finite() { v.clamp(0.0, 1.0) } else { 0.0 });
         let attachment = [vk::RenderingAttachmentInfo::default()
             .image_view(target)
             .image_layout(vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL)
@@ -154,13 +184,14 @@ impl Encode {
             .store_op(vk::AttachmentStoreOp::STORE)
             .clear_value(vk::ClearValue {
                 color: vk::ClearColorValue {
-                    float32: [0.0, 0.0, 0.0, 1.0],
+                    float32: [c[0], c[1], c[2], 1.0],
                 },
             })];
         let area = vk::Rect2D {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent,
         };
+        let scissor = tube_scissor(tube_rect, extent);
         d.cmd_begin_rendering(
             cb,
             &vk::RenderingInfo::default()
@@ -168,8 +199,8 @@ impl Encode {
                 .layer_count(1)
                 .color_attachments(&attachment),
         );
-        // Without a set (no frame decoded yet) the target is only cleared to black.
-        if let Some(set) = set {
+        // Without a set (no frame decoded yet) or an empty tube rectangle the target is only cleared.
+        if let (Some(set), Some(scissor)) = (set, scissor) {
             d.cmd_set_viewport(
                 cb,
                 0,
@@ -182,7 +213,7 @@ impl Encode {
                     max_depth: 1.0,
                 }],
             );
-            d.cmd_set_scissor(cb, 0, &[area]);
+            d.cmd_set_scissor(cb, 0, &[scissor]);
             d.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipeline);
             d.cmd_bind_descriptor_sets(cb, vk::PipelineBindPoint::GRAPHICS, self.layout, 0, &[set], &[]);
             let (transfer, gamma) = host.shader_pair();

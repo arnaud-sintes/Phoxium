@@ -51,3 +51,92 @@ tag = "D"
 source = "QUESTIONS SRC-3 and CRT.md Scanline structure: lines = source rows x multiplier (1 for 240p, 2 for double-scanned 200-line VGA modes), no row resampling"
 description = "Scanlines drawn per source row: 1 for ordinary rasters, 2 for double-scanned modes. The scanline pitch is the raster height over source rows x line_multiplier, so 2 halves it."
 group = "Source"
+
+# T-96 (PLAN D-13, D-18): how the captured source is mapped to the host output. Read by the CPU placement code
+# (src/placement.rs) and the application (src/app.rs: crop and divisor); stored per source profile (settings).
+
+[[param]]
+id = "source_scale_mode"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "tube"
+values = ["tube", "native", "integer", "fit", "fit_free"]
+tag = "E"
+source = "PLAN D-13 and D-18 (owner decisions 2026-11-19): scale modes of the source on any host monitor, QUESTIONS OUT-7"
+description = "How large the picture is in the output. tube: sized by the tube (visible height, aspect and height fraction), the physical default. native: one source row = one host pixel, centred (true 1:1). integer: source_scale host pixels per source row (0 = the largest whole factor that fits). fit: the largest whole factor that fits, below 1 a free fit. fit_free: the largest non-integer scale that fits, aspect kept (breaks the scanline and mask alignment with the host pixels). In every mode but tube the host px per mm follows from the picture height over the raster height in mm, so the mask pitch in px per triad scales with the picture."
+group = "Source"
+
+[[param]]
+id = "source_scale"
+stage = "source"
+type = "i32"
+unit = "1"
+default = 0
+min = 0
+max = 10
+tag = "E"
+source = "PLAN D-13 (owner decision 2026-11-19): integer scale x1 to x10, 0 = automatic"
+description = "Host pixels per source row in the integer scale mode: 0 = the largest whole factor that fits the output, 1 to 10 manual (reduced to the largest that fits when the output is too small, reported in the readout)."
+group = "Source"
+
+[[param]]
+id = "source_center"
+stage = "source"
+type = "bool"
+unit = "1"
+default = true
+tag = "E"
+source = "PLAN D-13 (owner decision 2026-11-19): centring with black rectangles around the game zone"
+description = "Centre the picture in the output (letterbox or pillarbox). Off: aligned to the top-left corner (debugging)."
+group = "Source"
+
+[[param]]
+id = "source_surround_color"
+stage = "source"
+type = "vec3"
+unit = "1"
+default = [0.0, 0.0, 0.0]
+min = 0.0
+max = 1.0
+tag = "E"
+source = "PLAN D-13 (owner decision 2026-11-19): black rectangles around the game zone by default"
+description = "Colour of the output outside the tube rectangle, as output code values (0 to 1 per channel, red green blue). Black by default."
+group = "Source"
+
+[[param]]
+id = "source_display_aspect"
+stage = "source"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 4.0
+tag = "E"
+source = "CRT.md Pixel aspect ratio and QUESTIONS SRC-4: a source shown at a forced display aspect (4:3 = 1.3333) whatever its pixel count"
+description = "Forced display aspect of the picture (width over height, 4:3 = 1.3333). 0 = off: the aspect comes from source_par (raster_aspect par) or the tube (fill_tube, which wins)."
+group = "Source"
+
+[[param]]
+id = "source_crop_mode"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "auto"
+values = ["auto", "manual", "none"]
+tag = "E"
+source = "QUESTIONS SRC-1 and PLAN D-13: the client area of the window by default, a manual rectangle (--crop or the source profile), or the whole window"
+description = "Which part of the captured window is the source. auto: the client area. manual: the crop rectangle of the command line or of the source profile, inside the client area. none: the whole window, frame included."
+group = "Source"
+
+[[param]]
+id = "source_divisor_mode"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "auto"
+values = ["auto", "manual", "none"]
+tag = "E"
+source = "QUESTIONS SRC-2 and PLAN D-13: integer upscale of the source detected (src/scaling.rs), given (--divisor or the source profile), or none"
+description = "How the native raster is recovered from an upscaled source. auto: the integer factor is detected from the first informative frames. manual: the divisor of the command line or of the source profile. none: the captured pixels are the native raster (divisor 1)."
+group = "Source"

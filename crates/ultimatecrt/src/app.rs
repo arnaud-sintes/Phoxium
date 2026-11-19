@@ -7,7 +7,7 @@ use windows::Win32::{
     UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
 };
 
-use crate::{capture, cli, diag, gpu, lifecycle, output, scaling, source, sources, Res};
+use crate::{capture, cli, diag, gpu, lifecycle, output, placement, scaling, settings, source, sources, Res};
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
@@ -59,11 +59,14 @@ pub fn run() -> Res<()> {
 
     let kind = source::Source::choose(args.pattern.as_deref(), args.pattern_size, args.image.as_deref())?;
     // T-50: --preset (else the settings preset), then the settings overrides; an unknown preset stops here.
-    let params = crate::render_cmd::live_params(args.preset.as_deref())?;
+    let mut params = crate::render_cmd::live_params(args.preset.as_deref())?;
     let synthetic = !matches!(kind, source::Source::Capture);
     let mut synthetic_n = 0u64;
-    let (mut capture, follow, mut reattach) = if synthetic {
-        (None, windows::Win32::Foundation::HWND::default(), None)
+    // T-96: the source profile of the target (executable and class) applies on top of the preset and the
+    // global overrides, the command-line options on top of the profile.
+    let mut profile = settings::SourceProfile::default();
+    let found = if synthetic {
+        None
     } else {
         let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
         let source = sources::find_by_title(&needle)
@@ -72,12 +75,36 @@ pub fn run() -> Res<()> {
             "source: \"{}\" ({}x{}, class {})",
             source.title, source.width, source.height, source.class
         );
-        let capture = capture::Capture::start(source.hwnd, !args.no_crop)?;
-        println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
         // Follows the target across closes and relaunches (T-56): same executable and class.
         let target = lifecycle::TargetKey::of(&sources::WindowEntry::from_info(&source));
-        let reattach = lifecycle::Reattacher::new(target, source.hwnd.0 as isize);
-        (Some(capture), source.hwnd, Some(reattach))
+        if let (Some((exe, class)), Some(dir)) = (target.profile_key(), settings::default_dir()) {
+            if let Some(p) = settings::load(&dir).settings.find_source(exe, class) {
+                println!("source profile: {exe} ({class})");
+                profile = p.clone();
+                for w in profile.apply_to(&mut params) {
+                    eprintln!("warning: {w}");
+                }
+            }
+        }
+        Some((source, target))
+    };
+    args.apply_source(&mut params)?;
+    let (map, warnings) = scaling::SourceMap::resolve(
+        &params,
+        args.crop.or(profile.crop_rect()),
+        args.divisor.or(profile.divisor_pair()),
+    );
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
+    let (mut capture, follow, mut reattach) = match found {
+        None => (None, windows::Win32::Foundation::HWND::default(), None),
+        Some((source, target)) => {
+            let capture = capture::Capture::start(source.hwnd, map.client_area)?;
+            println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
+            let reattach = lifecycle::Reattacher::new(target, source.hwnd.0 as isize);
+            (Some(capture), source.hwnd, Some(reattach))
+        }
     };
     // Next frame of the source: the capture, or a pattern or image (static ones only once).
     let mut poll = |capture: Option<&capture::Capture>, frame: &mut capture::Frame| -> Res<bool> {
@@ -117,7 +144,15 @@ pub fn run() -> Res<()> {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
-    let scale = (900 / frame.height.max(1)).max(1) as i32;
+    // Initial windowed size (D-18: no assumed host resolution): the largest whole multiple of the frame
+    // within 5/6 of the height and the width of the chosen (else the first) monitor.
+    let monitors = output::monitor_rects();
+    let screen = monitors
+        .get(args.monitor.unwrap_or(0))
+        .or(monitors.first())
+        .map_or((1280, 720), |r| (r.right - r.left, r.bottom - r.top));
+    let fit = |avail: i32, size: u32| (avail.max(1) as u32 * 5 / 6) / size.max(1);
+    let scale = fit(screen.1, frame.height).min(fit(screen.0, frame.width)).max(1) as i32;
     let win = output::create(&output::Options {
         fullscreen: args.fullscreen,
         no_activate: args.no_activate,
@@ -169,6 +204,7 @@ pub fn run() -> Res<()> {
     // Lost source (T-56): reminders, then a fullscreen output drops to a window, or the app exits.
     let mut lost_watch = lifecycle::LostWatch::new(args.lost, args.fullscreen);
     let windowed_size = (frame.width as i32 * scale, frame.height as i32 * scale);
+    let mut readout_key = ((0u32, 0u32), (0u32, 0u32));
     loop {
         if !output::pump() {
             break;
@@ -188,7 +224,7 @@ pub fn run() -> Res<()> {
                 }
                 lifecycle::Step::TryAttach(hwnd) => {
                     let h = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
-                    match capture::Capture::start(h, !args.no_crop) {
+                    match capture::Capture::start(h, map.client_area) {
                         Ok(c) => {
                             capture = Some(c);
                             r.attach_result(now, hwnd, true);
@@ -241,13 +277,13 @@ pub fn run() -> Res<()> {
                 w: frame.width,
                 h: frame.height,
             };
-            let region = args.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
-            let key = (frame.width, frame.height, args.crop);
+            let region = map.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
+            let key = (frame.width, frame.height, map.crop);
             if key != detect_key {
                 detect_key = key;
                 detector.reset();
             }
-            let div = match args.divisor.or(synthetic.then_some((1, 1))) {
+            let div = match map.divisor.or(synthetic.then_some((1, 1))) {
                 Some(d) => d,
                 None => {
                     let was_locked = detector.is_locked();
@@ -273,7 +309,7 @@ pub fn run() -> Res<()> {
             // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
             // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
             // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
-            let eligible = capture.is_some() && args.divisor.is_none() && detector.is_locked() && div == (1, 1);
+            let eligible = capture.is_some() && map.divisor.is_none() && detector.is_locked() && div == (1, 1);
             if smoothing.feed(&frame.data, frame.width, region, eligible) {
                 println!("warning: {}", lifecycle::SMOOTHED_WARNING);
             }
@@ -283,8 +319,14 @@ pub fn run() -> Res<()> {
         if size_watch.take_history_clear() {
             renderer.clear_history();
         }
-        renderer.render(upload, view, output::client_size(win.hwnd))?;
+        let out_size = output::client_size(win.hwnd);
+        renderer.render(upload, view, out_size)?;
         fresh = false;
+        // T-96: the resolved placement, printed with --stats when the native raster or the output changes.
+        if args.stats && (view.native, out_size) != readout_key {
+            readout_key = (view.native, out_size);
+            println!("{}", placement::readout(&params, view.native, out_size, args.integer));
+        }
         renders += 1;
         if let Some(l) = log.as_mut() {
             l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
