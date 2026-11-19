@@ -26,7 +26,8 @@ pub struct Live {
     /// Id of the preset in force, `None` when the parameters are the table defaults or a preset file.
     current_preset: Option<String>,
     bypass_saved: Option<SlotFlags>,
-    /// The settings as loaded; only `global.output.windowed` is written back (on F11 and at exit).
+    /// The settings as loaded, the one instance of the session; `global.output.windowed` (on F11 and at exit)
+    /// and `global.ui` (the menu layout, [`Live::set_ui_layout`]) are written back.
     settings: Settings,
     settings_dir: Option<PathBuf>,
     /// Outer size of the framed window when nothing is remembered (the initial client size plus the frame).
@@ -77,13 +78,13 @@ impl Live {
     ) {
         for action in output::take_actions() {
             if let Some(command) = controls::dispatch(action, &mut self.controls, ui) {
-                self.run(command, ui, hwnd, renderer, params, lost);
+                self.run(command, hwnd, renderer, params, lost);
             }
         }
         if output::take_display_changed() {
             let monitors = output::monitor_irects();
             if let Some(p) = self.mode.display_change(output::outer_rect(hwnd), &monitors) {
-                output::apply_placement(hwnd, &p, !ui.menu_open());
+                output::apply_placement(hwnd, &p);
                 println!("output: monitors changed, {}", describe(&p, &monitors));
             }
         }
@@ -99,7 +100,6 @@ impl Live {
     fn run(
         &mut self,
         command: Command,
-        ui: &dyn UiHook,
         hwnd: HWND,
         renderer: &mut gpu::Renderer,
         params: &mut Params,
@@ -146,11 +146,48 @@ impl Live {
                     &monitors,
                     self.default_outer,
                 );
-                // Non-activating in both modes, except while the settings menu is open (it needs the focus).
-                output::apply_placement(hwnd, &placement, !ui.menu_open());
+                // Non-activating in both modes, except while the settings menu is open (it needs the focus):
+                // `output::sync_activation` decides, so F11 works with the menu open or closed.
+                output::apply_placement(hwnd, &placement);
                 lost.set_fullscreen(matches!(placement, Placement::Fullscreen { .. }));
                 println!("output: {}", describe(&placement, &monitors));
                 self.save_window_rect();
+            }
+        }
+    }
+
+    /// The settings of the session: the one instance the hotkeys, the window rectangle and the menu layout
+    /// share (the menu reads its layout and menu key from it, and writes the layout back with
+    /// [`Live::set_ui_layout`]).
+    pub fn settings(&self) -> &Settings {
+        &self.settings
+    }
+
+    /// The presets the hotkeys step through (the menu lists the same ones).
+    pub fn library(&self) -> &Library {
+        &self.library
+    }
+
+    /// Id of the preset in force (stepped by the hotkeys or selected in the menu).
+    pub fn current_preset(&self) -> Option<&str> {
+        self.current_preset.as_deref()
+    }
+
+    /// The menu selected a preset: the next preset hotkey steps from it.
+    pub fn set_current_preset(&mut self, id: Option<String>) {
+        self.current_preset = id;
+    }
+
+    /// The menu layout changed (the menu closed after a move, resize or opacity change): kept in the shared
+    /// settings and written to the file. A failure is a warning, never an error.
+    pub fn set_ui_layout(&mut self, layout: settings::UiState) {
+        if layout == self.settings.global.ui {
+            return;
+        }
+        self.settings.global.ui = layout;
+        if let Some(dir) = &self.settings_dir {
+            if let Err(e) = settings::save(dir, &self.settings) {
+                eprintln!("warning: cannot save the menu layout: {e}");
             }
         }
     }

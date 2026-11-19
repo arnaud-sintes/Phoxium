@@ -43,6 +43,9 @@ fn default_version() -> u32 {
 pub struct UiState {
     pub menu_x: f32,
     pub menu_y: f32,
+    /// Size of the settings menu window in output pixels (T-52a).
+    pub menu_w: f32,
+    pub menu_h: f32,
     pub menu_opacity: f32,
     pub menu_collapsed: bool,
 }
@@ -52,6 +55,8 @@ impl Default for UiState {
         Self {
             menu_x: 20.0,
             menu_y: 20.0,
+            menu_w: 460.0,
+            menu_h: 560.0,
             menu_opacity: 0.9,
             menu_collapsed: false,
         }

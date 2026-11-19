@@ -3,7 +3,8 @@
 //! Every frame in flight has its own timestamp query pool. The pipeline writes one timestamp
 //! (`vkCmdWriteTimestamp2`, `ALL_COMMANDS`) before the frame's first command, one after every segment
 //! that was recorded and one at the end of the command buffer. The segments, in recording order, are
-//! `upload` (staged frame or injected image copy), `decode`, every chain slot, `encode`. Because the
+//! `upload` (staged frame or injected image copy), `decode`, every chain slot, `encode`, `ui` (the settings
+//! menu and overlay pass of T-52a, recorded only while one of them is shown). Because the
 //! marks are chained, the time of a segment is the difference to the previous written mark, so the sum
 //! of the segments never exceeds the frame time; the rest of the frame (target barriers, the readback
 //! copies of a headless frame) is in the frame time only.
@@ -220,7 +221,7 @@ struct TimerSlot {
 
 /// The timestamp queries of the pipeline (one pool per frame slot).
 pub(super) struct GpuTimer {
-    /// Segment names in recording order: `upload`, `decode`, the chain slots, `encode`.
+    /// Segment names in recording order: `upload`, `decode`, the chain slots, `encode`, `ui`.
     names: Vec<&'static str>,
     ms_per_tick: f64,
     mask: u64,
@@ -245,6 +246,7 @@ impl GpuTimer {
         let mut names = vec!["upload", "decode"];
         names.extend(chain);
         names.push("encode");
+        names.push("ui");
         Self {
             names,
             ms_per_tick: 0.0,
@@ -257,6 +259,11 @@ impl GpuTimer {
 
     /// Segment index of `encode`.
     pub fn encode(&self) -> usize {
+        self.names.len() - 2
+    }
+
+    /// Segment index of the UI pass (T-52a), after `encode`; not recorded while the UI is hidden.
+    pub fn ui(&self) -> usize {
         self.names.len() - 1
     }
 

@@ -3,9 +3,8 @@
 //! (`live.rs`), [`step_preset`] picks the next or previous preset, [`bypass_plan`] decides the chain slot flags
 //! of the A/B bypass.
 //!
-//! The settings menu and the overlay (T-52a, T-52b) are reached through [`UiHook`]. `ui::Ui` implements it
-//! (see the README of the T-54 report: `request_toggle`, `toggle_overlay`, `is_open`, `wants_input`); until it
-//! exists the application uses [`NoUi`].
+//! The settings menu and the overlay (T-52a, T-52b) are reached through [`UiHook`], which `ui::Ui` implements
+//! (`request_toggle`, `toggle_overlay`, `is_open`, `wants_input`). [`NoUi`] is the stand-in of the unit tests.
 
 use crate::{
     hotkeys::Action,
@@ -27,7 +26,7 @@ pub trait UiHook {
     fn wants_input(&self) -> bool;
 }
 
-/// A stand-in for the UI until `ui::Ui` is wired in: the menu never opens and the overlay does nothing.
+/// A stand-in for the UI (tests, code without a window): the menu never opens and the overlay does nothing.
 #[derive(Default)]
 pub struct NoUi;
 

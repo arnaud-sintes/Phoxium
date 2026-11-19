@@ -8,8 +8,8 @@ use windows::Win32::{
 };
 
 use crate::{
-    capture, cli, controls, diag, gpu, hotkeys, lifecycle, live, modes, output, placement, presets, scaling, settings,
-    source, sources, Res,
+    capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output, placement, presets, scaling, settings, source,
+    sources, Res,
 };
 
 const NO_FRAME: &str =
@@ -221,7 +221,7 @@ pub fn run() -> Res<()> {
     let mut lost_watch = lifecycle::LostWatch::new(args.lost, args.fullscreen);
     let windowed_size = (frame.width as i32 * scale, frame.height as i32 * scale);
     let mut readout_key = ((0u32, 0u32), (0u32, 0u32));
-    // Hotkey actions and output modes (T-54, T-57). `ui` is the stand-in until `ui::Ui` implements `UiHook`.
+    // Hotkey actions and output modes (T-54, T-57). `live` owns the one settings instance of the session.
     let library = presets::Library::load(settings_dir.as_deref().map(presets::user_dir).as_deref());
     let current_preset = args
         .preset
@@ -229,7 +229,6 @@ pub fn run() -> Res<()> {
         .or(Some(stored.global.preset.as_str()).filter(|p| !p.is_empty()))
         .and_then(|id| library.find(id))
         .map(|p| p.id.clone());
-    let mut ui = controls::NoUi;
     let mut live = live::Live::new(
         args.fullscreen,
         stored,
@@ -238,6 +237,21 @@ pub fn run() -> Res<()> {
         current_preset,
         output::default_outer_size(windowed_size),
     );
+    // T-52a: the settings menu and the stats overlay, drawn over the output, reached by the hotkeys through
+    // `controls::UiHook`. Created after the renderer's device, dropped before it (declared after it, and
+    // dropped explicitly at the end of `run`). Its layout, menu key and presets come from `live`.
+    let mut ui = crate::ui::Ui::new(
+        renderer.context(),
+        renderer.output_format(),
+        crate::ui::UiConfig::live(
+            win.hwnd.0 as isize,
+            follow.0 as isize,
+            live.settings(),
+            live.library().clone(),
+            &win.hotkeys,
+        ),
+    )?;
+    let mut ui_state = crate::ui::UiState::default();
     loop {
         if !output::pump() {
             break;
@@ -265,6 +279,7 @@ pub fn run() -> Res<()> {
                         Ok(c) => {
                             capture = Some(c);
                             r.attach_result(now, hwnd, true);
+                            ui.set_source(Some(hwnd));
                             frame.seq = 0; // the new session counts from 1
                             health.reset(now);
                             size_watch.request_history_clear();
@@ -358,7 +373,37 @@ pub fn run() -> Res<()> {
             renderer.clear_history();
         }
         let out_size = output::client_size(win.hwnd);
-        renderer.render(upload, view, out_size)?;
+        // T-52a: the menu's input, what the menu and the overlay show, and what the user changed.
+        for (m, w, l) in output::take_ui_messages() {
+            ui.handle_win32_message(m, w, l);
+        }
+        if ui.is_open() || ui.overlay_on() {
+            ui_state.params = params;
+            // The preset in force, also when a preset hotkey stepped to it.
+            ui_state.preset = live.current_preset().map(str::to_string);
+            ui_state.headroom = renderer.headroom();
+            ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
+        }
+        let changes = ui.frame(&ui_state);
+        if let Some(mut p) = changes.params {
+            if changes.preset.is_some() {
+                // A new preset: the source profile and the command-line options apply on top again.
+                for w in profile.apply_to(&mut p) {
+                    eprintln!("warning: {w}");
+                }
+                args.apply_source(&mut p)?;
+                // The preset hotkeys step on from the preset chosen in the menu.
+                live.set_current_preset(changes.preset.clone());
+                ui_state.preset = changes.preset;
+            }
+            params = p;
+            renderer.set_params(params);
+        }
+        // The menu layout, once the menu closed after a change: into the shared settings and the file.
+        if let Some(layout) = ui.take_layout_change() {
+            live.set_ui_layout(layout);
+        }
+        renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
         fresh = false;
         // T-96: the resolved placement, printed with --stats when the native raster or the output changes.
         if args.stats && (view.native, out_size) != readout_key {
@@ -402,6 +447,11 @@ pub fn run() -> Res<()> {
             if let Some(l) = log.as_mut() {
                 l.second(captured - last_captured, renders, secs, gpu.as_ref())?;
             }
+            (ui_state.timings, ui_state.capture_fps, ui_state.render_fps) = (
+                gpu.clone(),
+                (captured - last_captured) as f64 / secs,
+                renders as f64 / secs,
+            );
             output::set_title(
                 win.hwnd,
                 &format!(
@@ -437,10 +487,17 @@ pub fn run() -> Res<()> {
             last_captured = captured;
         }
     }
+    // A menu still open at exit gives the foreground back and its layout is saved with the window rectangle.
+    ui.close_menu();
+    if let Some(layout) = ui.take_layout_change() {
+        live.set_ui_layout(layout);
+    }
     live.finish(win.hwnd);
     if let Some(l) = log.as_mut() {
         l.summary();
     }
+    // The UI first: its ImGui renderer lives on the renderer's device (T-52a).
+    drop(ui);
     drop(renderer);
     drop(capture);
     Ok(())

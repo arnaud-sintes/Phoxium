@@ -66,6 +66,9 @@ $third = @('# Third-party licences', '',
     'Crates built into or with ultimateCRT, with the licence expression they declare (from `cargo metadata`).', '',
     '| Crate | Version | Licence |', '|---|---|---|')
 foreach ($r in $rows) { $third += "| $($r.name) | $($r.version) | $($r.license) |" }
+# Upstream notices the crate packages do not carry (Dear ImGui and cimgui, T-52a), from the repository file.
+$third += ''
+$third += (Get-Content (Join-Path $root 'THIRD-PARTY.md') -Encoding UTF8)
 
 $name = "ultimatecrt-v$version-windows-x64"
 $stage = Join-Path $root "dist\$name"

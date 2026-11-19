@@ -21,6 +21,7 @@ pub mod scaling;
 pub mod settings;
 pub mod source;
 pub mod sources;
+pub mod ui;
 pub mod white;
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;

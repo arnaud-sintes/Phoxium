@@ -3,7 +3,8 @@
 //!
 //! Modules: `context` (instance, device choice, queue; with or without a window), `present`
 //! (one `Presenter` per window), `pipeline` (the stage chain, its images and frames in flight),
-//! `stages` (one module per stage). `Renderer` is the facade used by the application.
+//! `stages` (one module per stage), `ui_render` (the settings menu and overlay pass after `encode`,
+//! T-52a). `Renderer` is the facade used by the application.
 //! `headless` runs the same pipeline into an offscreen image and reads it back, without any window
 //! (tests).
 
@@ -20,8 +21,10 @@ mod pipeline;
 mod present;
 mod stages;
 mod timing;
+mod ui_render;
 
 pub use timing::{csv_columns, FrameTimings, StageTiming, TimingAverager};
+pub use ui_render::UiPass;
 
 pub use context::{gpu_required, validation_layer_available, ValidationCounter};
 pub use context::{list_gpus, Context, GpuInfo};
@@ -100,6 +103,30 @@ impl Renderer {
     /// is out of date (the frame is then not drawn but kept for the next call), so the caller may
     /// consider it consumed once this returns `Ok`.
     pub fn render(&mut self, frame: Option<(u32, u32, &[u8])>, view: View, client: (u32, u32)) -> Res<()> {
+        self.render_with_ui(frame, view, client, None)
+    }
+
+    /// The Vulkan context (device, queue, chosen GPU): the settings menu (`crate::ui::Ui`) creates its
+    /// renderer on it, and must be dropped before the renderer.
+    pub fn context(&self) -> &Context {
+        &self.ctx
+    }
+
+    /// Format of the swapchain images (`B8G8R8A8_UNORM` or `R8G8B8A8_UNORM`, A7): the UI renderer is created
+    /// for it.
+    pub fn output_format(&self) -> vk::Format {
+        self.presenter.format()
+    }
+
+    /// [`Renderer::render`] with the settings menu and overlay (T-52a) drawn over the output after `encode`,
+    /// when `ui` has something to draw; nothing more is recorded otherwise.
+    pub fn render_with_ui(
+        &mut self,
+        frame: Option<(u32, u32, &[u8])>,
+        view: View,
+        client: (u32, u32),
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<()> {
         let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
         // SAFETY: every handle used below belongs to `self.ctx`. `wait_slot` guarantees the slot's
         // previous submission finished, so its command buffer, staging and uniform buffers and its
@@ -135,7 +162,7 @@ impl Renderer {
             let Some(index) = self.presenter.acquire(&self.ctx, client, acquired)? else {
                 return Ok(());
             };
-            if let Err(e) = self.draw(index, acquired, view, client) {
+            if let Err(e) = self.draw(index, acquired, view, client, ui) {
                 self.recover_after_acquire(slot, client);
                 return Err(e);
             }
@@ -147,7 +174,14 @@ impl Renderer {
     ///
     /// # Safety
     /// As [`Renderer::render`]; `index` was acquired with `acquired` as its semaphore.
-    unsafe fn draw(&mut self, index: u32, acquired: vk::Semaphore, view: View, client: (u32, u32)) -> Res<()> {
+    unsafe fn draw(
+        &mut self,
+        index: u32,
+        acquired: vk::Semaphore,
+        view: View,
+        client: (u32, u32),
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<()> {
         let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
         let target = Target {
             image: self.presenter.image(index),
@@ -155,7 +189,7 @@ impl Renderer {
             extent: self.presenter.extent(),
             format: self.presenter.format(),
         };
-        let cb = pipeline.record(&self.ctx, view, &self.settings, &self.params, &target)?;
+        let cb = pipeline.record_ui(&self.ctx, view, &self.settings, &self.params, &target, ui)?;
         barrier(
             &self.ctx.device,
             cb,
@@ -246,7 +280,7 @@ impl Renderer {
         self.pipeline.as_ref().and_then(Pipeline::timing_unavailable)
     }
 
-    /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`.
+    /// Names of the timed segments in order: `upload`, `decode`, the chain slots, `encode`, `ui`.
     pub fn timing_names(&self) -> Vec<&'static str> {
         self.pipeline.as_ref().map(Pipeline::timing_names).unwrap_or_default()
     }
