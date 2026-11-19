@@ -23,7 +23,7 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 
 | Path | Role |
 |---|---|
-| `crates/pixel-demo` | Demo source app (Win32 and GDI). Procedural NES-style scene, test card, PNG display. It is the capture target for development and tests. |
+| `crates/pixel-demo` | Demo source app (Win32 and GDI), the stand-in game (D-13). Emulates how a game presents its native surface (1:1, integer, autofit, filtered fit, stretch; native presets, PAR, centring with plain or patterned bars, resizable or fixed window), with scene, test card, grid, patterns, PNG, corner markers and a frame counter, driven by options or keys. Pure layout in `layout.rs`. It is the capture target for development and tests. |
 | `crates/ultimatecrt` | The main application. |
 | `crates/crt-model` | The f64 CPU oracle of the physics (gun, beam, mask, geometry, ABL, phosphor, output, tube, units): the reference the GPU tests compare against. A regular dependency of `ultimatecrt` (placement, white retune, preset checks). |
 | `shaders/` | GLSL 450 sources (`*.vert`, `*.frag`, `*.comp`, `include/*.glsl`), compiled to SPIR-V by `crates/ultimatecrt/build.rs`. |

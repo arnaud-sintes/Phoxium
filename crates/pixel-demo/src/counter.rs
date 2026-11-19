@@ -149,4 +149,33 @@ mod tests {
         }
         assert_eq!(decode_frame(&frame, fw, fh, lay.dest, nw, nh), Some(0x0123_4567));
     }
+
+    #[test]
+    fn decode_survives_a_stretched_capture_with_markers() {
+        // Non-integer, aspect-breaking stretch (nearest), markers drawn before the counter.
+        let (nw, nh) = (256usize, 240usize);
+        let mut native = vec![0u32; nw * nh];
+        crate::patterns::draw_markers(&mut native, nw, nh);
+        draw(&mut native, nw, nh, 0x00AB_CDEF);
+        let (fw, fh) = (1001usize, 333usize);
+        let lay = layout(
+            fw as u32,
+            fh as u32,
+            nw as u32,
+            nh as u32,
+            Par::SQUARE,
+            ScaleMode::Stretch,
+            Align::Center,
+        );
+        assert_eq!(lay.dest, Rect::new(0, 0, fw as i32, fh as i32));
+        let frame: Vec<u32> = (0..fw * fh)
+            .map(|i| {
+                let (x, y) = (i % fw, i / fw);
+                native[(y * nh / fh) * nw + x * nw / fw]
+            })
+            .collect();
+        assert_eq!(decode_frame(&frame, fw, fh, lay.dest, nw, nh), Some(0x00AB_CDEF));
+        // The bottom-right capture pixel is the yellow marker.
+        assert_eq!(frame[fw * fh - 1], crate::patterns::MARKER_COLORS[3]);
+    }
 }

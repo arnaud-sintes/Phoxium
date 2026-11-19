@@ -1,7 +1,9 @@
 //! pixel-demo: a Win32 window showing a low-resolution pixel-art source. It is the universal test
-//! source used to develop ultimatecrt: 1:1, integer, auto-fit and filtered free-fit display,
-//! centring with bars, window modes, DPI handling, several test contents with a frame counter,
-//! and a high-resolution update clock. Run `pixel-demo --help` for the options and keys.
+//! source used to develop ultimatecrt: it emulates how a game presents its native surface (1:1,
+//! integer, auto-fit, filtered fit and stretch), centring with plain or patterned bars, window
+//! modes, DPI handling, native size presets, several test contents with corner markers and a frame
+//! counter, keyboard control, and a high-resolution update clock. Run `pixel-demo --help` for the
+//! options and keys.
 
 mod art;
 mod clock;
@@ -26,9 +28,10 @@ use windows::{
         Graphics::{
             Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND},
             Gdi::{
-                BeginPaint, CreateSolidBrush, EndPaint, FillRect, GetMonitorInfoW, InvalidateRect, MonitorFromWindow,
-                SetDIBitsToDevice, SetStretchBltMode, StretchDIBits, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER,
-                COLORONCOLOR, DIB_RGB_COLORS, HBRUSH, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+                BeginPaint, CreateDIBPatternBrushPt, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
+                GetMonitorInfoW, InvalidateRect, MonitorFromWindow, SetDIBitsToDevice, SetStretchBltMode,
+                StretchDIBits, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, COLORONCOLOR, DIB_RGB_COLORS, HBRUSH,
+                HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
             },
         },
         System::{
@@ -47,10 +50,12 @@ use windows::{
 
 use layout::{Align, Layout, Par, ScaleMode};
 use options::{Content, Options, Parsed};
+use patterns::BarPattern;
 use resample::Filter;
 
 const VK_ESCAPE: u32 = 0x1B;
 const VK_SPACE: u32 = 0x20;
+const VK_RETURN: u32 = 0x0D;
 const CREATE_WAITABLE_TIMER_HIGH_RESOLUTION: u32 = 0x2;
 const TIMER_ALL_ACCESS: u32 = 0x1F_0003;
 
@@ -69,7 +74,9 @@ struct App {
     scaled: Vec<u32>,
     scaled_dims: (usize, usize),
     scaled_valid: bool,
+    /// Bar brush (solid or pattern) and, for a pattern, the packed DIB it was made from.
     brush: HBRUSH,
+    brush_dib: Vec<u32>,
     /// Saved style and placement while fullscreen.
     saved: Option<(isize, WINDOWPLACEMENT)>,
     stat_start: Instant,
@@ -112,6 +119,7 @@ fn main() {
     let mut contents = vec![
         Content::Scene,
         Content::Card,
+        Content::Grid,
         Content::Bars,
         Content::Ramp,
         Content::Checker,
@@ -154,9 +162,9 @@ fn main() {
         };
         RegisterClassW(&class);
 
-        let bgr = ((o.bg & 0xFF) << 16) | (o.bg & 0xFF00) | ((o.bg >> 16) & 0xFF);
+        let (brush, brush_dib) = make_brush(o.bg, o.bars_pattern);
         let now = Instant::now();
-        let borderless = o.borderless;
+        let (borderless, fixed_size) = (o.borderless, o.fixed_size);
         let (fullscreen, maximised, no_round, fps, exit_after, stats) = (
             o.fullscreen,
             o.maximised,
@@ -180,7 +188,8 @@ fn main() {
                 scaled: Vec::new(),
                 scaled_dims: (0, 0),
                 scaled_valid: false,
-                brush: CreateSolidBrush(COLORREF(bgr)),
+                brush,
+                brush_dib,
                 saved: None,
                 stat_start: now,
                 stat_ticks: 0,
@@ -191,7 +200,7 @@ fn main() {
             *a.borrow_mut() = Some(app);
         });
 
-        let style = base_style(borderless);
+        let style = base_style(borderless, fixed_size);
         let (ww, wh) = outer_size(cw, ch, style, GetDpiForSystem());
         let hwnd = CreateWindowExW(
             WINDOW_EX_STYLE(0),
@@ -238,14 +247,16 @@ fn fail(msg: &str) -> ! {
 
 fn mode_text(o: &Options) -> String {
     match o.mode {
-        ScaleMode::Native => "mode native (1:1)".into(),
-        ScaleMode::Integer(n) => format!("mode integer x{n}"),
-        ScaleMode::Fit => "mode fit".into(),
-        ScaleMode::FitFree => format!("mode fit-free ({})", o.filter.name()),
+        ScaleMode::Native => "present 1to1".into(),
+        ScaleMode::Integer(n) => format!("present integer x{n}"),
+        ScaleMode::Fit => "present autofit".into(),
+        ScaleMode::FitFree | ScaleMode::Stretch => {
+            format!("present {} ({})", o.mode.present_name(), o.filter.name())
+        }
     }
 }
 
-/// Initial client size: `--window-size`, else the picture at its scale (3 for the fit modes).
+/// Initial client size: `--window`, else the picture at its scale (3 for the other modes).
 fn initial_client(o: &Options) -> (u32, u32) {
     if let Some(s) = o.window_size {
         return s;
@@ -254,8 +265,48 @@ fn initial_client(o: &Options) -> (u32, u32) {
     match o.mode {
         ScaleMode::Native => (nw, nh),
         ScaleMode::Integer(n) => layout::client_for_scale(nw, nh, o.par, n),
-        ScaleMode::Fit | ScaleMode::FitFree => layout::client_for_scale(nw, nh, o.par, 3),
+        ScaleMode::Fit | ScaleMode::FitFree | ScaleMode::Stretch => layout::client_for_scale(nw, nh, o.par, 3),
     }
+}
+
+/// Bar brush: solid `bg`, or a pattern brush built from a packed 32 bit DIB that is
+/// returned with it (kept alive as long as the brush).
+fn make_brush(bg: u32, pattern: BarPattern) -> (HBRUSH, Vec<u32>) {
+    let solid = || {
+        let bgr = ((bg & 0xFF) << 16) | (bg & 0xFF00) | ((bg >> 16) & 0xFF);
+        unsafe { CreateSolidBrush(COLORREF(bgr)) }
+    };
+    let Some((w, h, px)) = patterns::bar_tile(pattern, bg) else {
+        return (solid(), Vec::new());
+    };
+    // Bottom-up (positive height): the safe layout for pattern brushes; the tiles do not care.
+    let mut header = dib_header(w, h).bmiHeader;
+    header.biHeight = h as i32;
+    let words = size_of::<BITMAPINFOHEADER>() / 4;
+    let mut dib = vec![0u32; words + px.len()];
+    // SAFETY: the header is plain data of `words * 4` bytes, copied into the start of `dib`.
+    unsafe {
+        std::ptr::copy_nonoverlapping(
+            &header as *const BITMAPINFOHEADER as *const u8,
+            dib.as_mut_ptr() as *mut u8,
+            size_of::<BITMAPINFOHEADER>(),
+        );
+    }
+    dib[words..].copy_from_slice(&px);
+    match unsafe { CreateDIBPatternBrushPt(dib.as_ptr() as *const c_void, DIB_RGB_COLORS) } {
+        b if !b.is_invalid() => (b, dib),
+        _ => (solid(), Vec::new()),
+    }
+}
+
+/// Replaces the bar brush after a colour or pattern change.
+fn rebuild_brush(a: &mut App) {
+    let (brush, dib) = make_brush(a.o.bg, a.o.bars_pattern);
+    unsafe {
+        let _ = DeleteObject(HGDIOBJ(a.brush.0));
+    }
+    a.brush = brush;
+    a.brush_dib = dib;
 }
 
 /// Offline `--decode`: prints the frame counter of a client-area capture. Returns the exit code.
@@ -278,9 +329,11 @@ fn decode_capture(o: &Options, path: &str) -> i32 {
     }
 }
 
-fn base_style(borderless: bool) -> WINDOW_STYLE {
+fn base_style(borderless: bool, fixed_size: bool) -> WINDOW_STYLE {
     if borderless {
         WS_POPUP
+    } else if fixed_size {
+        WINDOW_STYLE(WS_OVERLAPPEDWINDOW.0 & !(WS_THICKFRAME.0 | WS_MAXIMIZEBOX.0))
     } else {
         WS_OVERLAPPEDWINDOW
     }
@@ -361,6 +414,10 @@ fn counter_on(o: &Options, c: Content) -> bool {
     o.counter.unwrap_or(c == Content::Motion)
 }
 
+fn markers_on(o: &Options, c: Content) -> bool {
+    o.markers.unwrap_or(matches!(c, Content::Motion | Content::Grid))
+}
+
 /// Draws the current content for the current frame into the native buffer.
 fn render_into(a: &mut App) {
     let (w, h) = (a.nw, a.nh);
@@ -369,6 +426,7 @@ fn render_into(a: &mut App) {
     match c {
         Content::Scene => art::draw_scene(&mut a.buf, w, h, clock::art_time(a.frame, fps)),
         Content::Card => art::draw_card(&mut a.buf, w, h, clock::art_time(a.frame, fps)),
+        Content::Grid => patterns::draw_grid(&mut a.buf, w, h),
         Content::Bars => patterns::draw_bars(&mut a.buf, w, h),
         Content::Ramp => patterns::draw_ramp(&mut a.buf, w, h),
         Content::Checker => patterns::draw_checker(&mut a.buf, w, h),
@@ -381,36 +439,68 @@ fn render_into(a: &mut App) {
             }
         }
     }
+    // Markers first: the counter (drawn last) stays decodable over the top-left marker.
+    if markers_on(&a.o, c) {
+        patterns::draw_markers(&mut a.buf, w, h);
+    }
     if counter_on(&a.o, c) {
         counter::draw(&mut a.buf, w, h, a.frame as u32);
     }
     a.scaled_valid = false;
 }
 
+/// Switches the native surface size (N key): new buffer, redrawn content.
+fn set_native(a: &mut App, size: (usize, usize)) {
+    a.o.native = size;
+    (a.nw, a.nh) = size;
+    a.buf = vec![0; size.0 * size.1];
+    render_into(a);
+}
+
+/// Keys legend shown at the end of the title.
+const TITLE_KEYS: &str = "keys 1-0 scale, M present, F filter, B bars, P pattern, C content, N native, K counter, \
+                          X markers, A align, Alt+Enter fullscreen, Esc";
+
 fn update_title(hwnd: HWND) {
+    let (cw, ch) = client_size(hwnd);
     let title = APP.with(|a| {
         let a = a.borrow();
-        let a = a.as_ref().unwrap();
+        let a = a.as_ref()?;
         let mode = match a.o.mode {
-            ScaleMode::Native => "1:1".to_string(),
-            ScaleMode::Integer(n) => format!("x{n}"),
-            ScaleMode::Fit => "fit".to_string(),
-            ScaleMode::FitFree => format!("fit-free {}", a.o.filter.name()),
+            ScaleMode::Native => "1to1".to_string(),
+            ScaleMode::Integer(n) => format!("integer x{n}"),
+            ScaleMode::Fit => match current_layout(a, cw, ch).scale {
+                Some(n) => format!("autofit x{n}"),
+                None => "autofit".to_string(),
+            },
+            ScaleMode::FitFree | ScaleMode::Stretch => {
+                format!("{} {}", a.o.mode.present_name(), a.o.filter.name())
+            }
         };
         let par = if a.o.par == Par::SQUARE {
             String::new()
         } else {
             format!(" par {}:{}", a.o.par.n, a.o.par.m)
         };
-        format!(
-            "pixel-demo | {} {}x{} {mode}{par} | {} Hz, {:.1}/s",
+        let align = match a.o.align {
+            Align::Center => "",
+            Align::TopLeft => " top-left",
+        };
+        let pattern = match a.o.bars_pattern {
+            BarPattern::None => String::new(),
+            p => format!(" {}", p.name()),
+        };
+        Some(format!(
+            "pixel-demo | {} {}x{} {mode}{par}{align} | client {cw}x{ch} | bars {}{pattern} | {} Hz, {:.1}/s | {TITLE_KEYS}",
             a.contents[a.current].name(),
             a.nw,
             a.nh,
+            options::bar_color_name(a.o.bg),
             a.o.fps,
             a.rate
-        )
+        ))
     });
+    let Some(title) = title else { return };
     unsafe {
         let _ = SetWindowTextW(hwnd, &HSTRING::from(title));
     }
@@ -508,7 +598,7 @@ fn exact_client(a: &App) -> Option<(u32, u32)> {
     match a.o.mode {
         ScaleMode::Native => Some((nw, nh)),
         ScaleMode::Integer(n) => Some(layout::client_for_scale(nw, nh, a.o.par, n)),
-        _ => None,
+        ScaleMode::Fit | ScaleMode::FitFree | ScaleMode::Stretch => None,
     }
 }
 
@@ -528,6 +618,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             LRESULT(0)
         }
         WM_SIZE => {
+            // Live re-layout: the next paint recomputes the layout for the new client size.
+            update_title(hwnd);
             let _ = InvalidateRect(Some(hwnd), None, false);
             LRESULT(0)
         }
@@ -539,6 +631,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             on_key(hwnd, wparam.0 as u32);
             LRESULT(0)
         }
+        // Alt+Enter toggles fullscreen, as in many games (bit 29: Alt held; bit 30: auto-repeat).
+        WM_SYSKEYDOWN if wparam.0 as u32 == VK_RETURN && lparam.0 & (1 << 29) != 0 => {
+            if lparam.0 & (1 << 30) == 0 {
+                toggle_fullscreen(hwnd);
+                update_title(hwnd);
+            }
+            LRESULT(0)
+        }
+        // No "invalid key" beep for Alt+Enter.
+        WM_SYSCHAR if wparam.0 == 0x0D => LRESULT(0),
         WM_DESTROY => {
             PostQuitMessage(0);
             LRESULT(0)
@@ -583,14 +685,41 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
             let _ = DestroyWindow(hwnd);
             return;
         }
-        0x46 => {
-            // F
-            toggle_fullscreen(hwnd);
-        }
-        VK_SPACE => APP.with(|a| {
+        // C or Space: next content.
+        0x43 | VK_SPACE => APP.with(|a| {
             let mut a = a.borrow_mut();
             let a = a.as_mut().unwrap();
             a.current = (a.current + 1) % a.contents.len();
+            render_into(a);
+        }),
+        0x4E => APP.with(|a| {
+            // N: next native preset; an exact-size window follows the new size.
+            let mut a = a.borrow_mut();
+            let a = a.as_mut().unwrap();
+            let (_, size) = options::next_native_preset((a.nw, a.nh));
+            set_native(a, size);
+            resize = exact_client(a);
+        }),
+        0x42 => APP.with(|a| {
+            // B: next bar colour.
+            let mut a = a.borrow_mut();
+            let a = a.as_mut().unwrap();
+            a.o.bg = options::next_bar_color(a.o.bg).1;
+            rebuild_brush(a);
+        }),
+        0x50 => APP.with(|a| {
+            // P: next bar pattern.
+            let mut a = a.borrow_mut();
+            let a = a.as_mut().unwrap();
+            a.o.bars_pattern = a.o.bars_pattern.next();
+            rebuild_brush(a);
+        }),
+        0x58 => APP.with(|a| {
+            // X: corner markers.
+            let mut a = a.borrow_mut();
+            let a = a.as_mut().unwrap();
+            let on = markers_on(&a.o, a.contents[a.current]);
+            a.o.markers = Some(!on);
             render_into(a);
         }),
         0x30..=0x39 => APP.with(|a| {
@@ -601,23 +730,15 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
             resize = exact_client(a);
         }),
         0x4D => APP.with(|a| {
-            // M: native -> integer -> fit -> fit-free -> native
+            // M: 1to1 -> integer -> autofit -> fit -> stretch -> 1to1
             let mut a = a.borrow_mut();
             let a = a.as_mut().unwrap();
-            let last = match a.o.mode {
-                ScaleMode::Integer(n) => n,
-                _ => 3,
-            };
-            a.o.mode = match a.o.mode {
-                ScaleMode::Native => ScaleMode::Integer(last),
-                ScaleMode::Integer(_) => ScaleMode::Fit,
-                ScaleMode::Fit => ScaleMode::FitFree,
-                ScaleMode::FitFree => ScaleMode::Native,
-            };
+            a.o.mode = a.o.mode.next(3);
+            a.scaled_valid = false;
             resize = exact_client(a);
         }),
-        0x42 => APP.with(|a| {
-            // B
+        0x46 => APP.with(|a| {
+            // F: next filter (used by fit and stretch).
             let mut a = a.borrow_mut();
             let a = a.as_mut().unwrap();
             a.o.filter = match a.o.filter {
@@ -636,8 +757,8 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
                 Align::TopLeft => Align::Center,
             };
         }),
-        0x43 => APP.with(|a| {
-            // C
+        0x4B => APP.with(|a| {
+            // K: frame counter.
             let mut a = a.borrow_mut();
             let a = a.as_mut().unwrap();
             let on = counter_on(&a.o, a.contents[a.current]);
@@ -673,7 +794,7 @@ unsafe fn paint(hwnd: HWND) {
         if lay.dest.is_empty() {
             return;
         }
-        let filtered = a.o.mode == ScaleMode::FitFree && a.o.filter != Filter::Nearest;
+        let filtered = a.o.mode.is_free() && a.o.filter != Filter::Nearest;
         if filtered {
             let dims = (lay.dest.w as usize, lay.dest.h as usize);
             if !a.scaled_valid || a.scaled_dims != dims {
