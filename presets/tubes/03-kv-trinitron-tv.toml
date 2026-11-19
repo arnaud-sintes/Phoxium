@@ -11,7 +11,8 @@ Spot growth: 0.9 -> 1.6 mm with n = 0.42 (Panasonic 76 cm TV datasheet exponent)
 Amplifier: 6 MHz (cheap consumer RGB 4 to 8 MHz). The amp stage blur is 0.1325 x 5.37 / 6 = 0.119 source px, so amp_samples = 16 (presets::recommended_amp_k). Fall/rise ratio 0.8: slow rise, so isolated bright pixels lose light (CRT.md adjacent-pixel nonlinearity); the opposite direction (> 1) would brighten them and is not chosen.
 Host (PHY-2 option D): 2.96 px per triad on 2560 x 1440, between the option D threshold 2.8 and the tier B threshold 3, where mask_tier = auto would still average the mask away; mask_tier = integrated draws it (ripple possible).
 ABL on: threshold 1.4 mA, steady state about 0.5 s (RCA patents, not Sony values).
-Not yet in the parameter table (M4, T-64): decay constants, faceplate thickness 12 mm, halation (13 mm / 2 %), horizontal curvature radius (estimate only).
+M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); cylindrical faceplate, horizontal radius 1723 mm (estimate only: 1.54 x 1R from the patent design calculation, inside 1594 to 2100 mm, no Sony KV value); convergence 1.0 mm radial at the corner on red (outward) and blue (inward), no static offset (CRT.md Starting presets TV, no centre value); ABL as above (RCA values). Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
+Not yet parameters (T-63 values kept for later): faceplate thickness 12 mm (generic sourced value for the size, not Sony-specific), halation (13 mm / 2 %), glass transmission.
 """
 
 [params]
@@ -34,6 +35,12 @@ amp_samples = 16
 abl_enable = true
 abl_threshold_ma = 1.4
 abl_tau_s = 0.1667
+geometry_curvature = "cylindrical"
+geometry_radius_mm = 1723.0
+phosphor_persistence = true
+phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+geometry_conv_red_radial_mm = 1.0
+geometry_conv_blue_radial_mm = -1.0
 exposure = 0.81
 output_match_srgb = false
 output_dither = "noise"
@@ -58,6 +65,12 @@ amp_samples = "D: presets::recommended_amp_k: edge sigma 0.1325 x 5.37 MHz / 6 M
 abl_enable = "E: CRT.md ABL, consumer TVs limit; T-63 item 3"
 abl_threshold_ma = "S: CRT.md T-63, RCA/Thomson average limiter 1.4 mA (RCA value, not Sony)"
 abl_tau_s = "D: CRT.md T-63, steady state about 0.5 s (RCA US 4,330,792), tau = 0.5 / 3 s"
+geometry_curvature = "E: CRT.md Faceplate curvature: Trinitron-type aperture grilles are cylindrical, curved horizontally and flat vertically [S]"
+geometry_radius_mm = "E: weak, CRT.md Faceplate curvature and T-63 item 3: about 1.3 to 1.75 x 1R from the US 5,386,174 design calculation only; the midpoint 1.54 x 1R = 1.54 x 1.767 x 633.3 mm = 1723 mm (inside the 1594 to 2100 mm patent range, near the unverified Sony about 2,000 mm); no Sony KV product value"
+phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown"
+phosphor_tail_strength_rgb = "S: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1)"
+geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
+geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
 exposure = "D: white (0.281, 0.311) has linear sRGB blue 1.233 at Y = 1, so exposure <= 1 / 1.233 = 0.811; 0.81 used"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
