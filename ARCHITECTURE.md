@@ -31,7 +31,8 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `presets/tubes/` | The 10 shipped tube presets, data files embedded in the binary (see 3.1, `presets.rs`). |
 | `crates/paramgen` | Build-time generator: reads `params/*.toml`, writes the Rust and GLSL parameter code (see 3.6). |
 | `spikes/imgui-spike` | Own Cargo workspace, throw-away spike TEC-5 (T-08): Dear ImGui on the ash device, with a live harness script. Not part of the product build. |
-| `scripts/` | `check.ps1` (local gate), `check-capture.ps1` (capture fidelity), `poll-foreground.ps1` (focus checks), `package.ps1` (checks, build, tests, release zip), `release.ps1` (GitHub release). |
+| `spikes/focus-leak` | Own Cargo workspace, T-07 spike: the output window without Vulkan (options for title updates, hotkey, windowed), to bisect the focus leak. Not part of the product build. |
+| `scripts/` | `check.ps1` (local gate), `check-capture.ps1` (capture fidelity), `poll-foreground.ps1` (focus checks), `focus-monitor.ps1` and `check-focus.ps1` (WinEvent-hook focus monitor and live focus check, T-07), `package.ps1` (checks, build, tests, release zip), `release.ps1` (GitHub release). |
 | `rust-toolchain.toml`, `rustfmt.toml` | Pinned toolchain, formatting rules. |
 | `CRT.md`, `QUESTIONS.md` | Physics knowledge base, decisions and open questions. |
 
@@ -78,7 +79,7 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 ### 3.4 Output window (Implemented)
 
 Raw Win32, not winit, because the behaviour needed (non-activating, topmost, tool window, `MA_NOACTIVATE`, global hotkey, per-monitor DPI v2) is Win32 specific.
-- Fullscreen: `WS_POPUP` with `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, shown with `SW_SHOWNOACTIVATE` over the monitor of the source window (or `--monitor`). It never takes focus.
+- Fullscreen: `WS_POPUP` with `WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, shown with `SW_SHOWNOACTIVATE` over the monitor of the source window (or `--monitor`). It is meant never to take focus. Known defect (T-07, open): Windows makes it the foreground window once, about 26 s after start, in every output mode and already in the scaffold 1fc5ea0; the cause is not found yet (QUESTIONS OUT-2). `scripts/check-focus.ps1` is the live regression check.
 - Windowed: normal overlapped window, Esc closes it.
 - `Ctrl+Alt+Q` is registered with `RegisterHotKey` and quits. If another program already owns it, a windowed output only warns (Esc still works), while a fullscreen output refuses to start, because it could not be closed from the keyboard. No keyboard hooks are used.
 - `Output` unregisters the hotkey and destroys its window in `Drop`.
