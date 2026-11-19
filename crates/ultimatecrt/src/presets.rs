@@ -1342,10 +1342,6 @@ mod tests {
         assert!((2300.0..=2500.0).contains(&f64::from(q.geometry_radius_mm)));
     }
 
-    /// T-64: persistence is on for every preset with the Kuhn P22 constants (tail strength 1), and the 60 Hz frame
-    /// energy ratios of the oracle are the CRT.md table (green 5.36 %, blue 4.72 %); ABL is on exactly for the
-    /// consumer TV presets with the sourced RCA 1.4 mA threshold; raster breathing and saturation keep their
-    /// defaults; mask_tier_blend stays the parameter default (D-15).
     // T-87 (audit m5): the confidence tags must be honest and the loader data must enforce it.
 
     const WEAK_WORDS: [&str; 6] = ["estimate", "borrowed", "weak", "sibling", "fitted", "chosen"];
@@ -1425,6 +1421,10 @@ mod tests {
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
+    /// T-64: persistence is on for every preset with the Kuhn P22 constants (tail strength 1), and the 60 Hz frame
+    /// energy ratios of the oracle are the CRT.md table (green 5.36 %, blue 4.72 %); ABL is on exactly for the
+    /// consumer TV presets with the sourced RCA 1.4 mA threshold; raster breathing and saturation keep their
+    /// defaults; mask_tier_blend stays the parameter default (D-15).
     #[test]
     fn m4_values_follow_the_recorded_policies() {
         use crt_model::phosphor::{KUHN_BLUE, KUHN_GREEN};
