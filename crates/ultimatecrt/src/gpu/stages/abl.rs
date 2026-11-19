@@ -21,12 +21,19 @@
 //! `raster_scale` = 1 + `abl_breathing` (apl_f - `abl_breathing_ref`) is a function of the same state
 //! (`abl_raster_scale` in `abl.glsl`); the geometry stage (T-37) reads it from this state (see the T-35
 //! report: `FrameConstants` is written by the CPU before the GPU measures the APL).
+//!
+//! Skipped as an identity ([`Stage::is_identity`]): with `abl_enable`, `abl_breathing` and `abl_probe` all
+//! off the pipeline records neither pass (the apply pass would be a full-image copy). The state is not
+//! touched while skipped, and nothing reads it (`screen` reads it only when `abl_breathing` is not 0); the
+//! slot's `prepare` sees `runs` false and clears the state in the first frame that runs again.
 
 use std::cell::Cell;
 
 use ash::vk;
 
 use super::{binding, compute_pipeline, standard_set_layout, ComputePass, Domain, Registration, Stage, GROUP};
+use crate::gpu::FrameConstants;
+use crate::params::Params;
 use crate::Res;
 
 const APPLY_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/abl.comp.spv"));
@@ -131,6 +138,17 @@ impl Stage for Abl {
         let mut src_stage = compute;
         let mut src_access = vk::AccessFlags2::SHADER_STORAGE_WRITE;
         if !self.cleared.get() {
+            // The clear comes after the earlier reads of the state: `screen` binds it every frame, also
+            // while this slot is skipped (identity), so the first run after a skip must wait for them.
+            self.state_barrier(
+                d,
+                cb,
+                (
+                    compute,
+                    vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+                ),
+                (vk::PipelineStageFlags2::CLEAR, vk::AccessFlags2::TRANSFER_WRITE),
+            );
             d.cmd_fill_buffer(cb, self.buffer, 0, vk::WHOLE_SIZE, 0);
             src_stage |= vk::PipelineStageFlags2::CLEAR;
             src_access |= vk::AccessFlags2::TRANSFER_WRITE;
@@ -168,6 +186,15 @@ impl Stage for Abl {
             (compute, vk::AccessFlags2::SHADER_STORAGE_WRITE),
             (compute, vk::AccessFlags2::SHADER_STORAGE_READ),
         );
+    }
+
+    /// Limiter, breathing and probe all off: the apply pass copies the texels and nothing reads the
+    /// state (`screen` reads it only when `abl_breathing` is not 0), so the slot is skipped, reduce pass
+    /// included. `prepare` then sees `runs` false and arms the cold start, which is what the reduce pass
+    /// did in this configuration anyway (it kept the state at 0). With the breathing on and the limiter off
+    /// the slot runs: the reduce pass keeps the state, `raster_scale` comes from it.
+    fn is_identity(&self, params: &Params, _fc: &FrameConstants) -> bool {
+        !params.abl_enable && params.abl_breathing == 0.0 && !params.abl_probe
     }
 
     fn abl_state(&self) -> Option<vk::Buffer> {

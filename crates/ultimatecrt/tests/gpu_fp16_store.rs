@@ -10,7 +10,8 @@
 //! Method. A float image of awkward values is injected (FP32 on the GPU, so the shader reads the exact
 //! `f32`), a stage that copies or computes exactly stores it, and the FP16 image read back (converted
 //! exactly to `f32`) must equal the reference for every value:
-//! - `abl` with the limiter off copies the texel: all four channels, any value (negative, huge, inf, NaN);
+//! - `abl` with the limiter off (and the breathing on, so that the slot is not skipped as an identity)
+//!   copies the texel: all four channels, any value (negative, huge, inf, NaN);
 //! - `gun` with `gun_gamma` 1 returns V unchanged, `amp` at its defaults is an exact hold, and `screen`
 //!   with the tube not placed is `1.0 * x` (beam fallback, mask 1): the values of [0, 1];
 //! - `decode` (the real stage, source frame): every code k / 255 read through UNORM.
@@ -246,8 +247,11 @@ fn every_stage_store_is_the_nearest_fp16_value() {
     let unit = unit_values(&all);
     eprintln!("{test}: {} values, {} in [0, 1]", all.len(), unit.len());
 
-    // abl, limiter off: a copy of every channel, any value.
-    let got = run(&mut gpu, "abl", "gun", &Params::default(), &all);
+    // abl, limiter off: a copy of every channel, any value. With every feature off the slot is skipped as
+    // an identity (no store at all), so the breathing is on to make the apply pass run.
+    let mut breathing = Params::default();
+    assert!(breathing.set("abl_breathing", ParamValue::F32(0.03)));
+    let got = run(&mut gpu, "abl", "gun", &breathing, &all);
     assert_nearest("abl copy", &all, &got, |_| true);
 
     // gun with gamma 1: V unchanged (rgb), alpha passed through.

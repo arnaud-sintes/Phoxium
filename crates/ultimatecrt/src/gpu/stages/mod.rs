@@ -32,6 +32,10 @@
 //! amp -> tube) runs the pipeline's nearest-neighbour resample (`shaders/resample.comp`), which copies
 //! FP16 values without arithmetic.
 //!
+//! A same-domain slot whose stage says [`Stage::is_identity`] for the frame's parameters is skipped the
+//! same way (`phosphor` with persistence and saturation off, `abl` with the limiter, the breathing and the
+//! probe off): the pipeline records nothing for it in that frame.
+//!
 //! Filling a slot (T-30, T-33, T-34, ...): replace the placeholder in the slot's own module by a type
 //! implementing [`Stage`] (usually a [`ComputePass`] plus its shader). Adding a slot: a new module with
 //! its `SLOT` constant, its `mod` line and one line in [`CHAIN`].
@@ -106,6 +110,17 @@ pub(super) trait Stage {
     /// # Safety
     /// `d` must be a live device.
     unsafe fn create(&mut self, d: &ash::Device) -> Res<()>;
+
+    /// The stage is an exact identity for these parameters and constants: its output equals its input
+    /// bit for bit, and running it has no effect that a later stage or a later frame needs (no state
+    /// buffer or history that it would update, no probe texel). The pipeline then routes around a slot
+    /// that keeps its domain exactly like a disabled one (no pass, no image, no barrier, the next slot
+    /// reads the previous image), evaluated every frame; `prepare` is called with `runs` false, so the
+    /// stage restarts its state when it runs again. A slot that changes domain always runs (its output
+    /// has another size): the answer is ignored there. Must be pure and cheap. Default: `false`.
+    fn is_identity(&self, _params: &crate::params::Params, _fc: &crate::gpu::FrameConstants) -> bool {
+        false
+    }
 
     /// Records the stage over an output image of `size`. Default: the pass without push constants.
     ///
