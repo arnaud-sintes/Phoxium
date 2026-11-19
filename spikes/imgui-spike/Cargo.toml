@@ -1,0 +1,31 @@
+[package]
+name = "imgui-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+description = "T-08 (TEC-5) throw-away spike: Dear ImGui on our ash device, dynamic rendering, Win32 input by hand"
+license = "MIT OR Apache-2.0"
+
+# Own workspace: the spike is not a member of the main workspace and never affects its lock file.
+[workspace]
+
+[dependencies]
+# Exact pins (the dear-imgui-* crates released 0.20, 0.21 and 0.22 within three weeks).
+ash = "=0.38.0"
+dear-imgui-rs = "=0.22.0"
+dear-imgui-sys = "=0.22.0"
+# Default feature `render-pass` off: we use dynamic rendering only (no VkRenderPass anywhere).
+dear-imgui-ash = { version = "=0.22.0", default-features = false, features = ["dynamic-rendering"] }
+windows = { version = "=0.62.2", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"

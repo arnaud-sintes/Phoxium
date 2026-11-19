@@ -677,9 +677,16 @@ Each has a recommended default so you can reply with exceptions only.
 
 ### TEC-5 ImGui binding
 - **Q:** Which Rust binding and Vulkan renderer for Dear ImGui (imgui-rs, dear-imgui-rs, cimgui-based), given maintenance status, and can input be fed manually from a custom Win32 window without focus? Is "ImGui" Dear ImGui specifically, with a native Rust GUI as a fallback only with your agreement?
-- **Why:** Bindings lag upstream (imgui-rs 0.12 tracks Dear ImGui 1.89, dear-imgui-rs tracks 1.92 with docking). Binding maintenance is a long-term single-developer risk, and docking or multi-viewport would help the control-window case.
+- **Why:** Bindings lag upstream (imgui-rs 0.12 tracks Dear ImGui 1.89, dear-imgui-rs 0.22.0 tracks 1.93.1 WIP with docking). Binding maintenance is a long-term single-developer risk, and docking or multi-viewport would help the control-window case.
 - **Who:** RESEARCH plus SPIKE (SP-2).
 - **Default:** Dear ImGui through whichever binding passes a one-day spike with custom input feeding, evaluating dear-imgui-rs first. Own Vulkan renderer if its backend does not fit ash.
+- **SPIKE T-08, build part (2026-11-19, headless only; details in `spikes/imgui-spike/RESULTS.md` on branch `spike/T-08`; decision at T-13):**
+  - `dear-imgui-rs`, `dear-imgui-sys`, `dear-imgui-ash` pinned `=0.22.0`: build from crates.io with no git submodule, no network and no libclang (vendored cimgui and Dear ImGui, pregenerated bindings); they need the MSVC C++ compiler. Licences MIT OR Apache-2.0; the whole dependency tree passes `cargo deny check licenses` with `deny.toml`. The crate packages ship no LICENSE file: the release zip must take the notices from upstream (Dear ImGui MIT, cimgui MIT).
+  - `dear-imgui-ash` 0.22.0 uses our `ash 0.38`, and its `dynamic-rendering` feature (default `render-pass` off) works: headless test on the RTX A2000, no `VkRenderPass`, offscreen RGBA8, validation and synchronization validation on, 0 messages. Checked: window colour exact at a known pixel, text drawn, slider grab moves with the value, 50 % window blended over a background image exactly (error 0, tolerance 1 code), overlay pass about 0.01 ms at 320x240.
+  - Win32 input fed by hand works: pure `WM_*` -> ImGui IO translation, unit tested (mouse, wheel, keys with left/right modifiers, UTF-16 `WM_CHAR`, focus, DPI); fed into ImGui headless it drags the slider, types into the text field, clicks the button and selects a combo entry with the keyboard (needs `NavEnableKeyboard`).
+  - Build cost: `dear-imgui-sys` C++ rebuild 16 s (release), cold release build of the spike 54 s, `live.exe` 2.3 MB. API churn is high (0.20 to 0.22 in three weeks, renderer constructor changed): keep exact pins.
+  - Fallback `imgui` 0.12 + `imgui-rs-vulkan-renderer` 1.16.0 (MIT, ash 0.38, has `dynamic-rendering`) builds; not run, not needed.
+  - Not yet verified (live harness `src/bin/live.rs` and `scripts/run-t08-live.ps1` written, not run): F12 focus hand-off to the output window and back to the source (10 cycles, windowed and fullscreen), F11 toggle with the source focused, whether `RegisterHotKey(VK_F12)` succeeds (Microsoft documents F12 as reserved for the debugger), and whether `SetForegroundWindow` needs a workaround.
 
 ### TEC-6 Pass architecture
 - **Q:** Fixed ordered pipeline in code, or a data-driven multi-pass graph like slangp? Compute or fragment? Intermediate formats?
@@ -838,6 +845,6 @@ None of them is verified on your machine, which is why they are tied to spikes.
 - Borderless capture (`IsBorderRequired = false`) needs Windows build 20348 or later and an access request. [Microsoft Learn: GraphicsCaptureSession.IsBorderRequired]
 - `MinUpdateInterval` and cursor-capture toggles arrived in later builds, and a frame-rate cap near 50 fps was reported on some builds even with `MinUpdateInterval` = 0. [Win32CaptureSample issue 82]
 - OBS skips minimised (iconic) windows when capturing with the WinRT API, and libwebrtc's capture session drops frames for minimised windows. [OBS winrt-capture source, libwebrtc wgc_capture_session]
-- `imgui` 0.12 (imgui-rs) tracks Dear ImGui 1.89. `dear-imgui-rs` 0.9 tracks 1.92 with docking. [docs.rs]
+- `imgui` 0.12 (imgui-rs) tracks Dear ImGui 1.89. `dear-imgui-rs` 0.22.0 tracks 1.93.1 WIP with docking (crates.io, checked by T-08 on 2026-11-19).
 - The development machine reports Windows build 10.0.26300, which Opus identified as an Insider build. No analyst checked which capture features that build has.
 - Not yet checked by anyone: behaviour of Vulkan swapchains on Windows when a non-activating topmost window is presented (layered on DXGI or not), VRR for an unfocused window, HDR swapchain colour spaces per vendor, D3D11 to Vulkan external memory support per vendor, and whether hosted CI has any usable software Vulkan implementation.
