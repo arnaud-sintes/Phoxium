@@ -1352,7 +1352,8 @@ pub fn run() -> Res<()> {
                     baseline = baseline_of(live.library(), live.current_preset(), &profile);
                     bars_state.forget();
                     let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
-                    if switch_map(
+                    // The detection key is reset below whether or not the map changed.
+                    let _ = switch_map(
                         new_map,
                         &mut map,
                         &mut capture,
@@ -1360,9 +1361,7 @@ pub fn run() -> Res<()> {
                         &mut captured_base,
                         &mut frame.seq,
                         capture_luid,
-                    ) {
-                        detect_key = (0, 0, None);
-                    }
+                    );
                     if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
                         bars_state.auto.start(now, bars::Trigger::Attach, None);
                     }
