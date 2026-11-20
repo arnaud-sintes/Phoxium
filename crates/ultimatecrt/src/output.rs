@@ -2,8 +2,14 @@
 //!
 //! Two modes, both non-activating except while the settings menu is open (OUT-2, OUT-3):
 //! - windowed: a resizable framed window; it can be moved and resized by its title bar and frame, a click does
-//!   not activate it (Esc closes it only after a drop to a window, T-56, which is activating);
+//!   not activate it;
 //! - fullscreen: borderless, topmost, covering one monitor.
+//!
+//! Quitting: Ctrl+Alt+Q (always registered) or the close button. Esc does not quit (it belongs to the captured
+//! program, and to the menu while it is open). Both quit paths only hide the window and post `WM_QUIT`
+//! ([`request_quit`]); the window is destroyed by `Drop for Output`, after the application has run its shutdown
+//! and dropped the renderer, so the Vulkan surface never outlives its window (contract of
+//! `gpu::Context::with_window`).
 //!
 //! F11 switches between them at run time ([`apply_placement`], decided by `modes::ModeState`).
 //!
@@ -12,8 +18,8 @@
 //! when the button is released.
 //!
 //! Activation: [`sync_activation`] is the only code that sets `WS_EX_NOACTIVATE` and the hand-back flag, from
-//! the mode (every mode except a drop to a window) and the menu state ([`effective_no_activate`]: the open menu
-//! always makes the output activating, closing it restores the mode's behaviour).
+//! the mode (every mode is non-activating) and the menu state ([`effective_no_activate`]: the open menu always
+//! makes the output activating, closing it restores the mode's behaviour).
 //!
 //! The hotkeys (T-54) are `RegisterHotKey` registrations on this window ([`hotkeys`]): Ctrl+Alt+Q always quits,
 //! since a non-activating fullscreen window cannot receive keyboard input; the others arrive as `WM_HOTKEY`,
@@ -71,9 +77,12 @@ static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
 static HIDE_CURSOR: AtomicBool = AtomicBool::new(false);
 /// The output currently is the borderless fullscreen one (it ignores `WM_DPICHANGED`).
 static FULLSCREEN: AtomicBool = AtomicBool::new(false);
-/// The window mode wants a non-activating output (every mode, set by [`create`] and [`apply_placement`]);
-/// false only after a drop to a window (T-56). See [`sync_activation`].
+/// The window mode wants a non-activating output (every mode, set by [`create`] and [`apply_placement`]).
+/// See [`sync_activation`].
 static MODE_NO_ACTIVATE: AtomicBool = AtomicBool::new(false);
+/// Set by `Drop for Output` while it destroys the window: `WM_DESTROY` then posts no `WM_QUIT` (a pending
+/// `WM_QUIT` would close the error message box `main` may show next).
+static DESTROYING: AtomicBool = AtomicBool::new(false);
 /// The settings menu is open (T-52a): input goes to the UI and the output may be active.
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
 /// System cursor (`IDC_*` number) shown over the client area while the menu is open; 0 hides it.
@@ -95,9 +104,8 @@ pub fn effective_no_activate(mode_no_activate: bool, menu_open: bool) -> bool {
 }
 
 /// The one place that sets the activation behaviour of the output: `WS_EX_NOACTIVATE` and the flag the
-/// hand-back of [`wndproc`] reads, from [`effective_no_activate`] of the mode ([`apply_placement`],
-/// [`drop_to_windowed`], [`create`]) and the menu ([`set_menu_open`]). Only that bit of the extended style
-/// changes.
+/// hand-back of [`wndproc`] reads, from [`effective_no_activate`] of the mode ([`apply_placement`], [`create`])
+/// and the menu ([`set_menu_open`]). Only that bit of the extended style changes.
 fn sync_activation(hwnd: HWND) {
     let on = effective_no_activate(
         MODE_NO_ACTIVATE.load(Ordering::Relaxed),
@@ -549,8 +557,9 @@ fn app_icon(hinstance: windows::Win32::Foundation::HINSTANCE, small: bool) -> HI
 pub fn create(opts: &Options) -> Result<Output> {
     // Every mode starts non-activating (OUT-2, OUT-3), the default framed window included: starting, clicking or
     // dragging the output leaves the foreground and the keyboard focus on the captured window. Only the settings
-    // menu activates it, and a drop to a window after a lost source (T-56, `drop_to_windowed`).
+    // menu activates it.
     MODE_NO_ACTIVATE.store(true, Ordering::Relaxed);
+    DESTROYING.store(false, Ordering::Relaxed);
     IN_SIZE_MOVE.store(false, Ordering::Relaxed);
     MENU_OPEN.store(false, Ordering::Relaxed);
     // No window yet: only the flag the window procedure reads during the creation.
@@ -643,6 +652,7 @@ pub fn create(opts: &Options) -> Result<Output> {
         if registration.bound(Action::Quit).is_none() && opts.fullscreen {
             // Without the hotkey a fullscreen output that cannot take focus has no keyboard exit.
             registration.unregister_all(&mut registrar);
+            DESTROYING.store(true, Ordering::Relaxed); // no WM_QUIT: the error message box comes next
             let _ = DestroyWindow(hwnd);
             let code = registration
                 .outcomes
@@ -675,56 +685,57 @@ pub fn create(opts: &Options) -> Result<Output> {
 }
 
 impl Drop for Output {
+    /// Destroys the window: the last step of the shutdown, after the renderer (and its Vulkan surface) is gone.
     fn drop(&mut self) {
+        DESTROYING.store(true, Ordering::Relaxed);
+        // SAFETY: our own window, destroyed on the thread that created it.
         unsafe {
             self.hotkeys.unregister_all(&mut Win32Registrar { hwnd: self.hwnd });
             if IsWindow(Some(self.hwnd)).as_bool() {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
                 let _ = DestroyWindow(self.hwnd);
             }
         }
     }
 }
 
-/// Turns the fullscreen output into a normal window (frame, taskbar button, not topmost, can take
-/// focus so Esc works), centred on the monitor it covered, with a client area of `client` clamped to
-/// that monitor. It does not take the focus itself. Used when the source is lost for too long (T-56).
-pub fn drop_to_windowed(hwnd: HWND, client: (i32, i32)) {
-    // A framed window that can take focus, also after a menu open now closes (it restores this mode).
-    MODE_NO_ACTIVATE.store(false, Ordering::Relaxed);
-    FULLSCREEN.store(false, Ordering::Relaxed);
+/// Hides the output window (the first step of the shutdown, on every exit path): the screen shows what is
+/// under it at once, while the saves run and the renderer is released. The window itself stays alive until
+/// `Drop for Output`.
+pub fn hide(hwnd: HWND) {
+    // SAFETY: plain call on our own window; a no-op on a null or destroyed handle.
     unsafe {
-        let mon = monitor_rect(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)).unwrap_or(RECT {
-            left: 0,
-            top: 0,
-            right: 1280,
-            bottom: 720,
-        });
-        let style = WS_OVERLAPPEDWINDOW;
-        let mut r = RECT {
-            left: 0,
-            top: 0,
-            right: client.0.clamp(160, ((mon.right - mon.left) * 3 / 4).max(160)),
-            bottom: client.1.clamp(120, ((mon.bottom - mon.top) * 3 / 4).max(120)),
-        };
-        let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
-        let (w, h) = (r.right - r.left, r.bottom - r.top);
-        // Hidden while the styles change so the taskbar picks up the removed tool-window style (not while it
-        // holds the foreground, the open menu: hiding would pass it on).
-        if GetForegroundWindow() != hwnd {
-            let _ = ShowWindow(hwnd, SW_HIDE);
-        }
-        SetWindowLongPtrW(hwnd, GWL_STYLE, style.0 as isize);
-        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, 0);
-        sync_activation(hwnd);
-        let _ = SetWindowPos(
-            hwnd,
-            Some(HWND_NOTOPMOST),
-            mon.left + ((mon.right - mon.left) - w) / 2,
-            mon.top + ((mon.bottom - mon.top) - h) / 2,
-            w,
-            h,
-            SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW,
-        );
+        let _ = ShowWindow(hwnd, SW_HIDE);
+    }
+}
+
+/// The quit paths (Ctrl+Alt+Q, the close button): hide the window and leave the message loop. The window is not
+/// destroyed here (see the module documentation).
+fn request_quit(hwnd: HWND) {
+    hide(hwnd);
+    // SAFETY: plain call.
+    unsafe { PostQuitMessage(0) };
+}
+
+/// Whether the loop should idle instead of rendering (R-04): the output is minimised or has an empty client
+/// area. Pure.
+pub fn should_idle(client: (u32, u32), iconic: bool) -> bool {
+    iconic || client.0 == 0 || client.1 == 0
+}
+
+/// Whether the output window is minimised.
+pub fn is_iconic(hwnd: HWND) -> bool {
+    // SAFETY: plain query on a window handle.
+    unsafe { IsIconic(hwnd) }.as_bool()
+}
+
+/// Sleeps until a message arrives for this thread (a hotkey, a restore, any input) or `timeout` passes, with no
+/// CPU use meanwhile (the idle wait of a minimised output, R-04). The caller then runs [`pump`].
+pub fn wait_messages(timeout: std::time::Duration) {
+    let ms = u32::try_from(timeout.as_millis()).unwrap_or(u32::MAX);
+    // SAFETY: plain call with no handles; MWMO_INPUTAVAILABLE also returns for messages already queued.
+    unsafe {
+        let _ = MsgWaitForMultipleObjectsEx(None, ms, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
     }
 }
 
@@ -853,15 +864,16 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_ERASEBKGND => LRESULT(1),
-        WM_KEYDOWN if wparam.0 == 0x1B => {
-            let _ = DestroyWindow(hwnd);
+        // The close button (and Alt+F4 while the menu has the focus): the same path as Ctrl+Alt+Q.
+        WM_CLOSE => {
+            request_quit(hwnd);
             LRESULT(0)
         }
         WM_HOTKEY => {
             if let Some(action) = Action::from_hotkey_id(wparam.0 as i32) {
                 if action == Action::Quit {
-                    // Immediate, as before T-54: the quit key works even if the loop is busy.
-                    let _ = DestroyWindow(hwnd);
+                    // The window disappears at once, also when the loop is busy; the loop then shuts down.
+                    request_quit(hwnd);
                 }
                 ACTIONS.lock().unwrap_or_else(|e| e.into_inner()).push(action);
             }
@@ -890,8 +902,11 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             SetCursor(None);
             LRESULT(1)
         }
+        // Only `Drop for Output` destroys the window; any other destruction still ends the loop.
         WM_DESTROY => {
-            PostQuitMessage(0);
+            if !DESTROYING.load(Ordering::Relaxed) {
+                PostQuitMessage(0);
+            }
             LRESULT(0)
         }
         _ => DefWindowProcW(hwnd, msg, wparam, lparam),
@@ -900,8 +915,21 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
 
 #[cfg(test)]
 mod tests {
-    use super::{drag_rect, effective_no_activate, hand_back_target, on_activate, self_drag_hit, OnActivate};
+    use super::{
+        drag_rect, effective_no_activate, hand_back_target, on_activate, self_drag_hit, should_idle, OnActivate,
+    };
     use crate::modes::IRect;
+
+    /// R-04: the loop idles while the output is minimised or has an empty client area.
+    #[test]
+    fn a_minimised_or_empty_output_idles() {
+        assert!(!should_idle((1280, 720), false));
+        assert!(should_idle((1280, 720), true), "minimised (some drivers keep the size)");
+        assert!(should_idle((0, 0), false));
+        assert!(should_idle((0, 720), false));
+        assert!(should_idle((1280, 0), false));
+        assert!(should_idle((0, 0), true));
+    }
 
     #[test]
     fn the_title_bar_and_the_frame_are_dragged_by_the_output_itself() {
