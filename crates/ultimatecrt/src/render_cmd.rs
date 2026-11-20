@@ -17,7 +17,7 @@ use std::path::Path;
 
 use crate::{
     gpu::{Headless, ImageF32, Settings, SourceFrame, TargetFormat},
-    params::{self, ParamType, ParamValue, Params},
+    params::{self, Applied, ParamType, ParamValue, Params},
     patterns,
     presets::{self, Library, Origin, Preset},
     scaling, settings,
@@ -78,8 +78,10 @@ pub fn parse(args: &[String]) -> Res<RenderArgs> {
     Ok(a)
 }
 
-/// Parses `text` as a value of the parameter `id` and stores it in `p`.
-pub fn set_param(p: &mut Params, id: &str, text: &str) -> Res<()> {
+/// Parses `text` as a value of the parameter `id` and stores it in `p` through `Params::set_checked`. A value
+/// outside the hard range is clamped into it: the result is then the warning to show. A value that cannot be
+/// read, a non-finite number (`nan`, `inf`) or an unknown enum name is an error.
+pub fn set_param(p: &mut Params, id: &str, text: &str) -> Res<Option<String>> {
     let meta = params::meta(id).ok_or_else(|| format!("--set: unknown parameter \"{id}\""))?;
     let bad = || format!("--set {id}: cannot read \"{text}\" as {:?}", meta.ty);
     let floats = |n: usize| -> Res<Vec<f32>> {
@@ -111,10 +113,10 @@ pub fn set_param(p: &mut Params, id: &str, text: &str) -> Res<()> {
         ParamType::Vec3 => ParamValue::Vec3(floats(3)?.try_into().unwrap()),
         ParamType::Vec4 => ParamValue::Vec4(floats(4)?.try_into().unwrap()),
     };
-    if p.set(id, value) {
-        Ok(())
-    } else {
-        Err(format!("--set {id}: value \"{text}\" is rejected").into())
+    match p.set_checked(id, value) {
+        Ok(Applied::Exact) => Ok(None),
+        Ok(Applied::Clamped(stored)) => Ok(Some(format!("--set {}", params::clamp_message(id, value, stored)))),
+        Err(why) => Err(format!("--set {id}: value \"{text}\" is rejected ({why})").into()),
     }
 }
 
@@ -193,7 +195,9 @@ pub fn live_params(preset_arg: Option<&str>) -> Res<Params> {
 /// The parameters the live app starts with: the preset of `--preset` (`preset_arg`, an id or a file), else the
 /// one of `settings.global.preset` (missing or empty: the table defaults; an unknown name is a warning), then
 /// the `settings.global.overrides` of `dir\settings.toml` on top (T-51: the overrides are the ids that differ
-/// from the preset). Returns the parameters and the warnings to show; an unknown `--preset` is an error.
+/// from the preset). Returns the parameters and the warnings to show; an unknown `--preset` is an error. A bad
+/// value in the preset or the overrides never fails: it is clamped (or skipped) with a warning naming the file
+/// and the key ([`presets::apply_overrides_checked`]), also recorded as a menu notice.
 pub fn startup_params(preset_arg: Option<&str>, dir: Option<&Path>) -> Res<(Params, Vec<String>)> {
     let mut warnings = Vec::new();
     let loaded = dir.map(settings::load);
@@ -216,7 +220,11 @@ pub fn startup_params(preset_arg: Option<&str>, dir: Option<&Path>) -> Res<(Para
             Err(e) => warnings.push(format!("settings preset \"{}\" not used: {e}", stored.preset)),
         }
     }
-    warnings.extend(settings::apply_overrides(&mut params, &stored.overrides));
+    warnings.extend(presets::apply_overrides_checked(
+        &mut params,
+        &stored.overrides,
+        settings::SETTINGS_FILE,
+    ));
     Ok((params, warnings))
 }
 
@@ -239,7 +247,9 @@ pub fn run(args: &[String]) -> Res<()> {
         p = resolve_preset(preset)?.params();
     }
     for (id, v) in &a.sets {
-        set_param(&mut p, id, v)?;
+        if let Some(w) = set_param(&mut p, id, v)? {
+            eprintln!("warning: {w}");
+        }
     }
     let mut renderer = Headless::new(a.validation)?;
     let format = if float {
@@ -284,7 +294,9 @@ pub fn encode_pfm(img: &ImageF32) -> Vec<u8> {
     out
 }
 
-/// Reads a colour PFM written by [`encode_pfm`] back to an RGBA image (alpha 1), rows top to bottom.
+/// Reads a colour PFM written by [`encode_pfm`] back to an RGBA image (alpha 1), rows top to bottom. Any
+/// malformed input (truncated header, missing separator after the scale, non-finite or non-negative scale,
+/// wrong data size) is an error, never a panic (R-33).
 pub fn decode_pfm(bytes: &[u8]) -> Res<ImageF32> {
     let mut pos = 0;
     let mut token = || -> Res<String> {
@@ -306,11 +318,19 @@ pub fn decode_pfm(bytes: &[u8]) -> Res<ImageF32> {
     let w: u32 = token()?.parse()?;
     let h: u32 = token()?.parse()?;
     let scale: f32 = token()?.parse()?;
-    if scale >= 0.0 {
+    if !scale.is_finite() || scale == 0.0 {
+        return Err("invalid PFM scale".into());
+    }
+    if scale > 0.0 {
         return Err("only little-endian PFM is supported".into());
     }
-    let data = &bytes[pos + 1..];
-    if data.len() != w as usize * h as usize * 12 {
+    // Exactly one whitespace byte separates the header from the data.
+    let data = bytes.get(pos + 1..).ok_or("truncated PFM: no data after the header")?;
+    let expected = (w as usize)
+        .checked_mul(h as usize)
+        .and_then(|n| n.checked_mul(12))
+        .ok_or("PFM size overflows")?;
+    if data.len() != expected {
         return Err("PFM data size does not match its header".into());
     }
     let mut rgba = vec![1.0f32; w as usize * h as usize * 4];
@@ -453,5 +473,96 @@ mod tests {
             rgba: (0..24).map(|i| if i % 4 == 3 { 1.0 } else { i as f32 / 7.0 }).collect(),
         };
         assert_eq!(decode_pfm(&encode_pfm(&img)).unwrap(), img);
+    }
+
+    /// R-33: truncated or malformed headers are errors, never panics.
+    #[test]
+    fn pfm_truncated_or_malformed_input_is_an_error() {
+        let img = ImageF32 {
+            width: 2,
+            height: 1,
+            rgba: vec![0.5; 8],
+        };
+        let good = encode_pfm(&img);
+        // Every prefix of a valid file (header cut anywhere, data cut short) is an error.
+        for n in 0..good.len() {
+            assert!(decode_pfm(&good[..n]).is_err(), "prefix of {n} bytes");
+        }
+        for bad in [
+            &b"PF\n1 1\n-1.0"[..], // the header ends at the end of the file (A-13, B-12)
+            b"PF\n1 1\nnan\n",
+            b"PF\n1 1\ninf\n",
+            b"PF\n1 1\n-inf\n",
+            b"PF\n1 1\n0\n",
+            b"PF\n1 1\n1.0\n",
+            b"PF\n4294967295 4294967295\n-1.0\n",
+            b"Pf\n1 1\n-1.0\n",
+            b"PF\n-1 1\n-1.0\n",
+            b"",
+        ] {
+            assert!(decode_pfm(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
+        }
+        // A trailing byte too many is an error as well.
+        let mut long = good.clone();
+        long.push(0);
+        assert!(decode_pfm(&long).is_err());
+    }
+
+    /// `--set` goes through the hard range: clamped with a warning, NaN and infinity rejected.
+    #[test]
+    fn set_param_clamps_to_the_hard_range_and_rejects_non_finite_values() {
+        let mut p = Params::default();
+        let w = set_param(&mut p, "tube_aspect", "0").unwrap().expect("a clamp warning");
+        assert!(w.contains("tube_aspect") && w.contains("valid range"), "{w}");
+        assert_eq!(p.tube_aspect, 0.25);
+        for text in ["nan", "inf", "-inf"] {
+            let before = p;
+            assert!(set_param(&mut p, "exposure", text).is_err(), "{text}");
+            assert_eq!(p, before);
+        }
+        assert!(set_param(&mut p, "tube_white_xy", "0.3, NaN").is_err());
+        assert_eq!(
+            set_param(&mut p, "exposure", "50").unwrap(),
+            None,
+            "beyond the slider, inside the hard range"
+        );
+        assert_eq!(p.exposure, 50.0);
+        assert!(set_param(&mut p, "amp_samples", "100000").unwrap().is_some());
+        assert_eq!(p.amp_samples, 64);
+    }
+
+    /// A bad settings override never stops the startup: clamped, with a warning naming the file and the key.
+    #[test]
+    fn startup_params_clamp_bad_overrides_with_a_warning() {
+        let dir = temp("c");
+        let mut st = settings::Settings::default();
+        st.global
+            .overrides
+            .insert("tube_visible_height_mm".into(), toml::Value::Float(0.0));
+        st.global
+            .overrides
+            .insert("exposure".into(), toml::Value::Float(f64::NAN));
+        st.global
+            .overrides
+            .insert("amp_samples".into(), toml::Value::Integer(100_000));
+        settings::save(&dir, &st).unwrap();
+        let (p, w) = startup_params(None, Some(&dir)).unwrap();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(p.tube_visible_height_mm, 10.0);
+        assert_eq!(p.exposure, Params::default().exposure, "NaN is ignored");
+        assert_eq!(p.amp_samples, 64);
+        assert_eq!(w.len(), 3, "{w:?}");
+        for (key, word) in [
+            ("tube_visible_height_mm", "valid range"),
+            ("exposure", "not a finite number"),
+            ("amp_samples", "valid range"),
+        ] {
+            assert!(
+                w.iter()
+                    .any(|m| m.starts_with("settings.toml: ") && m.contains(key) && m.contains(word)),
+                "{key}: {w:?}"
+            );
+        }
+        assert!(params::notices().iter().any(|n| n.contains("tube_visible_height_mm")));
     }
 }

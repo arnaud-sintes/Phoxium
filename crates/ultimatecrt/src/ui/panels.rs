@@ -10,8 +10,13 @@
 //!   right, chosen from the type and `ParamMeta::widget`: a slider over the soft range (logarithmic for a
 //!   positive range spanning two decades or more, [`is_log`]) with the value and unit aligned right, a check
 //!   box, a combo of the enum values, a colour picker, one slider per component for the other vectors.
-//!   Ctrl+click (or Enter) on a slider types a value (outside the soft range is allowed, as the table says).
-//!   The description is the tooltip, with the reference and table default values.
+//!   Ctrl+click (or Enter) on a slider types a value, clamped to the slider (soft) range ([`clamp_to_slider`]
+//!   and the slider's `ALWAYS_CLAMP`, R-05, owner decision Q1); a preset or settings file may go beyond it, up
+//!   to the hard range that `Params::set` enforces. The description is the tooltip, with the slider and
+//!   valid ranges and the reference and table default values.
+//! - **Notices**: a value that `Params::set` clamped or rejected (from a preset file, the settings overrides
+//!   or any other path) is listed at the end of the Performance panel ([`notice_lines`]), with a button that
+//!   dismisses the list.
 //! - **Modified marking and reset**: a row whose value differs from the reference (the preset in force with the
 //!   source profile and the command-line options, else the table defaults) gets an accent dot and brighter
 //!   label. Double-clicking the label resets it to the reference; right-click offers the reference or the table
@@ -304,6 +309,51 @@ pub fn decimals(v: f64, range: (f64, f64), log: bool) -> usize {
     }
 }
 
+/// A value from a slider of `m`, clamped to the slider (soft) range per component, as the slider's
+/// `ALWAYS_CLAMP` does for a typed value (a second guard, independent of the Dear ImGui flag). A logarithmic
+/// slider clamps in the value domain like a linear one. NaN is left as is (`Params::set` rejects it); bool and
+/// enum values pass through.
+pub fn clamp_to_slider(m: &ParamMeta, v: ParamValue) -> ParamValue {
+    let Some((lo, hi)) = m.soft_range else {
+        return v;
+    };
+    let f = |x: f32| if x.is_nan() { x } else { x.clamp(lo as f32, hi as f32) };
+    match v {
+        ParamValue::F32(x) => ParamValue::F32(f(x)),
+        ParamValue::I32(x) => ParamValue::I32(x.clamp(lo as i32, hi as i32)),
+        ParamValue::Vec2(a) => ParamValue::Vec2(a.map(f)),
+        ParamValue::Vec3(a) => ParamValue::Vec3(a.map(f)),
+        ParamValue::Vec4(a) => ParamValue::Vec4(a.map(f)),
+        ParamValue::Bool(_) | ParamValue::Enum(_) => v,
+    }
+}
+
+/// [`clamp_to_slider`] for the components of a vector that differ between `old` and `new` (the ones a
+/// slider moved); the others keep their `new` value. Other types: [`clamp_to_slider`] of `new`.
+pub fn clamp_moved_components(m: &ParamMeta, old: ParamValue, new: ParamValue) -> ParamValue {
+    fn pick<const N: usize>(old: [f32; N], new: [f32; N], clamped: [f32; N]) -> [f32; N] {
+        std::array::from_fn(|k| {
+            if new[k].to_bits() == old[k].to_bits() {
+                new[k]
+            } else {
+                clamped[k]
+            }
+        })
+    }
+    match (old, new, clamp_to_slider(m, new)) {
+        (ParamValue::Vec2(o), ParamValue::Vec2(n), ParamValue::Vec2(c)) => ParamValue::Vec2(pick(o, n, c)),
+        (ParamValue::Vec3(o), ParamValue::Vec3(n), ParamValue::Vec3(c)) => ParamValue::Vec3(pick(o, n, c)),
+        (ParamValue::Vec4(o), ParamValue::Vec4(n), ParamValue::Vec4(c)) => ParamValue::Vec4(pick(o, n, c)),
+        (_, _, c) => c,
+    }
+}
+
+/// The lines of the parameter notice box of the Performance panel: the recorded notices
+/// (`crate::params::notices`, values clamped or rejected), empty when there are none.
+pub fn notice_lines() -> Vec<String> {
+    crate::params::notices()
+}
+
 /// The value text of a number: [`decimals`], then the unit unless dimensionless.
 pub fn value_text(v: f64, range: (f64, f64), unit: &str, log: bool) -> String {
     let d = decimals(v, range, log);
@@ -502,6 +552,9 @@ fn row_tooltip(ui: &Frame, m: &ParamMeta, reference: &Params) {
         };
         let scale = if is_log(m) { ", logarithmic" } else { "" };
         text.push_str(&format!("\n\nRange {lo} to {hi}{unit}{scale}."));
+        if let Some((hlo, hhi)) = m.hard_range.filter(|h| *h != (lo, hi)) {
+            text.push_str(&format!(" Files may go from {hlo} to {hhi}{unit}."));
+        }
     } else if m.unit != "1" {
         text.push_str(&format!("\n\nUnit: {}.", m.unit));
     }
@@ -554,7 +607,7 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
         ParamValue::F32(mut v) => {
             let (changed, rect, hovered) = number_slider(ui, &wid, &mut v, m, width, m.unit);
             if changed {
-                new = Some(ParamValue::F32(v));
+                new = Some(clamp_to_slider(m, ParamValue::F32(v)));
             }
             ctx.items.push((format!("widget:{}", m.id), rect));
             widget_hovered = hovered;
@@ -563,7 +616,7 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
             let (lo, hi) = m.soft_range.unwrap_or((0.0, 10.0));
             let track = width - value_width(ui) - ui.clone_style().item_spacing()[0];
             if theme::slider_ex(ui, &wid, &mut v, lo as i32, hi as i32, track, false, "%d") {
-                new = Some(ParamValue::I32(v));
+                new = Some(clamp_to_slider(m, ParamValue::I32(v)));
             }
             ctx.record(ui, format!("widget:{}", m.id));
             widget_hovered = ui.is_item_hovered();
@@ -645,11 +698,14 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
                 widget_hovered |= hovered;
             }
             if changed {
-                new = Some(match n {
+                // Only the component the slider moved is clamped: the others keep their value even beyond the
+                // slider range (set from a file).
+                let typed = match n {
                     2 => ParamValue::Vec2([comps[0], comps[1]]),
                     3 => ParamValue::Vec3([comps[0], comps[1], comps[2]]),
                     _ => ParamValue::Vec4(comps),
-                });
+                };
+                new = Some(clamp_moved_components(m, value, typed));
             }
         }
     }
@@ -755,6 +811,18 @@ pub fn panel_body(
         }
         ctx.record(ui, format!("reset:{name}"));
     }
+    if name == PERFORMANCE {
+        let lines = notice_lines();
+        if !lines.is_empty() {
+            ui.spacing();
+            theme::callout(ui, PALETTE.problem, &lines);
+            ctx.record(ui, "notices".to_string());
+            if theme::button(ui, "Dismiss##param_notices") {
+                crate::params::clear_notices();
+            }
+            ctx.record(ui, "notices:dismiss".to_string());
+        }
+    }
     changed
 }
 
@@ -844,6 +912,76 @@ mod tests {
         ] {
             assert!(!is_log(crate::params::meta(id).unwrap()), "{id}");
         }
+    }
+
+    /// R-05 (Q1): a typed value is clamped to the slider range, on linear and log sliders, for every numeric
+    /// type; NaN is left for `Params::set` to reject.
+    #[test]
+    fn typed_values_are_clamped_to_the_slider_range() {
+        let m = |id: &str| crate::params::meta(id).unwrap();
+        let aspect = m("tube_aspect");
+        assert_eq!(clamp_to_slider(aspect, ParamValue::F32(0.0)), ParamValue::F32(1.0));
+        assert_eq!(clamp_to_slider(aspect, ParamValue::F32(-5.0)), ParamValue::F32(1.0));
+        assert_eq!(clamp_to_slider(aspect, ParamValue::F32(1e30)), ParamValue::F32(2.0));
+        assert_eq!(clamp_to_slider(aspect, ParamValue::F32(1.5)), ParamValue::F32(1.5));
+        let ParamValue::F32(nan) = clamp_to_slider(aspect, ParamValue::F32(f32::NAN)) else {
+            unreachable!()
+        };
+        assert!(nan.is_nan());
+        // A log slider (exposure, 0.05 to 8) clamps in the value domain.
+        let exposure = m("exposure");
+        assert!(is_log(exposure));
+        assert_eq!(clamp_to_slider(exposure, ParamValue::F32(0.0)), ParamValue::F32(0.05));
+        assert_eq!(clamp_to_slider(exposure, ParamValue::F32(500.0)), ParamValue::F32(8.0));
+        assert_eq!(
+            clamp_to_slider(m("amp_samples"), ParamValue::I32(100_000)),
+            ParamValue::I32(32)
+        );
+        assert_eq!(
+            clamp_to_slider(m("amp_samples"), ParamValue::I32(0)),
+            ParamValue::I32(1)
+        );
+        assert_eq!(
+            clamp_to_slider(m("gun_drive_rgb"), ParamValue::Vec3([0.0, 1.0, 9.0])),
+            ParamValue::Vec3([0.5, 1.0, 1.5])
+        );
+        assert_eq!(
+            clamp_to_slider(m("mask_type"), ParamValue::Enum(7)),
+            ParamValue::Enum(7)
+        );
+        // Every clamped value is inside the hard range, so `set` stores it unchanged.
+        for meta in PARAMS_META {
+            for x in [-1e30_f32, 0.0, 1e30] {
+                let v = match meta.ty {
+                    ParamType::F32 => ParamValue::F32(x),
+                    ParamType::I32 => ParamValue::I32(x as i32),
+                    ParamType::Vec2 => ParamValue::Vec2([x; 2]),
+                    ParamType::Vec3 => ParamValue::Vec3([x; 3]),
+                    ParamType::Vec4 => ParamValue::Vec4([x; 4]),
+                    _ => continue,
+                };
+                let c = clamp_to_slider(meta, v);
+                assert!(crate::params::in_hard_range(meta, c), "{}", meta.id);
+            }
+        }
+        // The owner's failure: 0 typed into the tube aspect reaches `set` as the slider minimum.
+        let mut p = Params::default();
+        assert!(p.set("tube_aspect", clamp_to_slider(aspect, ParamValue::F32(0.0))));
+        assert_eq!(p.tube_aspect, 1.0);
+    }
+
+    /// Only the vector component a slider moved is clamped; one beyond the slider range from a file is kept.
+    #[test]
+    fn only_the_moved_vector_component_is_clamped() {
+        let m = crate::params::meta("gun_drive_rgb").unwrap();
+        let old = ParamValue::Vec3([5.0, 1.0, 1.0]); // red from a file, beyond the slider maximum 1.5
+        let typed = ParamValue::Vec3([5.0, 1.0, 40.0]); // blue typed
+        assert_eq!(clamp_moved_components(m, old, typed), ParamValue::Vec3([5.0, 1.0, 1.5]));
+        let exposure = crate::params::meta("exposure").unwrap();
+        assert_eq!(
+            clamp_moved_components(exposure, ParamValue::F32(50.0), ParamValue::F32(60.0)),
+            ParamValue::F32(8.0)
+        );
     }
 
     #[test]

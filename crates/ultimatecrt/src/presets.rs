@@ -18,10 +18,14 @@
 //!
 //! Validation (`Preset::parse`): an unknown top-level key, an unknown parameter id, a value of the wrong type,
 //! an enum name that does not exist, a missing or malformed provenance entry, or a schema other than
-//! [`SCHEMA_VERSION`] is an error that names the file and the key. A value outside the soft range of the
-//! parameter table is a warning (`Preset::warnings`; the value is kept), as outside values are allowed in the
-//! UI. Applying a preset sets its values onto `Params` with `Params::set`; ids it does not list keep their
-//! table default, so a preset is always applied onto the defaults (`Preset::params`).
+//! [`SCHEMA_VERSION`] is an error that names the file and the key. A value is then checked like every other
+//! input, by `Params::set_checked` (R-05): outside the soft range of the parameter table it is a warning
+//! (`Preset::warnings`; the value is kept), outside the hard range it is clamped into it, and a cross-parameter
+//! rule (`Params::constrain`) may lower it; both are a warning naming the file and the key, and the clamped
+//! value is what the preset holds. A non-finite number (`nan`, `inf`) is dropped with a warning (the table
+//! default stays). A bad value never makes the file unusable. Applying a preset sets its values onto `Params`
+//! with `Params::set`; ids it does not list keep their table default, so a preset is always applied onto the
+//! defaults (`Preset::params`).
 //!
 //! Host display (PHY-2 option D, P-1): `Preset::px_per_triad` and `option_d_suggestions` give the host pixels
 //! per triad for a host output size, `Preset::host_note` the label "mask not resolvable on this host" below
@@ -49,7 +53,10 @@ use crt_model::{
 };
 
 use crate::{
-    params::{meta, Confidence, ParamType, ParamValue, Params, MASK_TIER_INTEGRATED, MASK_TYPE_DELTA},
+    params::{
+        clamp_message, meta, Applied, Confidence, ParamType, ParamValue, Params, Rejected, MASK_TIER_INTEGRATED,
+        MASK_TYPE_DELTA,
+    },
     settings::{from_value, to_value},
 };
 
@@ -297,6 +304,10 @@ impl Preset {
 
         let mut values = Vec::new();
         let mut warnings = Vec::new();
+        // The values applied in file order onto the defaults, as `Preset::params` will: the cross-parameter rules
+        // see the same neighbours here as there.
+        let mut acc = Params::default();
+        let mut dropped = Vec::new();
         for (key, raw) in params {
             let m = meta(key).ok_or_else(|| err(file, format!("unknown parameter id '{key}'")))?;
             let wrong = || err(file, format!("parameter '{key}': expected a value of type {:?}", m.ty));
@@ -311,9 +322,25 @@ impl Preset {
                 (ParamType::Enum, _) => return Err(wrong()),
                 (ty, raw) => from_value(ty, raw).ok_or_else(wrong)?,
             };
-            if let (Some((lo, hi)), true) = (m.soft_range, !components(value).is_empty()) {
+            let stored = match acc.set_checked(m.id, value) {
+                Ok(Applied::Exact) => value,
+                Ok(Applied::Clamped(stored)) => {
+                    let w = format!("{file}: {}", clamp_message(m.id, value, stored));
+                    crate::params::notify(w.clone());
+                    warnings.push(w);
+                    stored
+                }
+                Err(why) => {
+                    let w = format!("{file}: parameter '{key}' = {raw}: {why}, ignored (the table default is kept)");
+                    crate::params::notify(w.clone());
+                    warnings.push(w);
+                    dropped.push(key.clone());
+                    continue;
+                }
+            };
+            if let (Some((lo, hi)), true, true) = (m.soft_range, !components(stored).is_empty(), stored == value) {
                 // Bounds in f32, like the table's own range test: 1.6 as f32 is above 1.6 as f64.
-                if components(value)
+                if components(stored)
                     .iter()
                     .any(|c| !((lo as f32)..=(hi as f32)).contains(&(*c as f32)))
                 {
@@ -323,12 +350,15 @@ impl Preset {
                     ));
                 }
             }
-            values.push((m.id, value));
+            values.push((m.id, stored));
         }
         let mut provenance = BTreeMap::new();
         for (key, raw) in prov {
             if !params.contains_key(key) {
                 return Err(err(file, format!("provenance for '{key}', which is not in [params]")));
+            }
+            if dropped.contains(key) {
+                continue;
             }
             let bad = || err(file, format!("provenance of '{key}' must read \"<S|D|K|E>: <source>\""));
             let s = raw.as_str().ok_or_else(bad)?;
@@ -346,7 +376,10 @@ impl Preset {
                 },
             );
         }
-        if let Some(key) = params.keys().find(|k| !provenance.contains_key(*k)) {
+        if let Some(key) = params
+            .keys()
+            .find(|k| !provenance.contains_key(*k) && !dropped.contains(k))
+        {
             return Err(err(file, format!("parameter '{key}' has no provenance entry")));
         }
         Ok(Preset {
@@ -462,10 +495,10 @@ impl Preset {
     }
 
     /// The preset with `overrides` (as stored in the settings) applied; returns the parameters and one
-    /// warning per override that could not be applied.
+    /// warning per override that could not be applied or was clamped ([`apply_overrides_checked`]).
     pub fn with_overrides(&self, overrides: &BTreeMap<String, toml::Value>) -> (Params, Vec<String>) {
         let mut p = self.params();
-        let warnings = crate::settings::apply_overrides(&mut p, overrides);
+        let warnings = apply_overrides_checked(&mut p, overrides, "settings overrides");
         (p, warnings)
     }
 
@@ -547,6 +580,46 @@ fn triad_pitch_mm(p: &Params) -> f64 {
 
 fn triads_across(p: &Params) -> f64 {
     f64::from(p.tube_visible_height_mm) * f64::from(p.tube_aspect) / triad_pitch_mm(p)
+}
+
+/// Applies parameter overrides (id to TOML value, as `settings.toml` stores them) onto `params` through
+/// `Params::set_checked`, and returns one warning per problem, each starting with `origin` (the file or the
+/// table they come from): an unknown id or a malformed value is skipped, a non-finite number is skipped (the
+/// value is kept), a value outside the hard range or against a cross-parameter rule is clamped
+/// ([`crate::params::clamp_message`]). Clamps and non-finite values are also recorded as menu notices
+/// ([`crate::params::notify`]). Never fails: a bad value never stops the startup.
+pub fn apply_overrides_checked(
+    params: &mut Params,
+    overrides: &BTreeMap<String, toml::Value>,
+    origin: &str,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for (id, val) in overrides {
+        let Some(m) = meta(id) else {
+            warnings.push(format!("{origin}: unknown parameter '{id}' ignored"));
+            continue;
+        };
+        let Some(v) = from_value(m.ty, val) else {
+            warnings.push(format!("{origin}: invalid value for parameter '{id}' ignored"));
+            continue;
+        };
+        match params.set_checked(id, v) {
+            Ok(Applied::Exact) => {}
+            Ok(Applied::Clamped(stored)) => {
+                let w = format!("{origin}: {}", clamp_message(id, v, stored));
+                crate::params::notify(w.clone());
+                warnings.push(w);
+            }
+            Err(why) => {
+                let w = format!("{origin}: parameter '{id}' = {val}: {why}, ignored (the value is kept)");
+                if why == Rejected::NonFinite {
+                    crate::params::notify(w.clone());
+                }
+                warnings.push(w);
+            }
+        }
+    }
+    warnings
 }
 
 /// The ids whose value in `params` differs from `base`, with their values (as `settings` stores overrides).
@@ -1262,6 +1335,143 @@ mod tests {
         assert_eq!(p.warnings.len(), 1);
         assert!(p.warnings[0].contains("hi.toml") && p.warnings[0].contains("exposure"));
         assert_eq!(p.params().exposure, 50.0);
+    }
+
+    /// R-05: a value outside the hard range is clamped with one warning naming the file and the key, the preset
+    /// stays usable, and it round-trips through its file without a new warning.
+    #[test]
+    fn out_of_hard_range_values_are_clamped_with_a_warning() {
+        let extra = "amp_samples = 100000\ntube_aspect = 0.0\ntube_visible_height_mm = -5.0\n";
+        let prov =
+            "exposure = \"E: test\"\namp_samples = \"E: t\"\ntube_aspect = \"E: t\"\ntube_visible_height_mm = \"E: t\"";
+        let t = sample(extra).replace("exposure = \"E: test\"", prov);
+        let p = Preset::parse("bad.toml", &t, Origin::Embedded).unwrap();
+        assert_eq!(p.warnings.len(), 3, "{:?}", p.warnings);
+        for key in ["amp_samples", "tube_aspect", "tube_visible_height_mm"] {
+            assert!(
+                p.warnings
+                    .iter()
+                    .any(|w| w.starts_with("bad.toml: ") && w.contains(key) && w.contains("valid range")),
+                "{key}: {:?}",
+                p.warnings
+            );
+        }
+        let q = p.params();
+        assert_eq!(
+            (q.amp_samples, q.tube_aspect, q.tube_visible_height_mm),
+            (64, 0.25, 10.0)
+        );
+        assert!(host_px_per_mm(&q, HOST) > 0.0, "a tube that can be placed");
+        // Written back, the clamped values are valid: only beyond the slider (soft range notes), no clamp.
+        let back = Preset::parse("back.toml", &p.to_toml(), Origin::Embedded).unwrap();
+        assert!(
+            back.warnings
+                .iter()
+                .all(|w| w.contains("soft range") && !w.contains("valid range")),
+            "{:?}",
+            back.warnings
+        );
+        assert_eq!(back.params(), q);
+        // The library keeps the file and reports each warning once.
+        let mut lib = Library::default();
+        lib.add(Ok(p));
+        assert_eq!(lib.list().len(), 1);
+        assert_eq!(lib.warnings.len(), 3);
+        crate::params::clear_notices();
+    }
+
+    /// A non-finite number in a file is dropped (the default stays) with a warning; the file stays usable.
+    #[test]
+    fn non_finite_values_in_a_file_are_dropped_with_a_warning() {
+        for bad in ["nan", "inf", "-inf"] {
+            let t = sample("").replace("exposure = 0.5", &format!("exposure = {bad}"));
+            let p = Preset::parse("nan.toml", &t, Origin::Embedded).unwrap_or_else(|e| panic!("{bad}: {e}"));
+            assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+            assert!(p.warnings[0].contains("nan.toml") && p.warnings[0].contains("exposure"));
+            assert!(p.warnings[0].contains("not a finite number"));
+            assert_eq!(p.params().exposure, Params::default().exposure);
+            assert!(p.values.is_empty() && p.provenance.is_empty());
+            let back = Preset::parse("back.toml", &p.to_toml(), Origin::Embedded).unwrap();
+            assert_eq!(back.params(), p.params());
+        }
+        let v = sample("tube_red_xy = [0.6, nan]").replace(
+            "exposure = \"E: test\"",
+            "exposure = \"E: test\"\ntube_red_xy = \"E: t\"",
+        );
+        let p = Preset::parse("v.toml", &v, Origin::Embedded).unwrap();
+        assert_eq!(p.params().tube_red_xy, Params::default().tube_red_xy);
+        assert_eq!(p.params().exposure, 0.5);
+        crate::params::clear_notices();
+    }
+
+    /// Halation and glare weights over 1 together: the later key (file order is id order) yields, so the
+    /// stored preset keeps the energy and applies the same way every time.
+    #[test]
+    fn preset_optics_weights_are_kept_within_the_energy_rule() {
+        let extra = "optics_halation_weight = 0.8\noptics_glare_weight = 0.8\n";
+        let prov = "exposure = \"E: test\"\noptics_halation_weight = \"E: t\"\noptics_glare_weight = \"E: t\"";
+        let p = Preset::parse(
+            "o.toml",
+            &sample(extra).replace("exposure = \"E: test\"", prov),
+            Origin::Embedded,
+        )
+        .unwrap();
+        let q = p.params();
+        assert_eq!(q.optics_glare_weight, 0.8);
+        assert_eq!(q.optics_halation_weight, 1.0 - 0.8);
+        assert!(q.optics_glare_weight + q.optics_halation_weight <= 1.0);
+        // The glare weight is beyond its soft range (a warning, kept); the halation weight is lowered.
+        assert_eq!(p.warnings.len(), 2, "{:?}", p.warnings);
+        assert!(p
+            .warnings
+            .iter()
+            .any(|w| w.contains("optics_glare_weight") && w.contains("soft range")));
+        assert!(p
+            .warnings
+            .iter()
+            .any(|w| w.contains("optics_halation_weight") && w.contains("sum above 1")));
+        assert_eq!(
+            Preset::parse("b.toml", &p.to_toml(), Origin::Embedded)
+                .unwrap()
+                .params(),
+            q
+        );
+        crate::params::clear_notices();
+    }
+
+    /// The settings overrides through the checked path: 0 for a tube size is clamped with a warning (never an
+    /// empty tube), NaN keeps the value, unknown ids and malformed values are skipped; all name the origin.
+    #[test]
+    fn checked_overrides_clamp_or_skip_with_a_warning_naming_the_origin() {
+        let mut o = BTreeMap::new();
+        o.insert("tube_visible_height_mm".to_string(), toml::Value::Float(0.0));
+        o.insert("exposure".to_string(), toml::Value::Float(f64::NAN));
+        o.insert("no_such".to_string(), toml::Value::Float(1.0));
+        o.insert("mask_type".to_string(), toml::Value::Integer(99));
+        o.insert("gun_gamma".to_string(), toml::Value::String("x".into()));
+        o.insert("tube_aspect".to_string(), toml::Value::Float(1.6));
+        let mut p = Params::default();
+        let w = apply_overrides_checked(&mut p, &o, "settings.toml");
+        assert_eq!(w.len(), 5, "{w:?}");
+        assert!(w.iter().all(|m| m.starts_with("settings.toml: ")), "{w:?}");
+        assert_eq!(p.tube_visible_height_mm, 10.0);
+        assert_eq!(p.tube_aspect, 1.6);
+        assert_eq!(p.exposure, Params::default().exposure);
+        assert_eq!(p.mask_type, Params::default().mask_type);
+        assert!(w
+            .iter()
+            .any(|m| m.contains("tube_visible_height_mm") && m.contains("valid range")));
+        assert!(w
+            .iter()
+            .any(|m| m.contains("mask_type") && m.contains("not one of the values")));
+        assert!(crate::params::notices()
+            .iter()
+            .any(|n| n.contains("tube_visible_height_mm")));
+        // `with_overrides` uses the same path.
+        let lib = lib();
+        let (q, w) = lib.list()[0].with_overrides(&o);
+        assert_eq!((q.tube_visible_height_mm, w.len()), (10.0, 5));
+        crate::params::clear_notices();
     }
 
     #[test]

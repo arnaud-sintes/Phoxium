@@ -27,7 +27,17 @@
 //! # values = ["a", "b"]      # enum only: the choices, snake_case
 //! # advanced = true          # optional: shown in the settings menu under "Advanced" only
 //! # widget = "log"           # optional: auto (default), linear, log (positive float range), color (vec3 in 0..1)
+//! # hard_min = 0.001         # optional: hard validity range (numeric only), default the soft bound
+//! # hard_max = 100.0
+//! # hard_why = "..."         # why the value must stay in the hard range; required with hard_min or hard_max
 //! ```
+//!
+//! Two ranges per numeric parameter:
+//! - the **soft range** (`min`, `max`): the slider range of the settings menu; a typed value is clamped to it.
+//! - the **hard range** (`hard_min`, `hard_max`, defaulting to the soft bounds): where the value is physically
+//!   meaningful and numerically safe. It contains the soft range (checked here). `Params::set_checked`
+//!   (generated) clamps every value into it and rejects non-finite floats, whatever the input path (presets,
+//!   settings overrides, `render --set`, the menu), so the GPU never sees a value outside it.
 //!
 //! Files whose name starts with `_` (such as `_test.toml`) hold test-only entries: they are loaded only when
 //! asked (debug builds) and placed after the production files, so production offsets do not depend on them.
@@ -166,6 +176,11 @@ pub struct Param {
     /// Soft range as written in the file (UI slider range; values outside are allowed with a warning), per
     /// component for vecN. `None` for bool and enum.
     pub soft_range: Option<(f64, f64)>,
+    /// Hard validity range (`hard_min`, `hard_max`, else the soft bounds), per component for vecN; it contains
+    /// the soft range. `None` for bool and enum.
+    pub hard_range: Option<(f64, f64)>,
+    /// Why the value must stay in the hard range (`hard_why`), empty when the file gives no reason.
+    pub hard_why: String,
     /// Confidence tag: `S`, `D`, `K` or `E`.
     pub tag: char,
     pub source: String,
@@ -251,6 +266,9 @@ struct RawParam {
     #[serde(default)]
     advanced: bool,
     widget: Option<String>,
+    hard_min: Option<toml::Value>,
+    hard_max: Option<toml::Value>,
+    hard_why: Option<String>,
 }
 
 fn is_snake_ident(s: &str) -> bool {
@@ -467,12 +485,20 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         "S" | "D" | "K" | "E" => r.tag.chars().next().unwrap_or('E'),
         _ => return err(format!("{at}: tag `{}` must be one of S, D, K, E", r.tag)),
     };
+    let hard_why = r.hard_why.clone().unwrap_or_default();
+    if r.hard_why.is_some() && hard_why.trim().is_empty() {
+        return err(format!("{at}: `hard_why` is empty"));
+    }
     for (name, text) in [
         ("unit", &r.unit),
         ("source", &r.source),
         ("description", &r.description),
         ("group", &r.group),
+        ("hard_why", &hard_why),
     ] {
+        if name == "hard_why" && text.is_empty() {
+            continue;
+        }
         if text.trim().is_empty() {
             return err(format!("{at}: `{name}` is empty"));
         }
@@ -514,6 +540,51 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
             return err(format!("{at}: `min` and `max` are not allowed for type {}", r.ty));
         }
         None
+    };
+
+    // Hard validity range: the soft bounds unless the file widens them; it must contain the soft range.
+    let hard_range = match soft_range {
+        Some((lo, hi)) => {
+            if (r.hard_min.is_some() || r.hard_max.is_some()) && r.hard_why.is_none() {
+                return err(format!(
+                    "{at}: `hard_min` or `hard_max` needs `hard_why` (why values beyond it are invalid)"
+                ));
+            }
+            let bound = |v: &Option<toml::Value>, name: &str, soft: f64| -> Result<f64, Error> {
+                match v {
+                    None => Ok(soft),
+                    Some(v) => {
+                        let Some(x) = number(v) else {
+                            return err(format!("{at}: `{name}` must be a number"));
+                        };
+                        if ty == Type::I32 && x.fract() != 0.0 {
+                            return err(format!("{at}: `{name}` of an i32 must be an integer"));
+                        }
+                        if !x.is_finite() || (ty == Type::I32 && (x < i32::MIN as f64 || x > i32::MAX as f64)) {
+                            return err(format!("{at}: `{name}` = {x} is not a valid bound"));
+                        }
+                        Ok(x)
+                    }
+                }
+            };
+            let hlo = bound(&r.hard_min, "hard_min", lo)?;
+            let hhi = bound(&r.hard_max, "hard_max", hi)?;
+            if !(hlo <= lo && hi <= hhi) {
+                return err(format!(
+                    "{at}: the soft range [{lo}, {hi}] is not inside the hard range [{hlo}, {hhi}]"
+                ));
+            }
+            Some((hlo, hhi))
+        }
+        None => {
+            if r.hard_min.is_some() || r.hard_max.is_some() || r.hard_why.is_some() {
+                return err(format!(
+                    "{at}: `hard_min`, `hard_max` and `hard_why` are not allowed for type {}",
+                    r.ty
+                ));
+            }
+            None
+        }
     };
 
     // Settings menu widget.
@@ -629,6 +700,8 @@ fn validate(file: &str, stem: &str, r: RawParam) -> Result<Param, Error> {
         unit: r.unit,
         default,
         soft_range,
+        hard_range,
+        hard_why: one_line(&hard_why),
         tag,
         source: r.source,
         description: r.description,
@@ -708,6 +781,57 @@ pub fn load_dir(dir: &Path, include_test: bool) -> Result<Table, Error> {
     build(&files)
 }
 
+/// Checks the `[params]` table of every `*.toml` preset file of `dir` against the table: each key names a
+/// parameter, has a value of its type (enums by value name), and every number lies inside the hard range
+/// (bounds rounded to f32 for floats, as `Params::set_checked` compares them). Returns the number of files
+/// checked; the first problem is an error naming the file and the key. The full preset schema (provenance,
+/// names) is checked by `ultimatecrt::presets`.
+pub fn check_presets(t: &Table, dir: &Path) -> Result<usize, Error> {
+    let entries = fs::read_dir(dir).map_err(|e| Error(format!("cannot read {}: {e}", dir.display())))?;
+    let mut files: Vec<std::path::PathBuf> = entries
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|x| x == "toml"))
+        .collect();
+    files.sort();
+    for path in &files {
+        let name = path.display().to_string();
+        let text = fs::read_to_string(path).map_err(|e| Error(format!("cannot read {name}: {e}")))?;
+        let doc: toml::Table = toml::from_str(&text).map_err(|e| Error(format!("{name}: {e}")))?;
+        let Some(params) = doc.get("params").and_then(|v| v.as_table()) else {
+            return err(format!("{name}: missing table [params]"));
+        };
+        for (key, raw) in params {
+            let at = format!("{name}: parameter `{key}`");
+            let Some(p) = t.params.iter().find(|p| p.id == *key) else {
+                return err(format!("{at}: unknown parameter id"));
+            };
+            let numbers: Vec<f64> = match (p.ty, raw) {
+                (Type::Enum, toml::Value::String(s)) if p.values.contains(s) => Vec::new(),
+                (Type::Enum, _) => return err(format!("{at}: {raw:?} is not one of {:?}", p.values)),
+                (Type::Bool, toml::Value::Boolean(_)) => Vec::new(),
+                (Type::I32, toml::Value::Integer(i)) => vec![*i as f64],
+                (Type::F32, v) if number(v).is_some() => vec![number(v).unwrap_or_default()],
+                (Type::Vec2 | Type::Vec3 | Type::Vec4, toml::Value::Array(a))
+                    if a.len() == p.ty.components() && a.iter().all(|x| number(x).is_some()) =>
+                {
+                    a.iter().filter_map(number).collect()
+                }
+                _ => return err(format!("{at}: {raw:?} is not a value of type {:?}", p.ty)),
+            };
+            if let Some((lo, hi)) = p.hard_range {
+                let round = |x: f64| if p.ty == Type::I32 { x } else { x as f32 as f64 };
+                if let Some(x) = numbers.iter().find(|x| {
+                    let x = round(**x);
+                    !(x.is_finite() && round(lo) <= x && x <= round(hi))
+                }) {
+                    return err(format!("{at} = {x} is outside its hard range [{lo}, {hi}]"));
+                }
+            }
+        }
+    }
+    Ok(files.len())
+}
+
 /// Name of the constant generated for an enum value, in Rust and GLSL: `<ID>_<VALUE>` in upper case.
 pub fn enum_const_name(id: &str, value: &str) -> String {
     format!("{}_{}", id.to_uppercase(), value.to_uppercase())
@@ -744,8 +868,10 @@ fn confidence(tag: char) -> &'static str {
     }
 }
 
-/// Rust source to `include!` in a module that defines `ParamMeta`, `ParamType`, `ParamValue` and `Confidence`
-/// (see `crates/ultimatecrt/src/params.rs`).
+/// Rust source to `include!` in a module that defines `ParamMeta`, `ParamType`, `ParamValue`, `ParamWidget`,
+/// `Confidence`, the `set_checked` results `Applied` (`Exact`, `Clamped(ParamValue)`) and `Rejected`
+/// (`UnknownId`, `WrongType`, `NonFinite`, `NotAValue`), and `Params::constrain(&mut self, id: &str) -> bool`, the
+/// hand-written cross-parameter rules run after every accepted value (see `crates/ultimatecrt/src/params.rs`).
 pub fn rust_source(t: &Table) -> String {
     let mut s = String::new();
     s.push_str("// Generated by crates/paramgen from params/*.toml. Do not edit: change the TOML files.\n\n");
@@ -789,16 +915,18 @@ pub fn rust_source(t: &Table) -> String {
     s.push_str("/// Metadata of every parameter, in layout order.\npub const PARAMS_META: &[ParamMeta] = &[\n");
     for p in &t.params {
         let default = format!("ParamValue::{}({})", p.ty.variant(), rust_value(p));
-        let range = match p.soft_range {
+        let opt_range = |r: Option<(f64, f64)>| match r {
             Some((lo, hi)) => format!("Some(({}, {}))", rust_f64(lo), rust_f64(hi)),
             None => "None".to_string(),
         };
+        let (range, hard) = (opt_range(p.soft_range), opt_range(p.hard_range));
         s.push_str(&format!(
-            "    ParamMeta {{\n        id: {:?},\n        stage: {:?},\n        ty: ParamType::{},\n        unit: {:?},\n        default: {default},\n        soft_range: {range},\n        confidence: Confidence::{},\n        source: {:?},\n        description: {:?},\n        group: {:?},\n        values: &{:?},\n        advanced: {},\n        widget: ParamWidget::{},\n        file: {:?},\n        offset: {},\n        size: {},\n    }},\n",
+            "    ParamMeta {{\n        id: {:?},\n        stage: {:?},\n        ty: ParamType::{},\n        unit: {:?},\n        default: {default},\n        soft_range: {range},\n        hard_range: {hard},\n        hard_why: {:?},\n        confidence: Confidence::{},\n        source: {:?},\n        description: {:?},\n        group: {:?},\n        values: &{:?},\n        advanced: {},\n        widget: ParamWidget::{},\n        file: {:?},\n        offset: {},\n        size: {},\n    }},\n",
             p.id,
             p.stage,
             p.ty.variant(),
             p.unit,
+            p.hard_why,
             confidence(p.tag),
             one_line(&p.source),
             one_line(&p.description),
@@ -862,25 +990,62 @@ pub fn rust_source(t: &Table) -> String {
     s.push_str("            _ => None,\n        }\n    }\n\n");
 
     s.push_str(
-        "    /// Sets the parameter `id`. Returns false (and changes nothing) for an unknown id, a value of the\n",
+        "    /// Sets the parameter `id`, the one validation point of every input path. Rejected (nothing changes):\n\
+         \x20   /// an unknown id, a value of the wrong type, a non-finite float (NaN or infinity, any component), an enum\n\
+         \x20   /// index out of range. A number outside the hard range is clamped into it (per component), then the\n\
+         \x20   /// cross-parameter rules of `Params::constrain` apply; either gives `Applied::Clamped` with the value\n\
+         \x20   /// stored. Values outside the soft range but inside the hard range are stored as given.\n",
     );
-    s.push_str("    /// wrong type, a non-finite float (NaN or infinity) or an enum index out of range. Values outside the soft range are accepted.\n");
-    s.push_str("    pub fn set(&mut self, id: &str, value: ParamValue) -> bool {\n        match (id, value) {\n");
+    s.push_str(
+        "    pub fn set_checked(&mut self, id: &str, value: ParamValue) -> Result<Applied, Rejected> {\n        let adjusted = match (id, value) {\n",
+    );
     for p in &t.params {
-        let guard = match p.ty {
-            Type::Enum => format!(" if v < {}", p.values.len()),
-            Type::F32 => " if v.is_finite()".to_string(),
-            Type::Vec2 | Type::Vec3 | Type::Vec4 => " if v.iter().all(|x| x.is_finite())".to_string(),
-            _ => String::new(),
+        let (lo, hi) = p.hard_range.unwrap_or_default();
+        let arm = match p.ty {
+            Type::F32 => format!(
+                "{{ let c = param_clamp_f32(v, {}, {})?; self.{id} = c; c != v }}",
+                rust_f32(lo as f32),
+                rust_f32(hi as f32),
+                id = p.id
+            ),
+            Type::Vec2 | Type::Vec3 | Type::Vec4 => format!(
+                "{{ let c = param_clamp_vec(v, {}, {})?; self.{id} = c; c != v }}",
+                rust_f32(lo as f32),
+                rust_f32(hi as f32),
+                id = p.id
+            ),
+            Type::I32 => format!(
+                "{{ let c = v.clamp({}_i32, {}_i32); self.{id} = c; c != v }}",
+                lo as i32,
+                hi as i32,
+                id = p.id
+            ),
+            Type::Bool => format!("{{ self.{} = v; false }}", p.id),
+            Type::Enum => format!(
+                "{{ if v >= {} {{ return Err(Rejected::NotAValue); }} self.{} = v; false }}",
+                p.values.len(),
+                p.id
+            ),
         };
         s.push_str(&format!(
-            "            ({:?}, ParamValue::{}(v)){guard} => self.{} = v,\n",
+            "            ({:?}, ParamValue::{}(v)) => {arm}\n",
             p.id,
-            p.ty.variant(),
-            p.id
+            p.ty.variant()
         ));
     }
-    s.push_str("            _ => return false,\n        }\n        true\n    }\n}\n");
+    s.push_str(
+        "            _ => {\n                return Err(if PARAMS_META.iter().any(|m| m.id == id) {\n                    Rejected::WrongType\n                } else {\n                    Rejected::UnknownId\n                })\n            }\n        };\n",
+    );
+    s.push_str("        let constrained = self.constrain(id);\n");
+    s.push_str(
+        "        Ok(match self.get(id) {\n            Some(v) if adjusted || constrained => Applied::Clamped(v),\n            _ => Applied::Exact,\n        })\n    }\n}\n\n",
+    );
+    s.push_str(
+        "/// `v` clamped to `lo..=hi`, or `Rejected::NonFinite` for NaN and infinities.\n#[allow(dead_code)]\nfn param_clamp_f32(v: f32, lo: f32, hi: f32) -> Result<f32, Rejected> {\n    if v.is_finite() {\n        Ok(v.clamp(lo, hi))\n    } else {\n        Err(Rejected::NonFinite)\n    }\n}\n\n",
+    );
+    s.push_str(
+        "/// [`param_clamp_f32`] per component; any non-finite component rejects the whole vector.\n#[allow(dead_code)]\nfn param_clamp_vec<const N: usize>(v: [f32; N], lo: f32, hi: f32) -> Result<[f32; N], Rejected> {\n    let mut out = v;\n    for x in &mut out {\n        *x = param_clamp_f32(*x, lo, hi)?;\n    }\n    Ok(out)\n}\n",
+    );
     s
 }
 
@@ -1202,12 +1367,168 @@ mod tests {
         assert!(table(&entry("x", "i32", "0", "min = -2147483648\nmax = 2147483647\n")).is_ok());
     }
 
+    /// `mixed()` with every soft range [-10, 10] widened to the hard range [-100, 100], except `g` and the vec2
+    /// `d` (hard range = soft range [-10, 10]).
+    fn mixed_hard() -> String {
+        let wide = "min = -10.0\nmax = 10.0\nhard_min = -100.0\nhard_max = 100.0\nhard_why = \"test\"\n";
+        let mut text = String::new();
+        for chunk in mixed().split("[[param]]").filter(|c| !c.is_empty()) {
+            let keep = chunk.contains("id = \"g\"") || chunk.contains("id = \"d\"");
+            let chunk = if keep {
+                chunk.to_string()
+            } else {
+                chunk.replace(RANGE, wide)
+            };
+            let chunk = chunk.replace(
+                "min = -10\nmax = 10\n",
+                "min = -10\nmax = 10\nhard_min = -100\nhard_max = 100\nhard_why = \"test\"\n",
+            );
+            text.push_str("[[param]]");
+            text.push_str(&chunk);
+        }
+        text
+    }
+
+    #[test]
+    fn hard_range_defaults_to_the_soft_range_and_must_contain_it() {
+        let t = table(&entry("a", "f32", "1.0", "min = 0.5\nmax = 2.0\n")).unwrap();
+        assert_eq!(
+            (t.params[0].hard_range, t.params[0].hard_why.as_str()),
+            (Some((0.5, 2.0)), "")
+        );
+        let t = table(&entry(
+            "a",
+            "f32",
+            "1.0",
+            "min = 0.5\nmax = 2.0\nhard_min = 0.001\nhard_why = \"positive\"\n",
+        ))
+        .unwrap();
+        assert_eq!(t.params[0].hard_range, Some((0.001, 2.0)));
+        assert_eq!(t.params[0].hard_why, "positive");
+        // A reason alone documents a hard range equal to the soft range.
+        let t = table(&entry("a", "f32", "1.0", "min = 0.5\nmax = 2.0\nhard_why = \"why\"\n")).unwrap();
+        assert_eq!(t.params[0].hard_range, Some((0.5, 2.0)));
+        let rust = rust_source(&t);
+        assert!(rust.contains("hard_range: Some((0.5_f64, 2.0_f64)),") && rust.contains("hard_why: \"why\","));
+        assert!(table(&entry("b", "bool", "true", "")).unwrap().params[0]
+            .hard_range
+            .is_none());
+        for (ty, default, extra, needle) in [
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_min = 0.6\nhard_why = \"x\"\n",
+                "not inside the hard range",
+            ),
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_max = 1.5\nhard_why = \"x\"\n",
+                "not inside the hard range",
+            ),
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_min = 0.1\n",
+                "needs `hard_why`",
+            ),
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_min = \"a\"\nhard_why = \"x\"\n",
+                "must be a number",
+            ),
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_min = nan\nhard_why = \"x\"\n",
+                "not a valid bound",
+            ),
+            (
+                "i32",
+                "1",
+                "min = 0\nmax = 2\nhard_max = 2.5\nhard_why = \"x\"\n",
+                "must be an integer",
+            ),
+            ("bool", "true", "hard_why = \"x\"\n", "not allowed for type bool"),
+            (
+                "enum",
+                "\"a\"",
+                "values = [\"a\"]\nhard_min = 0\nhard_why = \"x\"\n",
+                "not allowed for type enum",
+            ),
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_why = \" \"\n",
+                "`hard_why` is empty",
+            ),
+            (
+                "f32",
+                "1.0",
+                "min = 0.5\nmax = 2.0\nhard_why = \"a\\nb\"\n",
+                "control character",
+            ),
+        ] {
+            let e = table(&entry("x", ty, default, extra)).unwrap_err();
+            assert!(e.0.starts_with("params/t.toml: parameter `x`: "), "{e}");
+            assert!(e.0.contains(needle), "expected `{needle}` in: {e}");
+        }
+    }
+
+    /// The repository table: every soft range (and so every default) lies inside the hard range, and every
+    /// production entry documents its hard range.
+    #[test]
+    fn repository_soft_ranges_lie_inside_the_hard_ranges() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("params");
+        let t = load_dir(&dir, true).unwrap();
+        for p in &t.params {
+            if let (Some((lo, hi)), Some((hlo, hhi))) = (p.soft_range, p.hard_range) {
+                assert!(
+                    hlo <= lo && hi <= hhi,
+                    "{}: soft [{lo}, {hi}] hard [{hlo}, {hhi}]",
+                    p.id
+                );
+            }
+            assert_eq!(p.hard_range.is_some(), p.soft_range.is_some(), "{}", p.id);
+        }
+    }
+
+    /// The shipped presets: every value names a parameter, enums name a value, numbers lie inside the hard range
+    /// ([`check_presets`]).
+    #[test]
+    fn shipped_presets_lie_inside_the_hard_ranges() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let t = load_dir(&root.join("params"), false).unwrap();
+        let n = check_presets(&t, &root.join("presets").join("tubes")).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(n, 10);
+        // The check names the file and the key.
+        let bad = std::env::temp_dir().join(format!("paramgen-presets-{}", std::process::id()));
+        fs::create_dir_all(&bad).unwrap();
+        fs::write(bad.join("x.toml"), "schema = 1\n[params]\ntube_aspect = 0.0\n").unwrap();
+        let e = check_presets(&t, &bad).unwrap_err();
+        fs::write(bad.join("x.toml"), "schema = 1\n[params]\nmask_type = \"hexagon\"\n").unwrap();
+        let e2 = check_presets(&t, &bad).unwrap_err();
+        fs::write(bad.join("x.toml"), "schema = 1\n[params]\nno_such = 1\n").unwrap();
+        let e3 = check_presets(&t, &bad).unwrap_err();
+        let _ = fs::remove_dir_all(&bad);
+        assert!(
+            e.0.contains("x.toml") && e.0.contains("tube_aspect") && e.0.contains("hard range"),
+            "{e}"
+        );
+        assert!(e2.0.contains("mask_type") && e2.0.contains("hexagon"), "{e2}");
+        assert!(e3.0.contains("no_such"), "{e3}");
+    }
+
     /// Compiles and runs a probe around the generated Rust source: it sets distinct values on the `mixed()`
     /// table, prints the std140 block, and tries to set non-finite values. Works in release builds (it does not
     /// read the repository table).
     #[test]
     fn generated_rust_serialises_the_full_std140_block_and_rejects_non_finite_values() {
-        let t = table(&mixed()).unwrap();
+        let t = table(&mixed_hard()).unwrap();
         let dir = std::env::temp_dir().join(format!("paramgen-test-{}-probe", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         let probe = format!(
@@ -1216,33 +1537,44 @@ mod tests {
              #[derive(Debug, Clone, Copy, PartialEq)] pub enum Confidence {{ Sourced, Derived, Known, Estimate }}\n\
              #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamValue {{ F32(f32), I32(i32), Bool(bool), Enum(u32), Vec2([f32; 2]), Vec3([f32; 3]), Vec4([f32; 4]) }}\n\
              #[derive(Debug, Clone, Copy, PartialEq)] pub enum ParamWidget {{ Auto, Linear, Log, Color }}\n\
-             pub struct ParamMeta {{ pub id: &'static str, pub stage: &'static str, pub ty: ParamType, pub unit: &'static str, pub default: ParamValue, pub soft_range: Option<(f64, f64)>, pub confidence: Confidence, pub source: &'static str, pub description: &'static str, pub group: &'static str, pub values: &'static [&'static str], pub advanced: bool, pub widget: ParamWidget, pub file: &'static str, pub offset: usize, pub size: usize }}\n\
+             pub struct ParamMeta {{ pub id: &'static str, pub stage: &'static str, pub ty: ParamType, pub unit: &'static str, pub default: ParamValue, pub soft_range: Option<(f64, f64)>, pub hard_range: Option<(f64, f64)>, pub hard_why: &'static str, pub confidence: Confidence, pub source: &'static str, pub description: &'static str, pub group: &'static str, pub values: &'static [&'static str], pub advanced: bool, pub widget: ParamWidget, pub file: &'static str, pub offset: usize, pub size: usize }}\n\
+             #[derive(Debug, Clone, Copy, PartialEq)] pub enum Applied {{ Exact, Clamped(ParamValue) }}\n\
+             #[derive(Debug, Clone, Copy, PartialEq)] pub enum Rejected {{ UnknownId, WrongType, NonFinite, NotAValue }}\n\
+             impl Params {{ fn constrain(&mut self, id: &str) -> bool {{ if id == \"a\" && self.a > 5.0 {{ self.a = 5.0; true }} else {{ false }} }} }}\n\
              {generated}\n\
              fn main() {{\n\
+                 use Applied::*;\n\
                  let mut p = Params::default();\n\
                  let sets = [\n\
-                     p.set(\"a\", ParamValue::F32(1.0)),\n\
-                     p.set(\"b\", ParamValue::Vec3([2.0, 3.0, 4.0])),\n\
-                     p.set(\"c\", ParamValue::I32(-7)),\n\
-                     p.set(\"d\", ParamValue::Vec2([5.0, 6.0])),\n\
-                     p.set(\"e\", ParamValue::Bool(true)),\n\
-                     p.set(\"f\", ParamValue::Vec4([7.0, 8.0, 9.0, 10.0])),\n\
-                     p.set(\"g\", ParamValue::F32(11.0)),\n\
-                     p.set(\"h\", ParamValue::Enum(2)),\n\
-                     p.set(\"i\", ParamValue::Vec2([12.0, 13.0])),\n\
-                     p.set(\"j\", ParamValue::F32(14.0)),\n\
+                     p.set_checked(\"a\", ParamValue::F32(1.0)),\n\
+                     p.set_checked(\"b\", ParamValue::Vec3([2.0, 3.0, 4.0])),\n\
+                     p.set_checked(\"c\", ParamValue::I32(-7)),\n\
+                     p.set_checked(\"d\", ParamValue::Vec2([5.0, 6.0])),\n\
+                     p.set_checked(\"e\", ParamValue::Bool(true)),\n\
+                     p.set_checked(\"f\", ParamValue::Vec4([7.0, 8.0, 9.0, 10.0])),\n\
+                     p.set_checked(\"g\", ParamValue::F32(11.0)),\n\
+                     p.set_checked(\"h\", ParamValue::Enum(2)),\n\
+                     p.set_checked(\"i\", ParamValue::Vec2([12.0, 13.0])),\n\
+                     p.set_checked(\"j\", ParamValue::F32(14.0)),\n\
                  ];\n\
-                 assert!(sets.iter().all(|&b| b));\n\
+                 assert_eq!(sets, [Ok(Exact), Ok(Exact), Ok(Exact), Ok(Exact), Ok(Exact), Ok(Exact), Ok(Clamped(ParamValue::F32(10.0))), Ok(Exact), Ok(Exact), Ok(Exact)]);\n\
                  let bytes = p.to_std140();\n\
                  println!(\"{{}}\", bytes.iter().map(|b| b.to_string()).collect::<Vec<_>>().join(\",\"));\n\
                  let before = p;\n\
-                 assert!(!p.set(\"a\", ParamValue::F32(f32::NAN)));\n\
-                 assert!(!p.set(\"a\", ParamValue::F32(f32::INFINITY)));\n\
-                 assert!(!p.set(\"b\", ParamValue::Vec3([0.0, f32::NEG_INFINITY, 0.0])));\n\
-                 assert!(!p.set(\"f\", ParamValue::Vec4([0.0, 0.0, f32::NAN, 0.0])));\n\
-                 assert!(!p.set(\"h\", ParamValue::Enum(3)));\n\
-                 assert!(!p.set(\"nope\", ParamValue::F32(1.0)));\n\
+                 assert_eq!(p.set_checked(\"a\", ParamValue::F32(f32::NAN)), Err(Rejected::NonFinite));\n\
+                 assert_eq!(p.set_checked(\"a\", ParamValue::F32(f32::INFINITY)), Err(Rejected::NonFinite));\n\
+                 assert_eq!(p.set_checked(\"b\", ParamValue::Vec3([0.0, f32::NEG_INFINITY, 0.0])), Err(Rejected::NonFinite));\n\
+                 assert_eq!(p.set_checked(\"f\", ParamValue::Vec4([0.0, 0.0, f32::NAN, 0.0])), Err(Rejected::NonFinite));\n\
+                 assert_eq!(p.set_checked(\"h\", ParamValue::Enum(3)), Err(Rejected::NotAValue));\n\
+                 assert_eq!(p.set_checked(\"nope\", ParamValue::F32(1.0)), Err(Rejected::UnknownId));\n\
+                 assert_eq!(p.set_checked(\"a\", ParamValue::I32(1)), Err(Rejected::WrongType));\n\
                  assert!(p == before);\n\
+                 assert_eq!(p.set_checked(\"c\", ParamValue::I32(i32::MAX)), Ok(Clamped(ParamValue::I32(100))));\n\
+                 assert_eq!(p.set_checked(\"c\", ParamValue::I32(i32::MIN)), Ok(Clamped(ParamValue::I32(-100))));\n\
+                 assert_eq!(p.set_checked(\"i\", ParamValue::Vec2([-1e30, 0.0])), Ok(Clamped(ParamValue::Vec2([-100.0, 0.0]))));\n\
+                 assert_eq!(p.set_checked(\"d\", ParamValue::Vec2([0.0, -0.0])), Ok(Exact));\n\
+                 assert_eq!(p.set_checked(\"a\", ParamValue::F32(7.0)), Ok(Clamped(ParamValue::F32(5.0))), \"constrain\");\n\
+                 assert_eq!(p.set_checked(\"g\", ParamValue::F32(f32::MAX)), Ok(Clamped(ParamValue::F32(10.0))));\n\
                  println!(\"ok\");\n\
              }}\n",
             generated = rust_source(&t)
@@ -1292,10 +1624,10 @@ mod tests {
             0x4100_0000,
             0x4110_0000,
             0x4120_0000, // f = [7, 8, 9, 10] at 48
-            0x4130_0000,
+            0x4120_0000,
             2,
             0x4140_0000,
-            0x4150_0000, // g = 11 at 64, h = 2 at 68, i = [12, 13] at 72
+            0x4150_0000, // g = 11 clamped to 10 at 64, h = 2 at 68, i = [12, 13] at 72
             0x4160_0000,
             0,
             0,

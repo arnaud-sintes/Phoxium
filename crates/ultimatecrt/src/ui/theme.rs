@@ -478,7 +478,7 @@ pub fn slider_value(t: f64, lo: f64, hi: f64, log: bool) -> f64 {
 
 /// [`slider`] with a logarithmic scale (`log`, positive ranges only) and the `format` Dear ImGui uses for the
 /// Ctrl+click (or Enter) text entry. The number is drawn only while it is typed in; otherwise the caller shows
-/// the value next to the slider.
+/// the value next to the slider. A typed value is clamped to `lo..=hi` (`ALWAYS_CLAMP`).
 #[allow(clippy::too_many_arguments)]
 pub fn slider_ex<T>(ui: &Frame, id: &str, v: &mut T, lo: T, hi: T, width: f32, log: bool, format: &str) -> bool
 where
@@ -491,7 +491,10 @@ where
         .or_else(|_| NumericFormat::<T>::new(""))
         .expect("an empty numeric format is valid");
     let (flo, fhi): (f64, f64) = (lo.into(), hi.into());
-    let mut flags = SliderFlags::NO_ROUND_TO_FORMAT;
+    // ALWAYS_CLAMP: a value typed with Ctrl+click (or Enter) is clamped to the slider range like a drag (R-05,
+    // owner decision Q1: typed values stay in the soft range; files may go up to the hard range). It works in
+    // the value domain, so a logarithmic slider clamps the same way.
+    let mut flags = SliderFlags::NO_ROUND_TO_FORMAT | SliderFlags::ALWAYS_CLAMP;
     if log && flo > 0.0 {
         flags |= SliderFlags::LOGARITHMIC;
     }
