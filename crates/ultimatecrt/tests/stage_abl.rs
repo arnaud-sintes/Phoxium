@@ -320,6 +320,69 @@ fn coloured_field_limits_every_channel() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// Review D-06: one frame with a NaN or an infinite beam current does not latch the state. The reduce passes
+/// ignore the non-finite frame APL (the filtered APL keeps its value), so the next frames are limited
+/// normally: in the one-workgroup reduce (`exact`) and in the parallel one (`standard`).
+#[test]
+fn non_finite_frame_does_not_latch_the_state() {
+    let test = "stage_abl non-finite frame";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut p = Params::default();
+    on(&mut p, "abl_enable", true);
+    on(&mut p, "abl_probe", true);
+    f32p(&mut p, "abl_full_white_ma", 4.0);
+    f32p(&mut p, "abl_tau_s", 0.25);
+    let o = oracle(&p);
+    let alpha = 1.0 - (-f64::from(DT_MS) * 1e-3 / 0.25).exp();
+    let (img, a) = window(50);
+    for bad in [f32::NAN, f32::INFINITY, f32::NEG_INFINITY] {
+        let mut poisoned = img.clone();
+        let i = ((H / 2 * W + W / 2) * 4) as usize;
+        poisoned.rgba[i] = bad;
+        for tier in [
+            ultimatecrt::params::QUALITY_TIER_EXACT,
+            ultimatecrt::params::QUALITY_TIER_STANDARD,
+        ] {
+            let q = Params {
+                quality_tier: tier,
+                ..p
+            };
+            let what = format!("{test} {bad} tier {tier}");
+            gpu.clear_history();
+            for _ in 0..20 {
+                frame(&mut gpu, &q, &img, DT_MS);
+            }
+            // The state after frame 20 (probe), then frame 21 updates it to x21.
+            let before = probe(&frame(&mut gpu, &q, &img, DT_MS));
+            let x21 = before[1] + alpha * (a - before[1]);
+            // The poisoned frame: its APL is ignored, the state stays x21.
+            frame(&mut gpu, &q, &poisoned, DT_MS);
+            let after = probe(&frame(&mut gpu, &q, &img, DT_MS));
+            eprintln!("{what}: before {before:?} after {after:?} (want x {x21:.6})");
+            assert!(after.iter().all(|v| v.is_finite()), "{what}: {after:?}");
+            // Two FP16 readouts (x20 and x21) apart: 1e-3; one more frame of the filter would add 7e-3.
+            assert!((after[1] - x21).abs() <= 1e-3, "{what}: x {} vs {x21}", after[1]);
+            // Both probe values are FP16: room for the readout of x as well.
+            let g = o.gain(after[1]);
+            assert!((after[0] - g).abs() <= 2e-3, "{what}: gain {} vs {g}", after[0]);
+            // The following frames are limited normally and finite.
+            for _ in 0..3 {
+                frame(&mut gpu, &q, &img, DT_MS);
+            }
+            let r = frame(&mut gpu, &q, &img, DT_MS);
+            assert!(abl(&r).rgba.iter().all(|v| v.is_finite()), "{what}: non-finite output");
+            let s = probe(&r);
+            assert!(s[1] > after[1] && s[1] < a, "{what}: x {} after the recovery", s[1]);
+            assert!(s[0] > 0.0 && s[0] < 1.0, "{what}: gain {}", s[0]);
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// `clear_history` resets the filtered APL (cold start on black): the frame after a clear is unlimited.
 #[test]
 fn clear_history_resets_the_state() {
