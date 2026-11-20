@@ -15,3 +15,7 @@ Thumbs.db
 
 # Release packages
 /dist/
+
+# Output of scripts/poll-foreground.ps1 (window titles of whatever was in the foreground: never commit)
+poll-foreground.csv
+poll.csv
