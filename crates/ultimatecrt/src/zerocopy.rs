@@ -904,6 +904,48 @@ mod tests {
         assert!(!already_held(None, (7, 5), true));
     }
 
+    /// Device loss with the pool in use: the render side holds two slots (current source and a frame in flight)
+    /// and the capture is writing the third when the device is lost. The renderer drains its holds (device idle or
+    /// dropped), the capture's copy fails and aborts its write: every slot is free again, nothing stays held or
+    /// half-written, and a new write can start (on a new pool after a fallback, or this one).
+    #[test]
+    fn device_loss_with_the_pool_in_use_frees_every_slot() {
+        use std::sync::Mutex;
+        /// A hold on a slot of a shared pool, released on its last drop (as `capture::SharedFrame`).
+        #[derive(Clone)]
+        struct SlotHold(Arc<(Arc<Mutex<SlotPool>>, usize)>);
+        impl Drop for SlotHold {
+            fn drop(&mut self) {
+                if Arc::strong_count(&self.0) == 1 {
+                    self.0 .0.lock().unwrap().release(self.0 .1);
+                }
+            }
+        }
+        let pool = Arc::new(Mutex::new(SlotPool::default()));
+        let take = |after: u64| {
+            let (slot, _) = pool.lock().unwrap().take(after).unwrap();
+            SlotHold(Arc::new((pool.clone(), slot)))
+        };
+        let mut f: InFlight<SlotHold, 2> = InFlight::default();
+        for seq in 1..=2 {
+            let s = pool.lock().unwrap().begin_write().unwrap();
+            assert!(pool.lock().unwrap().publish(s, seq));
+            f.set_current(take(seq - 1));
+            f.submitted((seq % 2) as usize, true);
+        }
+        let writing = pool.lock().unwrap().begin_write().unwrap();
+        assert_eq!(pool.lock().unwrap().counts(), (0, 1, 0, 2));
+        // Device lost: the renderer drains, the capture's GPU copy fails.
+        f.drain();
+        pool.lock().unwrap().abort_write(writing);
+        assert_eq!(pool.lock().unwrap().counts(), (POOL_SLOTS, 0, 0, 0));
+        assert_eq!(f.held(), 0);
+        // A late publish of the aborted write is refused (no half-written frame is ever shown).
+        assert!(!pool.lock().unwrap().publish(writing, 3));
+        assert_eq!(pool.lock().unwrap().take(0), None);
+        assert!(pool.lock().unwrap().begin_write().is_some());
+    }
+
     #[test]
     fn copy_cost_mean_and_max() {
         let mut c = CopyCost::default();

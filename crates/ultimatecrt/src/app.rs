@@ -205,7 +205,7 @@ pub fn run() -> Res<()> {
     // Review D-01: what the load upgraded (the old default hotkeys), shown once and written back at once.
     let settings_notes = loaded.as_ref().map(|l| l.notes.join(" ")).filter(|n| !n.is_empty());
     // No settings file yet: a first start, the first-run hint is due (shown on the window picker).
-    let first_start = loaded.as_ref().is_some_and(|l| l.state == settings::FileState::Missing);
+    let first_start = loaded.as_ref().is_some_and(settings::Loaded::first_start);
     let stored = loaded.map(|l| l.settings).unwrap_or_default();
     // A23: the windows recently in the foreground come first in the picker (the z-order seeds the list).
     let mut recent = picker::Recent::default();
@@ -1688,7 +1688,15 @@ pub fn run() -> Res<()> {
                 // R-02, R-01: what the renderer limited (amplifier samples, an empty tube area, ...). The renderer
                 // prints each one once when it appears; the queue is drained here so it stays bounded.
                 let _ = renderer.take_gpu_notices();
+                // The settings writer's latest failure, while it stands (disk full, read-only folder, locked file).
+                let save_notice = live.save_problem();
+                if let Some(n) = &save_notice {
+                    if !ui_state.notices.contains(n) {
+                        ui_state.notices.push(n.clone());
+                    }
+                }
                 let gpu_choice_notice = title_notice(adapter_notice.as_deref(), monitor_notice.as_deref());
+                let gpu_choice_notice = title_notice(gpu_choice_notice.as_deref(), save_notice.as_deref());
                 let machine_notice = title_notice(gpu_choice_notice.as_deref(), capture_notice.as_deref());
                 let gpu_notice = title_notice(machine_notice.as_deref(), renderer.gpu_notice().as_deref());
                 let shown_notice = title_notice(notice.as_deref(), gpu_notice.as_deref());

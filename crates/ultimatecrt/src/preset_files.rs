@@ -180,17 +180,31 @@ pub fn read_import(path: &Path, lib: &Library) -> Result<Prepared, String> {
     let shown = path
         .file_name()
         .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+    let too_big = |size: u64| {
+        format!(
+            "{shown} is {} KB, more than the {} KB a preset can be: not imported.",
+            size.div_ceil(1024),
+            MAX_IMPORT_BYTES / 1024
+        )
+    };
     let size = fs::metadata(path)
         .map_err(|e| format!("Cannot read {shown}: {e}"))?
         .len();
     if size > MAX_IMPORT_BYTES {
-        return Err(format!(
-            "{shown} is {} KB, more than the {} KB a preset can be: not imported.",
-            size.div_ceil(1024),
-            MAX_IMPORT_BYTES / 1024
-        ));
+        return Err(too_big(size));
     }
-    let bytes = fs::read(path).map_err(|e| format!("Cannot read {shown}: {e}"))?;
+    // The read itself is bounded too: the size above can be stale (a file still growing) or not the real one (a
+    // pipe or a device name reports 0), and nothing past the limit is ever held in memory.
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|f| {
+            use std::io::Read;
+            f.take(MAX_IMPORT_BYTES + 1).read_to_end(&mut bytes)
+        })
+        .map_err(|e| format!("Cannot read {shown}: {e}"))?;
+    if bytes.len() as u64 > MAX_IMPORT_BYTES {
+        return Err(too_big(bytes.len() as u64));
+    }
     let text = String::from_utf8(bytes).map_err(|_| format!("{shown} is not a text file: not imported."))?;
     let mut preset = Preset::parse(&shown, &text, Origin::User(path.to_path_buf())).map_err(|e| e.to_string())?;
     let name = clean_name(&preset.name);
@@ -458,6 +472,53 @@ mod tests {
             .collect();
         assert_eq!(names, ["bad.toml", "big.toml", "bin.toml", "odd.toml", "unknown.toml"]);
         assert!(scan(&dir.join("missing")).is_empty());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Hostile import files: exactly at the limit (read, then refused as a preset, not as a size), one byte over,
+    /// deep nesting (the parser's recursion stays bounded: an error, never a stack overflow), a huge name within
+    /// the limit (cut), a folder named like a preset, a missing file. Every one gives a message, none panics.
+    #[test]
+    fn hostile_import_files_are_refused_with_a_message() {
+        let dir = temp("hostile");
+        let lib = Library::embedded();
+        let write = |name: &str, text: &str| {
+            let p = dir.join(name);
+            fs::write(&p, text).unwrap();
+            p
+        };
+        let at = write("at.toml", &"#".repeat(MAX_IMPORT_BYTES as usize));
+        let e = read_import(&at, &lib).unwrap_err();
+        assert!(!e.contains("KB"), "at the limit the size is fine: {e}");
+        let over = write("over.toml", &"#".repeat(MAX_IMPORT_BYTES as usize + 1));
+        assert!(read_import(&over, &lib).unwrap_err().contains("not imported"));
+        for (name, text) in [
+            (
+                "arrays.toml",
+                format!("x = {}{}", "[".repeat(100_000), "]".repeat(100_000)),
+            ),
+            (
+                "tables.toml",
+                format!("x = {}{}", "{a = ".repeat(40_000), "}".repeat(40_000)),
+            ),
+        ] {
+            let p = write(name, &text);
+            assert!(read_import(&p, &lib).is_err(), "{name}");
+        }
+        let long_name = format!(
+            "schema = 1\nid = \"long\"\nname = \"{}\"\nlabel = \"x\"\n[params]\n[provenance]\n",
+            "N".repeat(200_000)
+        );
+        let p = write("long.toml", &long_name);
+        if let Ok(prep) = read_import(&p, &lib) {
+            assert!(prep.preset.name.chars().count() <= MAX_PRESET_NAME);
+        }
+        let folder = dir.join("folder.toml");
+        fs::create_dir_all(&folder).unwrap();
+        assert!(read_import(&folder, &lib).unwrap_err().contains("Cannot read"));
+        assert!(read_import(&dir.join("missing.toml"), &lib)
+            .unwrap_err()
+            .contains("Cannot read"));
         let _ = fs::remove_dir_all(&dir);
     }
 }

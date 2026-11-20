@@ -367,6 +367,15 @@ impl Live {
         true
     }
 
+    /// The notice while the settings cannot be written (disk full, folder read-only, file locked): the latest
+    /// write failed and none succeeded since (`settings::Writer::problem`). Never waits.
+    pub fn save_problem(&self) -> Option<String> {
+        self.writer
+            .as_ref()
+            .and_then(settings::Writer::problem)
+            .map(|e| format!("settings not saved ({e}); changes last until exit"))
+    }
+
     /// Waits until the queued writes are on disk (tests, and the exit through [`Live::finish`]). Returns the
     /// error of the last failed write, if any.
     pub fn wait_saved(&self) -> Option<String> {

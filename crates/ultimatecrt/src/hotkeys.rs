@@ -1306,6 +1306,43 @@ mod tests {
         }
     }
 
+    /// Re-registration failure paths: the click-through chord and its fallback both owned by another program leave
+    /// that one action unbound with a problem naming it (everything else works, the menu row still switches it);
+    /// a menu rebind whose new chord is refused and whose old chord cannot be taken back keeps the menu reachable
+    /// through the safety chord.
+    #[test]
+    fn registration_failures_never_cost_the_menu() {
+        let mut fake = Fake::taking(&["Ctrl+Alt+F6", "Ctrl+Alt+Shift+F6"]);
+        let mut reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert_eq!(reg.bound(Action::ToggleClickThrough), None);
+        let p = reg.problems().join(" ");
+        assert!(p.contains("toggle_click_through") && p.contains("1409"), "{p}");
+        for a in Action::ALL.into_iter().filter(|a| *a != Action::ToggleClickThrough) {
+            assert_eq!(reg.bound(a), Some(a.default_chord()), "{a:?}");
+        }
+        // The menu: the new chord is refused, and F10 is taken by another program the moment it is released.
+        fake.owned_elsewhere
+            .insert(chord("Ctrl+Alt+M"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        fake.owned_elsewhere
+            .insert(chord("F10"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        let e = rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("Ctrl+Alt+M")).unwrap_err();
+        assert!(e.contains("could not be taken back"), "{e}");
+        assert_eq!(reg.bound(Action::ToggleMenu), None);
+        assert_eq!(
+            reg.menu_fallback,
+            Some(chord("Ctrl+Alt+F10")),
+            "the safety chord opens the menu"
+        );
+        assert_eq!(fake.registered[&MENU_FALLBACK_ID], chord("Ctrl+Alt+F10"));
+        assert_eq!(Action::from_hotkey_id(MENU_FALLBACK_ID), Some(Action::ToggleMenu));
+        // Reset all: the menu back on a documented chord (F10 is still owned: its first fallback), click-through
+        // still reported, Quit kept.
+        let problems = reset_all(&mut fake, &mut reg);
+        assert!(reg.bound(Action::ToggleMenu).is_some() || reg.menu_fallback.is_some());
+        assert!(problems.join(" ").contains("toggle_click_through"), "{problems:?}");
+        assert_eq!(reg.bound(Action::Quit), Some(Action::Quit.default_chord()));
+    }
+
     #[test]
     fn the_plan_lists_the_wanted_chord_first_then_the_fallbacks() {
         let plan = plan_registration(&Bindings::default());
