@@ -40,6 +40,7 @@ pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
     ("toggle_bypass", "Ctrl+Alt+F7"),
     ("next_preset", "Ctrl+Alt+PageDown"),
     ("previous_preset", "Ctrl+Alt+PageUp"),
+    ("toggle_click_through", "Ctrl+Alt+F6"),
 ];
 
 /// The generation of the default hotkeys a file was written with (`[global] hotkey_defaults`): 1 (the key is
@@ -64,6 +65,16 @@ fn serialize_hotkeys<S: serde::Serializer>(map: &BTreeMap<String, String>, s: S)
     changed.serialize(s)
 }
 
+/// A boolean key that never makes the whole file unusable: a value of another type reads as absent.
+fn lenient_opt_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<bool>, D::Error> {
+    Ok(toml::Value::deserialize(d)?.as_bool())
+}
+
+/// A boolean key that never makes the whole file unusable: a value of another type reads as `false`.
+fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(toml::Value::deserialize(d)?.as_bool().unwrap_or(false))
+}
+
 fn default_version() -> u32 {
     SCHEMA_VERSION
 }
@@ -82,7 +93,11 @@ pub struct UiState {
     pub scale: UiScale,
     /// `[global.ui] first_run_done`: the first-run hint was dismissed with "Do not show again" (`true`), or is
     /// still due (`false`, written by a first run). Absent (a file from before the hint): never shown.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_opt_bool"
+    )]
     pub first_run_done: Option<bool>,
 }
 
@@ -171,6 +186,11 @@ pub struct OutputState {
     /// Outer rectangle of the framed windowed output in virtual-screen pixels: left, top, right, bottom. The
     /// position holds the monitor; a rectangle that is no longer on a monitor is ignored (`modes::restore_rect`).
     pub windowed: Option<[i32; 4]>,
+    /// The output ignores the mouse while the menu is closed: clicks reach the captured window under it
+    /// (`output::behaviour`). Off by default (PLAN D-8). Toggled by its hotkey (Ctrl+Alt+F6) or the menu
+    /// (Interface, "Click-through").
+    #[serde(deserialize_with = "lenient_bool")]
+    pub click_through: bool,
 }
 
 /// The value of `gpu.adapter` that means the automatic choice.
@@ -558,8 +578,8 @@ impl Settings {
     }
 
     /// "Reset everything to defaults" (menu, owner definition 2026-11-20): the parameter overrides cleared (the
-    /// preset in force stays, with its own values), the hotkeys, the UI scale, the GPU adapter and the capture path
-    /// back to their defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
+    /// preset in force stays, with its own values), the hotkeys, the UI scale, the GPU adapter, the capture path
+    /// and click-through back to their defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
     /// layout, the first-run state; user presets and burn-in maps are files this never touches.
     pub fn reset_everything(&mut self) {
         let g = &mut self.global;
@@ -568,6 +588,7 @@ impl Settings {
         g.ui.scale = UiScale::Auto;
         g.gpu = GpuSettings::default();
         g.capture = CaptureSettings::default();
+        g.output.click_through = false;
     }
 
     /// Inserts or replaces the profile with the same executable and class.
@@ -822,6 +843,14 @@ pub struct Loaded {
     pub notes: Vec<String>,
 }
 
+impl Loaded {
+    /// A first start (the first-run card is due): no settings file at all. A corrupt, unreadable or newer file is
+    /// not a first start: its warning is shown instead (on the window picker) and the card stays away.
+    pub fn first_start(&self) -> bool {
+        self.state == FileState::Missing
+    }
+}
+
 /// Loads `dir\settings.toml`. A missing file gives defaults without a warning; see [`FileState`] for the rest.
 pub fn load(dir: &Path) -> Loaded {
     let path = dir.join(SETTINGS_FILE);
@@ -946,6 +975,8 @@ struct WriterState {
     stop: bool,
     /// The error of the last write, until [`Writer::wait_idle`] or [`Writer::finish`] takes it.
     error: Option<String>,
+    /// The outcome of the latest write: its error, `None` once a write succeeded ([`Writer::problem`]).
+    failing: Option<String>,
 }
 
 impl WriterShared {
@@ -972,9 +1003,12 @@ impl Writer {
     /// Asks for `settings` to be written; returns at once (replaces a request not started yet).
     pub fn save(&self, settings: &Settings) {
         if self.thread.is_none() {
-            if let Err(e) = save(&self.dir, settings) {
+            let result = save(&self.dir, settings);
+            let mut st = self.shared.lock();
+            st.failing = result.as_ref().err().map(ToString::to_string);
+            if let Err(e) = result {
                 eprintln!("warning: cannot save the settings: {e}");
-                self.shared.lock().error = Some(e.to_string());
+                st.error = Some(e.to_string());
             }
             return;
         }
@@ -993,6 +1027,12 @@ impl Writer {
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
         }
         st.error.take()
+    }
+
+    /// The error of the latest finished write while it stands (a disk full, a read-only folder, a file locked by
+    /// another program), `None` once a later write succeeded. Never waits: the app polls it for a notice.
+    pub fn problem(&self) -> Option<String> {
+        self.shared.lock().failing.clone()
     }
 
     /// Writes what is pending and stops the thread (at exit). Returns the last write error, if any.
@@ -1027,6 +1067,7 @@ fn writer_loop(shared: &WriterShared, dir: &Path) {
             let result = save(dir, &s);
             st = shared.lock();
             st.busy = false;
+            st.failing = result.as_ref().err().map(ToString::to_string);
             if let Err(e) = result {
                 eprintln!("warning: cannot save the settings: {e}");
                 st.error = Some(e.to_string());
@@ -1218,6 +1259,87 @@ mod tests {
         let w = Writer::new(blocked);
         w.save(&s);
         assert!(w.wait_idle().is_some());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// Write failures of the background writer (a full disk or a permission error give the same paths: the
+    /// temporary file cannot be made, or the rename onto settings.toml fails): each is reported (`problem` while it
+    /// stands, the error once to `wait_idle`), leaves no temporary file and never breaks the file already there;
+    /// the writer keeps working and a later write that can succeed clears the problem.
+    #[test]
+    fn the_writer_survives_write_failures_and_recovers() {
+        let dir = temp_dir("writer-fail");
+        let w = Writer::new(dir.clone());
+        let mut s = Settings::default();
+        s.global.preset = "first".into();
+        w.save(&s);
+        assert_eq!(w.wait_idle(), None);
+        assert_eq!(w.problem(), None);
+        // The rename fails: settings.toml is replaced by a folder (a locked or read-only target behaves alike).
+        fs::remove_file(dir.join(SETTINGS_FILE)).unwrap();
+        fs::create_dir(dir.join(SETTINGS_FILE)).unwrap();
+        s.global.preset = "second".into();
+        w.save(&s);
+        assert!(w.wait_idle().is_some(), "reported once");
+        assert!(w.problem().is_some(), "and standing until a write succeeds");
+        assert_eq!(w.wait_idle(), None, "the error was taken");
+        let leftovers: Vec<_> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
+        // The cause goes: the next write succeeds and the problem clears.
+        fs::remove_dir(dir.join(SETTINGS_FILE)).unwrap();
+        s.global.preset = "third".into();
+        w.save(&s);
+        assert_eq!(w.wait_idle(), None);
+        assert_eq!(w.problem(), None);
+        assert_eq!(load(&dir).settings.global.preset, "third");
+        assert_eq!(w.finish(), None);
+        // The folder cannot be made at all (its parent is a file): every write fails, nothing panics, the writer
+        // still stops cleanly.
+        let parent = dir.join("file");
+        fs::write(&parent, "x").unwrap();
+        let w = Writer::new(parent.join("sub"));
+        for _ in 0..3 {
+            w.save(&s);
+        }
+        assert!(w.wait_idle().is_some());
+        assert!(w.problem().is_some());
+        assert!(w.finish().is_none(), "the error was already taken");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The first-run card and a damaged settings file: only a missing file is a first start. A corrupt, unreadable
+    /// or newer file shows its warning instead; a file whose first-run or click-through key has a wrong type stays
+    /// valid (those keys are read leniently), so one bad value never costs the user the other settings.
+    #[test]
+    fn a_damaged_settings_file_is_not_a_first_start_and_bad_flags_are_lenient() {
+        let dir = temp_dir("first-run");
+        let l = load(&dir);
+        assert!(l.first_start(), "no file: first start");
+        fs::write(dir.join(SETTINGS_FILE), "version = 1\n[global\npreset = ").unwrap();
+        let l = load(&dir);
+        assert_eq!(l.state, FileState::Invalid);
+        assert!(!l.first_start() && l.warning.is_some());
+        assert!(!l.settings.global.ui.first_run_due(), "no card over the warning");
+        fs::write(
+            dir.join(SETTINGS_FILE),
+            "version = 1\n[global]\npreset = \"kept\"\n[global.ui]\nfirst_run_done = \"yes\"\n[global.output]\n\
+             click_through = 3\n",
+        )
+        .unwrap();
+        let l = load(&dir);
+        assert_eq!(l.state, FileState::Valid, "{:?}", l.warning);
+        assert_eq!(l.settings.global.preset, "kept");
+        assert_eq!(l.settings.global.ui.first_run_done, None);
+        assert!(!l.settings.global.output.click_through);
+        assert!(!l.first_start());
+        // A newer schema is not a first start either.
+        fs::write(dir.join(SETTINGS_FILE), format!("version = {}\n", SCHEMA_VERSION + 1)).unwrap();
+        let l = load(&dir);
+        assert!(l.state == FileState::Newer && !l.first_start());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1704,6 +1826,30 @@ mod tests {
         assert_eq!(s.global.output.windowed, None);
         let s = Settings::from_toml("version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n").unwrap();
         assert_eq!(s.global.output.windowed, Some([10, 20, 1290, 740]));
+    }
+
+    /// `[global.output] click_through`: off by default and in a file of an earlier build (no key), round-trips,
+    /// and a file with the new hotkey missing still binds Ctrl+Alt+F6.
+    #[test]
+    fn click_through_defaults_off_and_round_trips() {
+        assert!(!Settings::default().global.output.click_through);
+        let old = "version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n";
+        assert!(!Settings::from_toml(old).unwrap().global.output.click_through);
+        let mut s = Settings::default();
+        s.global.output.click_through = true;
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("click_through = true"), "{text}");
+        assert!(Settings::from_toml(&text).unwrap().global.output.click_through);
+        let mut hk = default_hotkeys();
+        hk.remove("toggle_click_through");
+        let (b, w) = crate::hotkeys::Bindings::from_settings(&hk);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(
+            b.get(crate::hotkeys::Action::ToggleClickThrough)
+                .map(|c| c.to_string())
+                .as_deref(),
+            Some("Ctrl+Alt+F6")
+        );
     }
 
     /// The menu's UI scale and first-run keys (`[global.ui] scale`, `first_run_done`) round-trip; a file without

@@ -519,6 +519,33 @@ impl GpuSelection {
     }
 }
 
+/// The notice after the output moved onto another monitor (HW-3; no device is swapped during a session, too risky):
+/// `renderer` is the adapter the chain runs on, `start_owner` the owner of the monitor covered at start, `now` the
+/// choice [`select`] makes for the new rectangle. `None` when the new monitor is driven by the renderer's adapter,
+/// when its owner is unknown, or when it is the start situation (its warning was given at start). Otherwise the
+/// frames cross adapters; the notice says whether a restart would pick that adapter (automatic choice) or not (a
+/// configured adapter keeps the current one). Pure.
+pub fn moved_notice(renderer: Option<Luid>, start_owner: Option<Luid>, now: &GpuSelection) -> Option<String> {
+    let r = renderer?;
+    let o = now.owner.as_ref()?;
+    if o.luid == r || Some(o.luid) == start_owner {
+        return None;
+    }
+    let restart_picks_it = now.chosen.as_ref().and_then(|c| c.luid) == Some(o.luid);
+    Some(if restart_picks_it {
+        format!(
+            "moved to a monitor driven by another GPU ({}): frames cross adapters (slower); restart to use that GPU",
+            o.name
+        )
+    } else {
+        format!(
+            "moved to a monitor driven by another GPU ({}): frames cross adapters (slower; the GPU setting keeps \
+             the current one)",
+            o.name
+        )
+    })
+}
+
 /// The warning for a chain that does not run on the adapter of the monitor the output covers.
 fn crosses(name: &str, l: Luid, o: &Owner) -> String {
     format!(
@@ -1144,6 +1171,48 @@ mod tests {
 
     fn chosen(s: &GpuSelection) -> Option<usize> {
         s.chosen.as_ref().map(|c| c.index)
+    }
+
+    /// HW-3, monitor change: the output started on the RTX monitor and the chain runs on the RTX; dragged onto the
+    /// monitor of the Intel GPU, a notice says the frames cross adapters and that a restart would use the Intel
+    /// GPU (automatic choice) or keep the configured one; back on the RTX monitor the notice goes. No notice for
+    /// the start situation (a configured GPU that crosses from the start was warned about at start).
+    #[test]
+    fn moving_onto_a_monitor_of_another_gpu_is_noticed_never_hot_swapped() {
+        let (a, v) = dev_machine();
+        let at = |r: Rect, spec: &AdapterSpec| select(None, spec, &a, &v, Some(0), Some(r));
+        let start = at(RTX_MON, &AdapterSpec::Auto);
+        let renderer = start.chosen.as_ref().and_then(|c| c.luid);
+        assert_eq!(renderer, Some(RTX));
+        let start_owner = start.owner.as_ref().map(|o| o.luid);
+        // Same monitor: nothing.
+        assert_eq!(
+            moved_notice(renderer, start_owner, &at(RTX_MON, &AdapterSpec::Auto)),
+            None
+        );
+        // Onto the Intel monitor, automatic choice: a restart would take the Intel GPU.
+        let n = moved_notice(renderer, start_owner, &at(INTEL_MON, &AdapterSpec::Auto)).unwrap();
+        assert!(
+            n.contains("another GPU") && n.contains("Intel") && n.contains("cross adapters") && n.contains("restart"),
+            "{n}"
+        );
+        // A configured RTX: a restart would not change it; the notice says so.
+        let rtx = AdapterSpec::parse("RTX");
+        let n = moved_notice(renderer, start_owner, &at(INTEL_MON, &rtx)).unwrap();
+        assert!(n.contains("keeps the current one") && !n.contains("restart"), "{n}");
+        // Back: nothing.
+        assert_eq!(moved_notice(renderer, start_owner, &at(RTX_MON, &rtx)), None);
+        // Started crossing (configured RTX on the Intel monitor): the start situation is not news.
+        let crossing = at(INTEL_MON, &rtx);
+        let owner = crossing.owner.as_ref().map(|o| o.luid);
+        assert_eq!(moved_notice(renderer, owner, &crossing), None);
+        // Unknown renderer adapter or unknown owner: nothing to say.
+        assert_eq!(
+            moved_notice(None, start_owner, &at(INTEL_MON, &AdapterSpec::Auto)),
+            None
+        );
+        let off_screen = at((-9000, -9000, -8000, -8000), &AdapterSpec::Auto);
+        assert_eq!(moved_notice(renderer, start_owner, &off_screen), None);
     }
 
     #[test]

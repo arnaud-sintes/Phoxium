@@ -748,6 +748,8 @@ fn preview_state() -> UiState {
         source: Default::default(),
         profiles: Vec::new(),
         capture: Default::default(),
+        click_through: false,
+        notices: Vec::new(),
     }
 }
 

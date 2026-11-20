@@ -247,6 +247,24 @@ fn file_value(id: &str, v: ParamValue) -> toml::Value {
 /// Longest user preset name, in characters.
 pub const MAX_PRESET_NAME: usize = 60;
 
+/// Largest user preset file read from the presets folder at start (a shipped preset is about 5 KB; the import
+/// limit, `preset_files::MAX_IMPORT_BYTES`, is the same).
+pub const MAX_USER_PRESET_BYTES: u64 = 256 * 1024;
+
+/// Reads the text file `path`, at most `max` bytes: a larger file (by its size or by what the read finds, a file
+/// still growing) or one that is not UTF-8 is an error with a short reason; nothing past the limit is held.
+pub fn read_bounded(path: &Path, max: u64) -> Result<String, String> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    fs::File::open(path)
+        .and_then(|f| f.take(max + 1).read_to_end(&mut bytes))
+        .map_err(|e| e.to_string())?;
+    if bytes.len() as u64 > max {
+        return Err(format!("larger than {} KB, skipped", max / 1024));
+    }
+    String::from_utf8(bytes).map_err(|_| "not UTF-8 text, skipped".to_string())
+}
+
 /// The file id of a user preset called `name`: lower case ASCII letters and digits, every other run of
 /// characters one `-` (`My Trinitron 2` -> `my-trinitron-2`). `None` when nothing is left.
 pub fn preset_id_for(name: &str) -> Option<String> {
@@ -715,7 +733,8 @@ impl Library {
         lib
     }
 
-    /// The embedded presets plus the `*.toml` files of `dir` (sorted by file name). A user preset with the id
+    /// The embedded presets plus the `*.toml` files of `dir` (sorted by file name, each at most
+    /// [`MAX_USER_PRESET_BYTES`]: a larger file is skipped with a warning, never read whole). A user preset with the id
     /// of a shipped one replaces it in place; others are appended. A broken user file is skipped with a
     /// warning naming the file and key.
     pub fn load(dir: Option<&Path>) -> Library {
@@ -729,7 +748,7 @@ impl Library {
         files.sort();
         for path in files {
             let shown = path.display().to_string();
-            match fs::read_to_string(&path) {
+            match read_bounded(&path, MAX_USER_PRESET_BYTES) {
                 Ok(text) => lib.add(Preset::parse(&shown, &text, Origin::User(path.clone()))),
                 Err(e) => lib.warnings.push(format!("preset {shown}: {e}")),
             }
@@ -1232,6 +1251,39 @@ mod tests {
         assert_eq!(again.provenance, kv.provenance);
         // Invalid ids are refused.
         assert!(Preset::from_params("Bad Id", "n", &Params::default()).is_err());
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A huge or binary file in the presets folder is skipped with a warning (never read whole); the good file next
+    /// to it still loads.
+    #[test]
+    fn oversized_or_binary_user_files_are_skipped() {
+        let dir = std::env::temp_dir().join(format!("ucrt-presets-big-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.toml"), sample("")).unwrap();
+        fs::write(dir.join("big.toml"), "#".repeat(MAX_USER_PRESET_BYTES as usize + 1)).unwrap();
+        fs::write(dir.join("bin.toml"), [0xFFu8, 0xFE, 0x00]).unwrap();
+        let l = Library::load(Some(&dir));
+        assert!(l.find("x").is_some(), "the good file loads");
+        assert_eq!(l.list().len(), 11);
+        assert!(
+            l.warnings
+                .iter()
+                .any(|w| w.contains("big.toml") && w.contains("larger than 256 KB")),
+            "{:?}",
+            l.warnings
+        );
+        assert!(
+            l.warnings.iter().any(|w| w.contains("bin.toml") && w.contains("UTF-8")),
+            "{:?}",
+            l.warnings
+        );
+        assert_eq!(
+            read_bounded(&dir.join("a.toml"), 4).unwrap_err(),
+            "larger than 0 KB, skipped"
+        );
+        assert!(read_bounded(&dir.join("missing.toml"), 1024).is_err());
         let _ = fs::remove_dir_all(&dir);
     }
 

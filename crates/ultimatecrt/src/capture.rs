@@ -78,6 +78,9 @@ pub struct Frame {
     /// Zero-copy: `data` is an earlier sample of the same size, not this frame's pixels (the CPU analyses skip
     /// it). Always false on the CPU path.
     pub pixels_old: bool,
+    /// The capture session the frame came from (`zerocopy::next_id`, unique in the process): `seq` counts from 1
+    /// again in each session.
+    pub session: u64,
 }
 
 /// The shared state of the frame callback and the main thread.
@@ -125,6 +128,8 @@ pub struct Capture {
     pub adapter: String,
     /// LUID of that adapter (T-03).
     pub adapter_luid: Luid,
+    /// This session's id (`zerocopy::next_id`), given to every frame taken (`Frame::session`).
+    session_id: u64,
 }
 
 impl Capture {
@@ -184,6 +189,7 @@ impl Capture {
             session: Some((pool, session)),
             adapter,
             adapter_luid,
+            session_id: crate::zerocopy::next_id(),
         })
     }
 
@@ -208,6 +214,7 @@ impl Capture {
             session: None,
             adapter: "synthetic".to_string(),
             adapter_luid,
+            session_id: crate::zerocopy::next_id(),
         })
     }
 
@@ -271,6 +278,7 @@ impl Capture {
         into.width = f.width;
         into.height = f.height;
         into.seq = f.seq;
+        into.session = self.session_id;
         into.shared = shared;
         if f.data_seq != 0 {
             // The pixels not given out yet (every frame on the CPU path, a sample on the zero-copy path). The
@@ -290,6 +298,15 @@ impl Capture {
 
     pub fn frames_captured(&self) -> u64 {
         self.shared.captured.load(Ordering::Relaxed)
+    }
+}
+
+impl crate::lifecycle::CaptureSession for Capture {
+    fn adapter_luid(&self) -> Luid {
+        self.adapter_luid
+    }
+    fn frames_captured(&self) -> u64 {
+        Capture::frames_captured(self)
     }
 }
 
@@ -352,8 +369,6 @@ struct Worker {
     pool_size: (i32, i32),
     /// Zero-copy: the pool of the current client size.
     shared_pool: Option<Arc<SharedTextures>>,
-    /// Pools made so far (the generation of the next one).
-    generation: u64,
     /// When the last CPU sample of the zero-copy path was taken.
     last_sample: Option<Instant>,
     pending: Option<Pending>,
@@ -382,7 +397,6 @@ impl Worker {
             staging: None,
             pool_size,
             shared_pool: None,
-            generation: 0,
             last_sample: None,
             pending: None,
         }
@@ -511,10 +525,12 @@ impl Worker {
         let (_, _, cw, ch) = crop;
         let resized = self.shared_pool.as_ref().is_none_or(|p| p.size() != (cw, ch));
         if resized {
-            self.generation += 1;
+            // A generation unique in the process (`zerocopy::next_id`): a restarted session's pool is never taken
+            // for the pool the renderer imported from an earlier session.
+            let generation = crate::zerocopy::next_id();
             self.shared_pool = Some(
-                SharedTextures::create(&self.device, (cw, ch), HandleKind::Nt, self.generation)
-                    .or_else(|_| SharedTextures::create(&self.device, (cw, ch), HandleKind::Kmt, self.generation))?,
+                SharedTextures::create(&self.device, (cw, ch), HandleKind::Nt, generation)
+                    .or_else(|_| SharedTextures::create(&self.device, (cw, ch), HandleKind::Kmt, generation))?,
             );
         }
         let pool = self.shared_pool.clone().expect("pool made above");

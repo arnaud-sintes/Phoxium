@@ -205,7 +205,7 @@ pub fn run() -> Res<()> {
     // Review D-01: what the load upgraded (the old default hotkeys), shown once and written back at once.
     let settings_notes = loaded.as_ref().map(|l| l.notes.join(" ")).filter(|n| !n.is_empty());
     // No settings file yet: a first start, the first-run hint is due (shown on the window picker).
-    let first_start = loaded.as_ref().is_some_and(|l| l.state == settings::FileState::Missing);
+    let first_start = loaded.as_ref().is_some_and(settings::Loaded::first_start);
     let stored = loaded.map(|l| l.settings).unwrap_or_default();
     // A23: the windows recently in the foreground come first in the picker (the z-order seeds the list).
     let mut recent = picker::Recent::default();
@@ -390,6 +390,7 @@ pub fn run() -> Res<()> {
         client_size: windowed_size,
         hotkeys: bindings,
         saved_rect: stored.global.output.windowed.map(modes::IRect::from_array),
+        click_through: stored.global.output.click_through,
     })?;
     // HW-3: the adapter owning the monitor the output window really covers (auto), or the requested one.
     let cover = output::outer_rect(win.hwnd);
@@ -402,7 +403,7 @@ pub fn run() -> Res<()> {
     // Vulkan device gets the external memory extension whenever it can import, so the menu switches both ways live.
     let mut capture_mode = zerocopy::Fallback::new(args.capture_path.unwrap_or(stored.global.capture.path()));
     let mut capture_notice: Option<String> = None;
-    let mut shared_seq: Option<u64> = None; // the frame whose shared texture the renderer holds
+    let mut shared_seq: Option<(u64, u64)> = None; // the frame (session, seq) whose shared texture the renderer holds
     let mut renderer = gpu::Renderer::new(
         win.hwnd.0 as isize,
         win.hinstance,
@@ -416,16 +417,35 @@ pub fn run() -> Res<()> {
         name: got.name.clone(),
         luid: got.luid.map(adapters::Luid::from_vulkan),
     });
-    // The capture device on the renderer's adapter: restart the session when the first guess differs.
+    // The capture device on the renderer's adapter: restart the session when the first guess differs, else back
+    // on the first adapter (frames cross adapters, CPU copy), else the picker (`lifecycle::follow_renderer_adapter`).
     let mut captured_base = 0u64; // frames of the sessions already closed
-    let wanted = selection.capture_luid();
-    if let Some(old) = capture.take_if(|c| wanted.is_some_and(|l| l != c.adapter_luid)) {
-        captured_base += old.frames_captured();
-        drop(old); // the old session closes before the new one starts
-        let c = capture::Capture::start(follow, map.client_area, wanted)?;
-        println!("capture: restarted on {} (the renderer's adapter)", c.adapter);
-        frame.seq = 0; // the new session counts from 1
-        capture = Some(c);
+    match lifecycle::follow_renderer_adapter(&mut capture, selection.capture_luid(), &mut captured_base, |on| {
+        capture::Capture::start(follow, map.client_area, on)
+    }) {
+        lifecycle::Restart::Kept => {}
+        lifecycle::Restart::Restarted => {
+            if let Some(c) = &capture {
+                println!("capture: restarted on {} (the renderer's adapter)", c.adapter);
+            }
+            frame.seq = 0; // the new session counts from 1
+        }
+        lifecycle::Restart::Fallback(why) => {
+            eprintln!("warning: {why}");
+            frame.seq = 0;
+        }
+        // The developer path stops, as at the first start; the last choice goes to the picker.
+        lifecycle::Restart::Lost(why) if args.window.is_some() => return Err(why.into()),
+        lifecycle::Restart::Lost(why) => {
+            eprintln!("warning: {why}");
+            start_message = Some((false, format!("The last window could not be captured: {why}.")));
+            target = None;
+            frame = idle_frame();
+            profile = settings::SourceProfile::default();
+            profile.switch_to(&mut params, &start_base);
+            args.apply_source(&mut params)?;
+            map = resolve_map(&params, &profile, cli_crop, cli_divisor).0;
+        }
     }
     if let Some(c) = &capture {
         selection.note_capture(&c.adapter, c.adapter_luid);
@@ -447,6 +467,9 @@ pub fn run() -> Res<()> {
     // An earlier build's LUID setting that still names an adapter is stored as its stable identity (below).
     let upgraded_gpu = selection.upgraded_setting.clone().filter(|_| args.gpu.is_none());
     let capture_luid = selection.capture_luid();
+    // HW-3, monitor changes: the adapter the chain runs on and the owner of the monitor covered at start.
+    let renderer_luid = renderer.context().gpu.luid.map(adapters::Luid::from_vulkan);
+    let start_owner = selection.owner.as_ref().map(|o| o.luid);
     adapters::publish(adapters::Current {
         selection,
         adapters: topology.entries(),
@@ -485,6 +508,9 @@ pub fn run() -> Res<()> {
     let mut smoothing = lifecycle::SmoothingWatch::default();
     let mut size_watch = lifecycle::SizeWatch::default();
     let mut notice: Option<String> = None;
+    // The output's monitor and DPI, followed once a second; the notice of a move onto another GPU's monitor.
+    let mut monitor_watch = lifecycle::MonitorWatch::default();
+    let mut monitor_notice: Option<String> = None;
     // T-48, OUT-6: the automatic quality drop on sustained overrun (only with `quality_auto`, off by default).
     let mut auto_quality = crate::quality::AutoQuality::default();
     // Lost source (T-56, A23): reminders, reattach during the wait, then the picker (or an exit).
@@ -1215,9 +1241,9 @@ pub fn run() -> Res<()> {
             let upload = if !fresh || idle {
                 None
             } else if let Some(s) = frame.shared.take() {
-                shared_seq = Some(frame.seq);
+                shared_seq = Some((frame.session, frame.seq));
                 Some(gpu::Upload::Shared(s))
-            } else if shared_seq == Some(frame.seq) && renderer.source_is_shared() {
+            } else if zerocopy::already_held(shared_seq, (frame.session, frame.seq), renderer.source_is_shared()) {
                 None
             } else {
                 Some(gpu::Upload::Cpu(frame.width, frame.height, frame.data.as_slice()))
@@ -1235,6 +1261,12 @@ pub fn run() -> Res<()> {
                 stepped_preset = live.current_preset().map(str::to_string);
                 baseline = baseline_of(live.library(), stepped_preset.as_deref(), &profile);
             }
+            // Click-through: the settings are the reference (hotkey, menu row, "Reset everything"); the output window
+            // follows them through its one style rule (`output::sync_activation`).
+            if output::click_through() != live.click_through() {
+                output::set_click_through(win.hwnd, live.click_through());
+            }
+            ui_state.click_through = live.click_through();
             if ui.is_open() || ui.overlay_on() {
                 ui_state.params = params;
                 // The preset in force, also when a preset hotkey stepped to it.
@@ -1310,6 +1342,9 @@ pub fn run() -> Res<()> {
                     detect_key = (0, 0, None);
                     remap = true;
                 }
+            }
+            if let Some(on) = changes.click_through {
+                live.set_click_through(win.hwnd, on);
             }
             if let Some(adapter) = changes.gpu_adapter {
                 println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
@@ -1586,6 +1621,47 @@ pub fn run() -> Res<()> {
                     );
                 }
                 let captured = captured_base + capture.as_ref().map_or(0, |c| c.frames_captured());
+                // The attached window minimised or on another virtual desktop delivers no frames (lifecycle).
+                let source_visibility = match (&capture, &reattach) {
+                    (Some(_), Some(r)) if r.is_attached() => sources::visibility(hwnd_of(r.hwnd())),
+                    _ => lifecycle::SourceVisibility::Visible,
+                };
+                // The output's monitor and DPI (HW-3, OUT-6): a move onto another monitor re-evaluates the GPU choice
+                // (a notice, never a device swap), restarts the automatic quality's streaks, and a DPI change that
+                // `WM_DPICHANGED` did not bring still reaches the UI scale.
+                // SAFETY: plain query on our own window.
+                let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(win.hwnd) };
+                let change = monitor_watch.observe(output::monitor_of(win.hwnd), dpi);
+                if let Some(d) = change.dpi {
+                    ui.set_ui_scale(crate::ui::input::dpi_scale(d));
+                }
+                if change.moved {
+                    auto_quality.monitor_changed();
+                    let cover = output::outer_rect(win.hwnd);
+                    // The monitor layout may have changed since the start: the adapters' outputs are read again.
+                    let dxgi = adapters::dxgi_adapters().unwrap_or_else(|_| topology.dxgi.clone());
+                    let now_choice = adapters::select(
+                        args.gpu,
+                        &gpu_spec,
+                        &dxgi,
+                        &topology.vulkan,
+                        topology.default,
+                        Some((cover.left, cover.top, cover.right, cover.bottom)),
+                    );
+                    let n = adapters::moved_notice(renderer_luid, start_owner, &now_choice);
+                    if n != monitor_notice {
+                        match &n {
+                            Some(m) => println!("notice: {m}"),
+                            None => println!("output: back on a monitor of the GPU in use"),
+                        }
+                        monitor_notice = n;
+                    }
+                }
+                ui_state.notices = monitor_notice
+                    .iter()
+                    .cloned()
+                    .chain(source_visibility.notice().map(str::to_string))
+                    .collect();
                 // The one message to show: target lost, black or silent frames, smoothed source.
                 let now_notice = if reattach.as_ref().is_some_and(|r| !r.is_attached()) {
                     reattach
@@ -1593,7 +1669,8 @@ pub fn run() -> Res<()> {
                         .map(|r| format!("waiting for {}", r.target().describe()))
                 } else if capture.is_none() {
                     None
-                } else if let Some(m) = health.status(now).message() {
+                } else if let Some(m) = lifecycle::source_notice(source_visibility, health.status(now)) {
+                    // A minimised source (or one on another desktop) says why no frames come (WGC sends none).
                     Some(m)
                 } else if smoothing.warning() {
                     Some("smoothed source?".to_string())
@@ -1611,7 +1688,16 @@ pub fn run() -> Res<()> {
                 // R-02, R-01: what the renderer limited (amplifier samples, an empty tube area, ...). The renderer
                 // prints each one once when it appears; the queue is drained here so it stays bounded.
                 let _ = renderer.take_gpu_notices();
-                let machine_notice = title_notice(adapter_notice.as_deref(), capture_notice.as_deref());
+                // The settings writer's latest failure, while it stands (disk full, read-only folder, locked file).
+                let save_notice = live.save_problem();
+                if let Some(n) = &save_notice {
+                    if !ui_state.notices.contains(n) {
+                        ui_state.notices.push(n.clone());
+                    }
+                }
+                let gpu_choice_notice = title_notice(adapter_notice.as_deref(), monitor_notice.as_deref());
+                let gpu_choice_notice = title_notice(gpu_choice_notice.as_deref(), save_notice.as_deref());
+                let machine_notice = title_notice(gpu_choice_notice.as_deref(), capture_notice.as_deref());
                 let gpu_notice = title_notice(machine_notice.as_deref(), renderer.gpu_notice().as_deref());
                 let shown_notice = title_notice(notice.as_deref(), gpu_notice.as_deref());
                 let secs = stat_time.elapsed().as_secs_f64();

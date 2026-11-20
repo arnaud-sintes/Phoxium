@@ -85,6 +85,8 @@ static MODE_NO_ACTIVATE: AtomicBool = AtomicBool::new(false);
 static DESTROYING: AtomicBool = AtomicBool::new(false);
 /// The settings menu is open (T-52a): input goes to the UI and the output may be active.
 static MENU_OPEN: AtomicBool = AtomicBool::new(false);
+/// Click-through is asked (`[global.output] click_through`); see [`behaviour`].
+static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 /// System cursor (`IDC_*` number) shown over the client area while the menu is open; 0 hides it.
 static MENU_CURSOR: AtomicU32 = AtomicU32::new(32512);
 /// `WM_MOUSELEAVE` is requested (`TrackMouseEvent`) for the current stay of the mouse over the window.
@@ -103,27 +105,85 @@ pub fn effective_no_activate(mode_no_activate: bool, menu_open: bool) -> bool {
     mode_no_activate && !menu_open
 }
 
-/// The one place that sets the activation behaviour of the output: `WS_EX_NOACTIVATE` and the flag the
-/// hand-back of [`wndproc`] reads, from [`effective_no_activate`] of the mode ([`apply_placement`], [`create`])
-/// and the menu ([`set_menu_open`]). Only that bit of the extended style changes.
+/// How the output window treats activation and the mouse: the extended style bits [`sync_activation`] sets.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Behaviour {
+    /// `WS_EX_NOACTIVATE` and the T-07 hand-back ([`effective_no_activate`]).
+    pub no_activate: bool,
+    /// `WS_EX_TRANSPARENT | WS_EX_LAYERED` (full alpha): the mouse goes through the output to the window under
+    /// it (the captured game).
+    pub click_through: bool,
+}
+
+/// The behaviour of the output from the window mode (`mode_no_activate`, every mode reached by
+/// [`apply_placement`] is non-activating), the click-through setting (`[global.output] click_through`, its
+/// hotkey, the menu row) and the menu state. The open menu (settings or window picker) always takes the mouse and
+/// the activation back, whatever the mode and the setting: the user can never be locked out of the menu, and
+/// closing it returns to the setting. Click-through does not depend on the mode (fullscreen and framed alike;
+/// a click-through framed window cannot be moved by the mouse until the menu is open or the setting is off).
+/// Pure.
+pub fn behaviour(mode_no_activate: bool, click_through: bool, menu_open: bool) -> Behaviour {
+    Behaviour {
+        no_activate: effective_no_activate(mode_no_activate, menu_open),
+        click_through: click_through && !menu_open,
+    }
+}
+
+/// The extended style `ex` with the bits of `b` applied (`WS_EX_NOACTIVATE`, `WS_EX_TRANSPARENT`,
+/// `WS_EX_LAYERED`); every other bit is kept. Pure.
+pub fn styled(ex: isize, b: Behaviour) -> isize {
+    let set = |ex: isize, bit: u32, on: bool| {
+        if on {
+            ex | bit as isize
+        } else {
+            ex & !(bit as isize)
+        }
+    };
+    let ex = set(ex, WS_EX_NOACTIVATE.0, b.no_activate);
+    let ex = set(ex, WS_EX_TRANSPARENT.0, b.click_through);
+    set(ex, WS_EX_LAYERED.0, b.click_through)
+}
+
+/// The one place that sets the activation and mouse behaviour of the output: `WS_EX_NOACTIVATE`,
+/// `WS_EX_TRANSPARENT | WS_EX_LAYERED` and the flags the window procedure reads, from [`behaviour`] of the mode
+/// ([`apply_placement`], [`create`]), the click-through setting ([`set_click_through`]) and the menu
+/// ([`set_menu_open`]). Only those bits of the extended style change. A layered window gets full opacity at once
+/// (a layered window without its attributes is not drawn).
 fn sync_activation(hwnd: HWND) {
-    let on = effective_no_activate(
+    let b = behaviour(
         MODE_NO_ACTIVATE.load(Ordering::Relaxed),
+        CLICK_THROUGH.load(Ordering::Relaxed),
         MENU_OPEN.load(Ordering::Relaxed),
     );
-    NO_ACTIVATE.store(on, Ordering::Relaxed);
+    NO_ACTIVATE.store(b.no_activate, Ordering::Relaxed);
     if hwnd.is_invalid() {
         return;
     }
-    // SAFETY: our own window; only the WS_EX_NOACTIVATE bit of the extended style changes.
+    // SAFETY: our own window; only the three bits above of the extended style change.
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        let bit = WS_EX_NOACTIVATE.0 as isize;
-        let want = if on { ex | bit } else { ex & !bit };
+        let want = styled(ex, b);
         if want != ex {
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, want);
         }
+        if b.click_through {
+            // Opaque: only the hit-testing changes, never the picture.
+            let _ = SetLayeredWindowAttributes(hwnd, windows::Win32::Foundation::COLORREF(0), 255, LWA_ALPHA);
+        }
     }
+}
+
+/// Switches click-through on or off (`[global.output] click_through`, its hotkey, the menu row): applied at once
+/// through [`sync_activation`] (while the menu is open it takes effect when the menu closes). A null `hwnd`
+/// (before the window exists) only records the setting.
+pub fn set_click_through(hwnd: HWND, on: bool) {
+    CLICK_THROUGH.store(on, Ordering::Relaxed);
+    sync_activation(hwnd);
+}
+
+/// Whether click-through is asked (the setting; the open menu suspends it, [`behaviour`]).
+pub fn click_through() -> bool {
+    CLICK_THROUGH.load(Ordering::Relaxed)
 }
 
 /// Opens or closes the menu mode of the output window `hwnd` (T-52a, called by `crate::ui::menu::Menu`).
@@ -137,7 +197,8 @@ pub fn set_menu_open(hwnd: HWND, open: bool) {
     MENU_OPEN.store(open, Ordering::Relaxed);
     MOUSE_TRACKED.store(false, Ordering::Relaxed);
     if !open {
-        UI_MESSAGES.with(|q| q.borrow_mut().clear());
+        // The menu's input goes; a DPI change queued in the same pump stays (the UI scale must follow it).
+        UI_MESSAGES.with(|q| q.borrow_mut().retain(|m| m.0 == ui_input::WM_DPICHANGED));
     }
     sync_activation(hwnd);
     if !open {
@@ -313,6 +374,22 @@ pub fn drag_rect(hit: u32, start: IRect, dx: i32, dy: i32, min: (i32, i32)) -> I
     r
 }
 
+/// A move by the title bar ([`drag_rect`]) carried the framed output onto a monitor of another DPI and Windows
+/// suggests `suggested` (`WM_DPICHANGED`): the drag goes on from its press position with the suggested size, so
+/// the next pointer move does not put the old size back. A resize by the frame keeps its start (the user drives
+/// the size). Pure.
+pub fn rebase_drag_on_dpi(hit: u32, start: IRect, suggested: IRect) -> IRect {
+    if hit != HT_CAPTION {
+        return start;
+    }
+    IRect::new(
+        start.left,
+        start.top,
+        start.left + suggested.width(),
+        start.top + suggested.height(),
+    )
+}
+
 /// A move or resize of the non-activating framed output in progress: the hit-test code, the pointer and the
 /// outer rectangle at the press.
 #[derive(Clone, Copy)]
@@ -349,6 +426,8 @@ pub struct Options {
     pub hotkeys: Bindings,
     /// Outer rectangle of the windowed output remembered in the settings (T-57), used when it is still on a monitor.
     pub saved_rect: Option<IRect>,
+    /// `[global.output] click_through`: the mouse goes through the output while the menu is closed.
+    pub click_through: bool,
 }
 
 pub struct Output {
@@ -499,6 +578,52 @@ pub fn monitor_rects() -> Vec<RECT> {
     list.into_iter().filter_map(monitor_rect).collect()
 }
 
+/// Every monitor as (whole rectangle, work area without the taskbar), in virtual-screen pixels.
+pub fn monitor_work_irects() -> Vec<(IRect, IRect)> {
+    let mut list: Vec<HMONITOR> = Vec::new();
+    // SAFETY: plain enumeration and queries; `list` outlives the call.
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(monitor_proc), LPARAM(&mut list as *mut _ as isize));
+    }
+    list.into_iter()
+        .filter_map(|m| {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: as above.
+            unsafe { GetMonitorInfoW(m, &mut info) }
+                .as_bool()
+                .then(|| (irect(info.rcMonitor), irect(info.rcWork)))
+        })
+        .collect()
+}
+
+/// How close (px) to an outer screen edge the pointer must be released for [`snap_rect`].
+pub const SNAP_EDGE: i32 = 2;
+
+/// The self-run title-bar drag of the framed output disables Windows' snap (its modal move loop activates the
+/// window): a simple replacement. Released with the pointer at the left or right outer edge of a monitor, the
+/// window takes that half of the monitor's work area; at the top edge, the whole work area (a maximised size, the
+/// window stays a normal framed one). An edge shared with another monitor does not snap (the pointer crosses it).
+/// `monitors` lists (monitor, work area). `None`: no snap. Pure.
+pub fn snap_rect(cursor: (i32, i32), monitors: &[(IRect, IRect)]) -> Option<IRect> {
+    let inside = |r: &IRect, (x, y): (i32, i32)| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+    let (mon, work) = monitors.iter().find(|(m, _)| inside(m, cursor))?;
+    let outer = |p: (i32, i32)| !monitors.iter().any(|(m, _)| inside(m, p));
+    let (x, y) = cursor;
+    let half = work.left + work.width() / 2;
+    if y < mon.top + SNAP_EDGE && outer((x, mon.top - SNAP_EDGE)) {
+        Some(*work)
+    } else if x < mon.left + SNAP_EDGE && outer((mon.left - SNAP_EDGE, y)) {
+        Some(IRect::new(work.left, work.top, half, work.bottom))
+    } else if x >= mon.right - SNAP_EDGE && outer((mon.right - 1 + SNAP_EDGE, y)) {
+        Some(IRect::new(half, work.top, work.right, work.bottom))
+    } else {
+        None
+    }
+}
+
 /// Refresh rate (Hz) of the monitor that holds most of `hwnd` (`EnumDisplaySettingsW`, current mode), `None` when
 /// unknown or reported as the hardware default (0 or 1). The automatic quality drop compares the GPU frame time
 /// with its period (T-48, OUT-6).
@@ -563,6 +688,7 @@ pub fn create(opts: &Options) -> Result<Output> {
     DESTROYING.store(false, Ordering::Relaxed);
     IN_SIZE_MOVE.store(false, Ordering::Relaxed);
     MENU_OPEN.store(false, Ordering::Relaxed);
+    CLICK_THROUGH.store(opts.click_through, Ordering::Relaxed);
     // No window yet: only the flag the window procedure reads during the creation.
     sync_activation(HWND::default());
     SOURCE.store(opts.follow.0 as isize, Ordering::Relaxed);
@@ -849,7 +975,8 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             }
         }
         // Moving or resizing the non-activating framed output: run here, not in Windows' modal loop, which would
-        // activate the window and give it the keyboard focus (OUT-2). Aero snap and the keyboard move do not apply.
+        // activate the window and give it the keyboard focus (OUT-2). Windows' snap does not apply (a simple edge snap on
+        // release replaces it, `snap_rect`), nor does the keyboard move.
         WM_NCLBUTTONDOWN
             if NO_ACTIVATE.load(Ordering::Relaxed)
                 && !FULLSCREEN.load(Ordering::Relaxed)
@@ -884,8 +1011,25 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             LRESULT(0)
         }
         WM_LBUTTONUP if DRAG.get().is_some() => {
+            let hit = DRAG.get().map(|d| d.hit);
             DRAG.set(None);
             let _ = ReleaseCapture();
+            // A title-bar move released at an outer screen edge snaps (half or whole work area, `snap_rect`).
+            if hit == Some(HT_CAPTION) {
+                let mut p = windows::Win32::Foundation::POINT::default();
+                let _ = GetCursorPos(&mut p);
+                if let Some(r) = snap_rect((p.x, p.y), &monitor_work_irects()) {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.width(),
+                        r.height(),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
@@ -942,6 +1086,10 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
         // fullscreen one keeps the rectangle `apply_placement` gave it.
         WM_DPICHANGED if !FULLSCREEN.load(Ordering::Relaxed) => {
             let r = &*(lparam.0 as *const RECT);
+            if let Some(mut d) = DRAG.get() {
+                d.start = rebase_drag_on_dpi(d.hit, d.start, irect(*r));
+                DRAG.set(Some(d));
+            }
             let _ = SetWindowPos(
                 hwnd,
                 None,
@@ -971,9 +1119,129 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        drag_rect, effective_no_activate, hand_back_target, on_activate, self_drag_hit, should_idle, OnActivate,
+        behaviour, drag_rect, effective_no_activate, hand_back_target, on_activate, rebase_drag_on_dpi, self_drag_hit,
+        should_idle, snap_rect, styled, Behaviour, OnActivate,
     };
     use crate::modes::IRect;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+    };
+
+    /// Click-through state machine: menu open x click-through x mode. The open menu always takes the mouse and
+    /// the activation back (the user can always reach it); closing it returns to the setting; the mode does not
+    /// change click-through.
+    #[test]
+    fn click_through_follows_the_setting_and_the_open_menu_always_wins() {
+        for mode in [true, false] {
+            for click in [true, false] {
+                for menu in [true, false] {
+                    let b = behaviour(mode, click, menu);
+                    assert_eq!(b.click_through, click && !menu, "mode {mode} click {click} menu {menu}");
+                    assert_eq!(b.no_activate, effective_no_activate(mode, menu));
+                    if menu {
+                        assert!(
+                            !b.click_through && !b.no_activate,
+                            "the open menu takes the mouse and the focus"
+                        );
+                    }
+                }
+            }
+        }
+        // A session: on, the menu opens (mouse back), closes (click-through back), off.
+        let steps = [(true, false), (true, true), (true, false), (false, false)];
+        let seen: Vec<bool> = steps
+            .iter()
+            .map(|&(c, m)| behaviour(true, c, m).click_through)
+            .collect();
+        assert_eq!(seen, [true, false, true, false]);
+    }
+
+    /// The style bits: only NOACTIVATE, TRANSPARENT and LAYERED change, the others (topmost, tool window) stay;
+    /// TRANSPARENT never goes without LAYERED (the mouse would not pass to other programs' windows).
+    #[test]
+    fn the_style_bits_follow_the_behaviour_and_keep_the_others() {
+        let base = (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize;
+        let on = styled(
+            base,
+            Behaviour {
+                no_activate: true,
+                click_through: true,
+            },
+        );
+        for bit in [
+            WS_EX_TOPMOST,
+            WS_EX_TOOLWINDOW,
+            WS_EX_NOACTIVATE,
+            WS_EX_TRANSPARENT,
+            WS_EX_LAYERED,
+        ] {
+            assert_ne!(on & bit.0 as isize, 0, "{bit:?}");
+        }
+        let off = styled(
+            on,
+            Behaviour {
+                no_activate: false,
+                click_through: false,
+            },
+        );
+        assert_eq!(off, base);
+        // Idempotent.
+        let b = behaviour(true, true, false);
+        assert_eq!(styled(styled(0, b), b), styled(0, b));
+        for menu in [true, false] {
+            let ex = styled(0, behaviour(true, true, menu));
+            assert_eq!(
+                ex & WS_EX_TRANSPARENT.0 as isize != 0,
+                ex & WS_EX_LAYERED.0 as isize != 0
+            );
+        }
+    }
+
+    /// The edge snap of the self-run drag: left and right outer edges give the halves of the work area, the top
+    /// edge the whole work area; a shared edge between two monitors and the middle of a monitor do not snap.
+    #[test]
+    fn a_drag_released_at_an_outer_edge_snaps_to_a_half_or_the_work_area() {
+        let m0 = (IRect::new(0, 0, 2560, 1440), IRect::new(0, 0, 2560, 1400));
+        let m1 = (IRect::new(2560, 0, 5120, 1440), IRect::new(2560, 0, 5120, 1440));
+        let both = [m0, m1];
+        assert_eq!(
+            snap_rect((0, 700), &both),
+            Some(IRect::new(0, 0, 1280, 1400)),
+            "left half"
+        );
+        assert_eq!(
+            snap_rect((5119, 700), &both),
+            Some(IRect::new(3840, 0, 5120, 1440)),
+            "right half"
+        );
+        assert_eq!(snap_rect((1000, 0), &both), Some(m0.1), "top: the work area");
+        assert_eq!(snap_rect((3000, 0), &both), Some(m1.1));
+        // The shared edge: the pointer crosses it, no snap on either side.
+        assert_eq!(snap_rect((2559, 700), &both), None);
+        assert_eq!(snap_rect((2560, 700), &both), None);
+        // The middle, near but not at an edge, or off every monitor: no snap.
+        assert_eq!(snap_rect((1280, 700), &both), None);
+        assert_eq!(snap_rect((5, 700), &both), None);
+        assert_eq!(snap_rect((-50, 700), &both), None);
+        // One monitor: both sides are outer edges.
+        assert_eq!(snap_rect((2559, 700), &[m0]), Some(IRect::new(1280, 0, 2560, 1400)));
+    }
+
+    /// A title-bar drag that crosses onto a monitor of another DPI takes the size Windows suggests; a frame resize
+    /// keeps its start.
+    #[test]
+    fn a_drag_across_a_dpi_change_keeps_the_suggested_size() {
+        let start = IRect::new(100, 100, 900, 700);
+        let suggested = IRect::new(2600, 90, 3800, 990);
+        assert_eq!(
+            rebase_drag_on_dpi(2, start, suggested),
+            IRect::new(100, 100, 1300, 1000)
+        );
+        assert_eq!(rebase_drag_on_dpi(17, start, suggested), start);
+        // The next pointer move: the new size at the moved position.
+        let r = drag_rect(2, rebase_drag_on_dpi(2, start, suggested), 2500, 0, (136, 39));
+        assert_eq!((r.width(), r.height()), (1200, 900));
+    }
 
     /// R-04: the loop idles while the output is minimised or has an empty client area.
     #[test]

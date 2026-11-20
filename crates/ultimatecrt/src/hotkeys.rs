@@ -6,7 +6,7 @@
 //! loses it while ultimatecrt runs (documented in the README), but the foreground window never changes.
 //! Defaults: Quit `Ctrl+Alt+End`, fullscreen `F11`, settings menu `F10` (F12 is registered by another program on
 //! the dev machine, error 1409), overlay `Ctrl+Alt+F9`, A/B bypass `Ctrl+Alt+F7`, next and previous preset
-//! `Ctrl+Alt+PageDown` and `Ctrl+Alt+PageUp`. Every action, Quit included, can be rebound; Quit is never left
+//! `Ctrl+Alt+PageDown` and `Ctrl+Alt+PageUp`, click-through `Ctrl+Alt+F6`. Every action, Quit included, can be rebound; Quit is never left
 //! unbound by a rebind or a reset (the old chord is kept when the new one cannot be registered).
 //!
 //! AltGr (review D-01): Windows sends AltGr as LeftCtrl+RightAlt, so a `Ctrl+Alt+<key>` hotkey also fires on
@@ -242,11 +242,13 @@ pub enum Action {
     ToggleBypass,
     NextPreset,
     PreviousPreset,
+    /// Click-through of the output on or off (`[global.output] click_through`).
+    ToggleClickThrough,
 }
 
 impl Action {
     /// Every action, in registration order (Quit first: it is the escape path).
-    pub const ALL: [Action; 7] = [
+    pub const ALL: [Action; 8] = [
         Action::Quit,
         Action::ToggleFullscreen,
         Action::ToggleMenu,
@@ -254,6 +256,7 @@ impl Action {
         Action::ToggleBypass,
         Action::NextPreset,
         Action::PreviousPreset,
+        Action::ToggleClickThrough,
     ];
 
     /// The key of the action in `[global.hotkeys]` of `settings.toml`.
@@ -266,6 +269,7 @@ impl Action {
             Action::ToggleBypass => "toggle_bypass",
             Action::NextPreset => "next_preset",
             Action::PreviousPreset => "previous_preset",
+            Action::ToggleClickThrough => "toggle_click_through",
         }
     }
 
@@ -283,6 +287,7 @@ impl Action {
             Action::ToggleBypass => "Ctrl+Alt+F7",
             Action::NextPreset => "Ctrl+Alt+PageDown",
             Action::PreviousPreset => "Ctrl+Alt+PageUp",
+            Action::ToggleClickThrough => "Ctrl+Alt+F6",
         }
     }
 
@@ -313,6 +318,7 @@ impl Action {
             Action::ToggleBypass => &["Ctrl+Alt+Shift+F7"],
             Action::NextPreset => &["Ctrl+Alt+Shift+PageDown"],
             Action::PreviousPreset => &["Ctrl+Alt+Shift+PageUp"],
+            Action::ToggleClickThrough => &["Ctrl+Alt+Shift+F6"],
         }
     }
 
@@ -326,6 +332,7 @@ impl Action {
             Action::ToggleBypass => "A/B bypass",
             Action::NextPreset => "next preset",
             Action::PreviousPreset => "previous preset",
+            Action::ToggleClickThrough => "click-through",
         }
     }
 
@@ -1063,6 +1070,25 @@ mod tests {
         assert_eq!(Action::ToggleFullscreen.default_text(), "F11");
         assert_eq!(Action::ToggleOverlay.default_text(), "Ctrl+Alt+F9");
         assert_eq!(Action::ToggleBypass.default_text(), "Ctrl+Alt+F7");
+        assert_eq!(Action::ToggleClickThrough.default_text(), "Ctrl+Alt+F6");
+        assert_eq!(
+            Action::from_id("toggle_click_through"),
+            Some(Action::ToggleClickThrough)
+        );
+        assert_eq!(
+            Action::from_hotkey_id(Action::ToggleClickThrough.hotkey_id()),
+            Some(Action::ToggleClickThrough)
+        );
+        assert_ne!(Action::ToggleClickThrough.hotkey_id(), MENU_FALLBACK_ID);
+        // No chord (default or fallback) belongs to two actions, the menu's own fallbacks aside.
+        let mut owner: BTreeMap<Chord, Action> = BTreeMap::new();
+        for a in Action::ALL {
+            for text in std::iter::once(a.default_text()).chain(a.fallbacks().iter().copied()) {
+                if let Some(b) = owner.insert(chord(text), a) {
+                    assert_eq!(b, a, "{text} is a chord of {b:?} and {a:?}");
+                }
+            }
+        }
     }
 
     /// Review D-01: no default or fallback chord can fire on AltGr+<character> (Ctrl+Alt on a letter, a digit or
@@ -1280,10 +1306,47 @@ mod tests {
         }
     }
 
+    /// Re-registration failure paths: the click-through chord and its fallback both owned by another program leave
+    /// that one action unbound with a problem naming it (everything else works, the menu row still switches it);
+    /// a menu rebind whose new chord is refused and whose old chord cannot be taken back keeps the menu reachable
+    /// through the safety chord.
+    #[test]
+    fn registration_failures_never_cost_the_menu() {
+        let mut fake = Fake::taking(&["Ctrl+Alt+F6", "Ctrl+Alt+Shift+F6"]);
+        let mut reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert_eq!(reg.bound(Action::ToggleClickThrough), None);
+        let p = reg.problems().join(" ");
+        assert!(p.contains("toggle_click_through") && p.contains("1409"), "{p}");
+        for a in Action::ALL.into_iter().filter(|a| *a != Action::ToggleClickThrough) {
+            assert_eq!(reg.bound(a), Some(a.default_chord()), "{a:?}");
+        }
+        // The menu: the new chord is refused, and F10 is taken by another program the moment it is released.
+        fake.owned_elsewhere
+            .insert(chord("Ctrl+Alt+M"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        fake.owned_elsewhere
+            .insert(chord("F10"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        let e = rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("Ctrl+Alt+M")).unwrap_err();
+        assert!(e.contains("could not be taken back"), "{e}");
+        assert_eq!(reg.bound(Action::ToggleMenu), None);
+        assert_eq!(
+            reg.menu_fallback,
+            Some(chord("Ctrl+Alt+F10")),
+            "the safety chord opens the menu"
+        );
+        assert_eq!(fake.registered[&MENU_FALLBACK_ID], chord("Ctrl+Alt+F10"));
+        assert_eq!(Action::from_hotkey_id(MENU_FALLBACK_ID), Some(Action::ToggleMenu));
+        // Reset all: the menu back on a documented chord (F10 is still owned: its first fallback), click-through
+        // still reported, Quit kept.
+        let problems = reset_all(&mut fake, &mut reg);
+        assert!(reg.bound(Action::ToggleMenu).is_some() || reg.menu_fallback.is_some());
+        assert!(problems.join(" ").contains("toggle_click_through"), "{problems:?}");
+        assert_eq!(reg.bound(Action::Quit), Some(Action::Quit.default_chord()));
+    }
+
     #[test]
     fn the_plan_lists_the_wanted_chord_first_then_the_fallbacks() {
         let plan = plan_registration(&Bindings::default());
-        assert_eq!(plan.len(), 7);
+        assert_eq!(plan.len(), Action::ALL.len());
         assert_eq!(plan[0].action, Action::Quit, "quit is registered first");
         assert_eq!(
             plan[0].candidates,
@@ -1321,7 +1384,11 @@ mod tests {
             assert_eq!(reg.bound(a), Some(a.default_chord()), "{a:?}");
             assert_eq!(fake.registered[&a.hotkey_id()], a.default_chord());
         }
-        assert_eq!(fake.calls.len(), 7, "one call per action when nothing fails");
+        assert_eq!(
+            fake.calls.len(),
+            Action::ALL.len(),
+            "one call per action when nothing fails"
+        );
         assert!(reg.summary().contains("settings menu F10"), "{}", reg.summary());
     }
 

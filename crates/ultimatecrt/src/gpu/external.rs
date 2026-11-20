@@ -61,6 +61,11 @@ pub(super) struct ExternalSet {
 }
 
 impl ExternalSet {
+    /// The identity of the imported pool (its address, kept alive by this set so it cannot be reused meanwhile).
+    pub fn pool_id(&self) -> usize {
+        Arc::as_ptr(&self._pool) as usize
+    }
+
     /// Imports every texture of `pool` on `ctx`. All or nothing: on an error every import made is destroyed.
     ///
     /// # Safety

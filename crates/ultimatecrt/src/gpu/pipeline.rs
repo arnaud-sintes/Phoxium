@@ -1105,7 +1105,12 @@ impl Pipeline {
                 format!("zero-copy: a shared frame of {width}x{height} (this GPU's image limit is {max} px)").into(),
             );
         }
-        let imported = self.ext.as_ref().map(|e| e.generation) != Some(pool.generation());
+        // A new pool by generation or by identity (a restarted capture session never repeats a generation, and the
+        // identity check covers pools made by hand): never sample the textures of a pool that is not this one.
+        let imported = crate::zerocopy::needs_import(
+            self.ext.as_ref().map(|e| (e.generation, e.pool_id())),
+            (pool.generation(), std::sync::Arc::as_ptr(pool) as usize),
+        );
         if imported {
             ctx.device.device_wait_idle()?;
             self.ext_current = None;
