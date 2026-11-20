@@ -38,6 +38,11 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Fixed: zero-copy: after a capture restart, a reattach or a new attach, the renderer could keep sampling the previous session's shared textures (each session numbered its texture pools from 1); pool generations are now unique in the process and the renderer re-imports on any new pool.
 - Fixed: a DPI change queued in the same moment as the menu closing was dropped; a title-bar drag across monitors of different scaling now keeps the size Windows suggests.
 
+### Fixed
+
+- Zero-copy capture (the default) crashed intermittently at attach, and once at a source resize (live review 2026-11-20: 10 crashes in 35 starts on the RTX, 4 in 5 on the Intel UHD, none in 12 with the CPU copy), with `range start index ... out of range for slice of length 0` in the integer-scale detection. Cause: while a detection runs every frame is read back for the CPU analyses, and when the main loop had not yet taken a frame's sample, the capture thread took that buffer to refill it for the next frame; the main loop could then take the earlier frame, marked as carrying its own pixels, with an empty buffer. The capture thread now leaves a sample that was not taken in place, and each frame records the size of the picture its buffer holds. The CPU analyses (black-frame check, Auto picture area, integer-scale detection, smoothed-source warning, the CPU upload and `--save-capture`) read pixels only through a checked sample (`capture::Sample`, new module `analysis`), and every detector refuses a buffer that does not hold its region instead of indexing it. Reproduced and covered headless in `tests/zero_copy.rs`; a fuzz test feeds the detectors random buffer lengths and sizes (QUESTIONS CAP-2).
+- A white area showed for about 0.3 s when the output window opened: the window is now shown once its first frame is presented (or after one second without one), and its client area is black until then.
+
 ## [0.2.0] - 2026-11-20
 
 ultimateCRT v0.2.0 is the first public release (MIT licence, binaries not code-signed). It captures the window of a game or a program, runs it through a virtual CRT tube on the GPU and shows the result in a second window that can go fullscreen over the source without taking its keyboard focus; nothing is injected into the captured program. What is in it:

@@ -3,6 +3,7 @@
 pub mod about;
 pub mod adapters;
 pub mod ageing;
+pub mod analysis;
 pub mod app;
 pub mod bars;
 pub mod capture;

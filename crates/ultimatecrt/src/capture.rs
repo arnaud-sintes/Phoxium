@@ -67,11 +67,17 @@ pub const SAMPLE_EVERY: Duration = Duration::from_millis(100);
 const COPY_TIMEOUT: Duration = Duration::from_secs(1);
 
 /// One captured frame: tightly packed BGRA8, top-down.
+///
+/// The CPU analyses never read `data` directly: [`Frame::sample`] and [`Frame::last_sample`] give its pixels only
+/// when they are consistent with the frame (zero-copy: `data` may be an earlier sample, or none yet).
 #[derive(Default)]
 pub struct Frame {
     pub width: u32,
     pub height: u32,
     pub data: Vec<u8>,
+    /// The size of the picture `data` holds (width, height): the frame's own size on the CPU path; on the
+    /// zero-copy path the size of the sample, which may be an earlier frame's. (0, 0) when `data` holds none.
+    pub data_size: (u32, u32),
     pub seq: u64,
     /// Zero-copy: the shared texture holding this frame (the renderer samples it), `None` on the CPU path.
     pub shared: Option<SharedFrame>,
@@ -81,6 +87,94 @@ pub struct Frame {
     /// The capture session the frame came from (`zerocopy::next_id`, unique in the process): `seq` counts from 1
     /// again in each session.
     pub session: u64,
+}
+
+impl Frame {
+    /// A CPU frame (a pattern, an image, the idle frame): `data` holds this `width` x `height` picture.
+    pub fn cpu(width: u32, height: u32, data: Vec<u8>) -> Frame {
+        Frame {
+            width,
+            height,
+            data,
+            data_size: (width, height),
+            ..Frame::default()
+        }
+    }
+
+    /// This frame's own pixels, for the CPU analyses: `None` when `data` is an earlier sample (zero-copy), holds no
+    /// sample yet, or does not match the frame's size (a sample of another size, a short buffer).
+    pub fn sample(&self) -> Option<Sample<'_>> {
+        if self.pixels_old {
+            return None;
+        }
+        self.last_sample()
+    }
+
+    /// The newest pixels `data` holds when they are a picture of this frame's size, possibly an earlier frame's (the
+    /// zero-copy sample of the same size): what a re-analysis of the frame on screen may read. `None` otherwise.
+    pub fn last_sample(&self) -> Option<Sample<'_>> {
+        if self.data_size != (self.width, self.height) {
+            return None;
+        }
+        Sample::new(&self.data, self.width, self.height)
+    }
+}
+
+/// A CPU picture that is consistent by construction: BGRA8, top-down, `height` rows of `stride` bytes, each row
+/// starting with `width` pixels, all inside `data`. Width and height are not 0.
+#[derive(Clone, Copy, Debug)]
+pub struct Sample<'a> {
+    data: &'a [u8],
+    width: u32,
+    height: u32,
+    stride: usize,
+}
+
+impl<'a> Sample<'a> {
+    /// A tightly packed picture (`stride` = `width` x 4); `None` when `data` is too short or a side is 0.
+    pub fn new(data: &'a [u8], width: u32, height: u32) -> Option<Self> {
+        Sample::with_stride(data, width, height, width as usize * 4)
+    }
+
+    /// A picture whose rows are `stride` bytes apart; `None` when `stride` is shorter than a row, `data` shorter
+    /// than the picture, or a side is 0.
+    pub fn with_stride(data: &'a [u8], width: u32, height: u32, stride: usize) -> Option<Self> {
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let row = (width as usize).checked_mul(4)?;
+        let needed = stride.checked_mul(height as usize - 1)?.checked_add(row)?;
+        (stride >= row && data.len() >= needed).then_some(Sample {
+            data,
+            width,
+            height,
+            stride,
+        })
+    }
+
+    pub fn width(&self) -> u32 {
+        self.width
+    }
+
+    pub fn height(&self) -> u32 {
+        self.height
+    }
+
+    pub fn stride(&self) -> usize {
+        self.stride
+    }
+
+    /// Row `y` (`width` pixels). Panics only for `y >= height`.
+    pub fn row(&self, y: u32) -> &'a [u8] {
+        assert!(y < self.height, "row {y} of a {}-row sample", self.height);
+        let start = y as usize * self.stride;
+        &self.data[start..start + self.width as usize * 4]
+    }
+
+    /// The picture as one tightly packed slice of `width` x `height` x 4 bytes, `None` when the rows are padded.
+    pub fn packed(&self) -> Option<&'a [u8]> {
+        (self.stride == self.width as usize * 4).then(|| &self.data[..self.width as usize * self.height as usize * 4])
+    }
 }
 
 /// The shared state of the frame callback and the main thread.
@@ -106,8 +200,12 @@ struct Latest {
     seq: u64,
     /// The CPU pixels (every frame on the CPU path, the samples on the zero-copy path).
     data: Vec<u8>,
-    /// The frame `data` belongs to.
+    /// The frame `data` belongs to; 0 when `data` holds nothing to give out (taken by the main thread, or its
+    /// buffer handed back to be refilled). While it is not 0, only [`Capture::take_frame`] and a publication touch
+    /// `data` (the capture thread never empties a sample not taken yet).
     data_seq: u64,
+    /// The picture size of `data` (width, height).
+    data_size: (u32, u32),
     /// Zero-copy: the pool the newest frame was published to.
     pool: Option<Arc<SharedTextures>>,
 }
@@ -284,8 +382,10 @@ impl Capture {
             // The pixels not given out yet (every frame on the CPU path, a sample on the zero-copy path). The
             // caller's old buffer goes back to be refilled.
             std::mem::swap(&mut f.data, &mut into.data);
+            into.data_size = f.data_size;
             into.pixels_old = f.data_seq != f.seq;
             f.data_seq = 0;
+            f.data_size = (0, 0);
         } else {
             into.pixels_old = true;
         }
@@ -330,6 +430,13 @@ impl SyntheticFeed {
     pub fn push(&self, texture: &ID3D11Texture2D, crop: (u32, u32, u32, u32)) -> Result<()> {
         self.worker.lock().unwrap().deliver(texture.clone(), crop, None)
     }
+
+    /// Test seam: `hook` runs on the pushing thread between the read-back of each zero-copy CPU sample and its
+    /// publication (the window in which the main thread may take the previous frame), `None` removes it.
+    #[doc(hidden)]
+    pub fn set_sample_hook(&self, hook: Option<Box<dyn FnMut() + Send>>) {
+        self.worker.lock().unwrap().sample_hook = hook;
+    }
 }
 
 impl Shared {
@@ -372,6 +479,9 @@ struct Worker {
     /// When the last CPU sample of the zero-copy path was taken.
     last_sample: Option<Instant>,
     pending: Option<Pending>,
+    /// Test seam of a [`Capture::synthetic`] capture ([`SyntheticFeed::set_sample_hook`]): runs on the capture
+    /// thread between the read-back of a zero-copy sample and its publication.
+    sample_hook: Option<Box<dyn FnMut() + Send>>,
 }
 
 unsafe impl Send for Worker {}
@@ -399,6 +509,7 @@ impl Worker {
             shared_pool: None,
             last_sample: None,
             pending: None,
+            sample_hook: None,
         }
     }
 
@@ -465,18 +576,24 @@ impl Worker {
         let t0 = Instant::now();
         let shared = self.shared.clone();
         let mut out = shared.frame.lock().unwrap();
-        read_back_region(
+        if let Err(e) = read_back_region(
             &self.device,
             &self.context,
             &mut self.staging,
             texture,
             crop,
             &mut out.data,
-        )?;
+        ) {
+            // The buffer may be half rewritten (another size): nothing in it is given out any more.
+            out.data_seq = 0;
+            out.data_size = (0, 0);
+            return Err(e);
+        }
         out.width = crop.2;
         out.height = crop.3;
         out.seq += 1;
         out.data_seq = out.seq;
+        out.data_size = (crop.2, crop.3);
         out.pool = None;
         drop(out);
         self.shared.cost.lock().unwrap().push(t0.elapsed().as_secs_f64() * 1e6);
@@ -548,13 +665,23 @@ impl Worker {
             || self.last_sample.is_none_or(|t| t.elapsed() >= SAMPLE_EVERY);
         let mut sample = Vec::new();
         if due {
-            // The previous sample's buffer when the main thread gave it back, else a new one.
-            sample = std::mem::take(&mut self.shared.frame.lock().unwrap().data);
+            // The previous sample's buffer when the main thread gave it back, else a new one. A sample the main
+            // thread has not taken yet stays where it is until this one replaces it: emptying it here let the main
+            // thread take that frame, while this read-back runs, as "this frame's pixels" with an empty buffer
+            // (the zero-copy start-up crash of the 2026-11-20 live review).
+            let mut latest = self.shared.frame.lock().unwrap();
+            if latest.data_seq == 0 {
+                sample = std::mem::take(&mut latest.data);
+            }
+            drop(latest);
             if let Err(e) = self.read_back(texture, crop, &mut sample) {
                 pool.abort_write(slot);
                 return Err(e);
             }
             self.last_sample = Some(Instant::now());
+            if let Some(hook) = self.sample_hook.as_mut() {
+                hook();
+            }
         }
         let mut out = self.shared.frame.lock().unwrap();
         let seq = out.seq + 1;
@@ -570,6 +697,7 @@ impl Worker {
         if due {
             out.data = sample;
             out.data_seq = seq;
+            out.data_size = (cw, ch);
         }
         out.pool = Some(pool);
         drop(out);

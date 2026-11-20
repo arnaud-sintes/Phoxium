@@ -729,6 +729,10 @@ fn scan_line(line: &[[u8; 4]], counts: &mut EdgeCounts, centres: &mut Vec<usize>
 /// [`LINE_STRIDE`], horizontally and vertically, and records where the filtered ones are.
 pub fn edge_stats(data: &[u8], frame_w: u32, region: Rect) -> EdgeStats {
     let mut stats = EdgeStats::default();
+    // A buffer that does not hold the region (an empty or older-size sample) carries nothing.
+    if !crate::scaling::region_fits(data.len(), frame_w, region) {
+        return stats;
+    }
     let m = MARGIN.min(region.w / 8).min(region.h / 8);
     if region.w <= 2 * m + 2 || region.h <= 2 * m + 2 {
         return stats;
@@ -738,7 +742,7 @@ pub fn edge_stats(data: &[u8], frame_w: u32, region: Rect) -> EdgeStats {
     let (x0, x1) = (region.x + m, region.x + region.w - m);
     let (y0, y1) = (region.y + m, region.y + region.h - m);
     let at = |x: u32, y: u32| -> [u8; 4] {
-        let i = ((y * frame_w + x) * 4) as usize;
+        let i = (y as usize * frame_w as usize + x as usize) * 4;
         [data[i], data[i + 1], data[i + 2], data[i + 3]]
     };
     let mut line: Vec<[u8; 4]> = Vec::new();
@@ -799,7 +803,9 @@ impl SmoothingWatch {
             self.reset();
             return false;
         }
-        if self.warned || self.checks >= SMOOTH_MAX_CHECKS {
+        // Not ready: a buffer that does not hold the region counts neither as a frame nor as a check.
+        if self.warned || self.checks >= SMOOTH_MAX_CHECKS || !crate::scaling::region_fits(data.len(), frame_w, region)
+        {
             return false;
         }
         let due = self.frames == 0;

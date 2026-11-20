@@ -507,10 +507,10 @@ impl Accumulator {
     /// Adds one `w` x `h` frame of 4-byte pixels (BGRA or RGBA). A frame of another size restarts the
     /// accumulation (the window was resized); a short buffer is ignored.
     pub fn feed(&mut self, data: &[u8], w: u32, h: u32) {
-        let n = w as usize * h as usize;
-        if n == 0 || data.len() < n * 4 {
+        if !holds(data, w, h) {
             return;
         }
+        let n = w as usize * h as usize;
         if (w, h) != (self.w, self.h) || self.frames == 0 {
             *self = Accumulator {
                 w,
@@ -735,6 +735,12 @@ pub fn single_pixel_bars(data: &[u8], w: u32, h: u32, tol: u8) -> Bars {
 /// The `--detect-bars` report of one `w` x `h` 4-byte frame (a `--save-capture` PNG): the thresholds, the
 /// per-edge statistics, the outcome (the picture and the bars, or why nothing was cropped) and, for comparison,
 /// what the first single-pixel rule found.
+/// Whether `data` holds a whole `w` x `h` picture of 4-byte pixels (neither side 0).
+fn holds(data: &[u8], w: u32, h: u32) -> bool {
+    let n = w as u128 * h as u128;
+    n > 0 && n * 4 <= data.len() as u128
+}
+
 pub fn report(data: &[u8], w: u32, h: u32, cfg: &Config) -> String {
     let mut acc = Accumulator::new(cfg);
     acc.feed(data, w, h);
@@ -946,7 +952,8 @@ impl Auto {
     /// frame on screen, counts (a game that redraws rarely still gives one).
     pub fn start(&mut self, now: f64, trigger: Trigger, frame: Option<(&[u8], u32, u32)>) {
         let mut s = Session::new(now, self.config);
-        if let Some((data, w, h)) = frame {
+        // A frame whose buffer does not hold its picture (no sample yet) is not one: the detection waits for frames.
+        if let Some((data, w, h)) = frame.filter(|&(d, w, h)| holds(d, w, h)) {
             s.feed(data, w, h);
             self.size = (w, h);
         }
@@ -965,7 +972,9 @@ impl Auto {
     /// drops the area in force (the picture moved with the window). While a detection runs every frame counts;
     /// otherwise frames are sampled at most every [`SAMPLE_MIN_S`] s, less often when a frame is expensive.
     pub fn feed(&mut self, now: f64, data: &[u8], w: u32, h: u32) {
-        if w == 0 || h == 0 {
+        // Not ready: an empty frame, or a buffer that does not hold a `w` x `h` picture (a zero-copy frame without
+        // its sample) changes nothing, not even the size seen.
+        if !holds(data, w, h) {
             return;
         }
         if (w, h) != self.size {

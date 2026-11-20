@@ -781,3 +781,416 @@ fn switching_paths_while_frames_flow_keeps_every_frame_whole_and_in_order() {
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
+
+// ---- The CPU analyses over zero-copy frames (the start-up crash of the 2026-11-20 live review) ----
+
+use ultimatecrt::{analysis, bars, lifecycle, scaling};
+
+/// The main loop's CPU analyses, run in the loop's order on each iteration (`app.rs`: the frame just taken goes
+/// to the black-frame scan and the Auto picture area, then the integer-scale detection and the smoothed-source watch
+/// run on the frame on screen), through the same `analysis` functions the loop calls.
+struct LoopAnalyses {
+    detector: scaling::Detector,
+    detect_key: (u32, u32),
+    smoothing: lifecycle::SmoothingWatch,
+    auto: bars::Auto,
+    health: lifecycle::Health,
+    events: Vec<bars::AutoEvent>,
+}
+
+impl LoopAnalyses {
+    fn new() -> Self {
+        LoopAnalyses {
+            detector: scaling::Detector::default(),
+            detect_key: (0, 0),
+            smoothing: lifecycle::SmoothingWatch::default(),
+            auto: bars::Auto::new(bars::Config::default()),
+            health: lifecycle::Health::new(0.0),
+            events: Vec::new(),
+        }
+    }
+
+    /// One loop iteration: `got` when a frame was just taken, else the frame on screen analysed again.
+    fn run(&mut self, frame: &capture::Frame, got: bool, now: f64) {
+        if got {
+            analysis::note_health(&mut self.health, now, frame);
+            analysis::feed_area(&mut self.auto, now, frame);
+        }
+        let region = scaling::Rect {
+            x: 0,
+            y: 0,
+            w: frame.width,
+            h: frame.height,
+        };
+        if (frame.width, frame.height) != self.detect_key {
+            self.detect_key = (frame.width, frame.height);
+            self.detector.reset();
+        }
+        analysis::feed_scale(&mut self.detector, frame, got, region);
+        let eligible = self.detector.is_locked() && self.detector.divisor() == (1, 1);
+        analysis::feed_smoothing(&mut self.smoothing, frame, got, region, eligible);
+        if let Some(e) = self.auto.tick(now, (1, 1)) {
+            self.events.push(e);
+        }
+    }
+}
+
+/// The invariant every consumer relies on: a frame's own pixels (`sample`) are this frame's whole picture, and any
+/// picture it carries (`last_sample`) has the frame's size.
+fn assert_consistent(frame: &capture::Frame, what: &str) {
+    for (name, s) in [("sample", frame.sample()), ("last sample", frame.last_sample())] {
+        if let Some(s) = s {
+            assert_eq!(
+                (s.width(), s.height()),
+                (frame.width, frame.height),
+                "{what}: {name} size"
+            );
+            assert!(
+                frame.data.len() >= (frame.width * frame.height * 4) as usize,
+                "{what}: {name} short"
+            );
+        }
+    }
+    if !frame.pixels_old && frame.data_size == (frame.width, frame.height) {
+        assert_eq!(
+            frame.data.len(),
+            (frame.width * frame.height * 4) as usize,
+            "{what}: a frame marked as carrying its own pixels has a buffer of another length"
+        );
+    }
+}
+
+/// The client-area pixels the CPU path would deliver for `inside` in `crop`.
+fn client_pixels(crop: (u32, u32, u32, u32), inside: impl Fn(u32, u32) -> [u8; 4]) -> Vec<u8> {
+    let mut v = Vec::with_capacity((crop.2 * crop.3 * 4) as usize);
+    for y in 0..crop.3 {
+        for x in 0..crop.2 {
+            v.extend_from_slice(&inside(x, y));
+        }
+    }
+    v
+}
+
+/// The crash, deterministically: the capture thread publishes frame 1 with its sample; the main thread has not taken
+/// it yet when frame 2 arrives with a sample due (a detection runs: every frame is sampled); while frame 2's sample is
+/// read back, the main thread takes frame 1. Before the fix the capture thread had emptied frame 1's sample to reuse
+/// its buffer, so frame 1 came out "with its own pixels" and an empty buffer, and the integer-scale detection indexed
+/// it (`range start index ... out of range for slice of length 0`). Now frame 1 keeps its sample, frame 2 brings its
+/// own, and the loop's analyses run on both.
+#[test]
+fn a_frame_taken_while_the_next_sample_is_read_back_keeps_its_pixels() {
+    let Some((gpu, d, _kind)) = setup("a_frame_taken_while_the_next_sample_is_read_back_keeps_its_pixels") else {
+        return;
+    };
+    let cap = synthetic_capture(&gpu, &d);
+    cap.set_path(CapturePath::ZeroCopy);
+    cap.set_full_rate_samples(true);
+    let (to_main, from_writer) = std::sync::mpsc::channel::<&'static str>();
+    let (to_writer, from_main) = std::sync::mpsc::channel::<()>();
+    let writer = {
+        let (d, feed) = (d.clone(), cap.synthetic_feed());
+        std::thread::spawn(move || {
+            let window = window_texture(&d, WINDOW);
+            upload(&d, &window, WINDOW, &window_pixels(WINDOW, CROP, rich(1)));
+            feed.push(&window, CROP).expect("push 1");
+            to_main.send("published 1").unwrap();
+            from_main.recv().unwrap();
+            let (tx, rx) = (to_main.clone(), std::sync::Mutex::new(from_main));
+            // Frame 2: the hook holds the capture thread between its sample's read-back and its publication.
+            feed.set_sample_hook(Some(Box::new(move || {
+                tx.send("reading frame 2").unwrap();
+                rx.lock().unwrap().recv().unwrap();
+            })));
+            upload(&d, &window, WINDOW, &window_pixels(WINDOW, CROP, rich(2)));
+            feed.push(&window, CROP).expect("push 2");
+            feed.set_sample_hook(None);
+            to_main.send("published 2").unwrap();
+        })
+    };
+    let mut frame = capture::Frame::default();
+    let mut loop_analyses = LoopAnalyses::new();
+    assert_eq!(from_writer.recv().unwrap(), "published 1");
+    to_writer.send(()).unwrap();
+    assert_eq!(from_writer.recv().unwrap(), "reading frame 2");
+    // The window of the crash.
+    let got = cap.take_frame(&mut frame);
+    let seen = (got, frame.seq, frame.pixels_old, frame.data.len());
+    assert_consistent(&frame, "frame 1 taken during frame 2's read-back");
+    loop_analyses.run(&frame, got, 0.0);
+    to_writer.send(()).unwrap();
+    assert_eq!(from_writer.recv().unwrap(), "published 2");
+    writer.join().expect("writer thread");
+    assert_eq!(
+        seen,
+        (true, 1, false, (CROP.2 * CROP.3 * 4) as usize),
+        "frame 1 must come with its own whole sample"
+    );
+    assert_eq!(
+        frame.sample().and_then(|s| s.packed()),
+        Some(&client_pixels(CROP, rich(1))[..])
+    );
+    assert!(cap.take_frame(&mut frame), "frame 2");
+    assert_eq!((frame.seq, frame.pixels_old), (2, false));
+    assert_eq!(
+        frame.sample().and_then(|s| s.packed()),
+        Some(&client_pixels(CROP, rich(2))[..])
+    );
+    loop_analyses.run(&frame, true, 0.02);
+    assert_eq!(cap.take_failure(), None);
+}
+
+/// The same race, at random: a writer captures as fast as it can with a sample on every frame (a detection runs)
+/// while the main thread takes frames and runs the loop's analyses; every frame taken is consistent.
+#[test]
+fn frames_taken_while_samples_flow_are_always_consistent() {
+    let Some((gpu, d, _kind)) = setup("frames_taken_while_samples_flow_are_always_consistent") else {
+        return;
+    };
+    let cap = synthetic_capture(&gpu, &d);
+    cap.set_path(CapturePath::ZeroCopy);
+    cap.set_full_rate_samples(true);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (d, feed, stop) = (d.clone(), cap.synthetic_feed(), stop.clone());
+        std::thread::spawn(move || {
+            let ring: Vec<ID3D11Texture2D> = (0..4).map(|_| window_texture(&d, WINDOW)).collect();
+            let mut n = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                let tex = &ring[(n % 4) as usize];
+                upload(&d, tex, WINDOW, &window_pixels(WINDOW, CROP, tagged(n)));
+                feed.push(tex, CROP).expect("push");
+            }
+            n
+        })
+    };
+    let mut frame = capture::Frame::default();
+    let mut loop_analyses = LoopAnalyses::new();
+    let (mut taken, mut own) = (0u32, 0u32);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while Instant::now() < deadline {
+        let got = cap.take_frame(&mut frame);
+        if got {
+            taken += 1;
+            assert_consistent(&frame, &format!("frame {}", frame.seq));
+            own += u32::from(frame.sample().is_some());
+            // A frame dropped by the render side frees its slot.
+            frame.shared = None;
+        }
+        loop_analyses.run(&frame, got, 0.0);
+    }
+    stop.store(true, Ordering::Relaxed);
+    let written = writer.join().expect("writer thread");
+    eprintln!("{taken} frames taken ({own} with their own sample), {written} captured");
+    assert!(taken > 50 && own > 0, "{taken} taken, {own} with a sample");
+    assert_eq!(cap.take_failure(), None);
+}
+
+/// The loop's analyses over the zero-copy frames of one session and the next: the first frame (sampled), frames
+/// without a sample (skipped as new pixels, re-analysed on the newest picture of their size), a resize (the new size
+/// is sampled at once; an older sample is never read as a picture of the new size), a frame whose sample is of
+/// another size, and a restart (a new capture session, the main thread's frame keeping the last session's pixels).
+#[test]
+fn the_loop_analyses_take_zero_copy_frames_with_or_without_a_sample() {
+    let Some((gpu, d, _kind)) = setup("the_loop_analyses_take_zero_copy_frames_with_or_without_a_sample") else {
+        return;
+    };
+    let window = window_texture(&d, WINDOW);
+    let small = (8, 31, 120, 90);
+    let mut frame = capture::Frame::default();
+    let mut a = LoopAnalyses::new();
+    let now = std::cell::Cell::new(0.0);
+    let step = |cap: &capture::Capture, frame: &mut capture::Frame, a: &mut LoopAnalyses, what: &str| -> bool {
+        now.set(now.get() + 0.016);
+        let got = cap.take_frame(frame);
+        assert_consistent(frame, what);
+        a.run(frame, got, now.get());
+        frame.shared = None;
+        got
+    };
+    let push = |cap: &capture::Capture, crop: (u32, u32, u32, u32), n: u32| {
+        upload(&d, &window, WINDOW, &window_pixels(WINDOW, crop, rich(n)));
+        cap.synthetic_feed().push(&window, crop).expect("push");
+    };
+
+    let cap = synthetic_capture(&gpu, &d);
+    cap.set_path(CapturePath::ZeroCopy);
+    // Before any frame: the loop analyses the empty frame on screen.
+    assert!(!step(&cap, &mut frame, &mut a, "before the first frame"));
+    // The first frame: sampled (a new size).
+    push(&cap, CROP, 1);
+    assert!(step(&cap, &mut frame, &mut a, "first frame"));
+    assert!(frame.sample().is_some(), "the first frame of a size carries its sample");
+    // Frames without a sample (the next one is due in 100 ms): no own pixels, the picture of their size stays.
+    for n in 2..=4 {
+        push(&cap, CROP, n);
+        assert!(step(&cap, &mut frame, &mut a, "unsampled frame"));
+        assert!(frame.sample().is_none() && frame.last_sample().is_some(), "frame {n}");
+        // The frame on screen analysed again (a map change): the newest picture of its size.
+        assert!(!step(&cap, &mut frame, &mut a, "re-analysis"));
+    }
+    // A resize: sampled at once, at the new size.
+    push(&cap, small, 5);
+    assert!(step(&cap, &mut frame, &mut a, "resized frame"));
+    assert_eq!((frame.width, frame.height), (small.2, small.3));
+    assert_eq!(
+        frame.sample().and_then(|s| s.packed()),
+        Some(&client_pixels(small, rich(5))[..])
+    );
+    // Back to the first size, and a frame of that size the main thread takes after a newer unsampled one: the
+    // buffer it gets is the sample of the size before (its own frame's), consistent.
+    push(&cap, CROP, 6);
+    push(&cap, CROP, 7);
+    assert!(step(&cap, &mut frame, &mut a, "sample of an earlier frame"));
+    assert_eq!((frame.seq, frame.pixels_old), (7, true));
+    assert_eq!(
+        frame.last_sample().and_then(|s| s.packed()),
+        Some(&client_pixels(CROP, rich(6))[..])
+    );
+    // The main thread's buffer holding a picture of another size (as after a resize while it held the old sample):
+    // never read for this frame.
+    let mut odd = capture::Frame {
+        width: small.2,
+        height: small.3,
+        seq: frame.seq,
+        pixels_old: false,
+        ..capture::Frame::cpu(CROP.2, CROP.3, std::mem::take(&mut frame.data))
+    };
+    assert!(odd.sample().is_none() && odd.last_sample().is_none());
+    a.run(&odd, true, now.get());
+    a.run(&odd, false, now.get());
+    frame.data = std::mem::take(&mut odd.data);
+    frame.data_size = odd.data_size;
+    // A restart: a new session; the loop's frame keeps the last session's pixels (its counter back to 0).
+    drop(cap);
+    let cap = synthetic_capture(&gpu, &d);
+    cap.set_path(CapturePath::ZeroCopy);
+    frame.seq = 0;
+    assert!(!step(&cap, &mut frame, &mut a, "restart, before its first frame"));
+    push(&cap, small, 8);
+    assert!(step(&cap, &mut frame, &mut a, "restart, first frame"));
+    assert_eq!(
+        frame.sample().and_then(|s| s.packed()),
+        Some(&client_pixels(small, rich(8))[..])
+    );
+    assert_eq!(cap.take_failure(), None);
+}
+
+/// The window of the detection-quality test: a client area of 192 x 144 (x3 of 64 x 48) with room for the frame.
+const QWINDOW: (u32, u32) = (240, 200);
+const QCROP: (u32, u32, u32, u32) = (8, 31, 192, 144);
+
+/// Native pixel (nx, ny) of a busy 64 x 48 picture (bright: never taken for a black bar), changing with `n`.
+fn native_px(nx: u32, ny: u32, n: u32) -> [u8; 4] {
+    let v = ((nx * 7 + ny * 13 + n * 5) % 160) as u8;
+    [64 + v, 224 - v, 64 + (v ^ 0x2A) % 160, 255]
+}
+
+/// Captures frames at about 60 Hz on the zero-copy path with the main loop's sampling rule (every frame sampled
+/// while a detection runs, else 10 per second, or always 10 per second with `floor_only`) and runs the loop's
+/// analyses, until `done` or `limit`. Returns the time taken and the number of frames that carried a sample.
+fn run_detection(
+    gpu: &Headless,
+    d: &D3d,
+    inside: impl Fn(u32, u32, u32) -> [u8; 4],
+    floor_only: bool,
+    a: &mut LoopAnalyses,
+    limit: Duration,
+    done: impl Fn(&LoopAnalyses) -> bool,
+) -> (Duration, u32) {
+    let cap = synthetic_capture(gpu, d);
+    cap.set_path(CapturePath::ZeroCopy);
+    let feed = cap.synthetic_feed();
+    let window = window_texture(d, QWINDOW);
+    let mut frame = capture::Frame::default();
+    let t0 = Instant::now();
+    let mut samples = 0;
+    let mut n = 0;
+    while !done(a) && t0.elapsed() < limit {
+        n += 1;
+        cap.set_full_rate_samples(!floor_only && (!a.detector.is_locked() || a.auto.running()));
+        upload(
+            d,
+            &window,
+            QWINDOW,
+            &window_pixels(QWINDOW, QCROP, |x, y| inside(x, y, n)),
+        );
+        feed.push(&window, QCROP).expect("push");
+        let got = cap.take_frame(&mut frame);
+        assert_consistent(&frame, "detection frame");
+        samples += u32::from(got && frame.sample().is_some());
+        a.run(&frame, got, t0.elapsed().as_secs_f64());
+        frame.shared = None;
+        std::thread::sleep(Duration::from_millis(15));
+    }
+    assert_eq!(cap.take_failure(), None);
+    (t0.elapsed(), samples)
+}
+
+/// Detection quality under zero-copy: the integer-scale detection locks to x3 from the samples, with the main loop's
+/// rule (every frame sampled while it runs) in well under 3 s, and from samples at the 10-per-second floor alone after
+/// its 30 informative frames (about 3 s); the Auto picture area finds the picture inside black bars.
+#[test]
+fn zero_copy_samples_detect_the_scale_and_the_picture_area() {
+    let Some((gpu, d, _kind)) = setup("zero_copy_samples_detect_the_scale_and_the_picture_area") else {
+        return;
+    };
+    let x3 = |x: u32, y: u32, n: u32| native_px(x / 3, y / 3, n);
+    let mut a = LoopAnalyses::new();
+    let (t, samples) = run_detection(&gpu, &d, x3, false, &mut a, Duration::from_secs(3), |a| {
+        a.detector.is_locked()
+    });
+    eprintln!(
+        "x3, loop rule: locked {} after {t:?}, {samples} samples",
+        a.detector.is_locked()
+    );
+    assert!(a.detector.is_locked() && t <= Duration::from_secs(3), "{t:?}");
+    assert_eq!(a.detector.divisor(), (3, 3));
+
+    let mut a = LoopAnalyses::new();
+    let (t, samples) = run_detection(&gpu, &d, x3, true, &mut a, Duration::from_secs(6), |a| {
+        a.detector.is_locked()
+    });
+    eprintln!(
+        "x3, 10 samples per second: locked {} after {t:?}, {samples} samples",
+        a.detector.is_locked()
+    );
+    assert!(a.detector.is_locked(), "not locked after {t:?} ({samples} samples)");
+    assert_eq!(a.detector.divisor(), (3, 3));
+    assert!(
+        samples <= 32 && t <= Duration::from_secs(5),
+        "{samples} samples in {t:?}"
+    );
+
+    // Black bars: 24 px left and right, 18 px top and bottom, around a 144 x 108 picture (x3 of 48 x 36).
+    let picture = scaling::Rect {
+        x: 24,
+        y: 18,
+        w: 144,
+        h: 108,
+    };
+    let barred = move |x: u32, y: u32, n: u32| {
+        if x < picture.x || x >= picture.x + picture.w || y < picture.y || y >= picture.y + picture.h {
+            [0, 0, 0, 255]
+        } else {
+            native_px((x - picture.x) / 3, (y - picture.y) / 3, n)
+        }
+    };
+    let mut a = LoopAnalyses::new();
+    let (t, samples) = run_detection(&gpu, &d, barred, false, &mut a, Duration::from_secs(3), |a| {
+        !a.events.is_empty()
+    });
+    eprintln!("bars: {:?} after {t:?}, {samples} samples", a.events);
+    assert!(
+        matches!(
+            a.events[..],
+            [bars::AutoEvent::Detected(
+                bars::Trigger::Attach,
+                bars::Outcome::Found(_)
+            )]
+        ),
+        "{:?}",
+        a.events
+    );
+    assert_eq!(a.auto.rect(), Some(picture));
+}

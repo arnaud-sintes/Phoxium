@@ -277,15 +277,21 @@ impl Detector {
         }
     }
 
-    /// Analyses `region` of a BGRA8 frame that is `frame_w` pixels wide.
-    pub fn feed(&mut self, data: &[u8], frame_w: u32, region: Rect) {
+    /// Analyses `region` of a BGRA8 frame that is `frame_w` pixels wide. Input that does not hold the region (a
+    /// buffer too short for it, a region outside the frame's width, an empty frame) is not analysed: returns false
+    /// (not ready), and nothing changes. True when the input was usable (analysed, or nothing left to analyse).
+    pub fn feed(&mut self, data: &[u8], frame_w: u32, region: Rect) -> bool {
+        if !region_fits(data.len(), frame_w, region) {
+            return false;
+        }
         let m = MARGIN.min(region.w / 8).min(region.h / 8);
         if self.locked || region.w <= 2 * m + 2 || region.h <= 2 * m + 2 {
-            return;
+            return true;
         }
         let (x0, x1) = (region.x + m, region.x + region.w - m);
         let (y0, y1) = (region.y + m, region.y + region.h - m);
-        let row = |y: u32| -> &[u8] { &data[((y * frame_w + x0) * 4) as usize..((y * frame_w + x1) * 4) as usize] };
+        let at = |y: u32, x: u32| (y as usize * frame_w as usize + x as usize) * 4;
+        let row = |y: u32| -> &[u8] { &data[at(y, x0)..at(y, x1)] };
 
         let mut runs = Vec::new();
         let mut vertical = Vec::new();
@@ -325,12 +331,27 @@ impl Detector {
         informative |= eliminate(&mut self.cand_y, &vertical);
 
         if !informative {
-            return;
+            return true;
         }
         self.frames += 1;
         let any = (2..=MAX_K).any(|k| self.cand_x[k] || self.cand_y[k]);
         self.locked = !any || self.frames >= DETECT_FRAMES;
+        true
     }
+}
+
+/// Whether a BGRA8 buffer of `len` bytes, `frame_w` pixels wide, holds every pixel of `region` (not empty, inside the
+/// frame's width, its last row within the buffer). Computed without overflow for any input.
+pub fn region_fits(len: usize, frame_w: u32, region: Rect) -> bool {
+    let (x, y, w, h, fw) = (
+        region.x as u128,
+        region.y as u128,
+        region.w as u128,
+        region.h as u128,
+        frame_w as u128,
+    );
+    // The byte after the region's last pixel: ((y + h - 1) * fw + x + w) * 4, in u128 (no overflow for u32 input).
+    w > 0 && h > 0 && x + w <= fw && ((y + h - 1) * fw + x + w) * 4 <= len as u128
 }
 
 /// The part of the captured frame that is the source, and how it maps to native pixels.
