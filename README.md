@@ -212,6 +212,19 @@ Global hotkeys are registered with `RegisterHotKey` on the output window (no key
 - Every parameter (id, unit, default, range, confidence tag, source, description) is declared in `params\*.toml`, one file per stage. `--set id=value` of `render` takes those ids.
 - Without `--preset`, the live app starts from the preset named in `%APPDATA%\ultimateCRT\settings.toml` (else the parameter defaults), with the parameter overrides stored in that file on top.
 
+### Colour fringes (chromatic aberration)
+
+A real tube shows coloured fringes because its three beams never land exactly on the same spot (imperfect convergence): red and blue end up slightly apart, usually on opposite sides of green, more toward the edges. The settings menu has a **Chromatic aberration** group in the Geometry panel for that, off by default (both amounts 0 give exactly the picture without it):
+
+| Control | Default | Range (slider; files up to) | What it does |
+|---|---|---|---|
+| Chroma lateral (`geometry_chroma_lateral_mm`) | 0 mm | -10 to 10 (-20 to 20) | How far apart red and blue land at the picture corner, along the line from the centre: red outward by half, blue inward by half, green fixed. Negative: red inward. |
+| Chroma axis (`geometry_chroma_axis_mm`) | 0 mm | 0 to 5 (0 to 20) | The same separation everywhere, in the direction of the angle. |
+| Chroma angle (`geometry_chroma_angle_deg`) | 0 deg | -180 to 180 | Direction in which red moves for the axis amount: 0 right, 90 down, 180 left, -90 up. |
+| Chroma edge exponent (`geometry_chroma_edge_exponent`) | 2 | 1 to 3 (1 to 4) | How the lateral fringes grow from the centre: 1 evenly, 2 like a real tube, 3 almost only in the corners. |
+
+Recommended values: a good monitor, lateral 0.5 to 1 mm (and axis 0.2 to 0.3 mm at 0 deg); a consumer TV, lateral 1.5 to 2 mm, axis 0.5 to 1 mm; a cheap or badly adjusted set, lateral 3 mm or more. On the command line: `render --set geometry_chroma_lateral_mm=1.5 ...`. The per-colour Convergence controls below it (static offset and radial term per beam) still work and add to these. A different spot size per colour (per-gun focus) is not modelled yet.
+
 Only the client area of the target window is captured, so a 256×240 source at 3× arrives as exactly 768×720 pixels.
 
 ## Settings menu and overlay (T-52a, T-52b)

@@ -5,8 +5,9 @@
 //! constants of the live path (`FrameConstants::placed`, whose `amp_k` follows the tier, plus the skirt margin), on
 //! a 1920 x 1080 output, the mask off (the mask is the same multiplier in every tier; without it the error is in
 //! units of white: current 1 gives light 1 on a flat field). Configurations: the table defaults, PVM-20M4U flat
-//! (amp_samples 16), PVM-20M4U flat with a 5 % beam tail, PVM-20M4U as shipped (cylindrical) and the 26 in slot TV
-//! (spherical). Contents: game-like pixel art, a 1-px checker, a ramp, per-pixel noise.
+//! (amp_samples 16), PVM-20M4U flat with a 5 % beam tail, PVM-20M4U flat with chromatic aberration (lateral 3 mm,
+//! axis 0.5 mm at 30 deg, QUESTIONS PHY-17), PVM-20M4U as shipped (cylindrical) and the 26 in slot TV (spherical).
+//! Contents: game-like pixel art, a 1-px checker, a ramp, per-pixel noise.
 //!
 //! Contracts (errors of the `screen` image against `exact`, mean absolute and max over every pixel and channel):
 //! - `standard`: the T-48 accuracy contract, MAE <= 0.5 % and max <= 4 % of white; a curved tube is bit-identical
@@ -110,6 +111,15 @@ fn configs() -> Vec<(&'static str, Params)> {
             "01 flat, tail 5 %",
             Params {
                 beam_tail_weight: 0.05,
+                ..flat01
+            },
+        ),
+        (
+            "01 flat, chromatic aberration",
+            Params {
+                geometry_chroma_lateral_mm: 3.0,
+                geometry_chroma_axis_mm: 0.5,
+                geometry_chroma_angle_deg: 30.0,
                 ..flat01
             },
         ),

@@ -141,6 +141,17 @@ pub const PANELS: &[PanelDef] = &[
 /// control (`output_headroom_mode = mask_depth`).
 pub const MOVED: &[(&str, &str)] = &[("mask_depth", OUTPUT)];
 
+/// One-sentence explanations drawn under a group's subheading, as (group, note).
+pub const GROUP_NOTES: &[(&str, &str)] = &[(
+    "Chromatic aberration",
+    "Colour fringes: red and blue land slightly apart, as on a real tube with imperfect convergence.",
+)];
+
+/// The explanation drawn under the subheading of `group`, if any ([`GROUP_NOTES`]).
+pub fn group_note(group: &str) -> Option<&'static str> {
+    GROUP_NOTES.iter().find(|(g, _)| *g == group).map(|(_, n)| *n)
+}
+
 /// The panel definition called `name`.
 pub fn panel(name: &str) -> Option<&'static PanelDef> {
     PANELS.iter().find(|p| p.name == name)
@@ -760,6 +771,11 @@ pub fn panel_body(
         }
         if groups.len() > 1 && last_group != Some(m.group) {
             theme::subheading(ui, fonts, m.group);
+            if let Some(note) = group_note(m.group) {
+                let wrap = ui.push_text_wrap_pos(0.0);
+                ui.text_colored(PALETTE.text_faint, note);
+                drop(wrap);
+            }
             last_group = Some(m.group);
         }
         let _id = ui.push_id(m.id);
@@ -1013,6 +1029,29 @@ mod tests {
             component_names(crate::params::meta("gun_drive_rgb").unwrap()),
             ["R", "G", "B"]
         );
+    }
+
+    /// PHY-17: the chromatic aberration controls are a first-class group of the Geometry panel (not advanced),
+    /// between the geometry rows and the convergence rows, with its one-sentence note, found by "chromatic".
+    #[test]
+    fn chromatic_aberration_group_in_the_geometry_panel() {
+        let ids = [
+            "geometry_chroma_lateral_mm",
+            "geometry_chroma_axis_mm",
+            "geometry_chroma_angle_deg",
+            "geometry_chroma_edge_exponent",
+        ];
+        let rows = panel_params("Geometry");
+        let pos = |id: &str| rows.iter().position(|m| m.id == id).expect(id);
+        for id in ids {
+            let m = crate::params::meta(id).unwrap();
+            assert_eq!((m.group, m.advanced), ("Chromatic aberration", false), "{id}");
+            assert!(matches(m, "chromatic"), "{id}");
+            assert!(pos(id) < pos("geometry_conv_red_dx_mm") && pos(id) > pos("geometry_curvature"));
+        }
+        assert_eq!(label(crate::params::meta(ids[0]).unwrap()), "Chroma lateral");
+        assert!(group_note("Chromatic aberration").is_some_and(|n| n.starts_with("Colour fringes")));
+        assert_eq!(group_note("Geometry"), None);
     }
 
     #[test]

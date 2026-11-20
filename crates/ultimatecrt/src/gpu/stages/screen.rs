@@ -196,27 +196,13 @@ pub fn warp_plan_with(fc: &FrameConstants, params: &Params, abl_runs: bool) -> O
             .find(|&o| sigma_peak * f64::from(o) >= steps)?
     };
     // Reach of pass 1 (beam_warp.glsl): 4 sigma at twice the peak current (the tail's when on) plus the largest
-    // misconvergence, in raster px, as the skirt margin (FrameConstants::with_skirt_margin).
+    // misconvergence (chromatic aberration included), in raster px, as the skirt margin
+    // (FrameConstants::with_skirt_margin).
     let mut sigma_mm = growth.fwhm(2.0).max(growth.fwhm(0.0)) / 2.354_820_045;
     if params.beam_tail_weight > 0.0 {
         sigma_mm *= f64::from(params.beam_tail_sigma_ratio).max(1.0);
     }
-    let conv = |s: f32, d: f32, r: f32| f64::from(s.abs().max(d.abs()) + r.abs());
-    let conv_mm = conv(
-        params.geometry_conv_red_dx_mm,
-        params.geometry_conv_red_dy_mm,
-        params.geometry_conv_red_radial_mm,
-    )
-    .max(conv(
-        params.geometry_conv_green_dx_mm,
-        params.geometry_conv_green_dy_mm,
-        params.geometry_conv_green_radial_mm,
-    ))
-    .max(conv(
-        params.geometry_conv_blue_dx_mm,
-        params.geometry_conv_blue_dy_mm,
-        params.geometry_conv_blue_radial_mm,
-    ));
+    let conv_mm = crate::placement::max_misconvergence_mm(params);
     let im_max = 1.1 * im(params.geometry_overscan_x.min(params.geometry_overscan_y));
     let reach = (4.0 * sigma_mm + conv_mm) * ppm * im_max;
     if !reach.is_finite() {
