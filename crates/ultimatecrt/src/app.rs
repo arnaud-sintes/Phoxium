@@ -1252,16 +1252,33 @@ pub fn run() -> Res<()> {
                 // R-04: no busy loop while minimised; any message (a hotkey, the restore) wakes it at once.
                 output::wait_messages(IDLE_WAIT);
             } else {
-                renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
+                // R-01: a lost device ends the loop (the shutdown saves, `fatal_message` tells the user); what the
+                // renderer recovers from is a status, not an error.
+                let status = renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
+                // The frame was staged for upload whatever the status: it is consumed.
                 fresh = false;
-                // T-96: the resolved placement, printed with --stats when the native raster or the output changes.
-                if args.stats && (view.native, out_size) != readout_key {
-                    readout_key = (view.native, out_size);
-                    println!("{}", placement::readout(&params, view.native, out_size, args.integer));
-                }
-                renders += 1;
-                if let Some(l) = log.as_mut() {
-                    l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
+                let presented = match status {
+                    gpu::FrameStatus::Presented => true,
+                    // Nothing to draw into (a 0-sized surface the minimised check did not catch): wait as when
+                    // minimised instead of spinning.
+                    gpu::FrameStatus::NothingToDraw => {
+                        output::wait_messages(IDLE_WAIT);
+                        false
+                    }
+                    // The swapchain or the surface is recreated before the next call, which draws normally.
+                    gpu::FrameStatus::Skipped => false,
+                };
+                if presented {
+                    // T-96: the resolved placement, printed with --stats when the native raster or the output
+                    // changes.
+                    if args.stats && (view.native, out_size) != readout_key {
+                        readout_key = (view.native, out_size);
+                        println!("{}", placement::readout(&params, view.native, out_size, args.integer));
+                    }
+                    renders += 1;
+                    if let Some(l) = log.as_mut() {
+                        l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
+                    }
                 }
             }
 
@@ -1295,6 +1312,10 @@ pub fn run() -> Res<()> {
                     }
                     notice = now_notice;
                 }
+                // R-02, R-01: what the renderer limited (amplifier samples, an empty tube area, ...). The renderer
+                // prints each one once when it appears; the queue is drained here so it stays bounded.
+                let _ = renderer.take_gpu_notices();
+                let shown_notice = title_notice(notice.as_deref(), renderer.gpu_notice().as_deref());
                 let secs = stat_time.elapsed().as_secs_f64();
                 // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
                 let gpu = renderer.take_timing_average();
@@ -1337,7 +1358,7 @@ pub fn run() -> Res<()> {
                         view.div.0,
                         view.div.1,
                         renderer.gpu_name,
-                        notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
+                        shown_notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
                             + &ui_state
                                 .quality
                                 .as_ref()
@@ -1433,9 +1454,32 @@ fn shut_down(steps: &mut dyn ExitSteps, outcome: Res<()>) -> Res<()> {
     steps.release_gpu();
     steps.destroy_window();
     steps.release_capture();
-    outcome.map_err(|e| {
-        format!("{e}\n\nThe settings and the burn-in state were saved before closing (see any warning above).").into()
-    })
+    outcome.map_err(|e| fatal_message(&*e).into())
+}
+
+/// What the user reads when the session ends on `e` (after the shutdown saves). A lost GPU (R-01,
+/// [`gpu::GpuError::DeviceLost`]) gets a plain sentence; the technical cause was printed by [`shut_down`].
+fn fatal_message(e: &(dyn std::error::Error + 'static)) -> String {
+    if e.downcast_ref::<gpu::GpuError>()
+        .is_some_and(gpu::GpuError::is_device_lost)
+    {
+        return DEVICE_LOST_MESSAGE.to_string();
+    }
+    format!("{e}\n\nThe settings and the burn-in state were saved before closing (see any warning above).")
+}
+
+/// The message of a session that ended on a lost GPU device (R-01).
+const DEVICE_LOST_MESSAGE: &str =
+    "The GPU was lost (driver reset or update). Settings and burn-in were saved; restart the application.";
+
+/// The notice of the title bar: the source's (lost, black, smoothed, interlace) and the renderer's (R-02, R-01),
+/// joined, each shown once.
+fn title_notice(source: Option<&str>, gpu: Option<&str>) -> Option<String> {
+    match (source, gpu) {
+        (Some(s), Some(g)) if s != g => Some(format!("{s} | {g}")),
+        (Some(s), _) => Some(s.to_string()),
+        (None, g) => g.map(str::to_string),
+    }
 }
 
 /// The saves of the shutdown (R-01): see [`ExitSteps::save`]. `host` is the renderer, `None` when there is none.
@@ -1987,5 +2031,33 @@ mod tests {
         assert_eq!(exit.host.reads, 0, "burn-in never loaded: nothing to read back");
         assert_eq!(settings::load(&dir).settings.global.gpu.adapter, "Intel");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// R-01: a lost device (reported or hung) gives the plain message; other GPU errors keep their text.
+    #[test]
+    fn a_lost_device_gives_a_plain_message() {
+        for hung in [false, true] {
+            let e: Box<dyn std::error::Error> = Box::new(gpu::GpuError::DeviceLost {
+                during: "rendering a frame",
+                hung,
+            });
+            assert_eq!(fatal_message(&*e), DEVICE_LOST_MESSAGE);
+        }
+        let e: Box<dyn std::error::Error> = Box::new(gpu::GpuError::OutOfMemory { during: "x" });
+        let m = fatal_message(&*e);
+        assert!(
+            m.starts_with("out of GPU or system memory") && m.contains("saved"),
+            "{m}"
+        );
+    }
+
+    /// The title's notice shows the source's and the renderer's, a repeated one once.
+    #[test]
+    fn title_notice_joins_and_deduplicates() {
+        assert_eq!(title_notice(None, None), None);
+        assert_eq!(title_notice(Some("a"), None).as_deref(), Some("a"));
+        assert_eq!(title_notice(None, Some("g")).as_deref(), Some("g"));
+        assert_eq!(title_notice(Some("a"), Some("g")).as_deref(), Some("a | g"));
+        assert_eq!(title_notice(Some("a"), Some("a")).as_deref(), Some("a"));
     }
 }
