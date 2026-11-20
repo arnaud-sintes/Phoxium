@@ -245,6 +245,30 @@ impl DecayFit<'_> {
 /// three RGBA32F history images).
 pub const FEEDBACK_TERMS: usize = 4;
 
+// ---------------------------------------------------------------------------------------------------
+// Time base (review R-10, R-11)
+// ---------------------------------------------------------------------------------------------------
+
+/// Largest frame step, in ms, that the time-based stages (persistence, burn-in) take from one measured
+/// frame period. A longer period is not display time: the output was minimised, the loop stalled (modal
+/// move loop, system sleep), or the first frame after a pause. Without a bound one frame after a 10 minute
+/// minimise would wear the burn-in map by 600 h at an acceleration of 3600. 250 ms (4 frames per second)
+/// is longer than any frame period of a usable display, so no real frame is shortened. [E]
+pub const MAX_FRAME_STEP_MS: f64 = 250.0;
+
+/// The frame step a time-based stage uses for a measured frame period `measured_ms`: the period clamped
+/// to [`MAX_FRAME_STEP_MS`]; `None` for no measurement (0 on the first frame, negative or not finite). [D]
+pub fn frame_step_ms(measured_ms: f64) -> Option<f64> {
+    (measured_ms.is_finite() && measured_ms > 0.0).then(|| measured_ms.min(MAX_FRAME_STEP_MS))
+}
+
+/// Whether a measured frame period may enter a frame-rate estimate: a measurement (see [`frame_step_ms`])
+/// no longer than [`MAX_FRAME_STEP_MS`]. Longer periods are outliers (pauses), dropped, not clamped: a
+/// clamped 250 ms sample would still pull a 144 Hz estimate toward 4 Hz. [D]
+pub fn is_rate_sample(measured_ms: f64) -> bool {
+    measured_ms.is_finite() && measured_ms > 0.0 && measured_ms <= MAX_FRAME_STEP_MS
+}
+
 /// Truncation horizon of the trail in ms: the static-image normalisation uses the integral over
 /// the first second (CRT.md "Consequences for T-41"; n close to 1 makes the infinite total
 /// diverge or converge very slowly). [D]
@@ -274,6 +298,52 @@ impl FrameFeedback {
         rho: [0.0; FEEDBACK_TERMS],
         c: [0.0; FEEDBACK_TERMS],
     };
+
+    /// The recurrence of this fit, made for the frame period `fit_ms`, for one frame that lasted `step_ms`
+    /// (real-time persistence, review R-11). [D]
+    ///
+    /// Each geometric term is an exponential in real time: rho_j = exp(-T / tau_j) with T = `fit_ms`, so
+    /// tau_j = -T / ln(rho_j), and a frame of duration dt = `step_ms` decays it by
+    /// rho_j' = exp(-dt / tau_j) = rho_j^(dt / T). The amplitude keeps each term's share of the steady state,
+    /// g_j = c_j / (1 - rho_j): c_j' = g_j (1 - rho_j'). Then S_j = g_j x is a fixed point of
+    /// S_j <- rho_j' S_j + c_j' x for EVERY dt, so a static picture keeps y = w0 (1 + sum_j g_j) x = x however
+    /// the frame periods vary (w0 unchanged), and a trail decays by exp(-t / tau_j) after a time t whatever
+    /// the frame rate. dt = T gives the fit itself (rho_j' = rho_j, c_j' = c_j up to rounding). Unused terms
+    /// (rho = c = 0) stay unused.
+    ///
+    /// # Panics
+    /// Unless `fit_ms` and `step_ms` are finite and positive, or if a rho is outside [0, 1).
+    pub fn at_step(&self, fit_ms: f64, step_ms: f64) -> Self {
+        assert!(fit_ms.is_finite() && fit_ms > 0.0, "fit period {fit_ms} ms");
+        assert!(step_ms.is_finite() && step_ms > 0.0, "frame step {step_ms} ms");
+        let ratio = step_ms / fit_ms;
+        let mut out = *self;
+        for j in 0..FEEDBACK_TERMS {
+            let rho = self.rho[j];
+            assert!((0.0..1.0).contains(&rho), "rho {rho}");
+            let r = rho.powf(ratio);
+            out.rho[j] = r;
+            out.c[j] = self.c[j] / (1.0 - rho) * (1.0 - r);
+        }
+        out
+    }
+
+    /// One frame of the recurrence (the shader's, in f64): the output y = w0 (x + sum_j S_j) of a frame
+    /// whose light without persistence is `x`, then the history `s` of the next frame,
+    /// S_j <- rho_j S_j + c_j x. [D]
+    pub fn step(&self, s: &mut [f64; FEEDBACK_TERMS], x: f64) -> f64 {
+        let y = self.w0 * (x + s.iter().sum::<f64>());
+        for j in 0..FEEDBACK_TERMS {
+            s[j] = self.rho[j] * s[j] + self.c[j] * x;
+        }
+        y
+    }
+
+    /// The history of a static picture `x` shown forever: S_j = c_j x / (1 - rho_j) (the GPU stage primes a
+    /// cleared history to it). [D]
+    pub fn steady_history(&self, x: f64) -> [f64; FEEDBACK_TERMS] {
+        std::array::from_fn(|j| self.c[j] * x / (1.0 - self.rho[j]))
+    }
 
     /// Realised trail t_k = y_k / y_0 after a single excitation, k >= 1.
     pub fn trail(&self, k: u32) -> f64 {
@@ -480,6 +550,17 @@ pub fn saturate(light: f64, s: f64) -> f64 {
     light / (1.0 + s * light)
 }
 
+/// The strength the renderer uses for a parameter value `s` (review R-05): s clamped to [0, 1e30], NaN read
+/// as 0. A negative s would let 1 + s I reach 0 or below (infinite or negative light), so it acts as 0, the
+/// identity; the shader applies the same rule (`shaders/include/saturation.glsl`). [D]
+pub fn effective_saturation_strength(s: f64) -> f64 {
+    if s > 0.0 {
+        s.min(1e30)
+    } else {
+        0.0
+    }
+}
+
 /// Derivative f'(I) = 1 / (1 + s I)^2 of [`saturate`]. [D]
 ///
 /// # Panics
@@ -563,6 +644,25 @@ mod saturation_tests {
         for i in [0.5, 1.0, 2.0, 10.0] {
             assert!(saturate(i, b) < saturate(i, g) && saturate(i, g) < saturate(i, r));
         }
+    }
+
+    /// Review R-05: negative and NaN strengths act as 0 (identity), positive ones are kept, an infinite one
+    /// is capped; the result of `saturate` with them is finite and non-negative for any light >= 0.
+    #[test]
+    fn effective_strength_is_never_negative() {
+        assert_eq!(effective_saturation_strength(-1.0), 0.0);
+        assert_eq!(effective_saturation_strength(f64::NAN), 0.0);
+        assert_eq!(effective_saturation_strength(f64::NEG_INFINITY), 0.0);
+        assert_eq!(effective_saturation_strength(0.06), 0.06);
+        assert_eq!(effective_saturation_strength(f64::INFINITY), 1e30);
+        for s in [-1.0, -0.5, f64::NAN, f64::INFINITY, 0.0, 0.06] {
+            let s = effective_saturation_strength(s);
+            for i in [0.0, 1e-6, 1.0, 4.0, 1e6] {
+                let f = saturate(i, s);
+                assert!(f.is_finite() && f >= 0.0 && f <= i, "s {s} I {i}: {f}");
+            }
+        }
+        assert_eq!(saturate(2.5, effective_saturation_strength(-1.0)), 2.5);
     }
 
     #[test]
@@ -801,6 +901,152 @@ mod tests {
                 .trail(1)
                 < 1e-6
         );
+    }
+
+    /// Step-off response of the recurrence: a static picture 1 (history primed), then black frames of the
+    /// durations `steps_ms`; returns (time since the last lit frame began, output) per black frame, the
+    /// time being the sum of the lit frame's and the black frames' durations up to that frame.
+    fn step_off(fb: &FrameFeedback, fit_ms: f64, lit_ms: f64, steps_ms: &[f64]) -> Vec<(f64, f64)> {
+        let mut s = fb.steady_history(1.0);
+        // The lit frame (a fixed point of the history: the static picture goes on), then its decay.
+        let _ = fb.at_step(fit_ms, lit_ms).step(&mut s, 1.0);
+        let mut t = lit_ms;
+        let mut out = Vec::new();
+        for &dt in steps_ms {
+            out.push((t, fb.at_step(fit_ms, dt).step(&mut s, 0.0)));
+            t += dt;
+        }
+        out
+    }
+
+    /// The output of `curve` at the time `ms` (the sample whose time is within 1e-6 ms).
+    fn at(curve: &[(f64, f64)], ms: f64) -> f64 {
+        curve
+            .iter()
+            .find(|(t, _)| (t - ms).abs() < 1e-6)
+            .unwrap_or_else(|| panic!("no sample at {ms} ms"))
+            .1
+    }
+
+    /// `at_step` with the fit's own period is the fit; the per-term decays compose in real time (two steps
+    /// of a and b decay like one of a + b); the share of the steady state of each term is kept.
+    #[test]
+    fn at_step_is_real_time() {
+        for hz in [60.0, 144.0] {
+            let t = frame_period_ms(hz);
+            let fb = KUHN_GREEN.frame_feedback(t, TRAIL_HORIZON_MS);
+            let same = fb.at_step(t, t);
+            for j in 0..FEEDBACK_TERMS {
+                assert!(close(same.rho[j], fb.rho[j], 1e-15) && close(same.c[j], fb.c[j], 1e-15));
+            }
+            let (a, b) = (fb.at_step(t, 5.0), fb.at_step(t, 9.0));
+            let ab = fb.at_step(t, 14.0);
+            for j in 0..FEEDBACK_TERMS {
+                assert!(close(a.rho[j] * b.rho[j], ab.rho[j], 1e-14), "{hz} Hz term {j}");
+                let g = fb.c[j] / (1.0 - fb.rho[j]);
+                assert!(close(ab.c[j] / (1.0 - ab.rho[j]), g, 1e-13), "{hz} Hz term {j}: share");
+            }
+            assert_eq!(ab.w0, fb.w0);
+        }
+        // Red at 60 Hz has unused terms (rho = c = 0): they stay unused.
+        let red = KUHN_RED.frame_feedback(frame_period_ms(60.0), TRAIL_HORIZON_MS);
+        let r = red.at_step(frame_period_ms(60.0), 3.0);
+        for j in 0..FEEDBACK_TERMS {
+            assert!(r.rho[j].is_finite() && r.c[j].is_finite() && r.c[j] >= 0.0);
+        }
+    }
+
+    /// A static picture keeps y = x exactly (1e-12) whatever the frame periods: jitter, a dropped frame, a
+    /// clamped pause, a tiny step.
+    #[test]
+    fn static_picture_under_jitter() {
+        let t = frame_period_ms(144.0);
+        for (name, fit) in [("green", KUHN_GREEN), ("blue", KUHN_BLUE), ("red", KUHN_RED)] {
+            let fb = fit.frame_feedback(t, TRAIL_HORIZON_MS);
+            let x = 0.73;
+            let mut s = fb.steady_history(x);
+            for (i, dt) in [5.5, 8.4, 13.9, 6.9, MAX_FRAME_STEP_MS, 0.01, 7.0]
+                .iter()
+                .cycle()
+                .take(70)
+                .enumerate()
+            {
+                let y = fb.at_step(t, *dt).step(&mut s, x);
+                assert!(close(y, x, 1e-12), "{name} frame {i} ({dt} ms): {y}");
+            }
+        }
+    }
+
+    /// Review R-11 (oracle-driven, simulated frame times): the trail after a static picture is switched off
+    /// is a function of real time, not of the frame count. Each rate uses its own fit (as the stage does,
+    /// automatic rate), and the outputs at the same time since the last lit frame began (83.3, 250 and
+    /// 500 ms, whole frames at both rates) agree within 1 % of the steady-state light at 60 Hz, at 144 Hz,
+    /// and at 144 Hz with jittered periods (5.556 / 8.333 ms alternating, one dropped frame of 13.889 ms).
+    /// Measured: green 0.1465 / 0.1426 at 83.3 ms, 0.0927 / 0.0881 at 250 ms. The old behaviour (60 Hz
+    /// weights at 144 Hz frames, decay per frame) is off by more than 3 % (green 0.1033 at 83.3 ms: the trail
+    /// 2.4 times too short), so the test separates the two.
+    #[test]
+    fn trail_is_real_time_at_60_and_144_hz() {
+        let (t60, t144) = (frame_period_ms(60.0), frame_period_ms(144.0));
+        let times = [1000.0 / 12.0, 250.0, 500.0];
+        for (name, fit) in [("green", KUHN_GREEN), ("blue", KUHN_BLUE)] {
+            let fb60 = fit.frame_feedback(t60, TRAIL_HORIZON_MS);
+            let fb144 = fit.frame_feedback(t144, TRAIL_HORIZON_MS);
+            let c60 = step_off(&fb60, t60, t60, &[t60; 40]);
+            let c144 = step_off(&fb144, t144, t144, &[t144; 80]);
+            // Jitter: pairs of 5.556 + 8.333 ms (= 2 x 6.944), one pair replaced by a dropped frame.
+            let mut jitter = Vec::new();
+            for p in 0..40 {
+                if p == 3 {
+                    jitter.push(2.0 * t144);
+                } else {
+                    jitter.extend([2.0 * t144 * 0.4, 2.0 * t144 * 0.6]);
+                }
+            }
+            let cj = step_off(&fb144, t144, 2.0 * t144 * 0.6, &jitter);
+            // The old per-frame decay at 144 Hz with the 60 Hz weights.
+            let old = {
+                let mut s = fb60.steady_history(1.0);
+                let _ = fb60.step(&mut s, 1.0);
+                (1..=80)
+                    .map(|m| (f64::from(m) * t144, fb60.step(&mut s, 0.0)))
+                    .collect::<Vec<_>>()
+            };
+            for ms in times {
+                let (a, b, j) = (at(&c60, ms), at(&c144, ms), at(&cj, ms));
+                println!(
+                    "{name} {ms:.1} ms: 60 Hz {a:.5}, 144 Hz {b:.5}, jittered {j:.5}, old {:.5}",
+                    at(&old, ms)
+                );
+                assert!((a - b).abs() < 0.01, "{name} {ms} ms: 60 Hz {a} vs 144 Hz {b}");
+                assert!((a - j).abs() < 0.01, "{name} {ms} ms: 60 Hz {a} vs jittered {j}");
+                if ms < 300.0 {
+                    assert!(
+                        (a - at(&old, ms)).abs() > 0.03,
+                        "{name} {ms} ms: the old behaviour is separated"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Review R-10: the frame step is clamped to `MAX_FRAME_STEP_MS`, a missing measurement gives none, and
+    /// a pause is not a rate sample. A 10 minute gap decays the trail like 250 ms, not like 10 minutes.
+    #[test]
+    fn frame_step_clamp() {
+        assert_eq!(frame_step_ms(0.0), None);
+        assert_eq!(frame_step_ms(-1.0), None);
+        assert_eq!(frame_step_ms(f64::NAN), None);
+        assert_eq!(frame_step_ms(f64::INFINITY), None);
+        assert_eq!(frame_step_ms(16.7), Some(16.7));
+        assert_eq!(frame_step_ms(600_000.0), Some(MAX_FRAME_STEP_MS));
+        assert!(is_rate_sample(6.9) && is_rate_sample(MAX_FRAME_STEP_MS));
+        assert!(!is_rate_sample(MAX_FRAME_STEP_MS + 1.0) && !is_rate_sample(0.0) && !is_rate_sample(f64::NAN));
+        let t = frame_period_ms(60.0);
+        let fb = KUHN_GREEN.frame_feedback(t, TRAIL_HORIZON_MS);
+        let gap = fb.at_step(t, frame_step_ms(600_000.0).unwrap());
+        let quarter = fb.at_step(t, 250.0);
+        assert_eq!(gap, quarter);
     }
 
     #[test]
