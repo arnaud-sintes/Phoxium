@@ -1,5 +1,7 @@
 ﻿# Rust
 /target/
+/target-*/
+/spikes/*/target/
 **/*.rs.bk
 
 # Editors and OS
@@ -9,9 +11,12 @@
 *.swp
 Thumbs.db
 
-# Generated captures and local state
+# Generated captures, scratch files and local state
 /captures/
 /tube-state/
+/scratch/
+crash-*.txt
+*.state
 
 # Release packages
 /dist/
@@ -19,3 +24,6 @@ Thumbs.db
 # Output of scripts/poll-foreground.ps1 (window titles of whatever was in the foreground: never commit)
 poll-foreground.csv
 poll.csv
+
+# Diagnostic logs (ultimatecrt --log, scripts): may name programs, never commit
+*.csv
