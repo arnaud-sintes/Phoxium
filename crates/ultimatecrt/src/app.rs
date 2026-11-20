@@ -403,7 +403,7 @@ pub fn run() -> Res<()> {
     // Vulkan device gets the external memory extension whenever it can import, so the menu switches both ways live.
     let mut capture_mode = zerocopy::Fallback::new(args.capture_path.unwrap_or(stored.global.capture.path()));
     let mut capture_notice: Option<String> = None;
-    let mut shared_seq: Option<u64> = None; // the frame whose shared texture the renderer holds
+    let mut shared_seq: Option<(u64, u64)> = None; // the frame (session, seq) whose shared texture the renderer holds
     let mut renderer = gpu::Renderer::new(
         win.hwnd.0 as isize,
         win.hinstance,
@@ -417,16 +417,35 @@ pub fn run() -> Res<()> {
         name: got.name.clone(),
         luid: got.luid.map(adapters::Luid::from_vulkan),
     });
-    // The capture device on the renderer's adapter: restart the session when the first guess differs.
+    // The capture device on the renderer's adapter: restart the session when the first guess differs, else back
+    // on the first adapter (frames cross adapters, CPU copy), else the picker (`lifecycle::follow_renderer_adapter`).
     let mut captured_base = 0u64; // frames of the sessions already closed
-    let wanted = selection.capture_luid();
-    if let Some(old) = capture.take_if(|c| wanted.is_some_and(|l| l != c.adapter_luid)) {
-        captured_base += old.frames_captured();
-        drop(old); // the old session closes before the new one starts
-        let c = capture::Capture::start(follow, map.client_area, wanted)?;
-        println!("capture: restarted on {} (the renderer's adapter)", c.adapter);
-        frame.seq = 0; // the new session counts from 1
-        capture = Some(c);
+    match lifecycle::follow_renderer_adapter(&mut capture, selection.capture_luid(), &mut captured_base, |on| {
+        capture::Capture::start(follow, map.client_area, on)
+    }) {
+        lifecycle::Restart::Kept => {}
+        lifecycle::Restart::Restarted => {
+            if let Some(c) = &capture {
+                println!("capture: restarted on {} (the renderer's adapter)", c.adapter);
+            }
+            frame.seq = 0; // the new session counts from 1
+        }
+        lifecycle::Restart::Fallback(why) => {
+            eprintln!("warning: {why}");
+            frame.seq = 0;
+        }
+        // The developer path stops, as at the first start; the last choice goes to the picker.
+        lifecycle::Restart::Lost(why) if args.window.is_some() => return Err(why.into()),
+        lifecycle::Restart::Lost(why) => {
+            eprintln!("warning: {why}");
+            start_message = Some((false, format!("The last window could not be captured: {why}.")));
+            target = None;
+            frame = idle_frame();
+            profile = settings::SourceProfile::default();
+            profile.switch_to(&mut params, &start_base);
+            args.apply_source(&mut params)?;
+            map = resolve_map(&params, &profile, cli_crop, cli_divisor).0;
+        }
     }
     if let Some(c) = &capture {
         selection.note_capture(&c.adapter, c.adapter_luid);
@@ -1216,9 +1235,9 @@ pub fn run() -> Res<()> {
             let upload = if !fresh || idle {
                 None
             } else if let Some(s) = frame.shared.take() {
-                shared_seq = Some(frame.seq);
+                shared_seq = Some((frame.session, frame.seq));
                 Some(gpu::Upload::Shared(s))
-            } else if shared_seq == Some(frame.seq) && renderer.source_is_shared() {
+            } else if zerocopy::already_held(shared_seq, (frame.session, frame.seq), renderer.source_is_shared()) {
                 None
             } else {
                 Some(gpu::Upload::Cpu(frame.width, frame.height, frame.data.as_slice()))

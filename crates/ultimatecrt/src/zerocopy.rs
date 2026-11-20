@@ -438,6 +438,33 @@ impl Fallback {
     }
 }
 
+/// Pool generations (and capture session ids) come from one counter for the whole process: a capture session
+/// restarted on another adapter, a reattach or a new source makes pools whose generations never repeat an
+/// earlier session's (each session used to count from 1, so a restarted session's first pool looked like the
+/// pool the renderer had imported and the renderer kept sampling the old, stale textures). The counter starts far
+/// above the small hand-made generations of the tests.
+static NEXT_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1 << 32);
+
+/// A new pool generation or capture session id, never returned before in this process.
+pub fn next_id() -> u64 {
+    NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Whether the renderer must import `offered` (generation, pool identity: the address of the shared pool, kept
+/// alive by the import so it cannot be reused meanwhile) when it holds the imports of `imported`: any difference
+/// of either value is a new pool. Pure.
+pub fn needs_import(imported: Option<(u64, usize)>, offered: (u64, usize)) -> bool {
+    imported != Some(offered)
+}
+
+/// Whether the frame `frame` (capture session id, sequence number) needs no upload because the renderer already
+/// samples its shared texture (`held`, recorded when it was handed over, and `renderer_shared`): the same frame of
+/// the same session only. A new session counts its frames from 1 again: its frame 5 is not the old session's
+/// frame 5. Pure.
+pub fn already_held(held: Option<(u64, u64)>, frame: (u64, u64), renderer_shared: bool) -> bool {
+    renderer_shared && held == Some(frame)
+}
+
 /// Running mean of the capture thread's copy cost per frame (µs), read and restarted by the statistics.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CopyCost {
@@ -834,6 +861,47 @@ mod tests {
         f.request(CapturePath::ZeroCopy);
         assert_eq!(f.active(), CapturePath::ZeroCopy);
         assert_eq!(f.describe(), "zero-copy");
+    }
+
+    /// A capture restarted on another adapter (or reattached) makes a new pool: its generation is new for the whole
+    /// process, so the renderer imports it instead of sampling the old session's textures; the same pool is not
+    /// imported twice.
+    #[test]
+    fn a_restarted_session_never_reuses_an_imported_pool() {
+        // Two sessions each make their first pool.
+        let (a, b) = (next_id(), next_id());
+        assert_ne!(a, b);
+        assert!(a >= 1 << 32 && b > a, "far above the tests' hand-made generations");
+        let imported = Some((a, 0x1000));
+        assert!(!needs_import(imported, (a, 0x1000)), "same pool: no import");
+        assert!(needs_import(imported, (b, 0x2000)), "the new session's pool");
+        // Even a repeated generation with another pool (hand-made generations of the tests) is imported.
+        assert!(needs_import(imported, (a, 0x2000)));
+        assert!(needs_import(None, (a, 0x1000)), "nothing imported yet");
+        // Ids are unique across threads (the capture threads make pools concurrently).
+        let ids: Vec<u64> = std::thread::scope(|s| {
+            let h: Vec<_> = (0..4)
+                .map(|_| s.spawn(|| (0..100).map(|_| next_id()).collect::<Vec<_>>()))
+                .collect();
+            h.into_iter().flat_map(|h| h.join().unwrap()).collect()
+        });
+        let set: std::collections::BTreeSet<_> = ids.iter().collect();
+        assert_eq!(set.len(), ids.len());
+    }
+
+    /// The frame whose shared texture the renderer holds is not uploaded again, but a new session's frame with the
+    /// same number is (a restart counts from 1 again).
+    #[test]
+    fn a_held_frame_is_matched_by_session_and_number() {
+        let held = Some((7, 5));
+        assert!(already_held(held, (7, 5), true));
+        assert!(!already_held(held, (8, 5), true), "same number, new session");
+        assert!(!already_held(held, (7, 6), true));
+        assert!(
+            !already_held(held, (7, 5), false),
+            "the renderer dropped it (a zero-copy failure)"
+        );
+        assert!(!already_held(None, (7, 5), true));
     }
 
     #[test]

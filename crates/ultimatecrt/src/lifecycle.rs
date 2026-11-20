@@ -864,6 +864,163 @@ impl SizeWatch {
     }
 }
 
+// ---------------------------------------------------------------------------------------------
+// Minimised or hidden source
+// ---------------------------------------------------------------------------------------------
+
+/// Whether the attached window can deliver frames: Windows.Graphics.Capture sends none for a minimised window,
+/// nor for a window cloaked by the compositor (on another virtual desktop). The capture session stays open and
+/// the frames come back when the window is restored or brought to the current desktop.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SourceVisibility {
+    #[default]
+    Visible,
+    /// `IsIconic`.
+    Minimised,
+    /// `DWMWA_CLOAKED`: on another virtual desktop (or hidden by the shell).
+    Cloaked,
+}
+
+impl SourceVisibility {
+    /// From the two window queries; minimised wins (a minimised window on another desktop is restored first).
+    pub fn of(minimised: bool, cloaked: bool) -> Self {
+        if minimised {
+            SourceVisibility::Minimised
+        } else if cloaked {
+            SourceVisibility::Cloaked
+        } else {
+            SourceVisibility::Visible
+        }
+    }
+
+    /// The notice for the title bar and the menu, `None` while the window is visible.
+    pub fn notice(self) -> Option<&'static str> {
+        match self {
+            SourceVisibility::Visible => None,
+            SourceVisibility::Minimised => Some("source minimised: no frames (restore it to resume)"),
+            SourceVisibility::Cloaked => {
+                Some("source on another virtual desktop: no frames (bring it to this desktop to resume)")
+            }
+        }
+    }
+}
+
+/// The notice of an attached source: why no frames come (minimised, on another desktop) before what the frames
+/// show ([`HealthStatus`]: black, or none for a while, which a minimised window would otherwise report as
+/// "protected or not drawing" after [`STALE_AFTER_S`]). `None` while all is well. Pure.
+pub fn source_notice(visibility: SourceVisibility, health: HealthStatus) -> Option<String> {
+    visibility.notice().map(str::to_string).or_else(|| health.message())
+}
+
+// ---------------------------------------------------------------------------------------------
+// Capture restart on the renderer's adapter (HW-3)
+// ---------------------------------------------------------------------------------------------
+
+/// What [`follow_renderer_adapter`] needs of a capture session (`capture::Capture`; a fake in the tests).
+pub trait CaptureSession {
+    /// The adapter the session's Direct3D 11 device runs on.
+    fn adapter_luid(&self) -> crate::adapters::Luid;
+    /// Frames delivered by the session so far.
+    fn frames_captured(&self) -> u64;
+}
+
+/// The outcome of [`follow_renderer_adapter`].
+#[derive(Debug, PartialEq, Eq)]
+pub enum Restart {
+    /// No session, no wanted adapter, or the session already runs on it: nothing changed.
+    Kept,
+    /// The session runs on the renderer's adapter now (a new session: its frames count from 1).
+    Restarted,
+    /// The session could not start on the renderer's adapter and runs again on its first adapter (a new session
+    /// too): every frame crosses adapters, the zero-copy path refuses (`zerocopy::Refusal::CrossAdapter`) and the
+    /// CPU copy runs. The text says why.
+    Fallback(String),
+    /// Neither start worked: no session any more (the caller shows the window picker, or stops on the
+    /// developer path). The text says why.
+    Lost(String),
+}
+
+/// The capture session follows the adapter the renderer really got (HW-3): the first session starts on a guess
+/// before the output window exists; when the renderer's adapter `wanted` differs, the session is closed first
+/// (frames counted into `captured_base`), then started again on `wanted` through `start`, else on its first
+/// adapter, else given up. A session started on another adapter makes new shared pools (new generations,
+/// `zerocopy::next_id`), so a zero-copy renderer can never keep sampling the old session's textures.
+pub fn follow_renderer_adapter<C: CaptureSession, E: std::fmt::Display>(
+    capture: &mut Option<C>,
+    wanted: Option<crate::adapters::Luid>,
+    captured_base: &mut u64,
+    mut start: impl FnMut(Option<crate::adapters::Luid>) -> Result<C, E>,
+) -> Restart {
+    let (Some(w), Some(old)) = (wanted, capture.as_ref()) else {
+        return Restart::Kept;
+    };
+    let first = old.adapter_luid();
+    if first == w {
+        return Restart::Kept;
+    }
+    if let Some(old) = capture.take() {
+        *captured_base += old.frames_captured();
+        drop(old); // the old session closes before the new one starts
+    }
+    match start(Some(w)) {
+        Ok(c) => {
+            *capture = Some(c);
+            Restart::Restarted
+        }
+        Err(e) => match start(Some(first)) {
+            Ok(c) => {
+                *capture = Some(c);
+                Restart::Fallback(format!(
+                    "the capture could not start on the renderer's adapter ({e}); it runs on its first adapter, \
+                     frames cross adapters (CPU copy)"
+                ))
+            }
+            Err(e2) => Restart::Lost(format!(
+                "the capture could not start on the renderer's adapter ({e}) nor on its first one ({e2})"
+            )),
+        },
+    }
+}
+
+// ---------------------------------------------------------------------------------------------
+// Monitor and DPI of the output
+// ---------------------------------------------------------------------------------------------
+
+/// Follows the monitor the output window is on and its DPI, sampled about once a second: a move onto another
+/// monitor (by a drag, F11, a display change) re-evaluates the GPU choice (`adapters::moved_notice`), resets the
+/// automatic quality's streaks (`quality::AutoQuality::monitor_changed`), and a DPI change missed by
+/// `WM_DPICHANGED` still reaches the UI scale. The persistence's automatic rate measures the real frame period
+/// and follows by itself.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorWatch {
+    last: Option<(crate::modes::IRect, u32)>,
+}
+
+/// What changed since the last [`MonitorWatch::observe`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct MonitorChange {
+    /// The output is on another monitor (not reported for the first sample).
+    pub moved: bool,
+    /// The new DPI, when it changed (not reported for the first sample).
+    pub dpi: Option<u32>,
+}
+
+impl MonitorWatch {
+    /// One sample: the monitor rectangle the output is on and its DPI (0 when unknown: ignored).
+    pub fn observe(&mut self, monitor: crate::modes::IRect, dpi: u32) -> MonitorChange {
+        let dpi = if dpi == 0 { self.last.map_or(0, |(_, d)| d) } else { dpi };
+        let change = match self.last {
+            None => MonitorChange::default(),
+            Some((m, d)) => MonitorChange {
+                moved: m != monitor,
+                dpi: (d != dpi && dpi != 0).then_some(dpi),
+            },
+        };
+        self.last = Some((monitor, dpi));
+        change
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1748,5 +1905,176 @@ mod tests {
         s.request_history_clear();
         assert!(s.take_history_clear());
         assert_eq!(s.generation(), 0);
+    }
+
+    // ---- minimised or hidden source ----
+
+    /// A minimised source (or one on another virtual desktop) says why no frames come, before the "not drawing"
+    /// message the silence would give after 10 s; restored, the notice goes and the health speaks again.
+    #[test]
+    fn a_minimised_or_cloaked_source_is_named_instead_of_looking_frozen() {
+        assert_eq!(SourceVisibility::of(false, false), SourceVisibility::Visible);
+        assert_eq!(SourceVisibility::of(true, false), SourceVisibility::Minimised);
+        assert_eq!(SourceVisibility::of(false, true), SourceVisibility::Cloaked);
+        assert_eq!(SourceVisibility::of(true, true), SourceVisibility::Minimised);
+        // Minimised at t = 0: no frames; at 12 s the health alone would say "not drawing".
+        let h = Health::new(0.0);
+        assert_eq!(h.status(12.0), HealthStatus::Stale);
+        let n = source_notice(SourceVisibility::Minimised, h.status(12.0)).unwrap();
+        assert!(n.contains("minimised") && n.contains("no frames"), "{n}");
+        let n = source_notice(SourceVisibility::Cloaked, HealthStatus::Ok).unwrap();
+        assert!(n.contains("another virtual desktop"), "{n}");
+        // Restored: frames come again, nothing to say.
+        let mut h = h;
+        h.note_frame(13.0, Some(false));
+        assert_eq!(source_notice(SourceVisibility::Visible, h.status(13.5)), None);
+        // Visible but silent for long: the health message as before.
+        assert!(source_notice(SourceVisibility::Visible, HealthStatus::Stale)
+            .unwrap()
+            .contains(PROTECTED_OR_NOT_DRAWING));
+    }
+
+    // ---- capture restart on the renderer's adapter ----
+
+    use crate::adapters::Luid;
+
+    /// A fake capture session: its adapter and frame count.
+    #[derive(Debug, PartialEq)]
+    struct FakeSession(Luid, u64);
+
+    impl CaptureSession for FakeSession {
+        fn adapter_luid(&self) -> Luid {
+            self.0
+        }
+        fn frames_captured(&self) -> u64 {
+            self.1
+        }
+    }
+
+    fn luid(n: u32) -> Luid {
+        Luid { low: n, high: 0 }
+    }
+
+    /// A fake factory: the adapters on which a start succeeds.
+    fn factory(ok: &[u32]) -> impl FnMut(Option<Luid>) -> Result<FakeSession, String> + '_ {
+        move |l: Option<Luid>| {
+            let l = l.expect("a start always names its adapter");
+            if ok.contains(&l.low) {
+                Ok(FakeSession(l, 0))
+            } else {
+                Err(format!("no device on {}", l.low))
+            }
+        }
+    }
+
+    #[test]
+    fn the_capture_follows_the_renderer_adapter_or_falls_back() {
+        let mut base = 0;
+        // Same adapter, no wanted adapter, no session: nothing happens.
+        let mut cap = Some(FakeSession(luid(1), 10));
+        let mut start = factory(&[]);
+        assert_eq!(
+            follow_renderer_adapter(&mut cap, Some(luid(1)), &mut base, &mut start),
+            Restart::Kept
+        );
+        assert_eq!(
+            follow_renderer_adapter(&mut cap, None, &mut base, &mut start),
+            Restart::Kept
+        );
+        let mut none: Option<FakeSession> = None;
+        assert_eq!(
+            follow_renderer_adapter(&mut none, Some(luid(2)), &mut base, &mut start),
+            Restart::Kept
+        );
+        assert_eq!((cap.as_ref().unwrap().0, base), (luid(1), 0));
+        // Another adapter: closed (frames counted), started there.
+        let mut start = factory(&[2]);
+        assert_eq!(
+            follow_renderer_adapter(&mut cap, Some(luid(2)), &mut base, &mut start),
+            Restart::Restarted
+        );
+        assert_eq!((cap.as_ref().unwrap(), base), (&FakeSession(luid(2), 0), 10));
+        // The start on the wanted adapter fails: back on the first adapter, with the reason.
+        let mut cap = Some(FakeSession(luid(1), 5));
+        let mut start = factory(&[1]);
+        match follow_renderer_adapter(&mut cap, Some(luid(3)), &mut base, &mut start) {
+            Restart::Fallback(why) => assert!(why.contains("no device on 3") && why.contains("CPU copy"), "{why}"),
+            r => panic!("{r:?}"),
+        }
+        assert_eq!(cap, Some(FakeSession(luid(1), 0)), "a new session on the first adapter");
+        assert_eq!(base, 15);
+        // Both fail: no session, never a stale one.
+        let mut start = factory(&[]);
+        match follow_renderer_adapter(&mut cap, Some(luid(3)), &mut base, &mut start) {
+            Restart::Lost(why) => assert!(
+                why.contains("no device on 3") && why.contains("no device on 1"),
+                "{why}"
+            ),
+            r => panic!("{r:?}"),
+        }
+        assert!(cap.is_none());
+    }
+
+    /// The restart and the zero-copy path: the restarted session's frames come from a new pool (a generation
+    /// never seen, so the renderer imports it) and number from 1 again (so the frame the renderer held is not
+    /// taken for a new one); after a fallback to the first adapter the zero-copy path is refused (cross adapter)
+    /// and the CPU copy runs.
+    #[test]
+    fn a_restart_while_zero_copy_runs_never_leaves_a_stale_pool() {
+        use crate::zerocopy::{already_held, decide, needs_import, next_id, CapturePath, HandleKind, Refusal, Support};
+        // Session 1 (first guess) published frame 5 from its pool, the renderer imported and holds it.
+        let (s1, pool1) = (next_id(), next_id());
+        let imported = Some((pool1, 0xA000));
+        let held = Some((s1, 5));
+        // The restart: session 2, its own pool, frames from 1.
+        let (s2, pool2) = (next_id(), next_id());
+        assert!(needs_import(imported, (pool2, 0xB000)), "the new pool is imported");
+        for seq in 1..=5 {
+            assert!(
+                !already_held(held, (s2, seq), true),
+                "frame {seq} of the new session is uploaded"
+            );
+        }
+        // Fallback onto the first adapter while the renderer is on another one: zero-copy refused, CPU copy.
+        let support = Support {
+            extension: true,
+            handle: Some(HandleKind::Nt),
+            same_adapter: Some(false),
+        };
+        assert_eq!(decide(CapturePath::ZeroCopy, support), Err(Refusal::CrossAdapter));
+    }
+
+    // ---- monitor and DPI of the output ----
+
+    #[test]
+    fn the_monitor_watch_reports_moves_and_dpi_changes_once() {
+        use crate::modes::IRect;
+        let (m0, m1) = (IRect::new(0, 0, 2560, 1440), IRect::new(2560, 0, 4480, 1080));
+        let mut w = MonitorWatch::default();
+        assert_eq!(
+            w.observe(m0, 96),
+            MonitorChange::default(),
+            "the first sample is no change"
+        );
+        assert_eq!(w.observe(m0, 96), MonitorChange::default());
+        assert_eq!(
+            w.observe(m1, 144),
+            MonitorChange {
+                moved: true,
+                dpi: Some(144)
+            }
+        );
+        assert_eq!(w.observe(m1, 144), MonitorChange::default(), "reported once");
+        // The user changes the scaling of the same monitor.
+        assert_eq!(
+            w.observe(m1, 120),
+            MonitorChange {
+                moved: false,
+                dpi: Some(120)
+            }
+        );
+        // An unknown DPI (0) is not a change.
+        assert_eq!(w.observe(m1, 0), MonitorChange::default());
+        assert_eq!(w.observe(m1, 120), MonitorChange::default());
     }
 }
