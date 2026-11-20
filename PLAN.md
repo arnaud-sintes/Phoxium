@@ -781,7 +781,7 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 - **Accept:** `gh release view v0.5.0` lists the zip and `.sha256`; the notes equal the changelog section.
 - **Model:** Sonnet low. **Owner:** yes.
 
-### 8b. Audit follow-ups (T-49 audit of 2026-11-19, exec/integration 64cc4b7)
+### 8b. Audit follow-ups (T-49 audit of 2026-11-19, exec/integration head of that day)
 
 Findings of the independent physics audit, turned into tasks. Ids T-84 to T-90 are new; they extend M3/M4 and gate the audit item of T-49. B = blocker, M = major, m = minor of the audit report.
 

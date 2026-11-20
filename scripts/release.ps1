@@ -218,5 +218,6 @@ try {
     Write-Host "Draft release created (not public, no tag yet): $($draft.url)"
     Write-Host 'Check it (notes, assets), then run: .\scripts\release.ps1 -Publish'
 } finally {
-    Remove-Item $notesFile -ErrorAction SilentlyContinue
+    # Best-effort cleanup: a failure here must never change the exit code.
+    try { [IO.File]::Delete($notesFile) } catch { }
 }

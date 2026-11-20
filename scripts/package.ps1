@@ -118,7 +118,10 @@ foreach ($stale in @(Get-StaleBinaries $root $exes)) {
 
 $name = "ultimatecrt-v$version-windows-x64"
 $stage = Join-Path $root "dist\$name"
-Remove-Item -Recurse -Force "dist\$name", "dist\$name.zip", "dist\$name.zip.sha256", "dist\$name.commit" -ErrorAction SilentlyContinue
+foreach ($leaf in @($name, "$name.zip", "$name.zip.sha256", "$name.commit")) {
+    $old = Join-Path $root "dist\$leaf"
+    try { if ([IO.Directory]::Exists($old)) { [IO.Directory]::Delete($old, $true) } else { [IO.File]::Delete($old) } } catch { }
+}
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item -LiteralPath $exes -Destination $stage
 Copy-Item 'LICENSE', 'README.md', 'CHANGELOG.md' $stage
@@ -173,7 +176,7 @@ ultimateCRT is released under the MIT licence (LICENSE). Licences of the depende
 Add-Type -AssemblyName System.IO.Compression
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $zipPath = Join-Path $root "dist\$name.zip"
-if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+try { [IO.File]::Delete($zipPath) } catch { }
 $stageFull = (Resolve-Path $stage).Path.TrimEnd('\')
 $zipStream = [IO.File]::Open($zipPath, [IO.FileMode]::CreateNew)
 try {
@@ -188,6 +191,6 @@ try {
 $hash = (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower()
 [IO.File]::WriteAllText((Join-Path $root "dist\$name.zip.sha256"), "$hash  $name.zip`n", [Text.Encoding]::ASCII)
 [IO.File]::WriteAllText((Join-Path $root "dist\$name.commit"), "$commit`n", [Text.Encoding]::ASCII)
-Remove-Item -Recurse -Force $stage
+try { [IO.Directory]::Delete($stage, $true) } catch { }
 Write-Host "Created dist\$name.zip ($hash) from $commit"
 if ($commit -match '-(dirty|untested)') { Write-Warning 'This zip is a local trial: release.ps1 refuses it.' }
