@@ -455,9 +455,9 @@ fn preset_files_are_managed_from_the_menu() {
         return;
     };
     rig.open_menu();
-    // The Preset section is open by default; the files section starts closed.
+    // The Preset section is open by default; its file tools start hidden ("Manage files").
     assert!(rig.ui.item_rect("files:preset").is_none());
-    rig.click("header:Preset files");
+    rig.click("files:toggle");
     // Choose the user preset (the first entry).
     rig.click("files:preset");
     rig.click("files:preset:0");

@@ -1,4 +1,4 @@
-//! The "Preset files" section of the menu (owner request 2026-11-20): rename, delete (with a confirmation),
+//! The preset files tools of the menu's Preset section ("Manage files", owner request 2026-11-20): rename, delete (with a confirmation),
 //! duplicate and export a preset, and import preset files, through `crate::preset_files`. The folder-based paths
 //! are the main ones: export writes to `%APPDATA%\ultimateCRT\export\`, import lists the `.toml` files dropped in
 //! `%APPDATA%\ultimateCRT\import\` (Rescan). The native Save and Open dialogs are optional buttons
@@ -34,6 +34,8 @@ pub enum DialogResult {
 /// The section's state.
 #[derive(Clone, Debug, Default)]
 pub struct FilesModel {
+    /// The tools are shown ("Manage files" in the Preset section).
+    pub open: bool,
     /// The preset the tools act on; `None`: the preset in force.
     pub selected: Option<String>,
     /// The new name typed for Rename.
@@ -125,11 +127,7 @@ pub fn section(
     current: Option<&str>,
     r: &mut MenuResult,
 ) {
-    let (open, header) = theme::section_header(ui, fonts, "Preset files", None, false, false);
-    r.items.push(("header:Preset files".to_string(), header));
-    if !open {
-        return;
-    }
+    theme::subheading(ui, fonts, "Preset files");
     let Some(dir) = dir else {
         small(
             ui,

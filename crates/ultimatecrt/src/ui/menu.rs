@@ -18,7 +18,10 @@
 //! the parameter table ([`super::panels`], closed by default, each header with its count of changed
 //! parameters; the source panel starts with the placement readout of T-96); performance (GPU milliseconds per
 //! stage, T-21); GPU and system (adapter in use and the `[global.gpu] adapter` choice for the next start,
-//! hotkeys, settings folder). With a search, the body lists only the matching parameters of every panel.
+//! the hotkeys and their rebinding, `super::hotkeys_panel`, settings folder); Interface and About
+//! (`super::system_panels`). The Source section ends with the saved per-game profiles (`super::profiles_panel`),
+//! the preset tools open the preset files tools ("Manage files", `super::files_panel`). With a search, the body
+//! lists only the matching parameters of every panel.
 //! Position, size, opacity and the collapsed state persist in `settings.toml` (`[global.ui]`); the parameters,
 //! the preset and the adapter go back to the app through [`MenuResult`] (`super::UiOutput`).
 //!
@@ -450,15 +453,6 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
 
     source_section(ui, m, r);
     preset_section(ui, m, r, &reference);
-    super::files_panel::section(
-        ui,
-        &fonts,
-        m.files,
-        m.library,
-        m.presets.dir.as_deref(),
-        m.state.preset.as_deref(),
-        r,
-    );
 
     // Output and headroom (T-84): the readout, the mode in effect, then the output panel (open by default).
     let changed = panels::modified_count(m.params, &reference, panels::OUTPUT);
@@ -708,6 +702,15 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
             "Read the preset files again (the shipped ones and the user folder).",
         );
     }
+    // The preset files tools (rename, delete, duplicate, export, import) open below the preset tools.
+    ui.same_line();
+    if theme::button(ui, if m.files.open { "Hide files" } else { "Manage files" }) {
+        m.files.open = !m.files.open;
+    }
+    record(ui, r, "files:toggle");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, "Rename, delete, duplicate, export and import preset files.");
+    }
     let changed = panels::PANELS
         .iter()
         .map(|p| panels::modified_count(m.params, reference, p.name))
@@ -763,6 +766,17 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
             ui.text_colored(if *ok { PALETTE.ok } else { PALETTE.problem }, text);
             drop(wrap);
         });
+    }
+    if m.files.open {
+        super::files_panel::section(
+            ui,
+            &fonts,
+            m.files,
+            m.library,
+            m.presets.dir.as_deref(),
+            m.state.preset.as_deref(),
+            r,
+        );
     }
 }
 
