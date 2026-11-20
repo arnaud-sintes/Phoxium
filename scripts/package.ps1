@@ -168,7 +168,23 @@ ultimateCRT is released under the MIT licence (LICENSE). Licences of the depende
 [IO.File]::WriteAllText("$stage\RUNNING.txt", ($running -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
 
 # The folder itself goes into the zip, so unzipping never scatters files.
-Compress-Archive -Path $stage -DestinationPath "dist\$name.zip"
+# Compress-Archive of Windows PowerShell 5.1 writes backslashes in the entry names (non-standard: Linux unzip and
+# other tools mishandle them), so the zip is written with System.IO.Compression and forward-slash entry names.
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+$zipPath = Join-Path $root "dist\$name.zip"
+if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+$stageFull = (Resolve-Path $stage).Path.TrimEnd('\')
+$zipStream = [IO.File]::Open($zipPath, [IO.FileMode]::CreateNew)
+try {
+    $zipArchive = New-Object IO.Compression.ZipArchive($zipStream, [IO.Compression.ZipArchiveMode]::Create)
+    try {
+        foreach ($file in (Get-ChildItem -LiteralPath $stageFull -Recurse -File | Sort-Object FullName)) {
+            $entryName = $name + '/' + ($file.FullName.Substring($stageFull.Length + 1) -replace '\\', '/')
+            [void][IO.Compression.ZipFileExtensions]::CreateEntryFromFile($zipArchive, $file.FullName, $entryName, [IO.Compression.CompressionLevel]::Optimal)
+        }
+    } finally { $zipArchive.Dispose() }
+} finally { $zipStream.Dispose() }
 $hash = (Get-FileHash "dist\$name.zip" -Algorithm SHA256).Hash.ToLower()
 [IO.File]::WriteAllText((Join-Path $root "dist\$name.zip.sha256"), "$hash  $name.zip`n", [Text.Encoding]::ASCII)
 [IO.File]::WriteAllText((Join-Path $root "dist\$name.commit"), "$commit`n", [Text.Encoding]::ASCII)
