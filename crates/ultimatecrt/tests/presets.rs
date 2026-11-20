@@ -361,13 +361,16 @@ fn run_phosphor(gpu: &mut Headless, params: &Params, input: &ImageF32) -> ImageF
     gpu.enable_only(&["phosphor"]).unwrap();
     let settings = Settings::identity();
     let (w, h) = (input.width, input.height);
+    // A 60 Hz output: the presets use the real-time default, which steps by the measured period.
+    let mut frame = FrameConstants::new((w, h), (w, h), false);
+    frame.frame_time_ms = 1000.0 / 60.0;
     let r = gpu
         .render_stages(&StageRun {
             input: StageInput::Image {
                 after: "screen",
                 image: input,
             },
-            frame: FrameConstants::new((w, h), (w, h), false),
+            frame,
             settings: &settings,
             params,
             format: TargetFormat::Rgba32F,
@@ -376,7 +379,8 @@ fn run_phosphor(gpu: &mut Headless, params: &Params, input: &ImageF32) -> ImageF
     r.stage("phosphor").expect("phosphor output").clone()
 }
 
-/// T-64: with the parameters of each shipped preset (persistence on, tail strength 1, 60 Hz), a single white frame
+/// T-64: with the parameters of each shipped preset (persistence on, tail strength 1, real-time time base, here
+/// on a 60 Hz output), a single white frame
 /// followed by black gives the CRT.md frame-energy ratio of the Kuhn P22 fit in the next frame: green E1/E0 = 5.36 %
 /// (blue 4.72 %, red none), equal to the `crt_model::phosphor` oracle within one FP16 step.
 #[test]
@@ -395,7 +399,7 @@ fn every_preset_persistence_trail_equals_the_oracle() {
         let p = preset.params();
         assert!(p.phosphor_persistence, "{}: persistence on", preset.id);
         assert_eq!(p.phosphor_tail_strength_rgb, [1.0; 3], "{}", preset.id);
-        assert_eq!(p.phosphor_frame_rate_hz, 60.0, "{}", preset.id);
+        assert_eq!(p.phosphor_frame_rate_hz, 0.0, "{}: real time (review R-11)", preset.id);
         // Drop the trail of the previous preset: a cleared history is primed by the first frame, so a black
         // frame leaves it at 0 (the stage's contract; that a trail also decays to exactly 0 frame by frame is
         // checked once in tests/stage_phosphor.rs, `step_response`, instead of once per preset here).

@@ -291,6 +291,13 @@ pub struct FrameFeedback {
     pub c: [f64; FEEDBACK_TERMS],
 }
 
+/// [`FrameFeedback::IDENTITY`]: no persistence.
+impl Default for FrameFeedback {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
 impl FrameFeedback {
     /// No persistence: y = x.
     pub const IDENTITY: Self = Self {
@@ -333,8 +340,8 @@ impl FrameFeedback {
     /// S_j <- rho_j S_j + c_j x. [D]
     pub fn step(&self, s: &mut [f64; FEEDBACK_TERMS], x: f64) -> f64 {
         let y = self.w0 * (x + s.iter().sum::<f64>());
-        for j in 0..FEEDBACK_TERMS {
-            s[j] = self.rho[j] * s[j] + self.c[j] * x;
+        for ((sj, rho), c) in s.iter_mut().zip(self.rho).zip(self.c) {
+            *sj = rho * *sj + c * x;
         }
         y
     }
