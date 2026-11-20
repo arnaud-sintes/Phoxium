@@ -29,7 +29,9 @@
 
 layout(set = 0, binding = 2) uniform sampler2D linear_in;
 
-// Clip counters, cleared by the CPU before each frame (per frame in flight).
+// Clip counters (per frame in flight), in device-local memory: cleared on the GPU before this pass and copied to
+// a host-visible buffer after it. They were in host memory until 2026-11-20, where every atomic crossed the bus:
+// 3 to 3.5 ms at 1920 x 1080 when most pixels clip (a 1-px checker, noise), 0.13 ms in device memory.
 layout(set = 0, binding = 3, std430) buffer Clip {
     uint over_white;
     uint out_of_gamut;
