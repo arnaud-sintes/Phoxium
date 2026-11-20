@@ -368,6 +368,17 @@ pub fn button(ui: &Frame, label: &str) -> bool {
     ui.button(label)
 }
 
+/// A compact button tinted with `colour` (the confirmation of a deletion or a reset): a soft fill of the colour and
+/// the colour as text. True when clicked.
+pub fn button_tinted(ui: &Frame, label: &str, colour: Rgba) -> bool {
+    // Popped in reverse order when the tokens drop (Dear ImGui's stack order).
+    let _b = ui.push_style_color(StyleColor::Button, alpha(colour, 0.20));
+    let _h = ui.push_style_color(StyleColor::ButtonHovered, alpha(colour, 0.32));
+    let _a = ui.push_style_color(StyleColor::ButtonActive, alpha(colour, 0.44));
+    let _t = ui.push_style_color(StyleColor::Text, colour);
+    button(ui, label)
+}
+
 /// A section header ([`section`]) with an optional note on the right, open or closed by default (`open`),
 /// with or without the gap above (`first`). Returns whether it is open and the header's rectangle.
 pub fn section_header(

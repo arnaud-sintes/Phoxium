@@ -701,6 +701,7 @@ fn preview_state() -> UiState {
         render_fps: 60.0,
         quality: None,
         source: Default::default(),
+        profiles: Vec::new(),
     }
 }
 
