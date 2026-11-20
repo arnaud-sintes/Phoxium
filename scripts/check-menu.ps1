@@ -213,13 +213,14 @@ function Test-MenuForeground($Samples, $Cycles, [DateTime]$PollEnd, [int]$Settle
     return @{ Pass = ($reasons.Count -eq 0); Reasons = @($reasons); Notes = @($notes); Blips = $blips; Opens = $opens; Closes = $closes }
 }
 
-# Foreground samples from a poll-foreground.ps1 CSV: the source flag, else a title starting with 'ultimatecrt'
-# is the output, anything else is another window.
+# Foreground samples from a poll-foreground.ps1 CSV: the output first (its executable, or a title starting with
+# 'ultimatecrt': the output title names the source program, so the source flag alone matches it too), then the
+# source flag, anything else is another window.
 function Read-ForegroundSamples([string]$Path) {
     $samples = @()
     foreach ($row in (Import-Csv -LiteralPath $Path)) {
         $state = 'other'
-        if ($row.is_source -eq '1') { $state = 'source' } elseif ($row.title -like 'ultimatecrt*') { $state = 'output' }
+        if ($row.exe -eq 'ultimatecrt.exe' -or $row.title -like 'ultimatecrt*') { $state = 'output' } elseif ($row.is_source -eq '1') { $state = 'source' }
         $t = [DateTime]::ParseExact($row.timestamp, 'yyyy-MM-ddTHH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture)
         $samples += @{ Time = $t; State = $state }
     }
