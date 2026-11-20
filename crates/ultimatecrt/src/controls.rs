@@ -111,6 +111,8 @@ pub fn step_preset(lib: &Library, current: Option<&str>, step: Step, old: &Param
         Step::Previous => lib.previous(current),
     }?;
     let mut params = preset.params();
+    // T-48: the quality tier and its automatic drop describe the machine, not the tube.
+    crate::quality::keep(&mut params, old);
     for m in PARAMS_META.iter().filter(|m| m.stage == "source") {
         if let Some(v) = old.get(m.id) {
             let kept = params.set(m.id, v);

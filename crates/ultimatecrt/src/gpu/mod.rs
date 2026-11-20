@@ -50,6 +50,8 @@ pub struct Renderer {
     image_available: [vk::Semaphore; FRAMES_IN_FLIGHT],
     settings: Settings,
     params: Params,
+    /// Tiers the automatic quality drop takes off the selected tier (T-48, `quality::AutoQuality`), 0 normally.
+    quality_drop: u32,
     /// Clip counters of the last frame that finished (T-46), refreshed by `render`.
     clip: ClipCounts,
     /// Destroyed last: `Drop for Renderer` releases every child object above first, then the
@@ -77,6 +79,7 @@ impl Renderer {
                     ..Settings::default()
                 },
                 params: Params::default(),
+                quality_drop: 0,
                 clip: ClipCounts::default(),
                 ctx,
             };
@@ -94,6 +97,12 @@ impl Renderer {
     /// Replaces the tube parameters used from the next frame on (the startup preset and settings overrides).
     pub fn set_params(&mut self, params: Params) {
         self.params = params;
+    }
+
+    /// The automatic quality drop in force (T-48, OUT-6): the frames are rendered `drop` tiers below the selected
+    /// `quality_tier` ([`crate::quality::effective`]); the parameters themselves are not changed.
+    pub fn set_quality_drop(&mut self, drop: u32) {
+        self.quality_drop = drop;
     }
 
     /// Renders one frame. `frame` is a newly captured BGRA8 image, if any. `client` is the current
@@ -148,11 +157,12 @@ impl Renderer {
             }
             // Everything that can fail for a reason other than the device or the surface (settings,
             // pipeline creation, image allocation) is done before the acquire.
+            let params = crate::quality::effective(&self.params, self.quality_drop);
             pipeline.prepare(
                 &self.ctx,
                 view,
                 &self.settings,
-                &self.params,
+                &params,
                 self.presenter.extent(),
                 self.presenter.format(),
             )?;
@@ -189,7 +199,8 @@ impl Renderer {
             extent: self.presenter.extent(),
             format: self.presenter.format(),
         };
-        let cb = pipeline.record_ui(&self.ctx, view, &self.settings, &self.params, &target, ui)?;
+        let params = crate::quality::effective(&self.params, self.quality_drop);
+        let cb = pipeline.record_ui(&self.ctx, view, &self.settings, &params, &target, ui)?;
         barrier(
             &self.ctx.device,
             cb,

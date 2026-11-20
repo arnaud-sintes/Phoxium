@@ -482,8 +482,12 @@ impl FrameConstants {
             px_per_mm: p.px_per_mm as f32,
             line_pitch_mm: p.line_pitch_mm as f32,
             white_gain: crate::white::white_gains(params),
-            // `amp_samples` (a preset sets it from its bandwidth, `presets::recommended_amp_k`).
-            amp_k: params.amp_samples.max(1),
+            // `amp_samples` (a preset sets it from its bandwidth, `presets::recommended_amp_k`), limited to what the
+            // host pixels resolve in the fast and low quality tiers (T-48, `quality::amp_k`).
+            amp_k: crate::quality::amp_k(
+                params,
+                f64::from(p.rect_px[2] - p.rect_px[0]) / f64::from(native.0.max(1)),
+            ),
             ..Self::new(native, target, integer)
         }
     }

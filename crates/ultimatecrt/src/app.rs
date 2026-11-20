@@ -453,6 +453,8 @@ pub fn run() -> Res<()> {
     let mut smoothing = lifecycle::SmoothingWatch::default();
     let mut size_watch = lifecycle::SizeWatch::default();
     let mut notice: Option<String> = None;
+    // T-48, OUT-6: the automatic quality drop on sustained overrun (only with `quality_auto`, off by default).
+    let mut auto_quality = crate::quality::AutoQuality::default();
     // Lost source (T-56, A23): reminders, reattach during the wait, then the picker (or an exit).
     let policy = lifecycle::LostPolicy {
         wait_s: if args.wait_source_set {
@@ -1264,6 +1266,22 @@ pub fn run() -> Res<()> {
             let secs = stat_time.elapsed().as_secs_f64();
             // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
             let gpu = renderer.take_timing_average();
+            // T-48, OUT-6: one step of the automatic quality drop on this second's mean GPU frame time against the
+            // refresh period of the output's monitor (60 Hz when unknown).
+            let period_ms = output::refresh_hz(win.hwnd).map_or(1000.0 / 60.0, |hz| 1000.0 / hz);
+            let user_tier = crate::quality::tier(&params);
+            let gpu_ms = gpu.as_ref().map_or(f64::NAN, |g| g.frame_ms);
+            if let Some(change) = auto_quality.feed(params.quality_auto, user_tier, gpu_ms, period_ms) {
+                renderer.set_quality_drop(auto_quality.drop());
+                println!("notice: {}", change.notice());
+            }
+            ui_state.quality = (auto_quality.drop() > 0).then(|| {
+                format!(
+                    "{} (auto, selected {})",
+                    auto_quality.effective(user_tier).name(),
+                    user_tier.name()
+                )
+            });
             if let Some(l) = log.as_mut() {
                 l.second(captured - last_captured, renders, secs, gpu.as_ref())?;
             }
@@ -1283,6 +1301,11 @@ pub fn run() -> Res<()> {
                     view.div.1,
                     renderer.gpu_name,
                     notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
+                        + &ui_state
+                            .quality
+                            .as_ref()
+                            .map(|q| format!(" | quality {q}"))
+                            .unwrap_or_default()
                 )
             });
             output::set_title(win.hwnd, &window_title(source_name.as_deref(), rates));

@@ -60,7 +60,7 @@ fn game(w: u32, h: u32) -> Vec<u8> {
                 let (tx, ty) = (x / 16, y / 16);
                 let t = hash(tx, ty);
                 let (lx, ly) = (x % 16, y % 16);
-                if t % 5 == 0 && (4..12).contains(&lx) && (4..12).contains(&ly) {
+                if t.is_multiple_of(5) && (4..12).contains(&lx) && (4..12).contains(&ly) {
                     let (sx, sy) = (lx - 4, ly - 4);
                     let bit = |sx: u32, sy: u32| (hash(t, sy * 4 + sx.min(7 - sx)) & 1) == 1;
                     if bit(sx, sy) {

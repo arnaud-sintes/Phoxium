@@ -56,6 +56,13 @@ pub fn lines(state: &UiState) -> Vec<Row> {
         }
         None => out.push(row("GPU", "-".to_string())),
     }
+    // T-48: the automatic quality drop in force, highlighted.
+    if let Some(q) = &state.quality {
+        out.push(Row {
+            strong: true,
+            ..row("Quality", q.clone())
+        });
+    }
     match &state.placement {
         Some(p) => {
             out.push(row("Triad", format!("{:.2} px", p.px_per_triad)));

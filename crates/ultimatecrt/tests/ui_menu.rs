@@ -670,6 +670,7 @@ fn preview_state() -> UiState {
         }),
         capture_fps: 59.94,
         render_fps: 60.0,
+        quality: None,
         source: Default::default(),
     }
 }

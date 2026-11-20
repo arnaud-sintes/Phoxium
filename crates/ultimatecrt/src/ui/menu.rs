@@ -603,7 +603,10 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
             };
             if ui.selectable_config(text).selected(selected).build() {
                 if let Some(p) = m.library.find(id) {
+                    let old = *m.params;
                     *m.params = p.params();
+                    // T-48: the quality tier stays (it describes the machine, not the tube).
+                    crate::quality::keep(m.params, &old);
                     r.preset = Some(id.clone());
                     r.params_changed = true;
                     m.presets.message = None;

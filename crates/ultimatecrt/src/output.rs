@@ -490,6 +490,29 @@ pub fn monitor_rects() -> Vec<RECT> {
     list.into_iter().filter_map(monitor_rect).collect()
 }
 
+/// Refresh rate (Hz) of the monitor that holds most of `hwnd` (`EnumDisplaySettingsW`, current mode), `None` when
+/// unknown or reported as the hardware default (0 or 1). The automatic quality drop compares the GPU frame time
+/// with its period (T-48, OUT-6).
+pub fn refresh_hz(hwnd: HWND) -> Option<f64> {
+    use windows::Win32::Graphics::Gdi::{EnumDisplaySettingsW, DEVMODEW, ENUM_CURRENT_SETTINGS, MONITORINFOEXW};
+    unsafe {
+        let m = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+        let mut info = MONITORINFOEXW::default();
+        info.monitorInfo.cbSize = std::mem::size_of::<MONITORINFOEXW>() as u32;
+        if !GetMonitorInfoW(m, &mut info as *mut MONITORINFOEXW as *mut MONITORINFO).as_bool() {
+            return None;
+        }
+        let mut mode = DEVMODEW {
+            dmSize: std::mem::size_of::<DEVMODEW>() as u16,
+            ..Default::default()
+        };
+        if !EnumDisplaySettingsW(PCWSTR(info.szDevice.as_ptr()), ENUM_CURRENT_SETTINGS, &mut mode).as_bool() {
+            return None;
+        }
+        (mode.dmDisplayFrequency > 1).then_some(f64::from(mode.dmDisplayFrequency))
+    }
+}
+
 fn monitor_rect(m: HMONITOR) -> Option<RECT> {
     let mut info = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
