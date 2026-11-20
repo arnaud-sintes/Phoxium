@@ -21,9 +21,10 @@ Usage: ultimatecrt [options]
   --gpu <index>        Vulkan device (see --list-gpus) that runs the chain, capture included; wins over the
                        settings file's [global.gpu] adapter (default auto: the adapter driving the monitor the
                        output covers)
-  --capture-path <cpu|zero-copy>  how frames reach the renderer: the simple CPU copy (default, any adapter pair)
-                       or zero-copy GPU sharing (experimental, capture and rendering on one adapter; falls back to
-                       the CPU copy with a notice); wins over [global.capture] path
+  --capture-path <auto|zero-copy|cpu>  how frames reach the renderer: zero-copy GPU sharing (auto, the default:
+                       used when capture and rendering share one adapter that supports it, else the CPU copy, with
+                       an automatic fallback on any failure) or the CPU copy (most compatible); wins over
+                       [global.capture] path
   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
   --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
   --no-activate        accepted for older scripts, no effect: every output is non-activating
@@ -257,7 +258,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                 let v = value("--capture-path")?;
                 a.capture_path = Some(
                     crate::zerocopy::CapturePath::parse(&v)
-                        .ok_or_else(|| format!("--capture-path expects cpu or zero-copy, got \"{v}\""))?,
+                        .ok_or_else(|| format!("--capture-path expects auto, zero-copy or cpu, got \"{v}\""))?,
                 );
             }
             "--fullscreen" => a.fullscreen = true,
@@ -366,9 +367,14 @@ mod tests {
             parse("--capture-path zero_copy").unwrap().capture_path,
             Some(CapturePath::ZeroCopy)
         );
+        // `auto` is the default: zero-copy with the automatic fallback.
+        assert_eq!(
+            parse("--capture-path auto").unwrap().capture_path,
+            Some(CapturePath::default())
+        );
         assert!(parse("--capture-path shared").is_err());
         assert!(parse("--capture-path").is_err());
-        assert!(USAGE.contains("--capture-path <cpu|zero-copy>"));
+        assert!(USAGE.contains("--capture-path <auto|zero-copy|cpu>"));
     }
 
     /// A23: `--wait-source` wins over the settings only when given; `--window` stays a developer option.

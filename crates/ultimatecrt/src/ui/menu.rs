@@ -298,7 +298,7 @@ pub struct MenuResult {
     pub library: Option<Library>,
     /// The `[global.gpu] adapter` value chosen in this frame (applied at the next start).
     pub gpu_adapter: Option<String>,
-    /// The capture path chosen in this frame (Performance and diagnostics, A29).
+    /// The capture path chosen in this frame (Source section, A29).
     pub capture_path: Option<crate::zerocopy::CapturePath>,
     /// A burn-in action asked in this frame (T-43): "Burn in now" or "New tube".
     pub wear_action: Option<super::WearAction>,
@@ -502,7 +502,7 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     r.rects.performance_header = header;
     r.items.push(("header:Performance and diagnostics".to_string(), header));
     if open {
-        capture_path_rows(ui, m, r);
+        capture_status_row(ui, m, r);
         performance_rows(ui, m);
     }
 
@@ -862,6 +862,9 @@ fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
             theme::tooltip(ui, "Stop capturing: the window list comes back.");
         }
     }
+    // The capture path (A29), next to the attached program.
+    ui.dummy([0.0, 2.0 * s]);
+    capture_choice(ui, m, r);
     if let Some(a) = src.attached.clone() {
         picture_area_rows(ui, m, r, &a);
         multiplier_rows(ui, m, r, &a);
@@ -1476,60 +1479,78 @@ fn headroom_readout(ui: &Frame, m: &MenuModel<'_>) {
     ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
 }
 
-/// The text of the capture path in force: `Zero-copy GPU sharing`, `Simple CPU copy`, with the copy cost.
+/// The text of the capture path in force: `Zero-copy (GPU sharing)` or `CPU copy`, with the copy cost.
 pub fn capture_path_status(c: &super::CaptureView) -> String {
-    use crate::zerocopy::CapturePath;
-    let name = match c.active {
-        CapturePath::Cpu => "Simple CPU copy",
-        CapturePath::ZeroCopy => "Zero-copy GPU sharing",
-    };
+    let name = c.active.name();
     match c.copy_ms {
         Some(ms) => format!("{name}, copy {ms:.3} ms per frame"),
         None => name.to_string(),
     }
 }
 
-/// The capture path (A29): the choice (`[global.capture] path`), the path in force and why it is not the one asked.
-fn capture_path_rows(ui: &Frame, m: &MenuModel<'_>, r: &mut MenuResult) {
+/// The capture combo's tooltip.
+pub const CAPTURE_TOOLTIP: &str =
+    "How captured frames reach the renderer. Zero-copy (the default) keeps the frames on \
+     the GPU: the captured window is shared with the renderer, nothing goes through the CPU (cheapest, most at large \
+     windows); it needs capture and rendering on one GPU, and falls back to the CPU copy by itself on any problem. \
+     The CPU copy reads each frame back to the CPU and uploads it again: works on every PC. The change applies at \
+     once and is saved ([global.capture] path); --capture-path wins at start.";
+
+/// The capture path choice (A29), in the Source section: the combo (`[global.capture] path`, applied at once), the
+/// path in force with its copy cost, and why zero-copy is not running when it is asked.
+fn capture_choice(ui: &Frame, m: &MenuModel<'_>, r: &mut MenuResult) {
     use crate::zerocopy::CapturePath;
     let c = &m.state.capture;
-    let width = theme::row_label(ui, "Capture path");
+    let width = theme::row_label(ui, "Capture");
     ui.set_next_item_width(width);
     if let Some(_combo) = ui.begin_combo("##capture_path", c.requested.label()) {
         for p in CapturePath::ALL {
             let selected = p == c.requested;
+            // Zero-copy cannot run on this machine: shown disabled, the reason below.
+            let off = p == CapturePath::ZeroCopy && c.unavailable.is_some() && !selected;
+            let disabled = ui.begin_disabled_with_cond(off);
             if ui.selectable_config(p.label()).selected(selected).build() && !selected {
                 r.capture_path = Some(p);
             }
+            drop(disabled);
             record(ui, r, &format!("capture_path:{}", p.id()));
         }
     }
     record(ui, r, "capture_path");
     if ui.is_item_hovered() {
-        theme::tooltip(
-            ui,
-            "How captured frames reach the renderer ([global.capture] path in settings.toml). The simple CPU copy works on \
-             every PC. Zero-copy GPU sharing keeps the frames on the GPU (faster at large window sizes) but needs capture and \
-             rendering on one adapter; on any problem it falls back to the CPU copy and says why. --capture-path wins.",
-        );
+        theme::tooltip(ui, CAPTURE_TOOLTIP);
     }
     theme::kv_row(ui, "In use", &capture_path_status(c), PALETTE.text);
     record(ui, r, "capture_path:active");
-    if c.restart_needed {
-        theme::callout(
-            ui,
-            PALETTE.accent,
-            &["Restart required: zero-copy applies at the next start of ultimateCRT (the GPU device was made without it).".to_string()],
-        );
-    } else if let Some(why) = &c.reason {
-        theme::callout(
-            ui,
-            PALETTE.problem,
-            &[format!("Zero-copy is off: {why}. The CPU copy is used.")],
-        );
+    if c.requested == CapturePath::ZeroCopy && c.active == CapturePath::Cpu {
+        if let Some(why) = c.reason.as_ref().or(c.unavailable.as_ref()) {
+            // Not supported here: a plain note; a failure at runtime: a problem.
+            let colour = if c.unavailable.is_some() {
+                PALETTE.accent
+            } else {
+                PALETTE.problem
+            };
+            theme::callout(
+                ui,
+                colour,
+                &[format!("Zero-copy is not used: {why}. The CPU copy runs instead.")],
+            );
+            record(ui, r, "capture_path:reason");
+        }
+    } else if let Some(why) = c.unavailable.as_ref().filter(|_| c.requested == CapturePath::Cpu) {
+        theme::with_font(ui, None, METRICS.font_small, || {
+            let wrap = ui.push_text_wrap_pos(0.0);
+            ui.text_colored(PALETTE.text_faint, format!("Zero-copy is not available here: {why}."));
+            drop(wrap);
+        });
         record(ui, r, "capture_path:reason");
     }
-    ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+}
+
+/// The capture path in force, read-only (Performance and diagnostics; the choice is in the Source section).
+fn capture_status_row(ui: &Frame, m: &MenuModel<'_>, r: &mut MenuResult) {
+    theme::kv_row(ui, "Capture path", &capture_path_status(&m.state.capture), PALETTE.text);
+    record(ui, r, "capture_path:status");
 }
 
 /// Capture and render rates and the GPU milliseconds per stage.
@@ -1853,15 +1874,13 @@ mod tests {
     fn capture_path_status_names_the_path_and_the_cost() {
         use crate::zerocopy::CapturePath;
         let mut c = super::super::CaptureView::default();
-        assert_eq!(capture_path_status(&c), "Simple CPU copy");
-        c.active = CapturePath::ZeroCopy;
-        c.copy_ms = Some(0.2084);
-        assert_eq!(
-            capture_path_status(&c),
-            "Zero-copy GPU sharing, copy 0.208 ms per frame"
-        );
-        assert_eq!(CapturePath::Cpu.label(), "Simple CPU copy (default)");
-        assert_eq!(CapturePath::ZeroCopy.label(), "Zero-copy GPU sharing (experimental)");
+        assert_eq!(capture_path_status(&c), "Zero-copy (GPU sharing)");
+        c.active = CapturePath::Cpu;
+        c.copy_ms = Some(1.2084);
+        assert_eq!(capture_path_status(&c), "CPU copy, copy 1.208 ms per frame");
+        assert_eq!(CapturePath::ZeroCopy.label(), "Zero-copy (GPU sharing, default)");
+        assert_eq!(CapturePath::Cpu.label(), "CPU copy (most compatible)");
+        assert!(CAPTURE_TOOLTIP.contains("Zero-copy") && CAPTURE_TOOLTIP.contains("CPU copy"));
     }
 
     #[test]

@@ -398,8 +398,8 @@ pub fn run() -> Res<()> {
         &gpu_spec,
         Some((cover.left, cover.top, cover.right, cover.bottom)),
     );
-    // A29: the capture path asked for (`--capture-path` wins over `[global.capture] path`). The Vulkan device gets the
-    // external memory extension only when zero-copy is asked for at start.
+    // A29: the capture path asked for (`--capture-path` wins over `[global.capture] path`; default zero-copy). The
+    // Vulkan device gets the external memory extension whenever it can import, so the menu switches both ways live.
     let mut capture_mode = zerocopy::Fallback::new(args.capture_path.unwrap_or(stored.global.capture.path()));
     let mut capture_notice: Option<String> = None;
     let mut shared_seq: Option<u64> = None; // the frame whose shared texture the renderer holds
@@ -409,7 +409,6 @@ pub fn run() -> Res<()> {
         selection.device_request(),
         args.validation,
         args.integer,
-        capture_mode.requested() == zerocopy::CapturePath::ZeroCopy,
     )?;
     let got = &renderer.context().gpu;
     selection.note_renderer(adapters::VulkanDevice {
@@ -434,16 +433,9 @@ pub fn run() -> Res<()> {
     renderer.set_params(params);
     println!("render: Vulkan on {}", renderer.gpu_name);
     println!(
-        "capture path: {} asked{}",
+        "capture path: {} asked (Vulkan import of shared textures: {})",
         capture_mode.requested(),
-        if capture_mode.requested() == zerocopy::CapturePath::ZeroCopy {
-            format!(
-                " (Vulkan import: {})",
-                renderer.zero_copy_support().map_or("not supported", |k| k.name())
-            )
-        } else {
-            String::new()
-        }
+        renderer.zero_copy_support().map_or("not supported", |k| k.name())
     );
     println!("{}", selection.summary());
     for w in &selection.warnings {
@@ -582,7 +574,15 @@ pub fn run() -> Res<()> {
         (true, None) => None,
     };
     let mut ui = crate::ui::Ui::new(renderer.context(), renderer.output_format(), ui_config)?;
-    let mut ui_state = crate::ui::UiState::default();
+    let mut ui_state = crate::ui::UiState {
+        capture: capture_view(
+            &capture_mode,
+            renderer.zero_copy_check(capture.as_ref().map(|c| c.adapter_luid)),
+            capture.is_some(),
+            None,
+        ),
+        ..Default::default()
+    };
     let mut stepped_preset = live.current_preset().map(str::to_string);
 
     // A23: the source state machine and the picker's upkeep.
@@ -945,9 +945,7 @@ pub fn run() -> Res<()> {
                 }
                 if capture_mode.active() == zerocopy::CapturePath::ZeroCopy {
                     let support = renderer.zero_copy_check(Some(c.adapter_luid));
-                    if let Err(r) =
-                        zerocopy::decide(zerocopy::CapturePath::ZeroCopy, renderer.zero_copy_requested(), support)
-                    {
+                    if let Err(r) = zerocopy::decide(zerocopy::CapturePath::ZeroCopy, support) {
                         refuse_zero_copy(&mut capture_mode, &mut capture_notice, r);
                     }
                 }
@@ -1318,12 +1316,19 @@ pub fn run() -> Res<()> {
                 live.set_gpu_adapter(adapter);
             }
             if let Some(path) = changes.capture_path {
-                // A29: stored, and applied from the next frame on (restart-free on the capture side; zero-copy needs the
-                // GPU device made for it at start, else it applies at the next start).
+                // A29: stored (only when not the default), and applied from the next frame on, both ways: the GPU
+                // device was made able to import whenever it can.
                 println!("capture: path set to {path}");
                 live.set_capture_path(path);
                 capture_mode.request(path);
                 capture_notice = None;
+                // The menu shows the new path at once (the copy cost follows with the next statistics).
+                ui_state.capture = capture_view(
+                    &capture_mode,
+                    renderer.zero_copy_check(capture.as_ref().map(|c| c.adapter_luid)),
+                    capture.is_some(),
+                    None,
+                );
             }
             if let Some(SourcePrefs {
                 ask_at_start,
@@ -1464,6 +1469,9 @@ pub fn run() -> Res<()> {
                     }
                     params = p;
                     renderer.set_params(params);
+                    // A29: the capture path back to the default (zero-copy where the machine allows it), at once.
+                    capture_mode.request(zerocopy::CapturePath::default());
+                    capture_notice = None;
                     let kept = copy.map_or_else(String::new, |c| {
                         format!(" The old settings are kept in {}.", c.display())
                     });
@@ -1627,16 +1635,12 @@ pub fn run() -> Res<()> {
                 });
                 // A29: the capture path in force and the capture thread's copy cost of this second.
                 let copy = capture.as_ref().and_then(|c| c.take_copy_cost());
-                ui_state.capture = crate::ui::CaptureView {
-                    requested: capture_mode.requested(),
-                    active: capture_mode.active(),
-                    reason: capture_mode
-                        .reason()
-                        .filter(|r| **r != zerocopy::Refusal::NotEnabledAtStart)
-                        .map(ToString::to_string),
-                    restart_needed: capture_mode.reason() == Some(&zerocopy::Refusal::NotEnabledAtStart),
-                    copy_ms: copy.map(|(mean, _, _)| mean),
-                };
+                ui_state.capture = capture_view(
+                    &capture_mode,
+                    renderer.zero_copy_check(capture.as_ref().map(|c| c.adapter_luid)),
+                    capture.is_some(),
+                    copy.map(|(mean, _, _)| mean),
+                );
                 if let Some(l) = log.as_mut() {
                     l.set_capture(capture_mode.active(), copy.map(|(mean, _, _)| mean));
                 }
@@ -1785,22 +1789,45 @@ fn fatal_message(e: &(dyn std::error::Error + 'static)) -> String {
 const DEVICE_LOST_MESSAGE: &str =
     "The GPU was lost (driver reset or update). Settings and burn-in were saved; restart the application.";
 
-/// Falls back from zero-copy to the CPU copy (A29) for why: printed once, kept as the title notice while the
-/// setting asks for zero-copy.
+/// Falls back from zero-copy to the CPU copy (A29) for why: printed once. A failure at runtime stays as the title
+/// notice while the setting asks for zero-copy; a machine that cannot run zero-copy (no extension, no import,
+/// another adapter) falls back without a title notice (zero-copy is only the default), the menu says why.
 fn refuse_zero_copy(mode: &mut zerocopy::Fallback, notice: &mut Option<String>, why: zerocopy::Refusal) {
+    let platform = why.is_platform();
     if mode.refuse(why) {
         let text = capture_fallback_notice(mode);
         println!("notice: {}", text.as_deref().unwrap_or("capture: the CPU copy is used"));
-        *notice = text;
+        if !platform {
+            *notice = text;
+        }
     }
 }
 
-/// The title notice of a zero-copy request that runs the CPU copy, None otherwise.
+/// The line of a zero-copy request that runs the CPU copy, None otherwise.
 fn capture_fallback_notice(mode: &zerocopy::Fallback) -> Option<String> {
-    mode.reason().map(|r| match r {
-        zerocopy::Refusal::NotEnabledAtStart => "capture: zero-copy applies at the next start".to_string(),
-        r => format!("capture: CPU copy ({r})"),
-    })
+    mode.reason().map(|r| format!("capture: CPU copy ({r})"))
+}
+
+/// The capture path as the menu shows it (A29): asked, in force, why not zero-copy, whether zero-copy can run here
+/// at all (`support`, `Renderer::zero_copy_check` of the capture's adapter; without a capture, `attached` false, the
+/// adapters are not compared yet), the copy cost.
+fn capture_view(
+    mode: &zerocopy::Fallback,
+    support: zerocopy::Support,
+    attached: bool,
+    copy_ms: Option<f64>,
+) -> crate::ui::CaptureView {
+    let support = zerocopy::Support {
+        same_adapter: if attached { support.same_adapter } else { Some(true) },
+        ..support
+    };
+    crate::ui::CaptureView {
+        requested: mode.requested(),
+        active: mode.active(),
+        reason: mode.reason().map(ToString::to_string),
+        unavailable: zerocopy::unavailable(support).map(|r| r.to_string()),
+        copy_ms,
+    }
 }
 
 /// The notice of the title bar: the source's (lost, black, smoothed, interlace) and the renderer's (R-02, R-01),
@@ -2435,25 +2462,68 @@ mod tests {
         );
     }
 
-    /// The title's notice shows the source's and the renderer's, a repeated one once.
+    /// A29: a runtime failure is the title notice (once); a machine that cannot run the default zero-copy falls back
+    /// without a title notice, the reason stays for the menu.
     #[test]
     fn a_refused_zero_copy_is_noticed_once_with_its_reason() {
-        let mut mode = zerocopy::Fallback::new(zerocopy::CapturePath::ZeroCopy);
+        let mut mode = zerocopy::Fallback::new(zerocopy::CapturePath::default());
         let mut notice = None;
         assert_eq!(capture_fallback_notice(&mode), None);
-        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::NotEnabledAtStart);
-        assert_eq!(notice.as_deref(), Some("capture: zero-copy applies at the next start"));
-        // Not news: the notice stays as it was.
+        // Not supported here: the CPU copy, quietly.
         refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::CrossAdapter);
-        assert_eq!(notice.as_deref(), Some("capture: zero-copy applies at the next start"));
-        let mut mode = zerocopy::Fallback::new(zerocopy::CapturePath::ZeroCopy);
-        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::CrossAdapter);
-        assert!(notice
-            .as_deref()
+        assert_eq!(notice, None);
+        assert_eq!(mode.active(), zerocopy::CapturePath::Cpu);
+        assert!(capture_fallback_notice(&mode)
             .is_some_and(|n| n.starts_with("capture: CPU copy (capture and rendering run on different adapters")));
+        // A failure at runtime: the title notice.
+        let mut mode = zerocopy::Fallback::new(zerocopy::CapturePath::ZeroCopy);
+        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::Failed("import".into()));
+        assert_eq!(notice.as_deref(), Some("capture: CPU copy (zero-copy failed: import)"));
+        // Not news: the notice stays as it was.
+        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::Failed("other".into()));
+        assert_eq!(notice.as_deref(), Some("capture: CPU copy (zero-copy failed: import)"));
         // The CPU path asked: no notice.
         mode.request(zerocopy::CapturePath::Cpu);
         assert_eq!(capture_fallback_notice(&mode), None);
+    }
+
+    /// A29: the menu's view of the capture path: the zero-copy choice is disabled with the reason only when this
+    /// machine cannot run it; without a capture the adapters are not held against it.
+    #[test]
+    fn the_capture_view_says_whether_zero_copy_can_run() {
+        use zerocopy::{CapturePath, HandleKind, Support};
+        let ok = Support {
+            extension: true,
+            handle: Some(HandleKind::Nt),
+            same_adapter: Some(true),
+        };
+        let mode = zerocopy::Fallback::new(CapturePath::default());
+        let v = capture_view(&mode, ok, true, Some(0.2));
+        assert_eq!(
+            (v.requested, v.active, v.unavailable, v.copy_ms),
+            (CapturePath::ZeroCopy, CapturePath::ZeroCopy, None, Some(0.2))
+        );
+        let cross = Support {
+            same_adapter: Some(false),
+            ..ok
+        };
+        assert!(capture_view(&mode, cross, true, None)
+            .unavailable
+            .is_some_and(|u| u.contains("different adapters")));
+        // No capture yet: the adapters are unknown, not a reason.
+        let unknown = Support {
+            same_adapter: None,
+            ..ok
+        };
+        assert_eq!(capture_view(&mode, unknown, false, None).unavailable, None);
+        let no_import = Support { handle: None, ..ok };
+        assert!(capture_view(&mode, no_import, false, None).unavailable.is_some());
+        // Refused at runtime: the reason, still available (the user may try again).
+        let mut failed = zerocopy::Fallback::new(CapturePath::ZeroCopy);
+        failed.refuse(zerocopy::Refusal::Failed("copy".into()));
+        let v = capture_view(&failed, ok, true, None);
+        assert_eq!((v.active, v.unavailable), (CapturePath::Cpu, None));
+        assert!(v.reason.is_some_and(|r| r.contains("copy")));
     }
 
     #[test]

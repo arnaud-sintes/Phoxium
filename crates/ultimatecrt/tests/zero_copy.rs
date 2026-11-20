@@ -24,7 +24,7 @@ use ultimatecrt::gpu::{
 };
 use ultimatecrt::params::Params;
 use ultimatecrt::scaling::View;
-use ultimatecrt::zerocopy::{HandleKind, SlotState, POOL_SLOTS};
+use ultimatecrt::zerocopy::{CapturePath, HandleKind, SlotState, POOL_SLOTS};
 use windows::Win32::Graphics::Direct3D11::{
     ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_BIND_SHADER_RESOURCE, D3D11_TEXTURE2D_DESC,
     D3D11_USAGE_DEFAULT,
@@ -536,6 +536,248 @@ fn import_failures_are_errors_and_the_cpu_path_goes_on() {
         .render_shared(&f, view, &s, &p, target, TargetFormat::Rgba32F)
         .expect("zero-copy after the failure");
     assert_eq!(bits(&a), bits(&r.native.rgba));
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The application's device enables `VK_KHR_external_memory_win32` whenever it can import (so the capture path can be
+/// switched live): the CPU path must not notice. The same CPU frames through the whole default chain on a device
+/// with the extension and on one without give the same output bit for bit, and both stay silent under validation.
+#[test]
+fn the_cpu_path_is_bit_identical_with_the_extension_enabled() {
+    let Some((mut with_ext, _d, _kind)) = setup("the_cpu_path_is_bit_identical_with_the_extension_enabled") else {
+        return;
+    };
+    let validation = validation_layer_available();
+    let plain_ctx = Context::new_headless(validation).expect("a device without the extension");
+    assert_eq!(plain_ctx.external_memory(), None);
+    let mut plain = Headless::from_context(plain_ctx).expect("renderer");
+    assert!(with_ext.context().external_memory().is_some());
+    let (c1, c2) = (with_ext.validation_counter(), plain.validation_counter());
+    let view = View::full(CROP.2, CROP.3);
+    for n in 0..4u32 {
+        let bytes = crop_cpu(&window_pixels(WINDOW, CROP, rich(n)), WINDOW, CROP);
+        let frame = SourceFrame {
+            width: CROP.2,
+            height: CROP.3,
+            bgra: &bytes,
+        };
+        let (s, p) = (Settings::default(), Params::default());
+        for g in [&mut with_ext, &mut plain] {
+            g.set_read_stages(StageReadback::All);
+        }
+        let a = with_ext
+            .render(Some(frame), view, &s, &p, (480, 300), TargetFormat::Rgba32F)
+            .expect("CPU path, extension enabled");
+        let b = plain
+            .render(Some(frame), view, &s, &p, (480, 300), TargetFormat::Rgba32F)
+            .expect("CPU path, no extension");
+        assert_eq!(bits(&a.native.rgba), bits(&b.native.rgba), "decode, frame {n}");
+        assert_eq!(bits(&a.output.rgba), bits(&b.output.rgba), "output, frame {n}");
+        assert_eq!(with_ext.shared_holds(), 0);
+    }
+    drop(with_ext);
+    drop(plain);
+    common::assert_no_validation_messages(&c1);
+    common::assert_no_validation_messages(&c2);
+}
+
+/// Checks that every pixel of a rendered frame is frame `n` of [`tagged`] at its own position (no tearing, no
+/// stale slot, the crop right).
+fn assert_tagged(r: &ultimatecrt::gpu::Rendered, n: u64, what: &str) {
+    let img = &r.native;
+    assert_eq!((img.width, img.height), (CROP.2, CROP.3), "{what}: size");
+    let code = |c: f32| (c * 255.0).round() as u64;
+    for y in 0..img.height {
+        for x in 0..img.width {
+            let v = img.pixel(x, y);
+            assert_eq!(
+                (code(v[2]) << 8) | code(v[1]),
+                n & 0xFFFF,
+                "{what}: pixel ({x}, {y}) is not frame {n}"
+            );
+            assert_eq!(
+                code(v[0]),
+                u64::from((x * 3 + y * 5) & 0xFF),
+                "{what}: pixel ({x}, {y}) moved"
+            );
+        }
+    }
+}
+
+/// The frame tag of a rendered frame (pixel (0, 0)).
+fn tag_of(r: &ultimatecrt::gpu::Rendered) -> u64 {
+    let v = r.native.pixel(0, 0);
+    let code = |c: f32| (c * 255.0).round() as u64;
+    (code(v[2]) << 8) | code(v[1])
+}
+
+/// Renders the frame taken from the capture the way the application does: its shared texture when it has one (the
+/// zero-copy path), else its CPU pixels. Returns the path the frame took, the result and, on the zero-copy path, a
+/// hold on its shared slot (a clone of the renderer's).
+fn render_taken(
+    gpu: &mut Headless,
+    frame: &mut capture::Frame,
+) -> (CapturePath, ultimatecrt::gpu::Rendered, Option<capture::SharedFrame>) {
+    let view = View::full(CROP.2, CROP.3);
+    let (s, p) = (Settings::identity(), Params::identity_gun());
+    match frame.shared.take() {
+        Some(sh) => {
+            let r = gpu
+                .render_shared(&sh, view, &s, &p, (CROP.2, CROP.3), TargetFormat::Rgba32F)
+                .expect("zero-copy frame");
+            (CapturePath::ZeroCopy, r, Some(sh))
+        }
+        None => {
+            assert!(!frame.pixels_old, "a CPU frame without its own pixels");
+            let src = SourceFrame {
+                width: frame.width,
+                height: frame.height,
+                bgra: &frame.data,
+            };
+            let r = gpu
+                .render(Some(src), view, &s, &p, (CROP.2, CROP.3), TargetFormat::Rgba32F)
+                .expect("CPU frame");
+            (CapturePath::Cpu, r, None)
+        }
+    }
+}
+
+/// A synthetic capture (the real capture code, fed with textures instead of a window) on the Vulkan device's
+/// adapter.
+fn synthetic_capture(gpu: &Headless, d: &D3d) -> capture::Capture {
+    let luid = gpu.context().gpu.luid.map(Luid::from_vulkan).expect("a LUID");
+    capture::Capture::synthetic(d.device.clone(), d.context.clone(), luid).expect("synthetic capture")
+}
+
+/// The live switch, frame by frame: zero-copy, then the CPU copy, then zero-copy again, one captured frame per
+/// rendered frame. Every frame is delivered once (sequence numbers 1, 2, 3, ... with no gap and no repeat), on the
+/// path asked when it was captured, and renders as exactly that frame. At the first switch the capture holds a frame
+/// for want of a free slot (every slot held by the render side): it is not lost, it goes through the CPU copy.
+#[test]
+fn switching_zero_copy_cpu_zero_copy_loses_and_repeats_no_frame() {
+    let Some((mut gpu, d, _kind)) = setup("switching_zero_copy_cpu_zero_copy_loses_and_repeats_no_frame") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.set_read_stages(StageReadback::All);
+    let cap = synthetic_capture(&gpu, &d);
+    let feed = cap.synthetic_feed();
+    let window = window_texture(&d, WINDOW);
+    let mut frame = capture::Frame::default();
+    let mut held: Vec<capture::SharedFrame> = Vec::new();
+    let mut on_path = [0usize; 2];
+    for n in 1..=60u64 {
+        let asked = if (21..=40).contains(&n) {
+            CapturePath::Cpu
+        } else {
+            CapturePath::ZeroCopy
+        };
+        cap.set_path(asked);
+        upload(&d, &window, WINDOW, &window_pixels(WINDOW, CROP, tagged(n)));
+        feed.push(&window, CROP).expect("push");
+        let mut expected = asked;
+        if n == 20 {
+            // Frames 17 and 18 kept by the test, frame 19 the renderer's source: every slot is held, so frame 20
+            // waits in the capture. Nothing new to take.
+            assert!(!cap.take_frame(&mut frame), "frame 20 delivered without a free slot");
+            // The switch to the CPU copy: the kept frame goes through it at the next take.
+            cap.set_path(CapturePath::Cpu);
+            expected = CapturePath::Cpu;
+        }
+        assert!(cap.take_frame(&mut frame), "frame {n} not delivered");
+        assert_eq!(frame.seq, n, "a frame was lost or repeated before frame {n}");
+        let (path, r, hold) = render_taken(&mut gpu, &mut frame);
+        assert_eq!(path, expected, "frame {n} took the wrong path");
+        on_path[usize::from(path == CapturePath::Cpu)] += 1;
+        assert_tagged(&r, n, &format!("frame {n} ({path})"));
+        assert_eq!(tag_of(&r), n);
+        // Nothing more until the next capture.
+        assert!(!cap.take_frame(&mut frame), "frame {n} delivered twice");
+        if n == 17 || n == 18 {
+            // The render side holds two more slots (frames still in flight, as far as the capture knows).
+            held.push(hold.expect("a zero-copy frame"));
+        }
+        if n == 20 {
+            held.clear();
+        }
+    }
+    assert_eq!(cap.take_failure(), None);
+    assert_eq!(cap.path(), CapturePath::ZeroCopy);
+    assert_eq!(on_path, [39, 21], "frames per path (zero-copy, CPU)");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The live switch while frames flow: a writer thread captures frames as fast as it can (each from its own window
+/// texture of a ring of four, as successive capture frames are), while the render side takes the newest frame, renders
+/// it and flips the path every 20 frames, 300 frames in all. Every frame rendered is one whole frame at its place,
+/// newer than the one before (never an older or a repeated frame), and both paths carry frames.
+#[test]
+fn switching_paths_while_frames_flow_keeps_every_frame_whole_and_in_order() {
+    let Some((mut gpu, d, _kind)) = setup("switching_paths_while_frames_flow_keeps_every_frame_whole_and_in_order")
+    else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.set_read_stages(StageReadback::All);
+    let cap = synthetic_capture(&gpu, &d);
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (d, feed, stop) = (d.clone(), cap.synthetic_feed(), stop.clone());
+        std::thread::spawn(move || {
+            let ring: Vec<ID3D11Texture2D> = (0..4).map(|_| window_texture(&d, WINDOW)).collect();
+            let mut n = 0u64;
+            while !stop.load(Ordering::Relaxed) {
+                n += 1;
+                let tex = &ring[(n % 4) as usize];
+                upload(&d, tex, WINDOW, &window_pixels(WINDOW, CROP, tagged(n)));
+                feed.push(tex, CROP).expect("push");
+                // A capture runs at the source's rate, not flat out.
+                std::thread::sleep(Duration::from_micros(500));
+            }
+            n
+        })
+    };
+    let mut frame = capture::Frame::default();
+    let (mut last_seq, mut last_tag) = (0u64, 0u64);
+    let mut on_path = [0usize; 2];
+    let mut path = CapturePath::ZeroCopy;
+    cap.set_path(path);
+    for i in 0..300 {
+        if i % 20 == 19 {
+            path = if path == CapturePath::ZeroCopy {
+                CapturePath::Cpu
+            } else {
+                CapturePath::ZeroCopy
+            };
+            cap.set_path(path);
+        }
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !cap.take_frame(&mut frame) {
+            assert!(Instant::now() < deadline, "no new frame within 5 s");
+            std::thread::yield_now();
+        }
+        assert!(frame.seq > last_seq, "frame {i}: an older or repeated frame");
+        last_seq = frame.seq;
+        let (took, r, _) = render_taken(&mut gpu, &mut frame);
+        on_path[usize::from(took == CapturePath::Cpu)] += 1;
+        let tag = tag_of(&r);
+        assert!(
+            tag > last_tag,
+            "frame {i}: tag {tag} after {last_tag} (older or repeated content)"
+        );
+        last_tag = tag;
+        assert_tagged(&r, tag, &format!("frame {i} ({took})"));
+    }
+    stop.store(true, Ordering::Relaxed);
+    let written = writer.join().expect("writer thread");
+    eprintln!(
+        "300 frames rendered ({} zero-copy, {} CPU), {written} captured",
+        on_path[0], on_path[1]
+    );
+    assert!(on_path[0] > 50 && on_path[1] > 50, "{on_path:?}");
+    assert_eq!(cap.take_failure(), None);
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

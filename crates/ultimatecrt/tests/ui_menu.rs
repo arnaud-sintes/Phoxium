@@ -1136,41 +1136,106 @@ fn the_adapter_combo_returns_the_setting_for_the_next_start() {
     rig.finish();
 }
 
-/// A29: the Performance section's capture path combo returns the path chosen (the app stores and applies it), shows the
-/// path in force, and the reason when zero-copy is refused.
+/// A29: the Source section's Capture combo (zero-copy by default) switches to the CPU copy and back through Win32
+/// messages, the status line follows the path in force at once, the Performance section only shows it, and a
+/// machine that cannot run zero-copy shows that choice disabled with the reason.
 #[test]
-fn the_capture_path_combo_returns_the_path_and_shows_the_fallback() {
+fn the_capture_combo_switches_both_ways_and_shows_the_path_in_force() {
     use ultimatecrt::ui::CaptureView;
     use ultimatecrt::zerocopy::CapturePath;
     let _g = lock();
     let Some(mut rig) = Rig::with_config(
-        "the_capture_path_combo_returns_the_path_and_shows_the_fallback",
+        "the_capture_combo_switches_both_ways_and_shows_the_path_in_force",
         1280,
         1080,
         system_config(),
     ) else {
         return;
     };
+    // The app's state at start: the default, running.
+    rig.state.capture = CaptureView {
+        copy_ms: Some(0.2),
+        ..CaptureView::default()
+    };
+    assert_eq!(rig.state.capture.requested, CapturePath::ZeroCopy);
     rig.open_menu();
     rig.click_item("header:Output and headroom");
-    rig.click_item("header:Performance and diagnostics");
+    rig.click_item("header:Source");
+    rig.item("capture_path:active");
+    // Zero-copy -> CPU copy: Down, Enter.
     rig.click_item("capture_path");
-    rig.key(0x28, 0x50, true); // Down: from the CPU copy to zero-copy
+    rig.key(0x28, 0x50, true);
     rig.key(0x0D, 0x1C, false);
     rig.frame(&[]);
-    assert_eq!(rig.out.capture_path, Some(CapturePath::ZeroCopy));
+    assert_eq!(rig.out.capture_path, Some(CapturePath::Cpu));
     assert_eq!(rig.out.params, None, "the capture path changed parameters");
-    // The app's answer: zero-copy asked, refused (another adapter), the CPU copy in force.
+    // The app applies it (its next state).
+    rig.state.capture = CaptureView {
+        requested: CapturePath::Cpu,
+        active: CapturePath::Cpu,
+        copy_ms: Some(1.25),
+        ..CaptureView::default()
+    };
+    rig.out.capture_path = None;
+    rig.frame(&[]);
+    // CPU copy -> zero-copy: a click on the entry of the open list.
+    rig.click_item("capture_path");
+    let zero = rig
+        .ui
+        .item_rect("capture_path:zero_copy")
+        .expect("the zero-copy entry in the open combo");
+    rig.click(MenuRects::at(zero, 0.5, 0.5));
+    rig.frame(&[]);
+    assert_eq!(rig.out.capture_path, Some(CapturePath::ZeroCopy));
+    // The Performance section shows the path in force, read-only (the Source section closed meanwhile).
+    rig.click_item("header:Source");
+    rig.click_item("header:Performance and diagnostics");
+    rig.item("capture_path:status");
+    assert!(
+        rig.ui.item_rect("capture_path").is_none(),
+        "the choice exists once, in the Source section"
+    );
+    rig.click_item("header:Performance and diagnostics");
+    rig.click_item("header:Source");
+    // The app's answer on a machine that cannot share textures: the CPU copy, the reason, zero-copy disabled.
+    let why = "capture and rendering run on different adapters".to_string();
     rig.state.capture = CaptureView {
         requested: CapturePath::ZeroCopy,
         active: CapturePath::Cpu,
-        reason: Some("capture and rendering run on different adapters".into()),
-        restart_needed: false,
+        reason: Some(why.clone()),
+        unavailable: Some(why.clone()),
         copy_ms: Some(1.25),
     };
     rig.frame(&[]);
-    rig.item("capture_path:active");
     rig.item("capture_path:reason");
+    // Choose the CPU copy explicitly, then try to come back: the disabled entry cannot be chosen.
+    rig.out.capture_path = None;
+    rig.click_item("capture_path");
+    rig.key(0x28, 0x50, true);
+    rig.key(0x0D, 0x1C, false);
+    rig.frame(&[]);
+    assert_eq!(rig.out.capture_path, Some(CapturePath::Cpu));
+    rig.state.capture = CaptureView {
+        requested: CapturePath::Cpu,
+        active: CapturePath::Cpu,
+        reason: None,
+        unavailable: Some(why),
+        copy_ms: Some(1.25),
+    };
+    rig.out.capture_path = None;
+    rig.frame(&[]);
+    rig.item("capture_path:reason");
+    rig.click_item("capture_path");
+    // Click the disabled zero-copy entry, then Up and Enter: nothing is chosen.
+    let zero = rig
+        .ui
+        .item_rect("capture_path:zero_copy")
+        .expect("the zero-copy entry in the open combo");
+    rig.click(MenuRects::at(zero, 0.5, 0.5));
+    rig.key(0x26, 0x48, true);
+    rig.key(0x0D, 0x1C, false);
+    rig.frame(&[]);
+    assert_eq!(rig.out.capture_path, None, "a disabled zero-copy entry was chosen");
     rig.finish();
 }
 
