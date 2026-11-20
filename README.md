@@ -168,6 +168,17 @@ How the source is mapped to the output, adaptive to any host monitor (no resolut
 - **Size change:** a new source size restarts the scale detection and clears the persistence history.
 - TODO(T-80b): a capture session lost without the window closing (Direct3D 11 device loss, monitor hot-plug) is not a lost target: the frames stop and only the `protected or not drawing: no new frame` message appears, with no restart. T-80b must restart the capture session.
 
+## Application icon
+
+![ultimateCRT icon](assets/icon/icon-256.png)
+
+A CRT tube face in graphite with a curved screen, a glowing amber pixel-art disc drawn as scanlines with fine
+RGB phosphor stripes. pixel-demo has its own variant (flat screen, teal pixel creature). Both are embedded in
+the executables (File Explorer, taskbar, Alt+Tab, title bar) with a version resource (product, description,
+version, copyright), nothing to ship beside the `.exe`. The build writes the `.res` file itself (`crates/appres`),
+so no `rc.exe` is needed. To change the artwork, edit `crates/appres/examples/gen_icon/draw.rs` and run
+`cargo run -p appres --example gen_icon --release` (details in `assets/icon/README.md`).
+
 ## Known limits of the scaffold
 
 - Frames go GPU to CPU to GPU (CAP-2, CPU copy path). A shared-handle path is a later spike.

@@ -9,6 +9,13 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
+name = "appres"
+version = "0.1.0"
+dependencies = [
+ "png",
+]
+
+[[package]]
 name = "ash"
 version = "0.38.0+1.3.281"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -245,6 +252,7 @@ dependencies = [
 name = "pixel-demo"
 version = "0.1.0"
 dependencies = [
+ "appres",
  "png",
  "windows",
 ]
@@ -450,6 +458,7 @@ checksum = "009dbb7700f11c55ef83aebbe4c0e9cf1f1ac0844bd8d6f00dc38f302026e13a"
 name = "ultimatecrt"
 version = "0.1.0"
 dependencies = [
+ "appres",
  "ash",
  "crt-model",
  "dear-imgui-ash",

@@ -161,6 +161,13 @@ fn main() {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
+            // The executable's icon (assets/icon/pixel-demo.ico, embedded by build.rs); Windows takes the small
+            // icon from the same group.
+            hIcon: LoadIconW(
+                Some(hinstance.into()),
+                windows::core::PCWSTR(std::ptr::without_provenance(1)),
+            )
+            .unwrap_or_default(),
             lpszClassName: w!("pixel_demo_window"),
             ..Default::default()
         };
