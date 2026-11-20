@@ -54,7 +54,8 @@ pub struct PanelDef {
 pub const SOURCE: &str = "Source and placement";
 pub const OPTICS: &str = "Optics";
 /// The explanation at the top of the Phosphor panel: what the trail is, its physical default, how to get more.
-const PHOSPHOR_INTRO: &str = "Persistence is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a \
+const PHOSPHOR_INTRO: &str =
+    "Persistence is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a \
      fading trail. The default is the measured colour-TV phosphor (P22): a faint green and blue trail of about \
      5, 3 and 2 % of a frame over the next frames at 60 Hz, none for red. That is physically right but easy to \
      miss. For a clearly visible trail, raise Extra afterglow (for example 0.5 to 1 at 100 to 300 ms) or Decay \
@@ -933,7 +934,10 @@ mod tests {
         );
         let intro = panel(OPTICS).and_then(|p| p.intro).unwrap();
         assert!(intro.contains("Enable") && intro.contains("off by default"));
-        assert!(PANELS.iter().filter(|p| p.intro.is_some()).count() == 2, "Optics and Phosphor have an intro");
+        assert!(
+            PANELS.iter().filter(|p| p.intro.is_some()).count() == 2,
+            "Optics and Phosphor have an intro"
+        );
     }
 
     #[test]
