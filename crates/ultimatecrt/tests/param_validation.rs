@@ -137,8 +137,9 @@ fn a_preset_saved_after_clamps_round_trips() {
     assert_eq!(back.params(), p);
 }
 
-/// Every numeric parameter at its hard minimum and maximum (all components), on top of a base with the
-/// optional stages on, renders a finite output without an error.
+/// Every numeric parameter at its hard minimum and maximum (all components), and at two interior values
+/// just above the minimum, on top of a base with the optional stages on, renders a finite output without
+/// an error.
 #[test]
 fn every_parameter_at_its_hard_bounds_renders_a_finite_output() {
     let Some(mut gpu) = common::gpu_or_skip("param_validation hard bounds") else {
@@ -168,7 +169,10 @@ fn every_parameter_at_its_hard_bounds_renders_a_finite_output() {
         let Some((lo, hi)) = m.hard_range else {
             continue;
         };
-        for x in [lo, hi] {
+        // The bounds, and two interior values just above the minimum (review D-03: the minimum is often a
+        // special value, 0 = off, while the values next to it are the numerically hard ones).
+        let near = [lo + (hi - lo) * 1e-3, lo + (hi - lo) * 1e-2];
+        for x in [lo, hi].into_iter().chain(near) {
             let mut p = base;
             assert!(p.set(m.id, value(m, x).unwrap()), "{} = {x}", m.id);
             let out = render_source(&mut gpu, &source, &p, Some((192, 144)), TargetFormat::Rgba32F)

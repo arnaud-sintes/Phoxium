@@ -28,8 +28,10 @@
 //! 2. **Channel** (composite only, optional): a Gaussian low-pass of -3 dB bandwidth B_ch
 //!    (`composite_bandwidth_mhz`, 0 = none; time sigma 0.1325 / B_ch, as the amplifier,
 //!    [`crate::beam::gaussian_amp_sigma_ns`]), discretised on the samples (truncated at 4 sigma,
-//!    normalised). The decoder's automatic colour control (ACC) measures the burst, which went through
-//!    the same channel, so it scales the separated chroma by 1 / |H(f_sc)| = 2^((f_sc / B_ch)^2 / 2).
+//!    normalised; B_ch lifted so that sigma is at most [`CHANNEL_SIGMA_MAX_SAMPLES`]). The decoder's
+//!    automatic colour control (ACC) measures the burst, which went through the same channel, so it scales
+//!    the separated chroma by 1 / |H(f_sc)| = 2^((f_sc / B_ch)^2 / 2), at most [`ACC_GAIN_MAX`] (a narrow
+//!    channel then desaturates the picture, as a real ACC at its limit).
 //! 3. **Luma/chroma separation** (composite only):
 //!    - `Notch`: luma = the mean of the signal over one subcarrier period (a box of L = S / c samples,
 //!      fractional end weights), which nulls f_sc and its harmonics; chroma = signal - luma. Simple and
@@ -95,6 +97,16 @@ pub const U_SCALE: f64 = 0.492111;
 pub const V_SCALE: f64 = 0.877283;
 /// Turn of the NTSC I/Q axes against U/V, degrees [K].
 pub const IQ_TURN_DEG: f64 = 33.0;
+/// Largest gain of the automatic colour control: 8 (+18 dB). A real ACC loop saturates at a few times its
+/// nominal gain; the value is an estimate [E]. It also keeps the gain finite: uncapped, 2^((f_sc / B)^2 / 2)
+/// overflows f32 below B = f_sc / 16 and f64 below about f_sc / 38 (review D-03).
+pub const ACC_GAIN_MAX: f64 = 8.0;
+/// Largest sigma of the channel low-pass, samples (one source pixel): a narrower channel bandwidth is
+/// lifted to the one of this sigma, 0.1325 f_px (about 0.71 MHz at 5.37 MHz). Its 4-sigma reach, 32
+/// samples, is what the GPU's line tile holds for the channel (`shaders/composite.comp`, `CAP_CHANNEL`), so
+/// the oracle and the shader apply the same kernel at every bandwidth. A modelling limit [E]: at such
+/// bandwidths the chroma is attenuated far beyond [`ACC_GAIN_MAX`] anyway (colour killed).
+pub const CHANNEL_SIGMA_MAX_SAMPLES: f64 = 8.0;
 
 /// Colour television standard.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,7 +153,8 @@ pub struct Composite {
     pub i_bandwidth_mhz: f64,
     /// NTSC Q bandwidth, MHz.
     pub q_bandwidth_mhz: f64,
-    /// Composite channel bandwidth, MHz; 0 = no channel filter.
+    /// Composite channel bandwidth, MHz; 0 (or any non-positive value) = no channel filter. See
+    /// [`Composite::channel_bandwidth_effective_mhz`].
     pub channel_bandwidth_mhz: f64,
     /// Decoder phase error (tint), degrees.
     pub hue_deg: f64,
@@ -237,14 +250,43 @@ impl Composite {
         SAMPLES_PER_PX as f64 / self.cycles_per_px()
     }
 
-    /// ACC gain of the composite chroma: 1 / |H_ch(f_sc)| = 2^((f_sc / B_ch)^2 / 2); 1 without a channel
-    /// filter or with S-Video.
+    /// The channel bandwidth the model applies, MHz: 0 (no channel filter) with S-Video or when
+    /// `channel_bandwidth_mhz` is not positive (0 = off); otherwise `channel_bandwidth_mhz` lifted to the
+    /// narrowest bandwidth whose kernel sigma is [`CHANNEL_SIGMA_MAX_SAMPLES`] (0.1325 f_px; see there).
+    pub fn channel_bandwidth_effective_mhz(&self) -> f64 {
+        // Not positive, or NaN: no channel filter.
+        if self.connection == Connection::SVideo
+            || self.channel_bandwidth_mhz.is_nan()
+            || self.channel_bandwidth_mhz <= 0.0
+        {
+            return 0.0;
+        }
+        // sigma_samples(B) = k / B, so sigma_samples(B) = CHANNEL_SIGMA_MAX_SAMPLES at B = k / max.
+        let floor = self.sigma_samples(1.0) / CHANNEL_SIGMA_MAX_SAMPLES;
+        self.channel_bandwidth_mhz.max(floor)
+    }
+
+    /// Sigma of the channel low-pass, samples: 0 without a channel filter, at most
+    /// [`CHANNEL_SIGMA_MAX_SAMPLES`].
+    pub fn channel_sigma_samples(&self) -> f64 {
+        self.sigma_samples(self.channel_bandwidth_effective_mhz())
+    }
+
+    /// ACC gain of the composite chroma: 1 / |H_ch(f_sc)| = 2^((f_sc / B_ch)^2 / 2) at the effective channel
+    /// bandwidth, capped at [`ACC_GAIN_MAX`]; 1 without a channel filter or with S-Video. Always finite.
     pub fn acc_gain(&self) -> f64 {
-        if self.connection == Connection::SVideo || self.channel_bandwidth_mhz <= 0.0 {
+        let b = self.channel_bandwidth_effective_mhz();
+        if b <= 0.0 {
             return 1.0;
         }
-        let r = self.subcarrier_mhz / self.channel_bandwidth_mhz;
-        2.0_f64.powf(0.5 * r * r)
+        let r = self.subcarrier_mhz / b;
+        let exponent = 0.5 * r * r;
+        // Compare the exponents: 2^exponent itself overflows f64 for a narrow channel.
+        if exponent >= ACC_GAIN_MAX.log2() {
+            ACC_GAIN_MAX
+        } else {
+            exponent.exp2()
+        }
     }
 
     /// Demodulator axis turn a, radians: 33 degrees in NTSC (I/Q axes), 0 in PAL (U/V axes).
@@ -275,7 +317,7 @@ impl Composite {
     pub fn padding_samples(&self) -> usize {
         let reach = |s: f64| (REACH_SIGMAS * s).ceil();
         let (a, b) = self.demod_sigmas();
-        let ch = reach(self.sigma_samples(self.channel_bandwidth_mhz));
+        let ch = reach(self.channel_sigma_samples());
         (ch + (0.5 * self.box_len_samples()).ceil() + reach(a.max(b)) + 2.0) as usize
     }
 
@@ -355,7 +397,7 @@ impl Composite {
         let (luma, chroma): (Vec<f64>, Vec<f64>) = if svideo {
             (raw_luma, sig)
         } else {
-            let sigma_ch = self.sigma_samples(self.channel_bandwidth_mhz);
+            let sigma_ch = self.channel_sigma_samples();
             let f0 = gaussian_filter(&sig, sigma_ch);
             let len = self.box_len_samples();
             let acc = self.acc_gain();
@@ -831,6 +873,69 @@ mod tests {
             .acc_gain(),
             1.0
         );
+    }
+
+    /// Review D-03: a narrow channel never overflows. The ACC gain is finite, capped at ACC_GAIN_MAX and
+    /// non-decreasing as the bandwidth narrows; the channel sigma never exceeds its cap; 0 (and any
+    /// non-positive or NaN value) means no channel filter on every path; a narrow channel decodes a flat
+    /// colour to a finite, desaturated colour of the same luma.
+    #[test]
+    fn narrow_channel_keeps_the_acc_gain_finite_and_capped() {
+        let base = Composite::ntsc(NES_CLOCK_MHZ);
+        let floor = base.sigma_samples(1.0) / CHANNEL_SIGMA_MAX_SAMPLES;
+        assert!((floor - 0.1325 * NES_CLOCK_MHZ).abs() < 1e-3 * floor, "floor {floor}");
+        let mut last = 1.0;
+        for bw in [50.0, 8.0, 4.2, 2.0, 1.0, 0.5, 0.22, 0.2, 0.1, 0.05, 1e-6, 1e-300] {
+            let cfg = Composite {
+                channel_bandwidth_mhz: bw,
+                ..base
+            };
+            let g = cfg.acc_gain();
+            assert!(g.is_finite() && (1.0..=ACC_GAIN_MAX).contains(&g), "{bw} MHz: gain {g}");
+            assert!(g >= last, "{bw} MHz: gain {g} < {last}");
+            last = g;
+            let s = cfg.channel_sigma_samples();
+            assert!(
+                s > 0.0 && s <= CHANNEL_SIGMA_MAX_SAMPLES * (1.0 + 1e-12),
+                "{bw} MHz: sigma {s}"
+            );
+            assert!(
+                cfg.padding_samples() < 200,
+                "{bw} MHz: padding {}",
+                cfg.padding_samples()
+            );
+        }
+        assert_eq!(last, ACC_GAIN_MAX);
+        for off in [0.0, -1.0, f64::NAN] {
+            let cfg = Composite {
+                channel_bandwidth_mhz: off,
+                ..base
+            };
+            assert_eq!(
+                (
+                    cfg.channel_bandwidth_effective_mhz(),
+                    cfg.channel_sigma_samples(),
+                    cfg.acc_gain()
+                ),
+                (0.0, 0.0, 1.0),
+                "{off}"
+            );
+        }
+        let colour = [0.8, 0.3, 0.2];
+        let rows = flat(64, 2, colour);
+        let luma = rgb_to_yuv(colour)[0];
+        for bw in [0.5, 0.22, 0.2, 0.1, 0.05] {
+            let cfg = Composite {
+                channel_bandwidth_mhz: bw,
+                ..base
+            };
+            let out = cfg.decode_frame_yuv(&rows, 0);
+            for p in &out[1][16..48] {
+                assert!(p.iter().all(|c| c.is_finite()), "{bw} MHz: {p:?}");
+                assert!((p[0] - luma).abs() < 0.02, "{bw} MHz: luma {p:?}");
+                assert!(p[1].hypot(p[2]) < 0.05, "{bw} MHz: chroma {p:?}");
+            }
+        }
     }
 
     /// The box filter: a length of one period nulls a sampled sinusoid; constant fields keep their level.

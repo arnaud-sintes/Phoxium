@@ -262,6 +262,38 @@ fn composite_slot_matches_the_oracle() {
         compare(&mut gpu, &art, p, *frame, what);
     }
 
+    // Review D-03: narrow channels (ACC gain capped, channel sigma lifted to the shader's cap): finite, and
+    // the same as the oracle; also with the comb and at a 14.3 MHz clock (a higher bandwidth floor).
+    for bw in [0.05_f32, 0.1, 0.2, 0.22, 0.5] {
+        for (what, p) in [
+            ("notch", ntsc),
+            (
+                "comb",
+                Params {
+                    composite_separation: params::COMPOSITE_SEPARATION_COMB,
+                    ..ntsc
+                },
+            ),
+            (
+                "14.318 MHz",
+                Params {
+                    amp_pixel_clock_mhz: 14.31818,
+                    ..ntsc
+                },
+            ),
+        ] {
+            let p = Params {
+                composite_bandwidth_mhz: bw,
+                ..p
+            };
+            let out = compare(&mut gpu, &art, &p, 1, &format!("channel {bw} MHz, {what}"));
+            assert!(
+                out.rgba.iter().all(|c| c.is_finite()),
+                "channel {bw} MHz, {what}: non-finite"
+            );
+        }
+    }
+
     // A width that is not a multiple of the 64-pixel tile.
     compare(&mut gpu, &pixel_art(200, 8), &ntsc, 0, "NTSC notch, 200 px wide");
 

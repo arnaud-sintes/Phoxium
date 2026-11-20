@@ -87,11 +87,9 @@ pub(crate) fn model(p: &Params) -> Composite {
 pub(super) fn plan(p: &Params, frame: u32) -> Push {
     let m = model(p);
     let (sigma_a, sigma_b) = m.demod_sigmas();
-    let sigma_ch = if m.connection == Connection::Composite {
-        m.sigma_samples(m.channel_bandwidth_mhz)
-    } else {
-        0.0
-    };
+    // 0 without a channel filter (bandwidth 0 or S-Video), at most CHANNEL_SIGMA_MAX_SAMPLES (= the
+    // shader's CAP_CHANNEL / 4), so the shader never truncates it; the ACC gain is capped (review D-03).
+    let sigma_ch = m.channel_sigma_samples();
     let mut flags = 0;
     if m.connection == Connection::SVideo {
         flags |= FLAG_SVIDEO;
@@ -220,5 +218,35 @@ mod tests {
         assert_eq!(model(&pal).subcarrier_mhz, PAL_SUBCARRIER_MHZ);
         assert_eq!(plan(&pal, 0).flags, FLAG_SVIDEO | FLAG_PAL | FLAG_COMB);
         assert_eq!(plan(&pal, 0).sigma_ch, 0.0, "no channel filter on S-Video");
+    }
+
+    /// Review D-03: a narrow channel pushes a finite ACC gain at most ACC_GAIN_MAX and a channel sigma
+    /// the shader holds without truncation; 0 is "no channel filter" (sigma 0, gain 1).
+    #[test]
+    fn narrow_channel_pushes_finite_capped_constants() {
+        use crt_model::composite::{ACC_GAIN_MAX, CHANNEL_SIGMA_MAX_SAMPLES};
+        let glsl = include_str!("../../../../../shaders/composite.comp");
+        assert!(glsl.contains("const float CAP_CHANNEL = 32.0;") && CHANNEL_SIGMA_MAX_SAMPLES * 4.0 == 32.0);
+        for bw in [0.05, 0.1, 0.2, 0.22, 0.5, 4.2, 50.0] {
+            let p = Params {
+                composite_bandwidth_mhz: bw,
+                ..Params::default()
+            };
+            let push = plan(&p, 0);
+            assert!(push.acc_gain.is_finite() && push.acc_gain >= 1.0, "{bw}: {push:?}");
+            assert!(f64::from(push.acc_gain) <= ACC_GAIN_MAX, "{bw}: {push:?}");
+            assert!(
+                push.sigma_ch > 0.0 && push.sigma_ch <= CHANNEL_SIGMA_MAX_SAMPLES as f32,
+                "{bw}: {push:?}"
+            );
+        }
+        let off = plan(
+            &Params {
+                composite_bandwidth_mhz: 0.0,
+                ..Params::default()
+            },
+            0,
+        );
+        assert_eq!((off.sigma_ch, off.acc_gain), (0.0, 1.0));
     }
 }
