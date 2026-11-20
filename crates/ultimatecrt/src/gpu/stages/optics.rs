@@ -1437,8 +1437,10 @@ mod tests {
     #[test]
     fn kernel_level_and_cells() {
         let fc = placed();
+        // The halation is opt-in (weight 0 by default): the physical 1.5 % switches the halo on.
         let p = Params {
             optics_enable: true,
+            optics_halation_weight: 0.015,
             ..Params::default()
         };
         let h = Halo::new(glass(&p).unwrap());
@@ -1486,6 +1488,7 @@ mod tests {
         for (t, fallback) in [(12.0, false), (30.0, true), (hard_max, true)] {
             let p = Params {
                 optics_enable: true,
+                optics_halation_weight: 0.015,
                 optics_halo_method: OPTICS_HALO_METHOD_GAUSSIANS,
                 optics_glass_thickness_mm: t,
                 ..Params::default()
@@ -1504,6 +1507,7 @@ mod tests {
         // Other methods never carry the flag.
         let p = Params {
             optics_enable: true,
+            optics_halation_weight: 0.015,
             optics_glass_thickness_mm: hard_max,
             ..Params::default()
         };

@@ -150,6 +150,10 @@ fn every_parameter_at_its_hard_bounds_renders_a_finite_output() {
     let mut base = Params::default();
     for (id, v) in [
         ("optics_enable", ParamValue::Bool(true)),
+        // The halo and the glare are opt-in (weight 0 by default): on, so that the glass, the halo method and
+        // the taps are swept with an effect.
+        ("optics_halation_weight", ParamValue::F32(0.015)),
+        ("optics_glare_weight", ParamValue::F32(0.01)),
         // The glow on, so that its radius, falloff, threshold and tint are swept with an effect (the vignette is
         // on by default).
         ("optics_bloom_weight", ParamValue::F32(0.2)),

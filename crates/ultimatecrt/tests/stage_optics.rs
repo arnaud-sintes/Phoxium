@@ -803,6 +803,268 @@ fn vignette_shapes_match_the_oracle() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// The vignette recipes of the README (live review 2026-11-20: the old "black corners" recipe, corner 0, start
+/// 0.5, exponent 2, softness 0.4, roundness 0.5, looked like a spotlight: the middle of the left edge of a wide
+/// picture fell to about 15 % of the centre). On a flat white field of a 4:3 and a 16:9 picture the GPU against
+/// the oracle, the luma at the middle of the left edge, the corner and the centre (printed for the old and the new
+/// recipes), and the rules: the "black corners, clean sides" recipe keeps the middle of the left and top edges at
+/// 85 % of the centre or more and the corner under 1 %; the strong recipe is a visible but even grade.
+#[test]
+fn vignette_recipes_keep_the_sides() {
+    let Some(mut gpu) = common::gpu_or_skip("vignette_recipes_keep_the_sides") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let base = Params {
+        optics_enable: true,
+        optics_halation_weight: 0.0,
+        optics_glare_weight: 0.0,
+        optics_diffusion_weight: 0.0,
+        ..Params::default()
+    };
+    let recipe = |corner: f32, start: f32, exponent: f32, softness: f32, roundness: f32| Params {
+        optics_vignette_corner: corner,
+        optics_vignette_start: start,
+        optics_vignette_exponent: exponent,
+        optics_vignette_softness: softness,
+        optics_vignette_roundness: roundness,
+        ..base
+    };
+    // (name, parameters, minimum edge / centre, maximum corner / centre)
+    let recipes = [
+        ("old black corners", recipe(0.0, 0.5, 2.0, 0.4, 0.5), 0.0, 1.0),
+        ("old strong", recipe(0.15, 0.3, 3.0, 0.3, 1.0), 0.0, 1.0),
+        (
+            "black corners, clean sides",
+            recipe(0.0, 0.6, 4.0, 0.2, 0.0),
+            0.85,
+            0.01,
+        ),
+        (
+            "black corners, later start",
+            recipe(0.0, 0.7, 5.0, 0.2, 0.0),
+            0.85,
+            0.01,
+        ),
+        ("strong", recipe(0.3, 0.3, 3.0, 0.3, 1.0), 0.0, 0.32),
+        ("subtle", recipe(0.8, 0.0, 2.0, 0.0, 1.0), 0.8, 0.82),
+    ];
+    println!("| shape | recipe | left edge | top edge | corner | (relative to the centre) |");
+    for (w, h, label) in [(160u32, 120u32, "4:3"), (160, 90, "16:9")] {
+        let flat = image(w, h, |_, _| [1.0; 3]);
+        for (name, p, min_edge, max_corner) in &recipes {
+            let got = run(&mut gpu, p, &flat, 2.0);
+            let want = oracle(p, &flat, 2.0);
+            let (_, max_abs) = errors(&got, &want);
+            assert!(max_abs <= 2e-3, "{label} {name}: GPU against the oracle {max_abs}");
+            let centre = f64::from(got.pixel(w / 2, h / 2)[1]);
+            let left = f64::from(got.pixel(0, h / 2)[1]) / centre;
+            let top = f64::from(got.pixel(w / 2, 0)[1]) / centre;
+            let corner = f64::from(got.pixel(0, 0)[1]) / centre;
+            println!("| {label} | {name} | {left:.3} | {top:.3} | {corner:.4} | |");
+            assert!(
+                left >= *min_edge && top >= *min_edge,
+                "{label} {name}: edges {left} {top}"
+            );
+            assert!(corner <= *max_corner, "{label} {name}: corner {corner}");
+        }
+    }
+    // The old recipe is the spotlight it was reported as: the left edge of the 16:9 picture falls under 20 %.
+    let flat = image(160, 90, |_, _| [1.0; 3]);
+    let old = run(&mut gpu, &recipes[0].1, &flat, 2.0);
+    assert!(old.pixel(0, 45)[1] / old.pixel(80, 45)[1] < 0.2);
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// A black frame with a white window, or a white frame with a black window, BGRA (the 320 x 240 source of
+/// `look_recipes_whole_chain`).
+fn window_frame(white_window: bool) -> Vec<u8> {
+    let (w, h) = (320usize, 240usize);
+    let mut v = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let inside = (100..220).contains(&x) && (70..170).contains(&y);
+            let c = if inside == white_window { 255 } else { 0 };
+            v[(y * w + x) * 4..][..4].copy_from_slice(&[c, c, c, 255]);
+        }
+    }
+    v
+}
+
+/// The Optics panel at its bare defaults (live review 2026-11-20: switching Optics on lifted the blacks by 20 to
+/// 27 codes because the halation and the glare defaulted to 1.5 % and 1 %): through the whole chain to the
+/// display output (8-bit codes of the green channel, patches of 16 x 16 pixels), the black level of a white
+/// window in black (far from it, 15 pixels beside it) and of a black window in white, with Optics off, with
+/// Optics on at the new defaults, with the old defaults (halation 0.015, glare 0.01) and with the README's gentle
+/// glow (weight 0.12, radius 6 mm, threshold 0.6) at several falloffs. The new defaults and the glow without a tail
+/// (falloff 0) must not lift a black by more than half a code; the glow's wide lobes (falloff 0.5, the default)
+/// leave a faint veil (measured: 2 codes far from a window, 9 inside a black area of a white field); the old
+/// defaults lift the black of a white field by 30 codes.
+#[test]
+fn look_recipes_whole_chain() {
+    let Some(mut gpu) = common::gpu_or_skip("look_recipes_whole_chain") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let target = (960u32, 720u32);
+    let patch = |img: &ImageF32, cx: u32, cy: u32| -> f64 {
+        let mut sum = 0.0;
+        for y in cy - 8..cy + 8 {
+            for x in cx - 8..cx + 8 {
+                sum += 255.0 * f64::from(img.pixel(x, y)[1]);
+            }
+        }
+        sum / 256.0
+    };
+    let off = Params::default();
+    let on = Params {
+        optics_enable: true,
+        ..off
+    };
+    let old = Params {
+        optics_halation_weight: 0.015,
+        optics_glare_weight: 0.01,
+        ..on
+    };
+    let glow = Params {
+        optics_bloom_weight: 0.12,
+        optics_bloom_radius_mm: 6.0,
+        optics_bloom_threshold: 0.6,
+        ..on
+    };
+    assert_eq!((on.optics_halation_weight, on.optics_glare_weight), (0.0, 0.0));
+    let glow_with = |weight: f32, radius: f32, falloff: f32, threshold: f32| Params {
+        optics_bloom_weight: weight,
+        optics_bloom_radius_mm: radius,
+        optics_bloom_falloff: falloff,
+        optics_bloom_threshold: threshold,
+        ..on
+    };
+    let cases = [
+        ("Optics off", off),
+        ("Optics on, new defaults", on),
+        ("Optics on, old defaults", old),
+        ("Optics on, gentle glow (0.12, 6 mm, threshold 0.6)", glow),
+        (
+            "glow 0.12, 6 mm, falloff 0.35, threshold 0.6",
+            glow_with(0.12, 6.0, 0.35, 0.6),
+        ),
+        (
+            "glow 0.12, 6 mm, falloff 0.2, threshold 0.6",
+            glow_with(0.12, 6.0, 0.2, 0.6),
+        ),
+        (
+            "glow 0.12, 6 mm, falloff 0, threshold 0.6",
+            glow_with(0.12, 6.0, 0.0, 0.6),
+        ),
+        (
+            "glow 0.15, 6 mm, falloff 0.2, threshold 0.6",
+            glow_with(0.15, 6.0, 0.2, 0.6),
+        ),
+        (
+            "glow 0.12, 6 mm, falloff 0.5, threshold 0",
+            glow_with(0.12, 6.0, 0.5, 0.0),
+        ),
+        (
+            "glow 0.08, 4 mm, falloff 0.5, threshold 0 (old README)",
+            glow_with(0.08, 4.0, 0.5, 0.0),
+        ),
+        (
+            "glow 0.2, 6 mm, falloff 0.7, threshold 0.6",
+            glow_with(0.2, 6.0, 0.7, 0.6),
+        ),
+        (
+            "glow 0.3, 15 mm, falloff 1, threshold 0",
+            glow_with(0.3, 15.0, 1.0, 0.0),
+        ),
+        (
+            "halation 0.01 alone",
+            Params {
+                optics_halation_weight: 0.01,
+                ..on
+            },
+        ),
+        (
+            "halation 0.015 alone",
+            Params {
+                optics_halation_weight: 0.015,
+                ..on
+            },
+        ),
+        (
+            "halation 0.03 alone",
+            Params {
+                optics_halation_weight: 0.03,
+                ..on
+            },
+        ),
+        (
+            "glare 0.01 alone",
+            Params {
+                optics_glare_weight: 0.01,
+                ..on
+            },
+        ),
+    ];
+    // Black codes: [far from a white window, 15 pixels beside it, inside a black window in white].
+    let mut black: Vec<[f64; 3]> = Vec::new();
+    println!("| configuration | black far | black beside the window | black window in white |");
+    for (name, p) in &cases {
+        let mut row = [0.0; 3];
+        for white_window in [true, false] {
+            let data = window_frame(white_window);
+            let r = gpu
+                .render(
+                    Some(SourceFrame {
+                        width: 320,
+                        height: 240,
+                        bgra: &data,
+                    }),
+                    View::full(320, 240),
+                    &Settings::default(),
+                    p,
+                    target,
+                    TargetFormat::Rgba32F,
+                )
+                .expect("render");
+            if white_window {
+                row[0] = patch(&r.output, 60, 360);
+                row[1] = patch(&r.output, 285, 360);
+            } else {
+                row[2] = patch(&r.output, 480, 360);
+            }
+        }
+        println!("| {name} | {:.2} | {:.2} | {:.2} |", row[0], row[1], row[2]);
+        black.push(row);
+    }
+    for (i, name) in [(1, "new defaults"), (6, "glow without a tail")] {
+        // The black far from the window and the black area of a white field (the glow's own halo, beside a
+        // window, is the effect).
+        for k in [0, 2] {
+            assert!(
+                black[i][k] <= black[0][k] + 0.5,
+                "{name}: black {k} lifted from {} to {}",
+                black[0][k],
+                black[i][k]
+            );
+        }
+    }
+    assert!(
+        black[1][1] <= black[0][1] + 0.5,
+        "new defaults: black beside the window"
+    );
+    // The default falloff keeps a faint veil: the README says so, with these bounds.
+    assert!(black[3][0] <= 2.5 && black[3][2] <= 10.5, "{:?}", black[3]);
+    assert!(
+        black[2][2] > black[0][2] + 20.0,
+        "the old defaults lifted the black of a white field by {}",
+        black[2][2] - black[0][2]
+    );
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// Cost of the glow and the vignette, headless, run by hand:
 /// `cargo test -p ultimatecrt --test stage_optics glow_cost_study -- --ignored --nocapture`.
 /// A 1920 x 1080 tube image at 4.966 px/mm (the PVM-20M4U across the width), the game-like frame, bursts of 40
@@ -845,6 +1107,8 @@ fn glow_cost_study() {
     };
     let all = Params {
         optics_enable: true,
+        optics_halation_weight: 0.015,
+        optics_glare_weight: 0.01,
         optics_bloom_weight: 0.2,
         optics_bloom_threshold: 0.6,
         optics_vignette_corner: 0.3,
@@ -871,10 +1135,12 @@ fn glow_cost_study() {
         ("glow 30 mm, falloff 1", "optics", glow(0.2, 30.0, 1.0, 0.0)),
         ("glow 6 mm, falloff 0.5, low tier", "optics", low),
         (
-            "default halo, glare, diffusion (no glow)",
+            "physical halo (0.015), glare (0.01) and default diffusion (no glow)",
             "optics",
             Params {
                 optics_enable: true,
+                optics_halation_weight: 0.015,
+                optics_glare_weight: 0.01,
                 ..Params::default()
             },
         ),
