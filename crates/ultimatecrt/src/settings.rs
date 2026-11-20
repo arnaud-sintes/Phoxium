@@ -1,11 +1,16 @@
 //! Persistent settings (T-51, UX-2, PRF-4, SRC-2): `%APPDATA%\ultimateCRT\settings.toml`.
 //!
-//! Holds the global settings (preset name, parameter overrides, hotkey chords, UI state), the host profile
-//! (monitor and panel size) and the source profiles keyed by executable file name and window class.
+//! Holds the global settings (preset name, parameter overrides, hotkey chords, UI state) and the source profiles
+//! keyed by executable file name and window class.
 //! The overrides are applied onto the settings preset at start; the settings menu records in them only the ids
 //! the user changed, against the preset in force ([`record_edit`], T-53). [`overrides_from_params`] gives the
-//! ids that differ from the table defaults. Writes are atomic (temporary file, then
-//! rename). A corrupt or too new file gives defaults plus a warning and is kept as `settings.toml.bak`.
+//! ids that differ from the table defaults.
+//!
+//! Writes are atomic (a temporary file named per process, flushed, then renamed) and run on a background thread
+//! ([`Writer`]), never on the render thread. A file that cannot be used gives defaults plus a warning
+//! ([`load`]): an invalid file is kept as `settings.toml.bak` (the first copy is never overwritten) and is then
+//! replaced by the session's settings; an unreadable file or one of a newer schema is never written by the
+//! session ([`Loaded::writable`]), so a newer build's settings survive a run of an older one.
 
 use std::{
     collections::BTreeMap,
@@ -205,36 +210,6 @@ pub fn default_hotkeys() -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Output monitor and physical panel size (UX-2). The size comes from EDID unless overridden.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HostProfile {
-    /// Monitor device name, empty for the primary one.
-    pub monitor: String,
-    /// Panel width and height in mm, from EDID.
-    pub panel_mm: Option<[f32; 2]>,
-    /// Manual override of the panel size in mm; wins over `panel_mm`.
-    pub panel_mm_override: Option<[f32; 2]>,
-}
-
-impl Default for HostProfile {
-    fn default() -> Self {
-        Self {
-            monitor: String::new(),
-            panel_mm: None,
-            // Dell P2418D, 53 x 30 cm (PLAN T-51).
-            panel_mm_override: Some([530.0, 300.0]),
-        }
-    }
-}
-
-impl HostProfile {
-    /// The panel size to use: the manual override, else EDID.
-    pub fn effective_panel_mm(&self) -> Option<[f32; 2]> {
-        self.panel_mm_override.or(self.panel_mm)
-    }
-}
-
 /// Per-source settings (SRC-2, T-96). Unset fields keep the value of the preset and the global overrides
 /// (for the modes: automatic). The app applies the profile of the attached window (executable and class)
 /// on top of the preset and the global overrides; command-line flags override the profile.
@@ -405,13 +380,14 @@ impl SourceProfile {
     }
 }
 
+/// The settings file. Unknown tables and keys are ignored at load and dropped at the next write (the `[host]`
+/// table of earlier builds, which held an unused panel size, included).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
     #[serde(default = "default_version")]
     pub version: u32,
     pub global: Global,
-    pub host: HostProfile,
     #[serde(rename = "source")]
     pub sources: Vec<SourceProfile>,
 }
@@ -421,7 +397,6 @@ impl Default for Settings {
         Self {
             version: SCHEMA_VERSION,
             global: Global::default(),
-            host: HostProfile::default(),
             sources: Vec::new(),
         }
     }
@@ -451,19 +426,21 @@ impl Settings {
         toml::to_string_pretty(self)
     }
 
-    /// Parses a file. Missing hotkeys are filled with their defaults.
+    /// Parses a file. Missing hotkeys are filled with their defaults; a remembered window rectangle that cannot
+    /// be one (`modes::IRect::from_saved`) is dropped.
     pub fn from_toml(text: &str) -> Result<Self, String> {
-        let mut s: Settings = toml::from_str(text).map_err(|e| e.to_string())?;
-        if s.version > SCHEMA_VERSION {
+        if let Some(v) = newer_version(text) {
             return Err(format!(
-                "schema version {} is newer than the supported {SCHEMA_VERSION}",
-                s.version
+                "schema version {v} is newer than the supported {SCHEMA_VERSION}"
             ));
         }
+        let mut s: Settings = toml::from_str(text).map_err(|e| e.to_string())?;
         s.version = SCHEMA_VERSION;
         for (a, c) in DEFAULT_HOTKEYS {
             s.global.hotkeys.entry(a.to_string()).or_insert_with(|| c.to_string());
         }
+        let w = &mut s.global.output.windowed;
+        *w = w.filter(|a| crate::modes::IRect::from_saved(*a).is_some());
         Ok(s)
     }
 }
@@ -573,66 +550,255 @@ pub fn default_dir() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("ultimateCRT"))
 }
 
+/// The `version` of a settings text when it is newer than [`SCHEMA_VERSION`] (the rest of the file may not
+/// parse with this build's types), `None` otherwise or when the text is not TOML.
+fn newer_version(text: &str) -> Option<i64> {
+    let table: toml::Table = text.parse().ok()?;
+    let v = table.get("version")?.as_integer()?;
+    (v > i64::from(SCHEMA_VERSION)).then_some(v)
+}
+
+/// What [`load`] found in the settings file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileState {
+    /// No file: defaults, written at the first change.
+    Missing,
+    /// A valid file.
+    Valid,
+    /// Not valid TOML or not the expected types: defaults; the file is kept as `.bak` and the session's
+    /// settings replace it.
+    Invalid,
+    /// It exists but could not be read (locked, no permission): defaults; the session never writes it.
+    Unreadable,
+    /// A newer schema (written by a newer build): defaults; kept as `.bak` and never written by the session.
+    Newer,
+}
+
 /// Result of [`load`].
 #[derive(Debug)]
 pub struct Loaded {
     pub settings: Settings,
-    /// Set when the file was unreadable or invalid (defaults are returned, the file kept as `.bak`).
+    /// Set when the file could not be used (defaults are returned); says what happens to the file.
     pub warning: Option<String>,
+    pub state: FileState,
+    /// Whether the session may write `settings.toml` (false for an unreadable file or a newer schema: the
+    /// session runs with the defaults in memory and leaves the file as it is).
+    pub writable: bool,
 }
 
-/// Loads `dir\settings.toml`. A missing file gives defaults without a warning.
+/// Loads `dir\settings.toml`. A missing file gives defaults without a warning; see [`FileState`] for the rest.
 pub fn load(dir: &Path) -> Loaded {
     let path = dir.join(SETTINGS_FILE);
-    let text = match fs::read_to_string(&path) {
-        Ok(t) => t,
+    let unusable = |state: FileState, reason: String| {
+        // An unreadable file cannot be copied either: nothing to keep, nothing will overwrite it.
+        let kept = if state == FileState::Unreadable {
+            None
+        } else {
+            backup(dir, &path)
+        };
+        let fate = if state == FileState::Invalid {
+            "it will be replaced by this session's settings"
+        } else {
+            "this session will not write the settings file (changes last until exit)"
+        };
+        let warning = format!(
+            "{} cannot be used ({reason}); defaults are used and {fate}{}",
+            path.display(),
+            kept.map(|b| format!("; a copy is kept as {}", b.display()))
+                .unwrap_or_default()
+        );
+        Loaded {
+            settings: Settings::default(),
+            warning: Some(warning),
+            state,
+            writable: state == FileState::Invalid,
+        }
+    };
+    let text = match fs::read(&path) {
+        Ok(bytes) => String::from_utf8(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             return Loaded {
                 settings: Settings::default(),
                 warning: None,
+                state: FileState::Missing,
+                writable: true,
             }
         }
-        Err(e) => return corrupt(dir, &path, e.to_string()),
+        Err(e) => return unusable(FileState::Unreadable, e.to_string()),
     };
+    let text = match text {
+        Ok(t) => t,
+        Err(_) => return unusable(FileState::Invalid, "not UTF-8 text".to_string()),
+    };
+    if newer_version(&text).is_some() {
+        return unusable(FileState::Newer, Settings::from_toml(&text).unwrap_err());
+    }
     match Settings::from_toml(&text) {
         Ok(settings) => Loaded {
             settings,
             warning: None,
+            state: FileState::Valid,
+            writable: true,
         },
-        Err(e) => corrupt(dir, &path, e),
+        Err(e) => unusable(FileState::Invalid, e),
     }
 }
 
-fn corrupt(dir: &Path, path: &Path, reason: String) -> Loaded {
-    let bak = dir.join(BACKUP_FILE);
-    let kept = fs::copy(path, &bak).is_ok();
-    let warning = format!(
-        "{} is invalid ({reason}); defaults used{}",
-        path.display(),
-        if kept {
-            format!(", the file was kept as {}", bak.display())
+/// Keeps a copy of the unusable `path` as [`BACKUP_FILE`]. The first copy is never overwritten: the same content
+/// again is already kept; other content goes to the first free `settings.toml.bak.<n>`. Returns the copy's path.
+fn backup(dir: &Path, path: &Path) -> Option<PathBuf> {
+    let content = fs::read(path).ok()?;
+    for n in 0..100u32 {
+        let bak = if n == 0 {
+            dir.join(BACKUP_FILE)
         } else {
-            String::new()
+            dir.join(format!("{BACKUP_FILE}.{n}"))
+        };
+        match fs::read(&bak) {
+            Ok(existing) if existing == content => return Some(bak),
+            Ok(_) => continue,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                // `create_new`: never replaces a file that appeared in between.
+                let mut f = fs::OpenOptions::new().write(true).create_new(true).open(&bak).ok()?;
+                return f.write_all(&content).is_ok().then_some(bak);
+            }
+            Err(_) => continue,
         }
-    );
-    Loaded {
-        settings: Settings::default(),
-        warning: Some(warning),
     }
+    None
 }
 
-/// Writes `dir\settings.toml` atomically (temporary file in the same directory, flushed, then renamed).
+/// Writes `dir\settings.toml` atomically (a temporary file in the same directory named per process, flushed,
+/// then renamed). Blocking: the live app goes through [`Writer`].
 pub fn save(dir: &Path, settings: &Settings) -> crate::Res<()> {
     fs::create_dir_all(dir)?;
     let text = settings.to_toml()?;
-    let tmp = dir.join("settings.toml.tmp");
-    {
+    let tmp = dir.join(format!("{SETTINGS_FILE}.{}.tmp", std::process::id()));
+    let written = (|| -> std::io::Result<()> {
         let mut f = fs::File::create(&tmp)?;
         f.write_all(text.as_bytes())?;
-        f.sync_all()?;
+        f.sync_all()
+    })();
+    if let Err(e) = written.and_then(|()| fs::rename(&tmp, dir.join(SETTINGS_FILE))) {
+        let _ = fs::remove_file(&tmp);
+        return Err(e.into());
     }
-    fs::rename(&tmp, dir.join(SETTINGS_FILE))?;
     Ok(())
+}
+
+/// The settings writer of the live app (R-31): [`save`] on a background thread, so no file I/O (and no `fsync`)
+/// happens on the render thread. Latest wins: a request replaces one not yet started. [`Writer::finish`] (or the
+/// drop) writes what is pending and joins the thread. A failed write is a warning on stderr, never an error.
+pub struct Writer {
+    shared: std::sync::Arc<WriterShared>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    dir: PathBuf,
+}
+
+struct WriterShared {
+    state: std::sync::Mutex<WriterState>,
+    cv: std::sync::Condvar,
+}
+
+#[derive(Default)]
+struct WriterState {
+    pending: Option<Box<Settings>>,
+    busy: bool,
+    stop: bool,
+    /// The error of the last write, until [`Writer::wait_idle`] or [`Writer::finish`] takes it.
+    error: Option<String>,
+}
+
+impl WriterShared {
+    fn lock(&self) -> std::sync::MutexGuard<'_, WriterState> {
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
+impl Writer {
+    /// A writer for `dir\settings.toml`. Without a thread (the spawn failed), every save writes at once.
+    pub fn new(dir: PathBuf) -> Writer {
+        let shared = std::sync::Arc::new(WriterShared {
+            state: std::sync::Mutex::new(WriterState::default()),
+            cv: std::sync::Condvar::new(),
+        });
+        let (s, d) = (shared.clone(), dir.clone());
+        let thread = std::thread::Builder::new()
+            .name("settings-writer".into())
+            .spawn(move || writer_loop(&s, &d))
+            .ok();
+        Writer { shared, thread, dir }
+    }
+
+    /// Asks for `settings` to be written; returns at once (replaces a request not started yet).
+    pub fn save(&self, settings: &Settings) {
+        if self.thread.is_none() {
+            if let Err(e) = save(&self.dir, settings) {
+                eprintln!("warning: cannot save the settings: {e}");
+                self.shared.lock().error = Some(e.to_string());
+            }
+            return;
+        }
+        self.shared.lock().pending = Some(Box::new(settings.clone()));
+        self.shared.cv.notify_all();
+    }
+
+    /// Waits until every request is written; returns the error of the last failed write, if any.
+    pub fn wait_idle(&self) -> Option<String> {
+        let mut st = self.shared.lock();
+        while self.thread.is_some() && (st.pending.is_some() || st.busy) {
+            st = self
+                .shared
+                .cv
+                .wait(st)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        st.error.take()
+    }
+
+    /// Writes what is pending and stops the thread (at exit). Returns the last write error, if any.
+    pub fn finish(mut self) -> Option<String> {
+        self.stop()
+    }
+
+    fn stop(&mut self) -> Option<String> {
+        self.shared.lock().stop = true;
+        self.shared.cv.notify_all();
+        if let Some(t) = self.thread.take() {
+            if t.join().is_err() {
+                return Some("the settings writer thread panicked".into());
+            }
+        }
+        self.shared.lock().error.take()
+    }
+}
+
+impl Drop for Writer {
+    fn drop(&mut self) {
+        let _ = self.stop();
+    }
+}
+
+fn writer_loop(shared: &WriterShared, dir: &Path) {
+    let mut st = shared.lock();
+    loop {
+        if let Some(s) = st.pending.take() {
+            st.busy = true;
+            drop(st);
+            let result = save(dir, &s);
+            st = shared.lock();
+            st.busy = false;
+            if let Err(e) = result {
+                eprintln!("warning: cannot save the settings: {e}");
+                st.error = Some(e.to_string());
+            }
+            shared.cv.notify_all();
+        } else if st.stop {
+            return;
+        } else {
+            st = shared.cv.wait(st).unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -660,7 +826,6 @@ mod tests {
         s.global.preset = "sony-trinitron".into();
         s.global.ui.menu_opacity = 0.5;
         s.global.hotkeys.insert("toggle_menu".into(), "Ctrl+F12".into());
-        s.host.panel_mm = Some([527.0, 296.5]);
         s.upsert_source(SourceProfile {
             exe: "Game.exe".into(),
             class: "UnityWndClass".into(),
@@ -689,9 +854,14 @@ mod tests {
         assert!(p.set(m.id, ParamValue::F32(d + 0.25)));
         s.global.overrides = overrides_from_params(&p);
         save(&dir, &s).unwrap();
-        assert!(!dir.join("settings.toml.tmp").exists());
+        let names: Vec<String> = fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, [SETTINGS_FILE], "no temporary file left");
         let back = load(&dir);
         assert!(back.warning.is_none());
+        assert_eq!((back.state, back.writable), (FileState::Valid, true));
         assert_eq!(back.settings, s);
         let mut q = Params::default();
         assert!(apply_overrides(&mut q, &back.settings.global.overrides).is_empty());
@@ -715,6 +885,7 @@ mod tests {
         let l = load(&dir);
         assert_eq!(l.settings, Settings::default());
         assert!(l.warning.is_some());
+        assert_eq!((l.state, l.writable), (FileState::Invalid, true));
         assert_eq!(
             fs::read_to_string(dir.join(BACKUP_FILE)).unwrap(),
             "this is = = not toml [["
@@ -722,13 +893,92 @@ mod tests {
         let _ = fs::remove_dir_all(&dir);
     }
 
+    /// R-15: the first `.bak` is never overwritten. Loading the same invalid file twice (the app loads it more
+    /// than once at start) keeps one copy; another invalid file goes to the next free name.
+    #[test]
+    fn two_invalid_loads_keep_the_first_backup() {
+        let dir = temp_dir("bak");
+        fs::write(dir.join(SETTINGS_FILE), "first = = [[").unwrap();
+        assert!(load(&dir).warning.unwrap().contains(BACKUP_FILE));
+        assert!(load(&dir).warning.is_some());
+        assert_eq!(fs::read_to_string(dir.join(BACKUP_FILE)).unwrap(), "first = = [[");
+        assert!(!dir.join(format!("{BACKUP_FILE}.1")).exists(), "same content: one copy");
+        fs::write(dir.join(SETTINGS_FILE), "second = = [[").unwrap();
+        let l = load(&dir);
+        assert!(l.warning.unwrap().contains(&format!("{BACKUP_FILE}.1")));
+        assert_eq!(fs::read_to_string(dir.join(BACKUP_FILE)).unwrap(), "first = = [[");
+        assert_eq!(
+            fs::read_to_string(dir.join(format!("{BACKUP_FILE}.1"))).unwrap(),
+            "second = = [["
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R-15: a newer schema gives defaults, a copy, and a session that never writes the file.
     #[test]
     fn newer_schema_is_set_aside() {
         let dir = temp_dir("newer");
-        fs::write(dir.join(SETTINGS_FILE), format!("version = {}\n", SCHEMA_VERSION + 1)).unwrap();
+        // A newer build may use types this one does not know: still recognised as newer, not as invalid.
+        let text = format!(
+            "version = {}\n[global]\npreset = 7\n[global.ui]\nmenu_x = \"far\"\n",
+            SCHEMA_VERSION + 1
+        );
+        fs::write(dir.join(SETTINGS_FILE), &text).unwrap();
         let l = load(&dir);
-        assert!(l.warning.is_some());
-        assert!(dir.join(BACKUP_FILE).exists());
+        assert_eq!((l.state, l.writable), (FileState::Newer, false));
+        assert!(
+            l.warning.as_ref().unwrap().contains("will not write"),
+            "{:?}",
+            l.warning
+        );
+        assert_eq!(fs::read_to_string(dir.join(BACKUP_FILE)).unwrap(), text);
+        assert_eq!(fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap(), text);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R-15: a file that exists but cannot be read (opened exclusively by another program) gives defaults and a
+    /// session that never writes it.
+    #[test]
+    fn an_unreadable_file_is_never_overwritten() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = temp_dir("locked");
+        let path = dir.join(SETTINGS_FILE);
+        fs::write(&path, "version = 1\n[global]\npreset = \"mine\"\n").unwrap();
+        {
+            // Share mode 0: nobody else may read, write or delete it while the handle is open.
+            let _lock = fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+            let l = load(&dir);
+            assert_eq!((l.state, l.writable), (FileState::Unreadable, false));
+            assert!(l.warning.unwrap().contains("will not write"));
+            assert!(!dir.join(BACKUP_FILE).exists());
+        }
+        assert_eq!(load(&dir).settings.global.preset, "mine", "untouched");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R-31: the writer thread keeps the latest request; after `finish` the file is complete.
+    #[test]
+    fn the_writer_keeps_the_last_of_quick_saves() {
+        let dir = temp_dir("writer");
+        let w = Writer::new(dir.clone());
+        let mut s = Settings::default();
+        for preset in ["a", "b", "c"] {
+            s.global.preset = preset.into();
+            w.save(&s);
+        }
+        assert_eq!(w.wait_idle(), None);
+        assert_eq!(load(&dir).settings.global.preset, "c");
+        s.global.preset = "d".into();
+        w.save(&s);
+        assert_eq!(w.finish(), None);
+        let l = load(&dir);
+        assert_eq!((l.state, l.settings.global.preset.as_str()), (FileState::Valid, "d"));
+        // A write that fails (the folder is a file) is reported, not a panic.
+        let blocked = dir.join("blocked");
+        fs::write(&blocked, "x").unwrap();
+        let w = Writer::new(blocked);
+        w.save(&s);
+        assert!(w.wait_idle().is_some());
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1060,13 +1310,33 @@ mod tests {
         }
     }
 
+    /// R-41: the `[host]` table of earlier builds (an unused panel size) loads without a warning and is not
+    /// written back.
     #[test]
-    fn host_profile_override_wins() {
-        let mut h = HostProfile::default();
-        assert_eq!(h.effective_panel_mm(), Some([530.0, 300.0]));
-        h.panel_mm_override = None;
-        assert_eq!(h.effective_panel_mm(), None);
-        h.panel_mm = Some([1.0, 2.0]);
-        assert_eq!(h.effective_panel_mm(), Some([1.0, 2.0]));
+    fn an_old_host_table_is_dropped() {
+        let dir = temp_dir("host");
+        fs::write(
+            dir.join(SETTINGS_FILE),
+            "version = 1\n[global]\npreset = \"p\"\n[host]\nmonitor = \"\"\npanel_mm_override = [530.0, 300.0]\n",
+        )
+        .unwrap();
+        let l = load(&dir);
+        assert_eq!((l.state, l.warning), (FileState::Valid, None));
+        assert_eq!(l.settings.global.preset, "p");
+        save(&dir, &l.settings).unwrap();
+        let text = fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap();
+        assert!(!text.contains("host") && !text.contains("panel_mm"), "{text}");
+        assert!(!Settings::default().to_toml().unwrap().contains("host"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R-42: an absurd remembered window rectangle is dropped at load (the default placement is used).
+    #[test]
+    fn an_absurd_window_rectangle_is_dropped_at_load() {
+        let s = Settings::from_toml("version = 1\n[global.output]\nwindowed = [-2147483648, 0, 2147483647, 100]\n")
+            .unwrap();
+        assert_eq!(s.global.output.windowed, None);
+        let s = Settings::from_toml("version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n").unwrap();
+        assert_eq!(s.global.output.windowed, Some([10, 20, 1290, 740]));
     }
 }
