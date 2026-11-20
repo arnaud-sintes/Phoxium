@@ -14,7 +14,7 @@ use windows::Win32::{
 };
 
 use crate::{
-    adapters, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output,
+    adapters, bars, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output,
     picker::{self, Event, Phase},
     placement, presets, scaling, settings, source, sources,
     ui::{AttachedView, SourceAction, SourcePrefs, SourceView},
@@ -235,14 +235,17 @@ pub fn run() -> Res<()> {
         target = Some(t);
     }
     args.apply_source(&mut params)?;
-    let resolve_map = |params: &crate::params::Params, profile: &settings::SourceProfile| {
-        scaling::SourceMap::resolve(
-            params,
-            args.crop.or(profile.crop_rect()),
-            args.divisor.or(profile.divisor_pair()),
-        )
+    // The command-line crop and divisor win over the profile's, until the Source section changes them (a
+    // detected crop, a reset, a multiplier: then the profile holds the choice).
+    let mut cli_crop = args.crop;
+    let mut cli_divisor = args.divisor;
+    let resolve_map = |params: &crate::params::Params,
+                       profile: &settings::SourceProfile,
+                       crop: Option<scaling::Rect>,
+                       divisor: Option<(u32, u32)>| {
+        scaling::SourceMap::resolve(params, crop.or(profile.crop_rect()), divisor.or(profile.divisor_pair()))
     };
-    let (mut map, warnings) = resolve_map(&params, &profile);
+    let (mut map, warnings) = resolve_map(&params, &profile, cli_crop, cli_divisor);
     for w in &warnings {
         eprintln!("warning: {w}");
     }
@@ -337,7 +340,7 @@ pub fn run() -> Res<()> {
         profile = settings::SourceProfile::default();
         profile.switch_to(&mut params, &start_base);
         args.apply_source(&mut params)?;
-        map = resolve_map(&params, &profile).0;
+        map = resolve_map(&params, &profile, cli_crop, cli_divisor).0;
     }
     // Initial windowed size (D-18: no assumed host resolution): the largest whole multiple of the frame
     // within 5/6 of the height and the width of the chosen (else the first) monitor. Without a source, two
@@ -551,6 +554,17 @@ pub fn run() -> Res<()> {
     output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
     ui.set_picker_message(start_message.take());
     let mut source_request: Option<SourceAction> = None;
+    // The Source section's black-bar detection, crop and multiplier edits; `remap` recomputes the view (native
+    // size, placement, readouts) at the next frame even when the source sends none.
+    let mut bars_state = BarsState::default();
+    let mut remap = false;
+    if capture.is_some() && live.settings().global.source.detect_bars_at_attach {
+        bars_state.session = Some(bars::Session::new(
+            start.elapsed().as_secs_f64(),
+            live.settings().global.source.bars_config(),
+        ));
+        println!("black bars: detecting (detect at attach)");
+    }
     let mut list_due = 0.0f64; // next enumeration of the picker's list
     let mut thumbs = picker::ThumbPlan::default();
     let mut thumb_capture: Option<(isize, capture::Capture)> = None;
@@ -576,8 +590,14 @@ pub fn run() -> Res<()> {
 
         // ---- A23: source requests of the picker and the menu ----
         let mut attach_request = None;
+        let mut start_bars = false;
+        let mut crop_request: Option<SourceAction> = None;
+        let mut multiplier_request: Option<scaling::Multiplier> = None;
         match source_request.take() {
             None => {}
+            Some(SourceAction::DetectBars) => start_bars = true,
+            Some(a @ (SourceAction::ResetCrop | SourceAction::UndoCrop)) => crop_request = Some(a),
+            Some(SourceAction::SetMultiplier(m)) => multiplier_request = Some(m),
             Some(SourceAction::Attach(h)) => attach_request = Some(h),
             Some(SourceAction::Cancel) => phase = picker::next(phase, Event::Cancel),
             Some(SourceAction::ChangeSource) => {
@@ -610,6 +630,7 @@ pub fn run() -> Res<()> {
                 ui.source_gone();
                 output::set_source(HWND::default());
                 source_name = None;
+                bars_state.forget();
                 output::set_title(win.hwnd, &window_title(None, None));
                 println!("source: detached");
             }
@@ -627,7 +648,7 @@ pub fn run() -> Res<()> {
             if let Err(e) = args.apply_source(&mut p) {
                 eprintln!("warning: {e}");
             }
-            let (new_map, warnings) = resolve_map(&p, &new_profile);
+            let (new_map, warnings) = resolve_map(&p, &new_profile, cli_crop, cli_divisor);
             for w in &warnings {
                 eprintln!("warning: {w}");
             }
@@ -661,6 +682,13 @@ pub fn run() -> Res<()> {
                     smoothing.reset();
                     detector.reset();
                     detect_key = (0, 0, None);
+                    remap = true;
+                    // A new window: the command-line crop and divisor stay, the last detection is forgotten.
+                    bars_state.forget();
+                    if live.settings().global.source.detect_bars_at_attach {
+                        bars_state.session = Some(bars::Session::new(now, live.settings().global.source.bars_config()));
+                        println!("black bars: detecting (detect at attach)");
+                    }
                     size_watch.request_history_clear();
                     output::set_source(hwnd_of(h));
                     phase = picker::next(phase, Event::Attached);
@@ -825,7 +853,126 @@ pub fn run() -> Res<()> {
             if capture.is_some() {
                 let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
                 health.note_frame(now, black);
+                // The black-bar detection accumulates only while it runs (about one second).
+                if let Some(s) = bars_state.session.as_mut() {
+                    s.feed(&frame.data, frame.width, frame.height);
+                }
             }
+            fresh = true;
+        }
+
+        // ---- The Source section: black-bar detection, crop reset and undo, scaling multiplier ----
+        if capture.is_none() {
+            bars_state.session = None;
+        }
+        let mut edited = false;
+        if start_bars && capture.is_some() && bars_state.session.is_none() {
+            let mut session = bars::Session::new(now, live.settings().global.source.bars_config());
+            if !map.client_area {
+                // The detection works on the client area (the manual crop lies in it): the capture follows first.
+                params.source_crop_mode = crate::params::SOURCE_CROP_MODE_AUTO;
+                renderer.set_params(params);
+                let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+                if switch_map(
+                    new_map,
+                    &mut map,
+                    &mut capture,
+                    reattach.as_ref().map(|r| r.hwnd()),
+                    &mut captured_base,
+                    &mut frame.seq,
+                    capture_luid,
+                ) {
+                    detect_key = (0, 0, None);
+                    remap = true;
+                }
+            } else if frame.seq > 0 {
+                // The frame on screen counts: a game that redraws rarely still gives one.
+                session.feed(&frame.data, frame.width, frame.height);
+            }
+            bars_state.session = Some(session);
+            bars_state.message = None;
+            println!("black bars: detecting");
+        }
+        if let Some(outcome) = bars_state
+            .session
+            .as_ref()
+            .filter(|s| s.done(now))
+            .map(|s| s.outcome(view.div))
+        {
+            bars_state.session = None;
+            let (_, text) = outcome.message();
+            println!("black bars: {text}");
+            if let bars::Outcome::Found(found) = outcome {
+                let (b, p) = (found.bars, found.picture);
+                println!(
+                    "black bars: left {}, top {}, right {}, bottom {} px; crop {}, {}, {}x{}",
+                    b.left, b.top, b.right, b.bottom, p.x, p.y, p.w, p.h
+                );
+                bars_state.undo = Some(bars::CropState::capture(&params, &profile, cli_crop));
+                bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, found.picture);
+                bars_state.found = Some(found);
+                edited = true;
+            }
+            bars_state.message = Some(outcome.message());
+        }
+        match crop_request {
+            Some(SourceAction::ResetCrop) => {
+                bars_state.undo = Some(bars::CropState::capture(&params, &profile, cli_crop));
+                bars::reset_crop(&mut params, &mut profile, &mut cli_crop);
+                bars_state.found = None;
+                bars_state.message = Some((true, "Crop reset: the whole client area is captured.".to_string()));
+                println!("source: crop reset to the client area");
+                edited = true;
+            }
+            Some(SourceAction::UndoCrop) => {
+                if let Some(u) = bars_state.undo.take() {
+                    u.restore(&mut params, &mut profile, &mut cli_crop);
+                    bars_state.found = None;
+                    bars_state.message = Some((true, "The last crop change was undone.".to_string()));
+                    println!("source: crop change undone");
+                    edited = true;
+                }
+            }
+            _ => {}
+        }
+        if let Some(m) = multiplier_request {
+            m.apply(&mut params, &mut profile);
+            cli_divisor = None;
+            println!(
+                "source scaling multiplier: {}",
+                match m {
+                    scaling::Multiplier::Auto => "auto".to_string(),
+                    scaling::Multiplier::None => "none (native)".to_string(),
+                    scaling::Multiplier::Manual(x, y) => scaling::Multiplier::pair_text((x, y)),
+                }
+            );
+            edited = true;
+        }
+        if edited {
+            // Live, and stored in the profile of this program and class.
+            renderer.set_params(params);
+            profile = keyed_profile(&profile, reattach.as_ref().map(|r| r.target()));
+            live.save_source_profile(&profile);
+            baseline = baseline_of(live.library(), live.current_preset(), &profile);
+            let (new_map, warnings) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+            for w in &warnings {
+                eprintln!("warning: {w}");
+            }
+            if switch_map(
+                new_map,
+                &mut map,
+                &mut capture,
+                reattach.as_ref().map(|r| r.hwnd()),
+                &mut captured_base,
+                &mut frame.seq,
+                capture_luid,
+            ) {
+                // The integer-scale detection runs again on the new area.
+                detect_key = (0, 0, None);
+            }
+            remap = true;
+        }
+        if std::mem::take(&mut remap) {
             fresh = true;
         }
         if fresh {
@@ -843,28 +990,34 @@ pub fn run() -> Res<()> {
             }
             // Patterns, images and the idle frame are native.
             let fixed = map.divisor.or((synthetic || capture.is_none()).then_some((1, 1)));
-            let div = match fixed {
-                Some(d) => d,
-                None => {
-                    let was_locked = detector.is_locked();
-                    detector.feed(&frame.data, frame.width, region);
-                    if detector.is_locked() && !was_locked {
-                        let d = detector.divisor();
-                        if d == (1, 1) {
-                            println!("source scaling: native (x1), {}x{}", region.w, region.h);
-                        } else {
-                            println!(
-                                "source scaling: detected x{}/x{}, native {}x{}",
-                                d.0,
-                                d.1,
-                                region.w / d.0,
-                                region.h / d.1
-                            );
-                        }
+            // A capture is always analysed (until the detection locks), also under a forced multiplier, so the
+            // Source section shows what was detected next to the forced value.
+            if capture.is_some() {
+                let was_locked = detector.is_locked();
+                detector.feed(&frame.data, frame.width, region);
+                if detector.is_locked() && !was_locked {
+                    let d = detector.divisor();
+                    if d == (1, 1) {
+                        println!("source scaling: native (x1), {}x{}", region.w, region.h);
+                    } else {
+                        println!(
+                            "source scaling: detected x{}/x{}, native {}x{}",
+                            d.0,
+                            d.1,
+                            region.w / d.0,
+                            region.h / d.1
+                        );
                     }
-                    detector.divisor()
+                    if let Some(f) = map.divisor.filter(|&f| f != d) {
+                        println!(
+                            "source scaling: forced {} ({} detected)",
+                            scaling::Multiplier::pair_text(f),
+                            scaling::Multiplier::pair_text(d)
+                        );
+                    }
                 }
-            };
+            }
+            let div = fixed.unwrap_or_else(|| detector.divisor());
             view = scaling::View::new(region, div);
             // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
             // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
@@ -905,6 +1058,8 @@ pub fn run() -> Res<()> {
                 (frame.width, frame.height),
                 view,
                 lost_at.map(|t| (now - t, lost_watch.policy().wait_s)),
+                scaling::Multiplier::of(&params, cli_divisor.or(profile.divisor_pair())),
+                bars_state.view(),
             );
         }
         // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
@@ -935,31 +1090,33 @@ pub fn run() -> Res<()> {
             renderer.set_params(params);
             // T-96, A23: the crop and divisor modes are live: the source map follows them (a change of the
             // capture area restarts the session on the same window).
-            let (new_map, _) = resolve_map(&params, &profile);
-            if new_map != map {
-                if new_map.client_area != map.client_area {
-                    if let (Some(r), true) = (reattach.as_ref(), capture.is_some()) {
-                        match capture::Capture::start(hwnd_of(r.hwnd()), new_map.client_area, capture_luid) {
-                            Ok(c) => {
-                                if let Some(old) = capture.replace(c) {
-                                    captured_base += old.frames_captured();
-                                }
-                                frame.seq = 0;
-                            }
-                            Err(e) => eprintln!("warning: capture area change: {e}"),
-                        }
-                    }
-                }
-                map = new_map;
+            let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+            if switch_map(
+                new_map,
+                &mut map,
+                &mut capture,
+                reattach.as_ref().map(|r| r.hwnd()),
+                &mut captured_base,
+                &mut frame.seq,
+                capture_luid,
+            ) {
                 detect_key = (0, 0, None);
+                remap = true;
             }
         }
         if let Some(adapter) = changes.gpu_adapter {
             println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
             live.set_gpu_adapter(adapter);
         }
-        if let Some(SourcePrefs { ask_at_start, wait_s }) = changes.source_prefs {
+        if let Some(SourcePrefs {
+            ask_at_start,
+            wait_s,
+            detect_bars_at_attach,
+            bars: bars_config,
+        }) = changes.source_prefs
+        {
             live.set_source_prefs(ask_at_start, wait_s);
+            live.set_bars_prefs(detect_bars_at_attach, bars_config);
             if !args.wait_source_set {
                 lost_watch.set_wait(wait_s);
             }
@@ -1093,6 +1250,78 @@ pub fn run() -> Res<()> {
     Ok(())
 }
 
+/// Switches the source map to `new_map`. A change of the capture area (client area or whole window) restarts the
+/// capture session on the attached window `hwnd`. Returns whether the map changed (the caller restarts the
+/// integer-scale detection and recomputes the view).
+fn switch_map(
+    new_map: scaling::SourceMap,
+    map: &mut scaling::SourceMap,
+    capture: &mut Option<capture::Capture>,
+    hwnd: Option<isize>,
+    captured_base: &mut u64,
+    seq: &mut u64,
+    luid: Option<adapters::Luid>,
+) -> bool {
+    if new_map == *map {
+        return false;
+    }
+    if new_map.client_area != map.client_area {
+        if let (Some(h), true) = (hwnd, capture.is_some()) {
+            match capture::Capture::start(hwnd_of(h), new_map.client_area, luid) {
+                Ok(c) => {
+                    if let Some(old) = capture.replace(c) {
+                        *captured_base += old.frames_captured();
+                    }
+                    *seq = 0; // the new session counts from 1
+                }
+                Err(e) => eprintln!("warning: capture area change: {e}"),
+            }
+        }
+    }
+    *map = new_map;
+    true
+}
+
+/// The black-bar detection state the Source section shows and the Undo it offers.
+#[derive(Default)]
+struct BarsState {
+    /// The running detection, if any.
+    session: Option<bars::Session>,
+    /// The crop before the last detection or reset (Undo).
+    undo: Option<bars::CropState>,
+    /// The last detection that found bars (cleared by a reset or an undo).
+    found: Option<bars::Found>,
+    /// The last outcome, reset or undo, in words.
+    message: Option<(bool, String)>,
+}
+
+impl BarsState {
+    fn view(&self) -> crate::ui::BarsView {
+        crate::ui::BarsView {
+            running: self.session.is_some(),
+            found: self.found,
+            message: self.message.clone(),
+            can_undo: self.undo.is_some(),
+        }
+    }
+
+    /// A new window: nothing to undo, no outcome to show.
+    fn forget(&mut self) {
+        *self = BarsState::default();
+    }
+}
+
+/// The source profile of the attached program and class with the key filled in (a window without a profile yet
+/// starts from an empty one), for [`live::Live::save_source_profile`].
+fn keyed_profile(profile: &settings::SourceProfile, target: Option<&lifecycle::TargetKey>) -> settings::SourceProfile {
+    let mut p = profile.clone();
+    if let Some((exe, class)) = target.and_then(|t| t.profile_key()) {
+        p.exe = exe.to_string();
+        p.class = class.to_string();
+    }
+    p
+}
+
 /// What the menu's Source section shows (A23).
 #[allow(clippy::too_many_arguments)]
 fn source_view(
@@ -1104,6 +1333,8 @@ fn source_view(
     frame: (u32, u32),
     view: scaling::View,
     lost: Option<(f64, f64)>,
+    multiplier: scaling::Multiplier,
+    bars: crate::ui::BarsView,
 ) -> SourceView {
     let waiting = match (target, lost) {
         (Some(t), Some((since, wait))) => Some(if wait > 0.0 {
@@ -1126,6 +1357,10 @@ fn source_view(
         scale: scale_text(map, detector, view.div),
         crop: crop_text(map),
         profile: *profile != settings::SourceProfile::default(),
+        multiplier,
+        detected: detector.is_locked().then(|| detector.divisor()),
+        crop_manual: map.crop.is_some() || !map.client_area,
+        bars,
     });
     SourceView { attached, waiting }
 }
@@ -1141,6 +1376,9 @@ pub fn scale_text(map: &scaling::SourceMap, detector: &scaling::Detector, div: (
     };
     match map.divisor {
         Some((1, 1)) => "none (x1)".to_string(),
+        Some(d) if detector.is_locked() && detector.divisor() != d => {
+            format!("{} (manual, detected {})", pair(d), pair(detector.divisor()))
+        }
         Some(d) => format!("{} (manual)", pair(d)),
         None if !detector.is_locked() => "detecting...".to_string(),
         None if div == (1, 1) => "x1 (native)".to_string(),

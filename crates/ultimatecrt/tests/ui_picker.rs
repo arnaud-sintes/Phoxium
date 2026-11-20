@@ -491,6 +491,7 @@ fn source_section_preview_image() {
             scale: "x4 detected".into(),
             crop: "client area".into(),
             profile: true,
+            ..AttachedView::default()
         }),
         waiting: None,
     };

@@ -124,6 +124,14 @@ pub struct SourceSettings {
     pub wait_s: f64,
     /// The last window chosen.
     pub last: Option<LastSource>,
+    /// Run the black-bar detection (`bars`) every time a window is attached (default off).
+    pub detect_bars_at_attach: bool,
+    /// Black-bar detection: largest code value (brightest channel, 0 to 255) still counted as black.
+    pub bars_tolerance: u8,
+    /// Black-bar detection: thinner bars are ignored (px).
+    pub bars_min: u32,
+    /// Black-bar detection: largest fraction of an axis the bars may remove (0 to 1).
+    pub bars_max_crop: f64,
 }
 
 impl Default for SourceSettings {
@@ -132,6 +140,25 @@ impl Default for SourceSettings {
             ask_at_start: true,
             wait_s: DEFAULT_WAIT_S,
             last: None,
+            detect_bars_at_attach: false,
+            bars_tolerance: crate::bars::DEFAULT_TOLERANCE,
+            bars_min: crate::bars::DEFAULT_MIN_BAR,
+            bars_max_crop: crate::bars::DEFAULT_MAX_CROP,
+        }
+    }
+}
+
+impl SourceSettings {
+    /// The black-bar detection thresholds, made valid (tolerance as stored, at least 1 px, a fraction 0.05 to 0.95).
+    pub fn bars_config(&self) -> crate::bars::Config {
+        crate::bars::Config {
+            tolerance: self.bars_tolerance,
+            min_bar: self.bars_min.max(1),
+            max_crop: if self.bars_max_crop.is_finite() {
+                self.bars_max_crop.clamp(0.05, 0.95)
+            } else {
+                crate::bars::DEFAULT_MAX_CROP
+            },
         }
     }
 }
@@ -925,6 +952,10 @@ mod tests {
                 class: "UnityWndClass".into(),
                 title: "Mina the Hollower".into(),
             }),
+            detect_bars_at_attach: true,
+            bars_tolerance: 12,
+            bars_min: 3,
+            bars_max_crop: 0.5,
         };
         let text = s.to_toml().unwrap();
         assert!(text.contains("[global.source]"), "{text}");
@@ -934,6 +965,16 @@ mod tests {
         let s = Settings::from_toml("version = 1\n[global.source]\nask_at_start = false\n").unwrap();
         assert!(!s.global.source.ask_at_start);
         assert_eq!(s.global.source.wait_s, DEFAULT_WAIT_S);
+        // Black-bar detection: off at attach by default, the documented thresholds, invalid values made valid.
+        let d = &s.global.source;
+        assert!(!d.detect_bars_at_attach);
+        assert_eq!(d.bars_config(), crate::bars::Config::default());
+        let odd = SourceSettings {
+            bars_min: 0,
+            bars_max_crop: 3.0,
+            ..SourceSettings::default()
+        };
+        assert_eq!((odd.bars_config().min_bar, odd.bars_config().max_crop), (1, 0.95));
     }
 
     /// A23: attaching to another program swaps the profile values and keeps everything else.

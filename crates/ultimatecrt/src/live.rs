@@ -321,6 +321,36 @@ impl Live {
         }
     }
 
+    /// The menu changed the black-bar detection preferences of `[global.source]` (detect at attach, thresholds):
+    /// written with the next [`Live::flush_settings`] (debounced).
+    pub fn set_bars_prefs(&mut self, at_attach: bool, config: crate::bars::Config) {
+        let s = &mut self.settings.global.source;
+        let (tolerance, min, max_crop) = (config.tolerance, config.min_bar.max(1), config.max_crop);
+        if s.detect_bars_at_attach != at_attach
+            || s.bars_tolerance != tolerance
+            || s.bars_min != min
+            || s.bars_max_crop != max_crop
+        {
+            s.detect_bars_at_attach = at_attach;
+            s.bars_tolerance = tolerance;
+            s.bars_min = min;
+            s.bars_max_crop = max_crop;
+            self.mark_dirty();
+        }
+    }
+
+    /// The Source section changed the source profile of the attached program and class (a detected crop, a
+    /// reset or undo, the scaling multiplier): stored in `[[source]]` (replacing the profile of the same
+    /// executable and class) and written at once. A profile without an executable is not stored.
+    pub fn save_source_profile(&mut self, profile: &settings::SourceProfile) {
+        if profile.exe.is_empty() || self.settings.find_source(&profile.exe, &profile.class) == Some(profile) {
+            return;
+        }
+        self.settings.upsert_source(profile.clone());
+        self.mark_dirty();
+        self.flush_settings(true);
+    }
+
     /// At exit: remembers where the framed window is and writes it to the settings.
     pub fn finish(&mut self, hwnd: HWND) {
         if self.mode.mode == WindowMode::Windowed {
@@ -432,6 +462,41 @@ mod tests {
         assert!(live.flush_settings(true));
         let s = settings::load(&dir).settings.global.source;
         assert_eq!((s.ask_at_start, s.wait_s), (false, 12.0));
+        // Black-bar detection preferences: debounced; a source profile: written at once, keyed by program and
+        // class.
+        let cfg = crate::bars::Config {
+            tolerance: 16,
+            min_bar: 4,
+            max_crop: 0.4,
+        };
+        live.set_bars_prefs(true, cfg);
+        assert!(live.flush_settings(true));
+        let s = settings::load(&dir).settings.global.source;
+        assert!(s.detect_bars_at_attach);
+        assert_eq!(s.bars_config(), cfg);
+        let mut profile = settings::SourceProfile {
+            exe: "snes9x.exe".into(),
+            class: "Snes9X".into(),
+            ..settings::SourceProfile::default()
+        };
+        crate::bars::set_manual_crop(
+            &mut Params::default(),
+            &mut profile,
+            &mut None,
+            crate::scaling::Rect {
+                x: 0,
+                y: 16,
+                w: 768,
+                h: 672,
+            },
+        );
+        crate::scaling::Multiplier::Manual(3, 3).apply(&mut Params::default(), &mut profile);
+        live.save_source_profile(&profile);
+        let saved = settings::load(&dir).settings;
+        assert_eq!(saved.find_source("SNES9X.EXE", "snes9x"), Some(&profile));
+        // Without an executable nothing is stored.
+        live.save_source_profile(&settings::SourceProfile::default());
+        assert_eq!(settings::load(&dir).settings.sources.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

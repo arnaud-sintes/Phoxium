@@ -271,6 +271,8 @@ pub struct MenuModel<'a> {
     pub fonts: Fonts,
     /// `[global.source]` ask at start and lost-source wait, edited in the Source section (A23).
     pub prefs: &'a mut super::SourcePrefs,
+    /// The scaling multiplier is shown per axis (Advanced, "Separate X and Y").
+    pub split_multiplier: &'a mut bool,
 }
 
 /// What the menu window did in one frame.
@@ -286,9 +288,10 @@ pub struct MenuResult {
     pub gpu_adapter: Option<String>,
     /// A burn-in action asked in this frame (T-43): "Burn in now" or "New tube".
     pub wear_action: Option<super::WearAction>,
-    /// Change source or Detach clicked in the Source section (A23).
+    /// A request of the Source section (A23): Change source, Detach, Detect black bars, Reset crop, Undo, a
+    /// scaling multiplier.
     pub source: Option<super::SourceAction>,
-    /// The ask-at-start box or the lost-source wait changed (A23).
+    /// The ask-at-start box, the lost-source wait or a black-bar detection preference changed (A23).
     pub prefs_changed: bool,
     /// The layout (position, size, opacity, collapsed) changed.
     pub layout_changed: bool,
@@ -804,6 +807,11 @@ fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
             theme::tooltip(ui, "Stop capturing: the window list comes back.");
         }
     }
+    if let Some(a) = src.attached.clone() {
+        picture_area_rows(ui, m, r, &a);
+        multiplier_rows(ui, m, r, &a);
+        theme::subheading(ui, &fonts, "Window choice");
+    }
     if ui.checkbox("Ask at every start", &mut m.prefs.ask_at_start) {
         r.prefs_changed = true;
     }
@@ -833,6 +841,307 @@ fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     }
     ui.same_line();
     theme::text_right(ui, PALETTE.text, &value);
+}
+
+/// A labelled slider row of a source preference (the lost-source wait style): the value text on the right.
+/// True when the value changed.
+#[allow(clippy::too_many_arguments)]
+fn pref_slider(
+    ui: &Frame,
+    r: &mut MenuResult,
+    key: &str,
+    label: &str,
+    value: &mut f32,
+    lo: f32,
+    hi: f32,
+    text: &str,
+    widest: &str,
+    tip: &str,
+) -> bool {
+    let label_w = theme::row_label(ui, label);
+    let track = label_w - ui.calc_text_size(widest)[0] - ui.clone_style().item_spacing()[0];
+    let changed = theme::slider_ex(ui, &format!("##{key}"), value, lo, hi, track, false, "%.0f");
+    record(ui, r, key);
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, tip);
+    }
+    ui.same_line();
+    theme::text_right(ui, PALETTE.text, text);
+    changed
+}
+
+/// The black bars of a detection in words: `left 0 · top 32 · right 0 · bottom 32 px`.
+pub fn bars_text(b: &crate::bars::Bars) -> String {
+    format!(
+        "left {}  \u{00B7}  top {}  \u{00B7}  right {}  \u{00B7}  bottom {} px",
+        b.left, b.top, b.right, b.bottom
+    )
+}
+
+/// Picture area: Detect black bars, Reset crop and Undo, what the last detection found, Detect at attach, and
+/// (Advanced) the detection thresholds.
+fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &super::AttachedView) {
+    let fonts = m.fonts;
+    theme::subheading(ui, &fonts, "Picture area");
+    let running = a.bars.running;
+    let disabled = ui.begin_disabled_with_cond(running);
+    if theme::button(ui, if running { "Detecting..." } else { "Detect black bars" }) {
+        r.source = Some(super::SourceAction::DetectBars);
+    }
+    drop(disabled);
+    record(ui, r, "source:detect_bars");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Watch the window for about one second and crop the capture to the picture inside its black bars \
+             (letterbox, pillarbox, a border area). Run it while the game shows a picture.",
+        );
+    }
+    ui.same_line();
+    let disabled = ui.begin_disabled_with_cond(!a.crop_manual || running);
+    if theme::button(ui, "Reset crop") {
+        r.source = Some(super::SourceAction::ResetCrop);
+    }
+    drop(disabled);
+    record(ui, r, "source:reset_crop");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, "Capture the whole client area of the window again (no crop).");
+    }
+    ui.same_line();
+    let disabled = ui.begin_disabled_with_cond(!a.bars.can_undo || running);
+    if theme::button(ui, "Undo") {
+        r.source = Some(super::SourceAction::UndoCrop);
+    }
+    drop(disabled);
+    record(ui, r, "source:undo_crop");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Put back the capture area as it was before the last detection or reset.",
+        );
+    }
+    if let Some(f) = &a.bars.found {
+        theme::kv_row(ui, "Bars", &bars_text(&f.bars), PALETTE.text);
+        record(ui, r, "source:bars");
+        theme::kv_row(
+            ui,
+            "Picture",
+            &format!(
+                "{} \u{00D7} {} at {}, {}",
+                f.picture.w, f.picture.h, f.picture.x, f.picture.y
+            ),
+            PALETTE.text,
+        );
+    }
+    if let Some((ok, text)) = &a.bars.message {
+        theme::with_font(ui, None, METRICS.font_small, || {
+            let wrap = ui.push_text_wrap_pos(0.0);
+            ui.text_colored(if *ok { PALETTE.ok } else { PALETTE.problem }, text);
+            drop(wrap);
+        });
+        record(ui, r, "source:bars_message");
+    }
+    if ui.checkbox("Detect at attach", &mut m.prefs.detect_bars_at_attach) {
+        r.prefs_changed = true;
+    }
+    record(ui, r, "source:detect_at_attach");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Run the black-bar detection every time a window is attached (its result is stored for that \
+             program like a manual crop).",
+        );
+    }
+    if *m.advanced {
+        let b = &mut m.prefs.bars;
+        let mut tol = f32::from(b.tolerance);
+        if pref_slider(
+            ui,
+            r,
+            "source:bars_tolerance",
+            "Black tolerance",
+            &mut tol,
+            0.0,
+            48.0,
+            &format!("{} / 255", b.tolerance),
+            "48 / 255",
+            "Largest code value (brightest of red, green, blue) still counted as black in a bar. Raise it for \
+             noisy or compressed bars, lower it for a game whose dark picture edges are taken for bars.",
+        ) {
+            b.tolerance = tol.round().clamp(0.0, 255.0) as u8;
+            r.prefs_changed = true;
+        }
+        let mut min = b.min_bar as f32;
+        if pref_slider(
+            ui,
+            r,
+            "source:bars_min",
+            "Minimum bar",
+            &mut min,
+            1.0,
+            32.0,
+            &format!("{} px", b.min_bar),
+            "48 / 255",
+            "Thinner dark borders are ignored (a 1 px window border is not a bar).",
+        ) {
+            b.min_bar = (min.round() as u32).max(1);
+            r.prefs_changed = true;
+        }
+        let mut pct = (b.max_crop * 100.0) as f32;
+        if pref_slider(
+            ui,
+            r,
+            "source:bars_max_crop",
+            "Largest crop",
+            &mut pct,
+            10.0,
+            90.0,
+            &format!("{:.0} %", b.max_crop * 100.0),
+            "48 / 255",
+            "The bars of one axis may remove at most this share of it; larger dark borders (a dark scene) are \
+             left alone.",
+        ) {
+            b.max_crop = f64::from(pct.round()) / 100.0;
+            r.prefs_changed = true;
+        }
+    }
+}
+
+/// One multiplier combo: `items` as (text, value), the current one highlighted. Every entry is recorded as
+/// `<key>:<index>` while the list is open. Returns the value picked.
+fn multiplier_combo(
+    ui: &Frame,
+    r: &mut MenuResult,
+    key: &str,
+    preview: &str,
+    items: &[(String, crate::scaling::Multiplier)],
+    current: crate::scaling::Multiplier,
+    width: f32,
+) -> Option<crate::scaling::Multiplier> {
+    let mut picked = None;
+    ui.set_next_item_width(width);
+    if let Some(_combo) = ui.begin_combo(format!("##{key}"), preview) {
+        for (i, (text, value)) in items.iter().enumerate() {
+            let selected = *value == current;
+            if ui
+                .selectable_config(format!("{text}##{key}{i}"))
+                .selected(selected)
+                .build()
+            {
+                picked = Some(*value);
+            }
+            record(ui, r, &format!("{key}:{i}"));
+            if selected {
+                ui.set_item_default_focus();
+            }
+        }
+    }
+    record(ui, r, key);
+    picked
+}
+
+/// Source scaling multiplier: Auto (the detected factor), None (the capture is native) or x1 to x10, with the
+/// detected factor next to it and a hint when a forced value disagrees; (Advanced) X and Y separately.
+fn multiplier_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &super::AttachedView) {
+    use crate::scaling::{Multiplier, MAX_MULTIPLIER};
+    let fonts = m.fonts;
+    theme::subheading(ui, &fonts, "Scaling");
+    let current = a.multiplier;
+    let detected_text = a.detected.map_or("detecting...".to_string(), Multiplier::pair_text);
+    let preview = match current {
+        Multiplier::Auto => format!("Auto ({detected_text})"),
+        Multiplier::None => "None (native, x1)".to_string(),
+        Multiplier::Manual(x, y) => Multiplier::pair_text((x, y)),
+    };
+    let split = *m.split_multiplier || !current.linked();
+    let mut items = vec![
+        (format!("Auto ({detected_text})"), Multiplier::Auto),
+        ("None (native, x1)".to_string(), Multiplier::None),
+    ];
+    items.extend((1..=MAX_MULTIPLIER).map(|k| (format!("x{k}"), Multiplier::Manual(k, k))));
+    let width = theme::row_label(ui, "Scaling multiplier");
+    let picked = multiplier_combo(ui, r, "source:multiplier", &preview, &items, current, width);
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "The integer factor the game is enlarged by in its window (a 256 \u{00D7} 224 game shown at x3). \
+             Auto finds it from the picture; None takes the capture as the game's own pixels; x1 to x10 forces \
+             it. Stored for this program.",
+        );
+    }
+    if let Some(v) = picked {
+        r.source = Some(super::SourceAction::SetMultiplier(v));
+    }
+    // The detection always shows; a forced value that disagrees with it gets a hint.
+    let note = match current.disagreement(a.detected) {
+        Some(h) => (PALETTE.accent, h),
+        None => (PALETTE.text_muted, format!("detected: {detected_text}")),
+    };
+    theme::with_font(ui, None, METRICS.font_small, || {
+        ui.set_cursor_pos_x(ui.cursor_pos()[0] + theme::label_width(ui));
+        ui.text_colored(note.0, &note.1);
+    });
+    record(ui, r, "source:multiplier_note");
+    if *m.advanced {
+        if ui.checkbox("Separate X and Y", m.split_multiplier) && !*m.split_multiplier && !current.linked() {
+            // Linking again: both axes take the horizontal factor.
+            if let Multiplier::Manual(x, _) = current {
+                r.source = Some(super::SourceAction::SetMultiplier(Multiplier::manual(x, x)));
+            }
+        }
+        record(ui, r, "source:split");
+        if ui.is_item_hovered() {
+            theme::tooltip(
+                ui,
+                "Non-square source pixels: a different factor across and down (for example x2 across, x3 down).",
+            );
+        }
+    }
+    if split && (*m.advanced || !current.linked()) {
+        let base = current.divisor().or(a.detected).unwrap_or((1, 1));
+        let axis_items = |axis: usize| -> Vec<(String, Multiplier)> {
+            (1..=MAX_MULTIPLIER)
+                .map(|k| {
+                    let v = if axis == 0 {
+                        Multiplier::manual(k, base.1)
+                    } else {
+                        Multiplier::manual(base.0, k)
+                    };
+                    (format!("{} x{k}", if axis == 0 { "X" } else { "Y" }), v)
+                })
+                .collect()
+        };
+        let half = (theme::row_label(ui, "Across, down") - ui.clone_style().item_spacing()[0]) * 0.5;
+        let shown = |d: u32, axis: &str| format!("{axis} x{d}");
+        let cur = if matches!(current, Multiplier::Manual(..)) {
+            current
+        } else {
+            Multiplier::Auto
+        };
+        if let Some(v) = multiplier_combo(
+            ui,
+            r,
+            "source:multiplier_x",
+            &shown(base.0, "X"),
+            &axis_items(0),
+            cur,
+            half,
+        ) {
+            r.source = Some(super::SourceAction::SetMultiplier(v));
+        }
+        ui.same_line();
+        if let Some(v) = multiplier_combo(
+            ui,
+            r,
+            "source:multiplier_y",
+            &shown(base.1, "Y"),
+            &axis_items(1),
+            cur,
+            half,
+        ) {
+            r.source = Some(super::SourceAction::SetMultiplier(v));
+        }
+    }
 }
 
 /// `text` cut with an ellipsis to fit `width` px in the current font.

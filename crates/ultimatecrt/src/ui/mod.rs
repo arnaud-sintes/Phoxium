@@ -106,6 +106,27 @@ pub struct AttachedView {
     pub crop: String,
     /// A source profile (`[[source]]` for this program and class) is applied.
     pub profile: bool,
+    /// The source scaling multiplier in force (auto, none, manual).
+    pub multiplier: crate::scaling::Multiplier,
+    /// What the automatic integer-scale detection found on the source area, `None` while it is still looking.
+    pub detected: Option<(u32, u32)>,
+    /// The capture area is a manual crop (Reset crop has something to reset).
+    pub crop_manual: bool,
+    /// The black-bar detection: running, its last outcome, Undo available.
+    pub bars: BarsView,
+}
+
+/// The black-bar detection as the Source section shows it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct BarsView {
+    /// A detection is running (about one second).
+    pub running: bool,
+    /// The bars of the last detection that found some (they are the crop now, unless undone or reset).
+    pub found: Option<crate::bars::Found>,
+    /// The outcome of the last detection, reset or undo: (good news, text).
+    pub message: Option<(bool, String)>,
+    /// The last crop change (detection, reset) can be undone.
+    pub can_undo: bool,
 }
 
 /// The source selection settings the menu and the picker edit (`[global.source]`, A23).
@@ -114,15 +135,26 @@ pub struct SourcePrefs {
     pub ask_at_start: bool,
     /// Seconds a lost source is waited for; 0 forever.
     pub wait_s: f64,
+    /// Detect black bars every time a window is attached.
+    pub detect_bars_at_attach: bool,
+    /// The black-bar detection thresholds (Advanced).
+    pub bars: crate::bars::Config,
+}
+
+impl SourcePrefs {
+    pub fn of(s: &settings::SourceSettings) -> Self {
+        Self {
+            ask_at_start: s.ask_at_start,
+            wait_s: s.wait_s,
+            detect_bars_at_attach: s.detect_bars_at_attach,
+            bars: s.bars_config(),
+        }
+    }
 }
 
 impl Default for SourcePrefs {
     fn default() -> Self {
-        let d = settings::SourceSettings::default();
-        Self {
-            ask_at_start: d.ask_at_start,
-            wait_s: d.wait_s,
-        }
+        Self::of(&settings::SourceSettings::default())
     }
 }
 
@@ -141,6 +173,14 @@ pub enum SourceAction {
     Refresh,
     /// Take the preview again now.
     RefreshPreview,
+    /// Detect the black bars around the picture and crop to it (the Source section's Detect black bars).
+    DetectBars,
+    /// Back to the whole client area (no crop).
+    ResetCrop,
+    /// Undo the last crop change (detection or reset).
+    UndoCrop,
+    /// Use this source scaling multiplier (auto, none, manual), live and in the source profile.
+    SetMultiplier(crate::scaling::Multiplier),
 }
 
 /// Which content the open menu mode shows.
@@ -236,10 +276,7 @@ impl UiConfig {
             settings_dir,
             gpu: crate::adapters::current().cloned(),
             gpu_setting: settings.global.gpu.adapter.clone(),
-            source_prefs: SourcePrefs {
-                ask_at_start: settings.global.source.ask_at_start,
-                wait_s: settings.global.source.wait_s,
-            },
+            source_prefs: SourcePrefs::of(&settings.global.source),
         }
     }
 
@@ -332,6 +369,8 @@ pub struct Ui {
     picker: picker::Picker,
     /// `[global.source]` as the menu and the picker edit it.
     prefs: SourcePrefs,
+    /// The Source section shows the scaling multiplier per axis (Advanced, "Separate X and Y").
+    split_multiplier: bool,
     /// Dropped last (declared last, and `Drop for Ui` shuts the renderer down before).
     imgui: ImContext,
 }
@@ -435,6 +474,7 @@ impl Ui {
                 ..picker::Picker::default()
             },
             prefs: config.source_prefs,
+            split_multiplier: false,
             imgui,
         };
         if let Some(out) = ui.output {
@@ -931,6 +971,7 @@ impl UiPass for Ui {
                     focus,
                     fonts: self.fonts,
                     prefs: &mut self.prefs,
+                    split_multiplier: &mut self.split_multiplier,
                 },
             ));
         }
