@@ -1,0 +1,63 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `wear` (ARCHITECTURE 3.7, image contract; T-42 ageing and T-43 burn-in, QUESTIONS PHY-14): tube domain ->
+// tube domain, linear light. The phosphor efficiency of a worn tube, per channel (oracle crt_model::burnin,
+// WearMap::apply, and crt_model::ageing):
+//
+//   y_c = x_c / (1 + c_c (Q_age + Q_c(p)))
+//
+// c_c the Pfahnl constant of the channel (per reference hour, calibrated on the CPU, src/ageing.rs), Q_age the
+// tube-wide charge of the hours of use (0 unless ageing is on), Q_c(p) the burn-in map (set 1, binding 0, an
+// RGBA32F image of the charge per texel in reference hours) interpolated bilinearly at the pixel centre in
+// texel coordinates, 0 outside the map (only with pc.use_map, burn-in on). Where the charge is exactly 0 the
+// efficiency is exactly 1 (no division), so a pixel away from any wear passes bit for bit. The map lies over the
+// tube image at pc.place: texel (i, j) covers [place.xy + (i, j) place.zw, + place.zw) host px.
+//
+// The input x is the light of a fresh phosphor (beam current times mask), which is also what the burn-in map
+// accumulates afterwards (shaders/wear_accumulate.comp, a second pass of the same slot).
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+layout(set = 1, binding = 0, rgba32f) uniform readonly image2D wear_sum;
+
+// std430, 40 bytes, mirrored by `Push` in src/gpu/stages/wear.rs.
+layout(push_constant) uniform Wear {
+    vec4 c_qage; // rgb: Pfahnl constant per channel (per reference hour); a: tube-wide charge (reference hours)
+    vec4 place;  // xy: host px of the map corner; zw: host px per texel
+    float scale; // accumulate pass only: reference hours per unit light in this frame
+    uint use_map; // 1: the burn-in map is applied
+} pc;
+
+vec3 map_q(ivec2 t, ivec2 size) {
+    if (any(lessThan(t, ivec2(0))) || any(greaterThanEqual(t, size))) {
+        return vec3(0.0);
+    }
+    return imageLoad(wear_sum, t).rgb;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(light_out)))) {
+        return;
+    }
+    vec4 x = texelFetch(light_in, p, 0);
+    vec3 q = vec3(pc.c_qage.a);
+    if (pc.use_map != 0u) {
+        ivec2 size = imageSize(wear_sum);
+        vec2 u = (vec2(p) + 0.5 - pc.place.xy) / pc.place.zw - 0.5;
+        vec2 u0 = floor(u);
+        vec2 f = u - u0;
+        ivec2 i0 = ivec2(u0);
+        q += (1.0 - f.x) * (1.0 - f.y) * map_q(i0, size) + f.x * (1.0 - f.y) * map_q(i0 + ivec2(1, 0), size)
+           + (1.0 - f.x) * f.y * map_q(i0 + ivec2(0, 1), size) + f.x * f.y * map_q(i0 + ivec2(1, 1), size);
+    }
+    vec3 k = pc.c_qage.rgb * q;
+    vec3 eff = mix(vec3(1.0) / (vec3(1.0) + k), vec3(1.0), equal(k, vec3(0.0)));
+    imageStore(light_out, p, round_f16(vec4(x.rgb * eff, x.a)));
+}

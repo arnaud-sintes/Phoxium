@@ -57,6 +57,8 @@ Usage: ultimatecrt [options]
                        same program and class meanwhile
   --exit-on-lost       exit when the captured window closes instead of waiting for it
   --exit-after <secs>  quit after some seconds (for automated tests)
+  --reset-burnin       start the burn-in wear map of the tube preset as a new tube (the saved wear is replaced
+                       at the next save); the same as the menu button \"New tube\"
   render ...           (first argument) offline render of a pattern or image to PNG or PFM, no window; see `ultimatecrt render --help`
   --version            print the version and exit
   --help               print this text
@@ -86,6 +88,8 @@ pub struct Args {
     pub stats: bool,
     pub save_capture: Option<String>,
     pub exit_after: Option<f64>,
+    /// `--reset-burnin`: the burn-in wear map starts as a new tube (T-43).
+    pub reset_burnin: bool,
     pub lost: lifecycle::LostPolicy,
     pub log: Option<String>,
     pub pattern: Option<String>,
@@ -213,6 +217,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             "--integer" => a.integer = true,
             "--validation" => a.validation = true,
             "--stats" => a.stats = true,
+            "--reset-burnin" => a.reset_burnin = true,
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
             "--wait-source" => {
                 let secs: f64 = number("--wait-source", &value("--wait-source")?)?;

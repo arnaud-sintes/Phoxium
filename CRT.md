@@ -561,6 +561,7 @@ Frame-energy ratios of these constants for a pixel excited once (E_k = integral 
 - Sulfides (blue ZnS:Ag, green ZnS:Cu,Al) saturate at high current density. Oxysulfide red is more linear. Extreme highlights shift toward yellow-red, by a few percent or a few hundred K in direct-view tubes and much more in projection tubes. [S][E]
 - Peak instantaneous current density is large because the average is delivered in a short flash (see "Temporal behaviour"). Per-channel soft-clip on instantaneous drive before the mask, stronger on blue, is the suggested shader hook. [E]
 - Ageing: one datasheet allows 15 % luminance loss after 20,000 h at 350 cd/m². Blue usually degrades fastest. Static images burn in. [S][K]
+- Wear curve: cathodoluminescent phosphors lose efficiency with the deposited charge N per area as I / I0 = 1 / (1 + C N) (Pfahnl's coulombic ageing law, from memory, no reference checked in this research) [K]. It decelerates (half the efficiency at N = 1 / C), so burn-in saturates. The model calibrates C on the datasheet point above, per colour with estimated rate ratios (red 0.5, green 1, blue 2) [E]; no measured per-phosphor curve was found. Cathode wear (emission loss, cutoff drift, larger spot) has no measured curve here either [E].
 - Backscattered electrons (coefficient about 0.25) bounce under the mask and can excite neighbouring phosphors, desaturating small saturated features by a few percent. [E]
 
 ## Electro-optical transfer, luminance, ABL and glare

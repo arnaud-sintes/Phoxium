@@ -267,6 +267,8 @@ pub struct MenuResult {
     pub library: Option<Library>,
     /// The `[global.gpu] adapter` value chosen in this frame (applied at the next start).
     pub gpu_adapter: Option<String>,
+    /// A burn-in action asked in this frame (T-43): "Burn in now" or "New tube".
+    pub wear_action: Option<super::WearAction>,
     /// The layout (position, size, opacity, collapsed) changed.
     pub layout_changed: bool,
     pub rects: MenuRects,
@@ -354,6 +356,28 @@ pub fn build(ui: &Frame, mut m: MenuModel<'_>) -> MenuResult {
     r
 }
 
+/// The burn-in actions under the ageing panel (T-43): wear the current picture for `burnin_now_hours` at once,
+/// or start a new tube (the wear map cleared and its file replaced). Both act on the map of the preset in force
+/// and only while burn-in is on (the app ignores them otherwise).
+fn wear_buttons(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let on = m.params.burnin_enable;
+    let disabled = ui.begin_disabled_with_cond(!on);
+    let hours = m.params.burnin_now_hours;
+    if theme::button(ui, &format!("Burn in {hours:.0} h now")) {
+        r.wear_action = Some(super::WearAction::BurnInNow(hours));
+    }
+    record(ui, r, "burn_in_now");
+    ui.same_line();
+    if theme::button(ui, "New tube (reset wear)") {
+        r.wear_action = Some(super::WearAction::NewTube);
+    }
+    record(ui, r, "new_tube");
+    drop(disabled);
+    if !on {
+        theme::kv_row(ui, "Burn-in", "off: turn it on to use these", PALETTE.text_faint);
+    }
+}
+
 fn rect(ui: &Frame) -> [[f32; 2]; 2] {
     [ui.item_rect_min(), ui.item_rect_max()]
 }
@@ -415,6 +439,9 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
             }
         }
         r.params_changed |= panel(ui, m, r, &reference, def.name);
+        if def.name == panels::AGEING {
+            wear_buttons(ui, m, r);
+        }
         ui.dummy([0.0, METRICS.section_gap * theme::scale_of(ui)]);
     }
 

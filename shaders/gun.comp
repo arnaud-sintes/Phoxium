@@ -15,6 +15,9 @@
 // A power law with gamma exactly 1 returns V unchanged (no pow, so the identity is bit exact). gun_gamma is
 // clamped to >= 0.1 (include/gun_law.glsl).
 //
+// T-42 ageing (params.ageing_enable, off by default: the branch below is not taken, bit for bit unchanged):
+// I = (1 - ageing_cathode_loss_rgb) * law(V - ageing_cutoff_drift_rgb) per gun.
+//
 // Reads the amp output (binding 2) and writes its own image (binding 3), both amp_size(): no in-place
 // update (every chain stage writes a new image).
 
@@ -50,5 +53,13 @@ void main() {
         return;
     }
     vec4 drive = texelFetch(drive_in, p, 0);
-    imageStore(current_out, p, round_f16(vec4(gun_current(drive.rgb), drive.a)));
+    if (!params.ageing_enable) {
+        imageStore(current_out, p, round_f16(vec4(gun_current(drive.rgb), drive.a)));
+        return;
+    }
+    // T-42 cathode wear (oracle crt_model::ageing::Cathode): the cutoff drifts by d (the drive is lowered
+    // before the law, the laws clamp what falls below their cutoff) and the emission loses a fraction.
+    vec3 i = gun_current(drive.rgb - params.ageing_cutoff_drift_rgb);
+    i *= vec3(1.0) - params.ageing_cathode_loss_rgb;
+    imageStore(current_out, p, round_f16(vec4(i, drive.a)));
 }

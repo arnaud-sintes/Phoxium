@@ -1,0 +1,142 @@
+# Ageing parameters (T-42, QUESTIONS PHY-14; ARCHITECTURE section 5, step 5). Format: crates/paramgen/src/lib.rs.
+# Each id is defined once in the whole params/ folder. Oracle: crates/crt-model/src/ageing.rs.
+# Tube-wide wear, opt-in (ageing_enable off = the chain is unchanged, bit for bit):
+# - phosphor efficiency loss per colour from the hours of use (Pfahnl law 1 / (1 + c Q), Q in reference hours of
+#   full white at 350 cd/m2, calibrated on the one sourced point: 15 % luminance loss after 20,000 h at 350 cd/m2),
+#   applied in the `wear` slot (shaders/wear.comp);
+# - cathode wear: emission loss and cutoff drift per gun, applied in `gun` (shaders/gun.comp);
+# - spot growth: the beam spot law scaled, applied to the beam widths on the CPU (src/ageing.rs).
+# The wear rates, the white luminance and the reference point are also the constants of the burn-in map
+# (params/burnin.toml), which uses them whether ageing_enable is on or not.
+
+[[param]]
+id = "ageing_enable"
+stage = "ageing"
+type = "bool"
+unit = "1"
+default = false
+tag = "E"
+source = "QUESTIONS PHY-14 decision 2026-11-18: ageing in scope, opt-in, off by default"
+description = "Tube ageing on or off. On: the phosphors have lost efficiency after the hours of use below (blue fastest, so white drifts warm), and the cathode wear and spot growth below apply. Off: a new tube, the picture is unchanged."
+group = "Ageing"
+
+[[param]]
+id = "ageing_hours"
+stage = "ageing"
+type = "f32"
+unit = "h"
+default = 0.0
+min = 0.0
+max = 50000.0
+tag = "E"
+source = "CRT.md Saturation and ageing (15 % luminance loss after 20,000 h at 350 cd/m2, one datasheet); the hours are the user's choice"
+description = "Hours the tube has been used. With the mean picture level and the white luminance they give the charge the phosphors received, in hours of full white at 350 cd/m2. 20,000 h of full white at 350 cd/m2 costs 15 % of the white luminance. Used only while Tube ageing is on."
+group = "Ageing"
+
+[[param]]
+id = "ageing_mean_level"
+stage = "ageing"
+type = "f32"
+unit = "1"
+default = 0.3
+min = 0.0
+max = 1.0
+tag = "E"
+source = "Average picture level of typical content over a tube's life, not measured (QUESTIONS PHY-14: the colour ratios and wear curve are estimates)"
+description = "Average picture level over the tube's life (1 = full white all the time). Scales the charge of the hours of use: 0.3 means the phosphors received 30 % of what a full-white field would have given them."
+group = "Ageing"
+
+[[param]]
+id = "ageing_white_cd_m2"
+stage = "ageing"
+type = "f32"
+unit = "cd/m2"
+default = 100.0
+min = 50.0
+max = 400.0
+tag = "S"
+source = "CRT.md Luminance table: broadcast reference white 100 cd/m2 (BVM-1911 103 cd/m2), EBU/SMPTE practice 80 to 120 cd/m2"
+description = "Luminance of the tube's full white (light 1). The wear law is calibrated at 350 cd/m2, so a tube run at 100 cd/m2 wears 100 / 350 as fast. Also used by the burn-in map."
+group = "Ageing"
+
+[[param]]
+id = "ageing_rates_rgb"
+stage = "ageing"
+type = "vec3"
+unit = "1"
+default = [0.5, 1.0, 2.0]
+min = 0.0
+max = 4.0
+tag = "E"
+source = "CRT.md Saturation and ageing: blue usually degrades fastest [S][K]; the ratios (red oxysulfide most robust) are an estimate, no measured per-colour curve (QUESTIONS PHY-14)"
+description = "Relative wear rate of the red, green and blue phosphors. The rates are rescaled so a white worn for the reference hours loses the reference loss; a higher blue rate makes white turn warm (yellowish) with age and burn-in ghosts tinted. Also used by the burn-in map."
+group = "Ageing"
+advanced = true
+
+[[param]]
+id = "ageing_ref_loss"
+stage = "ageing"
+type = "f32"
+unit = "1"
+default = 0.15
+min = 0.0
+max = 0.5
+tag = "S"
+source = "CRT.md Saturation and ageing: one datasheet allows 15 % luminance loss after 20,000 h at 350 cd/m2"
+description = "Calibration of the wear law: luminance loss of a white field after the reference hours at 350 cd/m2. Also used by the burn-in map."
+group = "Ageing"
+advanced = true
+
+[[param]]
+id = "ageing_ref_hours"
+stage = "ageing"
+type = "f32"
+unit = "h"
+default = 20000.0
+min = 1000.0
+max = 100000.0
+tag = "S"
+source = "CRT.md Saturation and ageing: one datasheet allows 15 % luminance loss after 20,000 h at 350 cd/m2"
+description = "Calibration of the wear law: hours of full white at 350 cd/m2 after which white has lost the reference loss. Also used by the burn-in map."
+group = "Ageing"
+advanced = true
+
+[[param]]
+id = "ageing_cathode_loss_rgb"
+stage = "ageing"
+type = "vec3"
+unit = "1"
+default = [0.0, 0.0, 0.0]
+min = 0.0
+max = 0.5
+tag = "E"
+source = "QUESTIONS PHY-14 (lower maximum beam current from cathode wear); CRT.md has no measured cathode wear curve, so this is a direct parameter"
+description = "Emission loss of each gun's cathode (red, green, blue): the beam current at a given drive is multiplied by 1 - loss. A worn gun gives a dimmer channel and a colour cast. Used only while Tube ageing is on."
+group = "Ageing"
+
+[[param]]
+id = "ageing_cutoff_drift_rgb"
+stage = "ageing"
+type = "vec3"
+unit = "1"
+default = [0.0, 0.0, 0.0]
+min = -0.05
+max = 0.1
+tag = "E"
+source = "QUESTIONS PHY-14 (cutoff drift from cathode wear); CRT.md Gun law (I = k V_drive^gamma above cutoff); the size of the drift is not measured"
+description = "Cutoff drift of each gun, as a fraction of the full drive voltage: the drive is lowered by this much before the gun law, so dark tones of that channel crush to black (positive) or lift (negative). Used only while Tube ageing is on."
+group = "Ageing"
+advanced = true
+
+[[param]]
+id = "ageing_spot_growth"
+stage = "ageing"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 1.0
+max = 2.0
+tag = "E"
+source = "QUESTIONS PHY-14 (slightly larger spot from cathode wear); CRT.md Spot growth with beam current gives the law, not its change with age"
+description = "Growth factor of the beam spot of a worn gun: the spot width (FWHM) at every beam current is multiplied by this factor, so the scanlines get softer. Used only while Tube ageing is on."
+group = "Ageing"

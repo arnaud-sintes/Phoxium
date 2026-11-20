@@ -559,6 +559,16 @@ impl Headless {
         Ok(())
     }
 
+    /// The pipeline (the `tube_state::WearHost` implementation of `gpu/mod.rs`).
+    pub(super) fn pipeline_mut(&mut self) -> &mut Pipeline {
+        &mut self.pipeline
+    }
+
+    /// The pipeline and its context.
+    pub(super) fn parts(&mut self) -> (&mut Pipeline, &Context) {
+        (&mut self.pipeline, &self.ctx)
+    }
+
     /// A headless renderer whose pipeline runs `chain` instead of [`super::stages::CHAIN`].
     #[cfg(test)]
     pub(super) fn with_chain(validation: bool, chain: &'static [super::stages::Registration]) -> Res<Self> {

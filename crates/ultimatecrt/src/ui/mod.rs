@@ -89,6 +89,17 @@ pub struct UiOutput {
     pub library: Option<Library>,
     /// The `[global.gpu] adapter` value chosen in the menu, for the settings (used at the next start).
     pub gpu_adapter: Option<String>,
+    /// A burn-in action (T-43), for `tube_state::TubeState`.
+    pub wear_action: Option<WearAction>,
+}
+
+/// A burn-in action of the menu's ageing panel (T-43).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum WearAction {
+    /// Wear the current picture for this many hours at once.
+    BurnInNow(f32),
+    /// Start a new tube: the wear map cleared and its file replaced.
+    NewTube,
 }
 
 /// How a [`Ui`] is set up.
@@ -676,6 +687,9 @@ impl UiPass for Ui {
             }
             if r.gpu_adapter.is_some() {
                 self.out.gpu_adapter = r.gpu_adapter;
+            }
+            if r.wear_action.is_some() {
+                self.out.wear_action = r.wear_action;
             }
         }
         if open && self.output.is_some() {

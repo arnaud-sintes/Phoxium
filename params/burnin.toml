@@ -1,0 +1,47 @@
+# Burn-in parameters (T-43, QUESTIONS PHY-14, SCP-6; ARCHITECTURE section 5, step 5). Format: crates/paramgen/src/lib.rs.
+# Each id is defined once in the whole params/ folder. Oracle: crates/crt-model/src/burnin.rs.
+# A per-colour wear map on the tube face (640 x 480 texels over the visible area, independent of the host
+# resolution) accumulates the charge the beam deposits, in reference hours of full white at 350 cd/m2, and lowers
+# the phosphor efficiency where the picture was bright (shaders/wear.comp, shaders/wear_accumulate.comp). The wear
+# law, the white luminance and the colour rates are those of params/ageing.toml. The map is saved per tube preset
+# in %APPDATA%\ultimateCRT\tubes\<preset>.state (src/tube_state.rs). Burn-in deliberately degrades the picture.
+
+[[param]]
+id = "burnin_enable"
+stage = "burnin"
+type = "bool"
+unit = "1"
+default = false
+tag = "E"
+source = "QUESTIONS PHY-14 decision 2026-11-18: burn-in in scope, opt-in, off by default, persistent per-colour wear map"
+description = "Burn-in on or off. On: static bright parts of the picture (a HUD, a letterbox edge, a logo) slowly wear the phosphors and leave a ghost, tinted by the colour that wore; the wear is saved between sessions. It deliberately degrades the picture. Off: no wear is added or shown (the saved wear is kept)."
+group = "Burn-in"
+
+[[param]]
+id = "burnin_acceleration"
+stage = "burnin"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 1.0
+max = 1000000.0
+tag = "E"
+source = "QUESTIONS PHY-14 (wear takes thousands of real hours, so the model needs a time-acceleration control)"
+description = "How many tube hours pass per real hour. 1 is real time (visible burn-in takes thousands of hours), 3600 makes every second an hour, 1,000,000 shows a ghost within seconds. 0 (typed) freezes the wear. Used only while Burn-in is on."
+group = "Burn-in"
+widget = "log"
+
+[[param]]
+id = "burnin_now_hours"
+stage = "burnin"
+type = "f32"
+unit = "h"
+default = 1000.0
+min = 1.0
+max = 100000.0
+tag = "E"
+source = "QUESTIONS PHY-14 ('burn in now' tool)"
+description = "Hours applied at once by the menu button 'Burn in now': the current picture is worn as if it had been shown this long (without the acceleration)."
+group = "Burn-in"
+widget = "log"
+advanced = true

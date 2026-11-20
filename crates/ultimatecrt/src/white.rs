@@ -68,6 +68,19 @@ pub fn white_retune_gains_from_chromaticities(
     (max.is_finite() && max > 0.0).then(|| q.map(|v| (v / max) as f32))
 }
 
+/// Luminance shares of the three primaries in the tube white (`tube_*_xy`): `s(tube white)`, which sums to 1
+/// because every unit-luminance primary has Y = 1 and the white has Y = 1 (the wear law of T-42 and T-43 is
+/// calibrated on this white). `None` when the white is not reachable (see [`white_retune_gains_from_chromaticities`]).
+pub fn luminance_shares(params: &Params) -> Option<[f64; 3]> {
+    let (r, g, b) = (
+        xyz(params.tube_red_xy)?,
+        xyz(params.tube_green_xy)?,
+        xyz(params.tube_blue_xy)?,
+    );
+    let p = [[r[0], g[0], b[0]], [r[1], g[1], b[1]], [r[2], g[2], b[2]]];
+    weights(p, xyz(params.tube_white_xy)?)
+}
+
 /// The gains of the frame: the retune from `tube_white_xy` to `gun_retune_white_xy` of the parameter table
 /// when `gun_white_balance` is on and both whites are reachable, else the neutral (1, 1, 1).
 pub fn white_gains(params: &Params) -> [f32; 3] {

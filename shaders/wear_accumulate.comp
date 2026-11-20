@@ -1,0 +1,73 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `wear`, second pass (T-43 burn-in, QUESTIONS PHY-14; oracle crt_model::burnin, WearMap::accumulate): one
+// invocation per map texel adds the charge of this frame,
+//
+//   Q_c += pc.scale x (1 / (t_x t_y)) sum_p overlap_x(p) overlap_y(p) x_c(p),
+//
+// the exact area mean of the slot's input light over the texel's footprint (host pixels outside the tube image
+// are black), times pc.scale = frame hours x acceleration x L_w / 350 (+ the hours of a 'burn in now'). The
+// input light is that of a fresh phosphor (the beam charge), never negative here (clamped).
+//
+// FP32 with compensated (Kahan) summation: at real time one frame adds about 1e-6 reference hours, which a plain
+// FP32 sum would lose against a charge of 1000 h (one ulp is 6e-5 there). The running compensation is the
+// second map image (binding 1); `precise` keeps the compiler from reassociating the four operations.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 1, binding = 0, rgba32f) uniform image2D wear_sum;
+layout(set = 1, binding = 1, rgba32f) uniform image2D wear_comp;
+
+// std430, 40 bytes, mirrored by `Push` in src/gpu/stages/wear.rs (the same block as wear.comp).
+layout(push_constant) uniform Wear {
+    vec4 c_qage;
+    vec4 place;
+    float scale;
+    uint use_map;
+} pc;
+
+// Longest run of host pixels per texel axis visited (a texel wider than this many pixels is truncated).
+const int MAX_SPAN = 64;
+
+void main() {
+    ivec2 t = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(t, imageSize(wear_sum)))) {
+        return;
+    }
+    vec2 x0 = pc.place.xy + vec2(t) * pc.place.zw;
+    vec2 x1 = x0 + pc.place.zw;
+    ivec2 size = textureSize(light_in, 0);
+    ivec2 p0 = max(ivec2(floor(x0)), ivec2(0));
+    ivec2 p1 = min(min(ivec2(ceil(x1)), size), p0 + MAX_SPAN);
+    vec3 sum = vec3(0.0);
+    for (int py = p0.y; py < p1.y; ++py) {
+        float oy = min(x1.y, float(py + 1)) - max(x0.y, float(py));
+        if (oy <= 0.0) {
+            continue;
+        }
+        for (int px = p0.x; px < p1.x; ++px) {
+            float ox = min(x1.x, float(px + 1)) - max(x0.x, float(px));
+            if (ox <= 0.0) {
+                continue;
+            }
+            vec3 l = texelFetch(light_in, ivec2(px, py), 0).rgb;
+            // Never negative, and a non-finite input (ordered compare false for NaN) counts as black.
+            l = mix(vec3(0.0), l, greaterThan(l, vec3(0.0)));
+            l = min(l, vec3(65504.0));
+            sum += ox * oy * l;
+        }
+    }
+    vec3 inc = pc.scale * sum / (pc.place.z * pc.place.w);
+    precise vec3 s = imageLoad(wear_sum, t).rgb;
+    precise vec3 c = imageLoad(wear_comp, t).rgb;
+    precise vec3 y = inc - c;
+    precise vec3 n = s + y;
+    precise vec3 cn = (n - s) - y;
+    imageStore(wear_sum, t, vec4(n, 0.0));
+    imageStore(wear_comp, t, vec4(cn, 0.0));
+}

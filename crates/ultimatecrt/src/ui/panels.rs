@@ -46,6 +46,8 @@ pub struct PanelDef {
 
 pub const SOURCE: &str = "Source and placement";
 pub const OPTICS: &str = "Optics";
+/// Ageing and burn-in (T-42, T-43): the menu adds the "Burn in now" and "New tube" buttons under its rows.
+pub const AGEING: &str = "Ageing and burn-in";
 pub const OUTPUT: &str = "Output and headroom";
 /// The panel of parameters whose stage no panel lists (none in the product; the test table's entries).
 pub const OTHER: &str = "Other";
@@ -92,6 +94,12 @@ pub const PANELS: &[PanelDef] = &[
         name: "Phosphor",
         stages: &["phosphor"],
         first: &[],
+        empty_note: None,
+    },
+    PanelDef {
+        name: AGEING,
+        stages: &["ageing", "burnin"],
+        first: &["ageing_enable", "ageing_hours", "burnin_enable", "burnin_acceleration"],
         empty_note: None,
     },
     PanelDef {
