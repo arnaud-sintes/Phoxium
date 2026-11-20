@@ -464,6 +464,48 @@ fn a_typed_value_beyond_the_slider_range_is_clamped() {
     rig.finish();
 }
 
+/// The glow weight slider of the Optics panel (owner request 2026-11-20) takes a typed value: beyond its slider
+/// range (0 to 0.3) it is clamped to it, inside it is kept; the panel shows the master switch first.
+#[test]
+fn a_typed_glow_weight_is_clamped_to_its_slider() {
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config(
+        "a_typed_glow_weight_is_clamped_to_its_slider",
+        1280,
+        1080,
+        tall_config(),
+    ) else {
+        return;
+    };
+    rig.state.params = Params::default();
+    rig.open_menu();
+    rig.click_item("header:Output and headroom");
+    rig.click_item("header:Optics");
+    let enable = rig.item("widget:optics_enable");
+    let glow = rig.item("widget:optics_bloom_weight");
+    assert!(enable[0][1] < glow[0][1], "the master switch is the first row");
+    let (_, hi) = ultimatecrt::params::meta("optics_bloom_weight")
+        .unwrap()
+        .soft_range
+        .unwrap();
+    for (text, want) in [("5", hi as f32), ("0.12", 0.12), ("-1", 0.0)] {
+        let p = MenuRects::at(rig.item("widget:optics_bloom_weight"), 0.5, 0.5);
+        let l = mouse_lparam(p[0] as i16, p[1] as i16);
+        rig.frame(&[(WM_KEYDOWN, 0x11, key_lparam(0x1D, false, false))]);
+        rig.frame(&[(WM_MOUSEMOVE, 0, l)]);
+        rig.frame(&[(WM_LBUTTONDOWN, 1, l)]);
+        rig.frame(&[(WM_LBUTTONUP, 0, l)]);
+        rig.frame(&[(WM_KEYUP, 0x11, key_lparam(0x1D, false, true))]);
+        rig.type_text(text);
+        rig.key(0x0D, 0x1C, false); // Enter
+        rig.frame(&[]);
+        let got = rig.state.params.optics_bloom_weight;
+        eprintln!("typed {text}: glow weight {got}");
+        assert_eq!(got, want, "typed {text}");
+    }
+    rig.finish();
+}
+
 #[test]
 fn preset_selector_applies_the_preset() {
     let _g = lock();

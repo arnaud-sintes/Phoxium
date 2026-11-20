@@ -47,10 +47,15 @@ pub struct PanelDef {
     pub first: &'static [&'static str],
     /// Shown when the panel has no parameter (a stage not built yet).
     pub empty_note: Option<&'static str>,
+    /// One plain sentence shown at the top of the panel, above its rows (not during a search).
+    pub intro: Option<&'static str>,
 }
 
 pub const SOURCE: &str = "Source and placement";
 pub const OPTICS: &str = "Optics";
+/// The sentence at the top of the Optics panel: its effects are behind the master switch, off by default.
+pub const OPTICS_INTRO: &str =
+    "Glow, vignette and the other effects below only work with Enable (the first row) on; it is off by default.";
 /// Ageing and burn-in (T-42, T-43): the menu adds the "Burn in now" and "New tube" buttons under its rows.
 pub const AGEING: &str = "Ageing and burn-in";
 pub const OUTPUT: &str = "Output and headroom";
@@ -66,18 +71,21 @@ pub const PANELS: &[PanelDef] = &[
         stages: &["source", "tube"],
         first: &["source_scale_mode", "source_scale"],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: "Signal and amplifier",
         stages: &["signal", "composite", "amp"],
         first: &[],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: "Gun and white",
         stages: &["gun", "colour"],
         first: &[],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: "Beam and scanlines",
@@ -85,42 +93,51 @@ pub const PANELS: &[PanelDef] = &[
         stages: &["beam", "interlace", "abl"],
         first: &[],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: "Mask",
         stages: &["mask"],
         first: &["mask_enabled", "mask_type", "mask_pitch_mm"],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: "Geometry",
         stages: &["geometry"],
         first: &[],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: "Phosphor",
         stages: &["phosphor"],
         first: &[],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: AGEING,
         stages: &["ageing", "burnin"],
         first: &["ageing_enable", "ageing_hours", "burnin_enable", "burnin_acceleration"],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: OPTICS,
         stages: &["optics"],
-        first: &["optics_enable", "optics_halation_weight", "optics_glare_weight"],
+        // The master switch first; the rows follow params/optics.toml, grouped (Glow (bloom), Vignette, Glass halo
+        // and glare, Phosphor diffusion, Tint and room).
+        first: &["optics_enable"],
         empty_note: None,
+        intro: Some(OPTICS_INTRO),
     },
     PanelDef {
         name: OUTPUT,
         stages: &["output"],
         first: &["output_headroom_mode", "exposure"],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         // T-48: the quality tier and its automatic drop (params/quality.toml).
@@ -128,12 +145,14 @@ pub const PANELS: &[PanelDef] = &[
         stages: &["quality"],
         first: &["quality_tier", "quality_auto"],
         empty_note: None,
+        intro: None,
     },
     PanelDef {
         name: OTHER,
         stages: &[],
         first: &[],
         empty_note: None,
+        intro: None,
     },
 ];
 
@@ -762,6 +781,11 @@ pub fn panel_body(
         g
     };
     let searching = !query.trim().is_empty();
+    if let Some(intro) = panel(name).and_then(|p| p.intro).filter(|_| !searching) {
+        let wrap = ui.push_text_wrap_pos(0.0);
+        ui.text_colored(PALETTE.text_faint, intro);
+        drop(wrap);
+    }
     let mut last_group = None;
     let mut hidden = 0;
     for m in &all {
@@ -770,11 +794,14 @@ pub fn panel_body(
             continue;
         }
         if groups.len() > 1 && last_group != Some(m.group) {
-            theme::subheading(ui, fonts, m.group);
-            if let Some(note) = group_note(m.group) {
-                let wrap = ui.push_text_wrap_pos(0.0);
-                ui.text_colored(PALETTE.text_faint, note);
-                drop(wrap);
+            // A group named as the panel (its master switch) needs no subheading of its own.
+            if m.group != name {
+                theme::subheading(ui, fonts, m.group);
+                if let Some(note) = group_note(m.group) {
+                    let wrap = ui.push_text_wrap_pos(0.0);
+                    ui.text_colored(PALETTE.text_faint, note);
+                    drop(wrap);
+                }
             }
             last_group = Some(m.group);
         }
@@ -870,10 +897,36 @@ mod tests {
         assert!(ids.contains(&"mask_depth"));
         assert!(!panel_params("Mask").iter().any(|m| m.id == "mask_depth"));
         let optics: Vec<&str> = panel_params(OPTICS).iter().map(|m| m.id).collect();
+        assert_eq!(optics[..2], ["optics_enable", "optics_bloom_weight"]);
+    }
+
+    /// The Optics panel (owner request 2026-11-20): the master switch first, then the groups in order, each
+    /// group's rows together (one subheading each), and the intro sentence naming the switch.
+    #[test]
+    fn the_optics_panel_is_grouped_with_the_master_switch_first() {
+        let rows = panel_params(OPTICS);
+        assert_eq!(rows[0].id, "optics_enable");
+        assert_eq!(rows[0].group, OPTICS, "the switch has no subheading of its own");
+        let mut groups: Vec<&str> = Vec::new();
+        for m in &rows[1..] {
+            if groups.last() != Some(&m.group) {
+                assert!(!groups.contains(&m.group), "{} splits the group {}", m.id, m.group);
+                groups.push(m.group);
+            }
+        }
         assert_eq!(
-            optics[..3],
-            ["optics_enable", "optics_halation_weight", "optics_glare_weight"]
+            groups,
+            [
+                "Glow (bloom)",
+                "Vignette",
+                "Glass halo and glare",
+                "Phosphor diffusion",
+                "Tint and room"
+            ]
         );
+        let intro = panel(OPTICS).and_then(|p| p.intro).unwrap();
+        assert!(intro.contains("Enable") && intro.contains("off by default"));
+        assert!(PANELS.iter().filter(|p| p.intro.is_some()).count() == 1);
     }
 
     #[test]

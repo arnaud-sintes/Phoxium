@@ -1,0 +1,39 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `optics`, bloom (owner request 2026-11-20; oracle crt_model::optics::Bloom): one half of the separable
+// Gaussian blur of a bloom lobe on its pyramid level (src/gpu/stages/optics.rs, `bloom_lobe`). The level read
+// bilinearly at full resolution already acts as a Gaussian of variance (4^l - 1) / 12 + 4^l / 6 px^2 (box chain
+// and bilinear tent); this blur adds the rest of the lobe's variance, sigma t texels, with the weights w(d) of
+// the storage buffer (pixel-box overlaps, unit sum, d = 0 .. R). Zero outside the level (no light there).
+//
+// pc.info: x the radius R (<= OPT_BLOOM_R_MAX), y the direction (0 horizontal, 1 vertical), z the offset of the
+// lobe's weights in the buffer.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "optics.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0, rgba16f) uniform readonly image2D src;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D dst;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(dst);
+    if (any(greaterThanEqual(p, sz))) {
+        return;
+    }
+    int r = min(pc.info.x, OPT_BLOOM_R_MAX);
+    ivec2 dir = pc.info.y == 0 ? ivec2(1, 0) : ivec2(0, 1);
+    int off = pc.info.z;
+    vec3 acc = vec3(0.0);
+    for (int d = -r; d <= r; ++d) {
+        ivec2 q = p + d * dir;
+        if (all(greaterThanEqual(q, ivec2(0))) && all(lessThan(q, sz))) {
+            acc += opt_buf.weight[off + abs(d)] * imageLoad(src, q).rgb;
+        }
+    }
+    imageStore(dst, p, round_f16(vec4(acc, 1.0)));
+}

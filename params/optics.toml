@@ -3,6 +3,10 @@
 # dimensionless. T-45 (CRT.md rule 7, "Glass, halation, glare and reflections"; QUESTIONS PHY-10). The model and
 # its derivation are in the oracle crates/crt-model/src/optics.rs. Off by default (D-6, D-24: halation is not in
 # the first usable version): with optics_enable off the stage is skipped as an exact identity.
+#
+# Entries are in menu order: the master switch first, then one `group` per subheading of the Optics panel (Glow
+# (bloom), Vignette, Glass halo and glare, Phosphor diffusion, Tint and room; src/ui/panels.rs). The glow and the
+# vignette shape controls were added on the owner's request of 2026-11-20 (QUESTIONS PHY-10, ARCHITECTURE A29).
 
 [[param]]
 id = "optics_enable"
@@ -12,8 +16,241 @@ unit = "1"
 default = false
 tag = "D"
 source = "PLAN D-6 and D-24 (optics off in the first usable version); CRT.md rule 7 and Glass, halation, glare and reflections"
-description = "Faceplate optics on or off. On: phosphor-layer diffusion, the halation ring of the glass, veiling glare, vignetting, glass tint and ambient reflection, each with its own amount below. Off: the picture passes unchanged."
+description = "Master switch of the whole Optics panel: glow (bloom), vignette, the glass halo and glare, phosphor diffusion, tint and room light. Off (the default): none of them is applied, whatever their own settings, and the picture passes unchanged. Turn it on to use any of them; each then has its own amount (0 keeps that effect off)."
 group = "Optics"
+
+# --- Glow (bloom) -------------------------------------------------------------------------------------------
+
+[[param]]
+id = "optics_bloom_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 0.3
+hard_min = 0.0
+hard_max = 0.6
+hard_why = "an energy fraction: the light a pixel gives to the glow leaves its direct image; above 0.6 the picture would be mostly glow, and with the halation and glare weights the sum is kept at 1 or less (Params::constrain)"
+tag = "E"
+source = "Owner request 2026-11-20 (QUESTIONS PHY-10). CRT.md Other stray-light mechanisms (long weak scatter tail) and the eye's glare spread function (CIE, power-law tail); no sourced amplitude, an artistic amount. Model: crt_model::optics::Bloom"
+description = "Glow: a soft, wide halo around bright areas (bright text, sprites, highlights bleed light around them). The fraction of the light that leaves each pixel into the glow; the direct picture keeps the rest, so a full white field keeps its level. 0 is off. About 0.05 to 0.15 for a gentle glow, 0.2 to 0.3 for a strong one. Needs the Optics master switch on. With the halation and glare weights it is limited to a sum of 1 (the value just set is lowered)."
+group = "Glow (bloom)"
+
+[[param]]
+id = "optics_bloom_radius_mm"
+stage = "optics"
+type = "f32"
+unit = "mm"
+default = 6.0
+min = 0.5
+max = 60.0
+hard_min = 0.1
+hard_max = 500.0
+hard_why = "a positive size on the tube (beyond a few hundred mm the glow is wider than any tube)"
+tag = "E"
+source = "Owner request 2026-11-20; crt_model::optics::Bloom (1/e radius r of the dominant Gaussian lobe, sigma r / sqrt 2)"
+description = "Size of the glow on the tube face: the radius at which the main part of the glow falls to 1/e (37 %) of its centre. A few mm hugs the bright areas; 20 mm and more spreads it over the picture. The falloff below adds wider lobes at 3 and 9 times this radius."
+group = "Glow (bloom)"
+
+[[param]]
+id = "optics_bloom_falloff"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.5
+min = 0.0
+max = 1.0
+hard_why = "a mixing fraction in [0, 1]"
+tag = "E"
+source = "crt_model::optics::bloom_lobe_weights: lobes at r, 3 r, 9 r weighted 1 - f / 2, 0.3 f, 0.2 f (sum 1), imitating the heavy tail of the eye's glare"
+description = "Shape of the glow's edge. 0: a single smooth Gaussian, the glow ends quickly. 1: a long faint tail (wider lobes at 3 and 9 times the radius), the look of light scattering in the glass and the eye. The total amount does not change."
+group = "Glow (bloom)"
+
+[[param]]
+id = "optics_bloom_threshold"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.5
+hard_min = 0.0
+hard_max = 10.0
+hard_why = "a brightness in units of the tube white, not negative"
+tag = "E"
+source = "Artistic (physical scatter has no threshold): crt_model::optics::bloom_feed, soft knee of half width T / 2 on the brightest channel of the light averaged at half the glow's size"
+description = "Only light brighter than this feeds the glow (1 = the tube white), with a soft knee, so highlights glow while mid-tones stay clean. 0: all light glows a little, as in a real tube. Try 0.5 to 0.8 for glowing highlights only."
+group = "Glow (bloom)"
+
+[[param]]
+id = "optics_bloom_tint_rgb"
+stage = "optics"
+type = "vec3"
+unit = "1"
+default = [1.0, 1.0, 1.0]
+min = 0.0
+max = 1.0
+hard_why = "a per-channel fraction of the glow weight in [0, 1] (energy conserving per channel)"
+tag = "E"
+source = "crt_model::optics::Bloom (tint): the weight per channel is the glow weight times this; each channel keeps its energy"
+description = "How much each channel (red, green, blue) glows, as a fraction of the glow weight. (1, 1, 1): neutral. Lower green and blue for a warm glow."
+group = "Glow (bloom)"
+advanced = true
+
+# --- Vignette -----------------------------------------------------------------------------------------------
+
+[[param]]
+id = "optics_vignette_enable"
+stage = "optics"
+type = "bool"
+unit = "1"
+default = true
+tag = "D"
+source = "Owner request 2026-11-20 (QUESTIONS PHY-10): the vignette on or off on its own, its settings kept"
+description = "Vignette (darker corners) on or off, keeping its settings. Needs the Optics master switch on."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_corner"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.85
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a relative brightness in [0, 1] (0 reads as 0.0001, black to the eye, so the falloff stays smooth); 1 is no vignetting"
+tag = "S"
+source = "CRT.md Uniformity: centre-to-corner luminance 73 % (Barco CDCT 6551), 87 % (Sony 17se), 70 to 90 % typical; a 21 in datasheet specifies 80 to 110 %. Profile v^(rho^2) from the glass thickness growing with the square of the radius, T_edge = T_centre^(t_edge / t_centre) [D]"
+description = "Brightness at the corners of the picture relative to the centre (1 = no vignetting). Real tubes: 0.7 to 0.9 (thicker glass toward the edges, the physical case). Lower values are an artistic grade: 0.3 is a strong vignette, 0 to 0.05 black corners. With the shape controls at their defaults it falls off as v^(rho^2), rho being the distance from the centre over the half diagonal."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_floor"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.0
+hard_why = "a brightness fraction in [0, 1]"
+tag = "E"
+source = "Artistic grade (crt_model::optics::Vignette): gain = floor + (1 - floor) v^p"
+description = "Least light the vignette leaves anywhere, as a fraction of the centre: the darkening is scaled into the range from this floor to 1. 0 lets the corners go as dark as the corner value says (black at 0); 0.5 halves the effect."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_start"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 0.9
+hard_min = 0.0
+hard_max = 0.95
+hard_why = "a radius fraction below 1, the corner (the falloff runs from the start to the corner)"
+tag = "E"
+source = "Artistic grade (crt_model::optics::Vignette): x = (rho - start) / (1 - start)"
+description = "Where the darkening begins, as a fraction of the distance from the centre to the corner. 0: from the centre (the physical glass falloff); 0.5: the middle of the picture stays untouched."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_exponent"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 2.0
+min = 0.5
+max = 8.0
+hard_min = 0.25
+hard_max = 16.0
+hard_why = "a positive power (very high or low powers turn the falloff into a step)"
+tag = "E"
+source = "Artistic grade (crt_model::optics::Vignette): profile p = x^exponent; 2 is the physical v^(rho^2)"
+description = "Shape of the falloff. 2 (default): the physical glass law. Higher: the centre stays bright longer and the edges drop fast; lower: a gradual darkening that starts right away."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_softness"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.0
+hard_why = "a width in [0, 1] of the normalised radius"
+tag = "E"
+source = "Artistic grade (crt_model::optics::Vignette): C1 quadratic onset of this width after the start radius"
+description = "Smooths the onset of the darkening at the start radius over this width (a fraction of the distance to the corner), so no edge shows where it begins. 0: a plain start (invisible when the start is 0)."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_roundness"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.0
+max = 1.0
+hard_why = "a blend fraction in [0, 1]"
+tag = "E"
+source = "Artistic grade (crt_model::optics::Vignette): rho^2 blended between d^2 / half diagonal^2 (round) and the half-axes ellipse ((dx / a)^2 + (dy / b)^2) / 2"
+description = "1: a round vignette (the physical case: the same darkening at the same distance from the centre). 0: it follows the picture's shape (an ellipse touching the middle of every edge alike), so the sides of a wide picture darken as much as the top and bottom."
+group = "Vignette"
+
+[[param]]
+id = "optics_vignette_centre_xy"
+stage = "optics"
+type = "vec2"
+unit = "1"
+default = [0.0, 0.0]
+min = -0.3
+max = 0.3
+hard_min = -0.5
+hard_max = 0.5
+hard_why = "an offset within half the picture"
+tag = "E"
+source = "Artistic grade (crt_model::optics::Vignette): the centre moved by these fractions of the half width and half height"
+description = "Moves the bright centre of the vignette, as fractions of the half width (x, right positive) and half height (y, down positive). (0, 0): centred."
+group = "Vignette"
+advanced = true
+
+# --- Glass halo and glare -----------------------------------------------------------------------------------
+
+[[param]]
+id = "optics_halation_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.015
+min = 0.0
+max = 0.1
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "an energy fraction; with the glare and glow weights the sum is kept at 1 or less (Params::constrain), else the direct picture gets a negative weight"
+tag = "E"
+source = "CRT.md Halation: amplitude 0.5 to 5 % (unresolved; only the total veiling glare is sourced, about 4 % for a colour monitor, Flynn and Badano 1999); QUESTIONS PHY-10 default about 1.5 %; Starting presets 1 to 3 %"
+description = "Fraction of the emitted light that ends in the halation halo (the thin ring around every bright point, about 1.75 times the glass thickness away, and its faint inner haze). The direct picture keeps the rest, so a full white field keeps its level; with the glare and glow weights it is limited to a sum of 1 (the value just set is lowered). The ring's shape comes from the glass thickness, index and transmission. For a soft glow use the Glow (bloom) controls."
+group = "Glass halo and glare"
+
+[[param]]
+id = "optics_glare_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.01
+min = 0.0
+max = 0.1
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "an energy fraction; with the halation and glow weights the sum is kept at 1 or less (Params::constrain), else the direct picture gets a negative weight"
+tag = "E"
+source = "CRT.md Other stray-light mechanisms (light leaking behind the phosphor, nearly uniform) and Halation (total glare about 4 % on a colour monitor, 0.4 % on a medical one, halation included); ANSI contrast 100 to 150:1"
+description = "Fraction of the emitted light spread evenly over the whole screen (veiling glare): every point receives this fraction of the mean picture level, so dark areas lift on bright pictures. The picture keeps its total light. With the halation and glow weights it is limited to a sum of 1 (the value just set is lowered)."
+group = "Glass halo and glare"
 
 [[param]]
 id = "optics_glass_thickness_mm"
@@ -29,7 +266,7 @@ hard_why = "a positive thickness"
 tag = "S"
 source = "CRT.md Faceplate: centre thickness 9 to 13.5 mm for 400 to 760 mm diagonals, 15 mm on a 28 in flat-face tube (patents US 7,176,611, US 4,537,322, US 6,133,686, US Re. 39,739)"
 description = "Thickness of the faceplate glass at the centre. The halation ring sits at 2 t tan(asin(1 / n)), about 1.75 times this thickness from every bright point (21 mm for 12 mm of glass)."
-group = "Optics"
+group = "Glass halo and glare"
 
 [[param]]
 id = "optics_glass_index"
@@ -45,7 +282,7 @@ hard_why = "above 1, so the critical angle asin(1 / n) of the halation ring exis
 tag = "K"
 source = "CRT.md Faceplate: n about 1.52 (CRT panel glass 1.52 to 1.54), critical angle asin(1 / n) = 41 deg"
 description = "Refractive index of the faceplate glass. It sets the critical angle of total internal reflection, so the ring radius (1.747 t at 1.52) and the strength of the weak Fresnel haze inside the ring."
-group = "Optics"
+group = "Glass halo and glare"
 advanced = true
 
 [[param]]
@@ -62,153 +299,7 @@ hard_why = "a transmission in (0, 1]"
 tag = "S"
 source = "CRT.md Faceplate: clear 85 to 90 %, grey 70 to 75 %, dark tint 40 to 55 %, extra dark 30 to 40 %; RCA 1983 clear faceplates 84 to 85.5 %; Starting presets: clear 0.85"
 description = "Transmission of the faceplate glass through its centre thickness at normal incidence. The halo light crosses the glass obliquely twice more (T^(2 / cos)), so dark glass suppresses the halo tail; the room light reflected by the screen crosses it twice (T^2). The picture's own white is measured through the glass, so this does not dim it."
-group = "Optics"
-
-[[param]]
-id = "optics_halation_weight"
-stage = "optics"
-type = "f32"
-unit = "1"
-default = 0.015
-min = 0.0
-max = 0.1
-hard_min = 0.0
-hard_max = 1.0
-hard_why = "an energy fraction; with the glare weight the sum is kept at 1 or less (Params::constrain), else the direct picture gets a negative weight"
-tag = "E"
-source = "CRT.md Halation: amplitude 0.5 to 5 % (unresolved; only the total veiling glare is sourced, about 4 % for a colour monitor, Flynn and Badano 1999); QUESTIONS PHY-10 default about 1.5 %; Starting presets 1 to 3 %"
-description = "Fraction of the emitted light that ends in the halation halo (the ring around every bright point and its faint inner haze). The direct picture keeps the rest, so a full white field keeps its level; with the glare weight it is limited to a sum of 1 (the value just set is lowered). The ring's shape comes from the glass thickness, index and transmission."
-group = "Optics"
-
-[[param]]
-id = "optics_glare_weight"
-stage = "optics"
-type = "f32"
-unit = "1"
-default = 0.01
-min = 0.0
-max = 0.1
-hard_min = 0.0
-hard_max = 1.0
-hard_why = "an energy fraction; with the halation weight the sum is kept at 1 or less (Params::constrain), else the direct picture gets a negative weight"
-tag = "E"
-source = "CRT.md Other stray-light mechanisms (light leaking behind the phosphor, nearly uniform) and Halation (total glare about 4 % on a colour monitor, 0.4 % on a medical one, halation included); ANSI contrast 100 to 150:1"
-description = "Fraction of the emitted light spread evenly over the whole screen (veiling glare): every point receives this fraction of the mean picture level, so dark areas lift on bright pictures. The picture keeps its total light. With the halation weight it is limited to a sum of 1 (the value just set is lowered)."
-group = "Optics"
-
-[[param]]
-id = "optics_diffusion_weight"
-stage = "optics"
-type = "f32"
-unit = "1"
-default = 0.1
-min = 0.0
-max = 1.0
-hard_why = "an energy fraction of a convex blend (conserving on its own)"
-tag = "E"
-source = "CRT.md Other stray-light mechanisms: phosphor-layer scatter gives a near-field glow on the scale of 0.05 to 0.5 mm that partly fills the black-matrix gaps (no amplitude sourced)"
-description = "Fraction of the light scattered sideways inside the phosphor layer (a short glow of the size below around every lit element). Energy conserving."
-group = "Optics"
-
-[[param]]
-id = "optics_diffusion_mm"
-stage = "optics"
-type = "f32"
-unit = "mm"
-default = 0.15
-min = 0.01
-max = 0.5
-hard_min = 0.001
-hard_max = 5.0
-hard_why = "a positive spread (the GPU limits it to 16 host pixels)"
-tag = "E"
-source = "CRT.md Other stray-light mechanisms: near-field glow on the scale of 0.05 to 0.5 mm"
-description = "Size of the phosphor-layer glow: the sigma of its Gaussian spread. On the GPU the spread is limited to 16 host pixels (about 5 sigma at 3.2 px of sigma); beyond, the outer part is cut and the rest renormalised."
-group = "Optics"
-advanced = true
-
-[[param]]
-id = "optics_vignette_corner"
-stage = "optics"
-type = "f32"
-unit = "1"
-default = 0.85
-min = 0.5
-max = 1.0
-hard_min = 0.01
-hard_max = 1.0
-hard_why = "a positive relative brightness (v^(rho^2) needs log2 v finite); 1 is no vignetting"
-tag = "S"
-source = "CRT.md Uniformity: centre-to-corner luminance 73 % (Barco CDCT 6551), 87 % (Sony 17se), 70 to 90 % typical; a 21 in datasheet specifies 80 to 110 %. Profile v^(rho^2) from the glass thickness growing with the square of the radius, T_edge = T_centre^(t_edge / t_centre) [D]"
-description = "Brightness at the corners of the raster relative to the centre (1 = no vignetting). It falls off as v^(rho^2), rho being the distance from the centre over the half diagonal."
-group = "Optics"
-
-[[param]]
-id = "optics_tint_rgb"
-stage = "optics"
-type = "vec3"
-unit = "1"
-default = [1.0, 1.0, 1.0]
-min = 0.5
-max = 1.0
-hard_min = 0.0
-hard_max = 1.0
-hard_why = "a relative transmission in [0, 1]"
-tag = "E"
-source = "CRT.md Faceplate (tinted glass classes); the tube white of params/colour.toml is taken as measured through the glass at the centre, so (1, 1, 1) is neutral"
-description = "Relative transmission of the glass per channel (red, green, blue). (1, 1, 1) is neutral: the tube white already includes the glass. Lower one channel to tint the picture and the reflected room light."
-group = "Optics"
-advanced = true
-
-[[param]]
-id = "optics_ambient_lux"
-stage = "optics"
-type = "f32"
-unit = "lx"
-default = 0.0
-min = 0.0
-max = 500.0
-hard_min = 0.0
-hard_max = 100000.0
-hard_why = "an illuminance is not negative; 100,000 lx is direct sunlight"
-tag = "E"
-source = "CRT.md Surface coatings and reflections: diffuse screen reflectance T^2 x r_s; raised blacks in a lit room about T^2 x 15 to 40 % of the ambient [D][E]"
-description = "Room light falling on the screen (illuminance). The screen reflects it diffusely, lifting the blacks evenly: E (T tint)^2 r_s / (pi white) in units of the tube white. 0 is a dark room. The mirror-like reflection of lamps is not modelled."
-group = "Optics"
-
-[[param]]
-id = "optics_screen_reflectance"
-stage = "optics"
-type = "f32"
-unit = "1"
-default = 0.25
-min = 0.05
-max = 0.5
-hard_min = 0.0
-hard_max = 1.0
-hard_why = "a reflectance in [0, 1]"
-tag = "E"
-source = "CRT.md Surface coatings and reflections: raised blacks about T^2 x 15 to 40 % of the ambient (phosphor reflectance about 0.7 times the open matrix fraction; unlit screen without filter 20 to 35 %)"
-description = "Diffuse reflectance r_s of the unlit phosphor screen and black matrix behind the glass (the glass factor T^2 is applied on top). Used only with room light."
-group = "Optics"
-advanced = true
-
-[[param]]
-id = "optics_white_nits"
-stage = "optics"
-type = "f32"
-unit = "cd/m2"
-default = 100.0
-min = 30.0
-max = 500.0
-hard_min = 1.0
-hard_max = 10000.0
-hard_why = "a positive luminance (it divides the reflected room light)"
-tag = "S"
-source = "CRT.md Luminance and contrast: broadcast reference white 100 cd/m^2 (80 to 120 in practice), PC monitors about 150 typical"
-description = "Luminance of the tube white, used only to express the reflected room light in units of that white."
-group = "Optics"
-advanced = true
+group = "Glass halo and glare"
 
 [[param]]
 id = "optics_halo_method"
@@ -220,7 +311,7 @@ values = ["kernel", "pyramid", "gaussians"]
 tag = "E"
 source = "QUESTIONS PHY-10 cost study (T-44): kernel = the exact halo kernel on one level of a box pyramid, bilinear upsample (chosen); pyramid = least-squares mix of the pyramid levels (bloom-like, cannot form a ring); gaussians = least-squares mix of four separable Gaussians at full resolution (slow, comparison only)"
 description = "How the wide halo is computed. Kernel (default): the physical ring kernel evaluated on a coarse level of an image pyramid, then interpolated. Pyramid: a weighted sum of blurred pyramid levels (cheaper, the ring becomes a soft glow). Gaussians: four large Gaussian blurs at full resolution (slow, for comparison; above 1025 taps per pixel, a thick glass on a fine screen, the pyramid is used instead, with a notice)."
-group = "Optics"
+group = "Glass halo and glare"
 advanced = true
 
 [[param]]
@@ -237,5 +328,107 @@ hard_why = "optics.rs uses 2 to TAPS_MAX (48) taps"
 tag = "E"
 source = "QUESTIONS PHY-10 cost study (T-44): the pyramid level of the kernel method is the finest whose texels keep the kernel radius within this many texels"
 description = "Quality of the kernel method: the largest halo kernel radius in texels of the pyramid level it runs on. Higher values use a finer level (sharper ring, cost grows with its square)."
-group = "Optics"
+group = "Glass halo and glare"
+advanced = true
+
+# --- Phosphor diffusion -------------------------------------------------------------------------------------
+
+[[param]]
+id = "optics_diffusion_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.1
+min = 0.0
+max = 1.0
+hard_why = "an energy fraction of a convex blend (conserving on its own)"
+tag = "E"
+source = "CRT.md Other stray-light mechanisms: phosphor-layer scatter gives a near-field glow on the scale of 0.05 to 0.5 mm that partly fills the black-matrix gaps (no amplitude sourced)"
+description = "Fraction of the light scattered sideways inside the phosphor layer (a short glow of the size below around every lit element). Energy conserving."
+group = "Phosphor diffusion"
+
+[[param]]
+id = "optics_diffusion_mm"
+stage = "optics"
+type = "f32"
+unit = "mm"
+default = 0.15
+min = 0.01
+max = 0.5
+hard_min = 0.001
+hard_max = 5.0
+hard_why = "a positive spread (the GPU limits it to 16 host pixels)"
+tag = "E"
+source = "CRT.md Other stray-light mechanisms: near-field glow on the scale of 0.05 to 0.5 mm"
+description = "Size of the phosphor-layer glow: the sigma of its Gaussian spread. On the GPU the spread is limited to 16 host pixels (about 5 sigma at 3.2 px of sigma); beyond, the outer part is cut and the rest renormalised."
+group = "Phosphor diffusion"
+advanced = true
+
+# --- Tint and room ------------------------------------------------------------------------------------------
+
+[[param]]
+id = "optics_tint_rgb"
+stage = "optics"
+type = "vec3"
+unit = "1"
+default = [1.0, 1.0, 1.0]
+min = 0.5
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a relative transmission in [0, 1]"
+tag = "E"
+source = "CRT.md Faceplate (tinted glass classes); the tube white of params/colour.toml is taken as measured through the glass at the centre, so (1, 1, 1) is neutral"
+description = "Relative transmission of the glass per channel (red, green, blue). (1, 1, 1) is neutral: the tube white already includes the glass. Lower one channel to tint the picture and the reflected room light."
+group = "Tint and room"
+advanced = true
+
+[[param]]
+id = "optics_ambient_lux"
+stage = "optics"
+type = "f32"
+unit = "lx"
+default = 0.0
+min = 0.0
+max = 500.0
+hard_min = 0.0
+hard_max = 100000.0
+hard_why = "an illuminance is not negative; 100,000 lx is direct sunlight"
+tag = "E"
+source = "CRT.md Surface coatings and reflections: diffuse screen reflectance T^2 x r_s; raised blacks in a lit room about T^2 x 15 to 40 % of the ambient [D][E]"
+description = "Room light falling on the screen (illuminance). The screen reflects it diffusely, lifting the blacks evenly: E (T tint)^2 r_s / (pi white) in units of the tube white. 0 is a dark room. The mirror-like reflection of lamps is not modelled."
+group = "Tint and room"
+
+[[param]]
+id = "optics_screen_reflectance"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.25
+min = 0.05
+max = 0.5
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a reflectance in [0, 1]"
+tag = "E"
+source = "CRT.md Surface coatings and reflections: raised blacks about T^2 x 15 to 40 % of the ambient (phosphor reflectance about 0.7 times the open matrix fraction; unlit screen without filter 20 to 35 %)"
+description = "Diffuse reflectance r_s of the unlit phosphor screen and black matrix behind the glass (the glass factor T^2 is applied on top). Used only with room light."
+group = "Tint and room"
+advanced = true
+
+[[param]]
+id = "optics_white_nits"
+stage = "optics"
+type = "f32"
+unit = "cd/m2"
+default = 100.0
+min = 30.0
+max = 500.0
+hard_min = 1.0
+hard_max = 10000.0
+hard_why = "a positive luminance (it divides the reflected room light)"
+tag = "S"
+source = "CRT.md Luminance and contrast: broadcast reference white 100 cd/m^2 (80 to 120 in practice), PC monitors about 150 typical"
+description = "Luminance of the tube white, used only to express the reflected room light in units of that white."
+group = "Tint and room"
 advanced = true

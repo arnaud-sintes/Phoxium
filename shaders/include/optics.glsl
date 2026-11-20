@@ -9,21 +9,42 @@
 //   2, 3        gauss_h outputs / gauss_v inputs (green, blue sums)
 //   4 OPT_HALO  the halo (kernel: at level l; gaussians: full resolution), read by the composite
 //   5 OPT_TOP   the 1 x 1 top of the pyramid (box mean of the whole image, zero padded)
-//   6 to 17     pyramid levels 1 to 12 (pyramid method)
+//   6 to 17     pyramid levels 1 to 12 (pyramid method; the bloom knee reads one of them)
 //   18          storage buffer: diffusion weights w(d), d = 0 .. OPT_DIFF_MAX, then the halo kernel quadrant
-//               (R + 1)^2, index dy (R + 1) + dx for |dx|, |dy| <= R
+//               (R + 1)^2, index dy (R + 1) + dx for |dx|, |dy| <= R, then the bloom blur weights, OPT_BLOOM_R_MAX + 1
+//               per lobe from OPT_BLOOM_OFFSET
+//   19 to 21    the three bloom lobes (each at its own pyramid level), read by the composite
 #ifndef UCRT_OPTICS_GLSL
 #define UCRT_OPTICS_GLSL
 
 #define OPT_DIFF_MAX 16
 #define OPT_KERNEL_OFFSET (OPT_DIFF_MAX + 1)
+#define OPT_TAPS_MAX_Q 48
+#define OPT_BLOOM_OFFSET (OPT_KERNEL_OFFSET + (OPT_TAPS_MAX_Q + 2) * (OPT_TAPS_MAX_Q + 2))
+#define OPT_BLOOM_R_MAX 8
 
-// std430, 96 bytes, mirrored by `Push` in src/gpu/stages/optics.rs. The meaning of each field is per pass.
+// std430, 112 bytes, mirrored by `Push` in src/gpu/stages/optics.rs. The meaning of each field is per pass.
 layout(push_constant) uniform OpticsPush {
     ivec4 info;
     vec4 scal;
     vec4 w[4];
+    ivec4 aux;
 } pc;
+
+// The bloom's soft-knee feed fraction q in [0, 1] of a pixel of local brightness m for the threshold t (oracle
+// crt_model::optics::bloom_feed): e(m) / m, e the excess over t with a quadratic knee of half width t / 2.
+// t <= 0 (or NaN) feeds all the light (1); m <= 0 feeds nothing.
+float opt_bloom_feed(float m, float t) {
+    if (!(t > 0.0)) {
+        return 1.0;
+    }
+    if (!(m > 0.0)) {
+        return 0.0;
+    }
+    float k = 0.5 * t;
+    float e = m <= t - k ? 0.0 : (m >= t + k ? m - t : (m - t + k) * (m - t + k) / (4.0 * k));
+    return clamp(e / m, 0.0, 1.0);
+}
 
 layout(std430, set = 1, binding = 18) readonly buffer OpticsWeights {
     float weight[];
