@@ -74,7 +74,8 @@ pub const PANELS: &[PanelDef] = &[
     },
     PanelDef {
         name: "Beam and scanlines",
-        stages: &["beam", "abl"],
+        // T-32: interlace changes which lines the beam draws per refresh, so it sits with the scanlines.
+        stages: &["beam", "interlace", "abl"],
         first: &[],
         empty_note: None,
     },

@@ -96,7 +96,7 @@ void beam_lines_entry(sampler2D current, ivec2 e) {
         float j0 = max(0.0, floor((x0 - reach_x) / a));
         float j1 = min(float(samples - 1), floor((x0 + im.x + reach_x) / a));
         j1 = min(j1, j0 + float(BEAM_MAX_SAMPLES - 1));
-        int row = e.y / r.mult;
+        int row = beam_line_row(r, e.y);
         vec3 run = vec3(0.0);
         float run0 = j0 * a;
         for (int j = int(j0); j <= int(j1); j++) {

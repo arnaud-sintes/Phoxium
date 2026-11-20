@@ -132,6 +132,15 @@ Off by default (`composite_enable`); the picture is then exactly the same as wit
 - `composite_frame_advance_deg`: 180 makes the dot pattern and artifact colours alternate every frame (broadcast NTSC), 0 keeps them still. `composite_hue_deg` (tint) and `composite_saturation` (colour) are the TV's knobs; `composite_i_bandwidth_mhz` and `composite_q_bandwidth_mhz` set how far colour bleeds past edges.
 - Advanced: the subcarrier and line rate (0 = the standard's), the channel bandwidth, and `composite_phase_deg`, which picks the hues of the artifact colours (machine specific, try values to match a known screenshot).
 
+## Interlace (T-32, optional)
+
+Off by default; the picture is then exactly the same as without it. In the menu panel "Beam and scanlines" (the field lock is an Advanced setting), or with `--set` on the command line and in presets.
+
+- **`interlace_mode`**: `off` (every refresh draws every row: 240p and 480p sources), `alternate_frames_are_fields` (each captured frame is one field of an interlaced picture; every other field lands half a line lower, between the lines of the previous one) or `split_woven_frame` (the captured frame holds both fields woven together, a "combed" 480i frame; each refresh draws only the even or only the odd rows, at twice the line spacing). The window capture cannot tell which, so you choose.
+- **`interlace_field_order`**: `top_first` (default) or `bottom_first`. If moving edges jitter up and down or look doubled, try the other order.
+- **`interlace_field_select`**: `alternate` (default: the field changes at every output refresh) or `top` / `bottom` to lock one field (a still picture for inspection; with a split woven frame, the 240p "double strike" look with its scanline gaps).
+- Interlaced pictures flicker and one-line horizontal details twitter, as on a real TV; phosphor persistence (`phosphor_persistence`) gives the afterglow between fields. The output refresh should equal the field rate (a 60 Hz monitor for 59.94 Hz fields): the window title and the console show a notice when it does not.
+
 ## Source scaling
 
 The CRT model needs the native raster: scanlines are native rows. A game shown at 3× is captured as 768×720, so the app recovers 256×240 with a divisor:

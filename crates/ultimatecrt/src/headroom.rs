@@ -13,7 +13,8 @@
 //!   not placed or the `screen` slot does not run. In `mask_depth` mode: 1 + depth (peak - 1).
 //! - scanline peak: `crt_model::beam::scanline_pixel_peak` at the spot width of full drive (the white gain of
 //!   each channel is its current, `SpotGrowth::fwhm`), over host rows of 1 / px_per_mm mm; the largest channel.
-//!   The tail is left out (it only lowers the peak). 1 when the beam does not draw lines.
+//!   The tail is left out (it only lowers the peak). 1 when the beam does not draw lines. With a split woven
+//!   frame (interlace, T-32) the pitch is the field's, twice the progressive one.
 //! - white matrix maximum: `crt_model::output::white_matrix_max` of the colour matrix and the white gains
 //!   (positive parts when the mask or the scanlines can separate the channels: different elements,
 //!   convergence offsets, per-channel spot widths; the plain row sum only for a flat field).
@@ -86,7 +87,8 @@ pub fn headroom(params: &Params, px_per_mm: f32, line_pitch_mm: f32, screen: boo
         mask_peak_physical
     };
     let gains = crate::white::white_gains(params).map(f64::from);
-    let pitch = f64::from(line_pitch_mm);
+    // T-32: a split woven frame draws one field per refresh, lines two progressive pitches apart.
+    let pitch = f64::from(line_pitch_mm) * crate::interlace::model(params).field_pitch_factor();
     let (mid, peak) = (f64::from(params.beam_fwhm_mid_mm), f64::from(params.beam_fwhm_peak_mm));
     let scanline_peak = if placed && pitch.is_finite() && pitch > 0.0 && mid > 0.0 && peak > 0.0 {
         let growth = SpotGrowth {

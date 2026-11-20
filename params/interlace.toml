@@ -1,0 +1,43 @@
+# Interlace, manual field mode (T-32, QUESTIONS SRC-7; CRT.md "Line modes and interlace"). Format: crates/paramgen/src/lib.rs.
+# Each id is defined once in the whole params/ folder. Oracle: crates/crt-model/src/interlace.rs.
+# Optional, off by default (A15): off draws the progressive raster exactly as before. A window capture carries no
+# field parity, so the user declares how the captured rows map onto the tube's fields. The shader side is the raster
+# of shaders/include/beam.glsl (beam_raster, interlace.glsl picks the field from the output frame index); the decay
+# between fields is the phosphor persistence (params/phosphor.toml), not this file.
+
+[[param]]
+id = "interlace_mode"
+stage = "interlace"
+type = "enum"
+unit = "1"
+default = "off"
+values = ["off", "alternate_frames_are_fields", "split_woven_frame"]
+tag = "D"
+source = "QUESTIONS SRC-7 decision 2026-11-18 (manual field mode, off by default); PLAN T-32; CRT.md Line modes and interlace (fields offset by half a line, 480i / 576i)"
+description = "Interlace. Off: every refresh draws every row (progressive, 240p and 480p sources). Alternate frames are fields: each captured frame is one field; every other field lands half a line lower, between the lines of the previous one (a source that renders 240-row fields of a 480i picture). Split woven frame: the captured frame holds both fields woven together (a combed 480i frame); each refresh draws only the even or only the odd rows, at twice the line spacing. Interlaced fields flicker and fine horizontal lines twitter, as on a real TV; the output refresh should equal the field rate (60 Hz for 59.94 Hz fields)."
+group = "Interlace"
+
+[[param]]
+id = "interlace_field_order"
+stage = "interlace"
+type = "enum"
+unit = "1"
+default = "top_first"
+values = ["top_first", "bottom_first"]
+tag = "E"
+source = "QUESTIONS SRC-7 (field order cannot be recovered from a capture, the user declares it)"
+description = "Which field is drawn first when the fields alternate: the top field (the upper lines, the even rows of a woven frame) or the bottom one. If moving edges jitter up and down or look doubled, try the other order."
+group = "Interlace"
+
+[[param]]
+id = "interlace_field_select"
+stage = "interlace"
+type = "enum"
+unit = "1"
+default = "alternate"
+values = ["alternate", "top", "bottom"]
+tag = "E"
+source = "PLAN T-32 (manual field mode); a locked field for inspection is a design choice of the T-32 work"
+description = "Alternate: the field changes at every output refresh, in the field order. Top or Bottom: always the same field, a still picture for inspection; with a split woven frame this is the 240p 'double strike' look (scanline gaps stay)."
+group = "Interlace"
+advanced = true

@@ -560,7 +560,9 @@ pub fn run() -> Res<()> {
             } else if smoothing.warning() {
                 Some("smoothed source?".to_string())
             } else {
-                None
+                // T-32: the output refresh against the field rate (interlace on, fields alternating).
+                let secs = stat_time.elapsed().as_secs_f64();
+                crate::interlace::notice(&params, (captured - last_captured) as f64 / secs, renders as f64 / secs)
             };
             if now_notice != notice {
                 if let Some(m) = &now_notice {
