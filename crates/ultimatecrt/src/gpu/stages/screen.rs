@@ -33,16 +33,27 @@
 //! the barrier between them, and like `phosphor` it owns images that are not chain images (the line images,
 //! five `rgba16f` storage images in set 2, allocated by `prepare` on first use and on a size change, freed while
 //! the warp path is off) and records its own barriers on them. The timing segment `screen` covers both passes.
+//!
+//! # Interlace (T-32)
+//!
+//! The field raster of `beam_raster` (`shaders/include/beam.glsl`, `interlace.glsl`) is compiled behind the
+//! specialization constant 0 (`UCRT_INTERLACE`). The pipelines created in [`Stage::create`] leave it false, so with
+//! `interlace_mode` off the driver compiles the progressive raster alone and the picture is bit-identical to the
+//! build without the module (a branch on the parameter alone changed the driver's code enough to flip a few FP16
+//! results, about 12 values of 3.7 million). The variants with the constant true (the three shaders) are created
+//! by `prepare` the first time a frame needs them and kept until `destroy`.
 
 use std::cell::Cell;
 
 use ash::vk;
 use crt_model::beam::SpotGrowth;
 
-use super::{binding, compute_pipeline, push, standard_set_layout, ComputePass, Domain, Registration, Stage};
+use super::{
+    binding, compute_pipeline, push, shader_module, standard_set_layout, ComputePass, Domain, Registration, Stage,
+};
 use crate::gpu::headless::GpuImage;
 use crate::gpu::{barrier, Context, FrameConstants};
-use crate::params::{Params, BEAM_QUALITY_STANDARD, GEOMETRY_CURVATURE_FLAT};
+use crate::params::{Params, BEAM_QUALITY_STANDARD, GEOMETRY_CURVATURE_FLAT, INTERLACE_MODE_OFF};
 use crate::Res;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/screen.comp.spv"));
@@ -187,8 +198,46 @@ pub fn warp_plan(fc: &FrameConstants, params: &Params) -> Option<WarpPlan> {
     })
 }
 
+/// The interlace variant of a pipeline (T-32): `spv` with the specialization constant 0 (`UCRT_INTERLACE` of
+/// `shaders/include/interlace.glsl`, a bool) set to true.
+///
+/// # Safety
+/// As [`compute_pipeline`].
+unsafe fn interlace_pipeline(d: &ash::Device, layout: vk::PipelineLayout, spv: &[u8]) -> Res<vk::Pipeline> {
+    let module = shader_module(d, spv)?;
+    let data = vk::TRUE.to_ne_bytes();
+    let entries = [vk::SpecializationMapEntry::default()
+        .constant_id(0)
+        .offset(0)
+        .size(size_of::<vk::Bool32>())];
+    let spec = vk::SpecializationInfo::default().map_entries(&entries).data(&data);
+    let info = vk::ComputePipelineCreateInfo::default()
+        .stage(
+            vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(module)
+                .name(c"main")
+                .specialization_info(&spec),
+        )
+        .layout(layout);
+    let result = d.create_compute_pipelines(vk::PipelineCache::null(), &[info], None);
+    d.destroy_shader_module(module, None);
+    Ok(result.map_err(|(_, e)| e)?[0])
+}
+
+/// The interlace variants of the stage's three pipelines (T-32).
+#[derive(Clone, Copy)]
+struct InterlacePipelines {
+    screen: vk::Pipeline,
+    lines: vk::Pipeline,
+    warp: vk::Pipeline,
+}
+
 #[derive(Default)]
 struct Screen {
+    /// T-32: the interlace variants, created on first use; whether the frame being recorded uses them.
+    interlace_pipelines: Option<InterlacePipelines>,
+    interlace: bool,
     /// The pass; its pipeline layout has the standard set 0 and the ABL state set 1.
     pass: ComputePass,
     state_layout: vk::DescriptorSetLayout,
@@ -323,7 +372,11 @@ impl Screen {
             ox: plan.ox,
             pad: plan.pad,
         };
-        d.cmd_bind_pipeline(cb, bind, self.lines_pipeline);
+        let (lines_pipeline, warp_pipeline) = match self.variants() {
+            Some(v) => (v.lines, v.warp),
+            None => (self.lines_pipeline, self.warp_pipeline),
+        };
+        d.cmd_bind_pipeline(cb, bind, lines_pipeline);
         d.cmd_bind_descriptor_sets(cb, bind, self.warp_layout, 0, &sets, &[]);
         push(d, cb, self.warp_layout, vk::ShaderStageFlags::COMPUTE, &pc);
         d.cmd_dispatch(
@@ -340,8 +393,13 @@ impl Screen {
             .dst_access_mask(read)];
         d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&m));
         // Same layout: the sets and push constants stay bound.
-        d.cmd_bind_pipeline(cb, bind, self.warp_pipeline);
+        d.cmd_bind_pipeline(cb, bind, warp_pipeline);
         d.cmd_dispatch(cb, size.0.div_ceil(WARP_GROUP.0), size.1.div_ceil(WARP_GROUP.1), 1);
+    }
+
+    /// The interlace variants when the frame being recorded draws fields (T-32), else `None`.
+    fn variants(&self) -> Option<InterlacePipelines> {
+        self.interlace_pipelines.filter(|_| self.interlace)
     }
 }
 
@@ -439,6 +497,16 @@ impl Stage for Screen {
 
     unsafe fn prepare(&mut self, ctx: &Context, fc: &FrameConstants, params: &Params, runs: bool) -> Res<()> {
         self.transition = false;
+        // T-32: the interlace variants of the pipelines, created the first time a frame draws fields.
+        self.interlace = runs && params.interlace_mode != INTERLACE_MODE_OFF;
+        if self.interlace && self.interlace_pipelines.is_none() {
+            let d = &ctx.device;
+            self.interlace_pipelines = Some(InterlacePipelines {
+                screen: interlace_pipeline(d, self.pass.layout, SPV)?,
+                lines: interlace_pipeline(d, self.warp_layout, LINES_SPV)?,
+                warp: interlace_pipeline(d, self.warp_layout, WARP_SPV)?,
+            });
+        }
         self.warp = if runs { warp_plan(fc, params) } else { None };
         match self.warp {
             None => {
@@ -473,7 +541,8 @@ impl Stage for Screen {
         // As `ComputePass::dispatch_group` with the tile workgroup, plus the ABL state set 1.
         let sets = [set, self.state_set];
         let bind = vk::PipelineBindPoint::COMPUTE;
-        d.cmd_bind_pipeline(cb, bind, self.pass.pipeline);
+        let pipeline = self.variants().map_or(self.pass.pipeline, |v| v.screen);
+        d.cmd_bind_pipeline(cb, bind, pipeline);
         d.cmd_bind_descriptor_sets(cb, bind, self.pass.layout, 0, &sets, &[]);
         let runs = u32::from(self.abl_runs.get());
         d.cmd_push_constants(
@@ -488,6 +557,11 @@ impl Stage for Screen {
 
     unsafe fn destroy(&mut self, d: &ash::Device) {
         self.free_lines(d);
+        if let Some(v) = self.interlace_pipelines.take() {
+            d.destroy_pipeline(v.screen, None);
+            d.destroy_pipeline(v.lines, None);
+            d.destroy_pipeline(v.warp, None);
+        }
         d.destroy_pipeline(self.lines_pipeline, None);
         d.destroy_pipeline(self.warp_pipeline, None);
         d.destroy_pipeline_layout(self.warp_layout, None);

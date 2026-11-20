@@ -137,13 +137,20 @@ vec3 beam_x_fraction(vec3 a0, vec3 a1, float b0, float b1, vec3 sigma) {
 // the tube rectangle vertically, centred. Line pitch P = line_pitch_mm * px_per_mm (T-30). The line
 // multiplier m (T-30 `line_multiplier`, each native row drawn m times) is recovered as
 // round(tube height / (P * native rows)), clamped to [1, 16]; the raster has native rows * m lines; line n is
-// centred at first + n P, first = (tube height - lines P) / 2 + P / 2, and draws native row n / m.
+// centred at first + n P, first = (tube height - lines P) / 2 + P / 2, and draws native row n / m
+// (beam_line_row). T-32 interlace (interlace.glsl, off by default): the raster of this output frame's field,
+// see beam_raster.
 struct BeamRaster {
     float pitch;
     float first;
     int lines;
     int mult;
+    // Line n draws native row (n / mult) * row_step + row_phase (1 and 0 unless a woven frame is split).
+    int row_step;
+    int row_phase;
 };
+
+#include "interlace.glsl"
 
 BeamRaster beam_raster() {
     BeamRaster r;
@@ -153,7 +160,30 @@ BeamRaster beam_raster() {
     r.mult = int(clamp(round(h / (r.pitch * float(rows))), 1.0, 16.0));
     r.lines = rows * r.mult;
     r.first = 0.5 * (h - float(r.lines) * r.pitch) + 0.5 * r.pitch;
+    r.row_step = 1;
+    r.row_phase = 0;
+    // T-32 (crt_model::interlace::Interlace::field_raster): `alternate_frames_are_fields` moves the bottom field
+    // down by half a line pitch; `split_woven_frame` draws the rows of the field's parity f at their progressive
+    // positions, a raster of pitch 2P from first + f P (each line then deposits current x 2P: one field of a flat
+    // field keeps its mean). Off leaves the progressive raster untouched.
+    if (UCRT_INTERLACE && params.interlace_mode != INTERLACE_MODE_OFF) {
+        int f = interlace_field();
+        if (params.interlace_mode == INTERLACE_MODE_SPLIT_WOVEN_FRAME) {
+            r.lines = ((rows + 1 - f) / 2) * r.mult;
+            r.first += float(f) * r.pitch;
+            r.pitch *= 2.0;
+            r.row_step = 2;
+            r.row_phase = f;
+        } else {
+            r.first += 0.5 * float(f) * r.pitch;
+        }
+    }
     return r;
+}
+
+// Native row drawn by raster line n.
+int beam_line_row(BeamRaster r, int n) {
+    return (n / r.mult) * r.row_step + r.row_phase;
 }
 
 // Per-channel convergence hook (CRT.md, Convergence, purity and landing): offset (host px) of the landing
@@ -259,7 +289,7 @@ vec3 beam_eval(sampler2D current, ivec2 q) {
         vec3 c = vec3(cn) + dy;
         vec3 e0 = y0 - c;
         vec3 e1 = y1 - c;
-        int row = n / r.mult;
+        int row = beam_line_row(r, n);
         vec3 run = vec3(0.0);
         float run0 = j0 * a;
         for (int j = int(j0); j <= int(j1); j++) {
@@ -465,7 +495,7 @@ void beam_eval_workgroup(sampler2D current, ivec2 q) {
             float j0 = max(0.0, floor((x0 - reach_x) / a));
             float j1 = min(float(samples - 1), floor((x0 + im.x + reach_x) / a));
             j1 = min(j1, j0 + float(BEAM_MAX_SAMPLES - 1));
-            int row = n / r.mult;
+            int row = beam_line_row(r, n);
             BeamColumn col = BeamColumn(vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0), vec3(0.0));
             vec3 run = vec3(0.0);
             float run0 = j0 * a;

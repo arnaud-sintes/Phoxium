@@ -21,6 +21,7 @@ pub mod burnin;
 pub mod colour;
 pub mod geometry;
 pub mod gun;
+pub mod interlace;
 pub mod mask;
 pub mod optics;
 pub mod output;

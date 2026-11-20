@@ -10,6 +10,7 @@ pub mod diag;
 pub mod gpu;
 pub mod headroom;
 pub mod hotkeys;
+pub mod interlace;
 pub mod lifecycle;
 pub mod live;
 pub mod modes;
