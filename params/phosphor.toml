@@ -1,7 +1,8 @@
 # Phosphor stage parameters (ARCHITECTURE section 5, step 5; shaders/phosphor.comp, src/gpu/stages/phosphor.rs).
 # Format: crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
-# dimensionless. T-41: persistence as a 60 Hz frame feedback (CRT.md rule 8, "Decay and persistence"; QUESTIONS
-# PHY-12). The decay constants are the Kuhn (2002) P22 fits of crt-model (phosphor.rs, KUHN_RED, KUHN_GREEN,
+# dimensionless. T-41: persistence as a frame feedback (CRT.md rule 8, "Decay and persistence"; QUESTIONS
+# PHY-12), decaying in real time by default (review R-11: the measured frame period, clamped to 250 ms, review
+# R-10). The decay constants are the Kuhn (2002) P22 fits of crt-model (phosphor.rs, KUHN_RED, KUHN_GREEN,
 # KUHN_BLUE); the presets choose them later (T-64).
 
 [[param]]
@@ -20,12 +21,12 @@ id = "phosphor_frame_rate_hz"
 stage = "phosphor"
 type = "f32"
 unit = "Hz"
-default = 60.0
+default = 0.0
 min = 0.0
 max = 480.0
-tag = "E"
-source = "CRT.md Display rate: at 60 Hz every output frame is one tube frame, so the frame period of the trail is the output refresh period; 50 and 120 Hz rows of the Decay and persistence table"
-description = "Frame rate of the trail: the decay between two output frames lasts 1 / rate. Set it to the refresh rate of the output display. 0: automatic, the smoothed measured frame period of the render loop (clamped to 10 to 240 Hz, whole hertz). The per-frame weights are recomputed (and cached) when it changes."
+tag = "D"
+source = "CRT.md Display rate: every output frame is one tube frame, so the trail is sampled at the output frame period; the decay itself is a function of time (Decay and persistence: impulse response I(t)), so the default follows the real time between frames (review R-11, owner decision: real time); 50 and 120 Hz rows of the Decay and persistence table"
+description = "Time base of the trail. 0 (default): real time, the trail decays by the time that really passed between two output frames (measured; a pause longer than 250 ms counts as 250 ms), so it lasts as long at 144 Hz as at 60 Hz; the decay weights are fitted for the measured display rate (10 to 240 Hz, whole hertz). A positive value: manual, every output frame decays the trail by exactly 1 / rate, whatever time passed (a deterministic frame count, for tests and comparisons)."
 group = "Phosphor"
 advanced = true
 

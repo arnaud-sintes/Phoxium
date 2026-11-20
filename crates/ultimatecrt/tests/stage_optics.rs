@@ -342,6 +342,83 @@ fn impulse_ring_and_energy() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// Review R-49: halation 0.8 with glare 0.8 (and a diffusion weight of 1.5) can no longer give negative light
+/// or create light. The weights are normalised to 0.5 / 0.5 (`crt_model::optics::light_weights`), so the
+/// direct image weighs 0, not -0.6. An impulse far from the edges, a neutral glass, the `kernel` halo (the
+/// default, a non-negative kernel like the oracle's): no channel is negative, and the total light equals the
+/// input and the oracle's total within 0.5 % (the halo energy budget, FP16 included). The signed `pyramid`
+/// and `gaussians` methods are printed only: their undershoot far from the light is their method error
+/// (not a weight effect; the direct weight is 0 everywhere here). Negative weights act as 0 (the stage
+/// output is then the input, within half an FP16 step).
+#[test]
+fn extreme_weights_give_no_negative_light() {
+    let Some(mut gpu) = common::gpu_or_skip("extreme_weights_give_no_negative_light") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h, ppm) = (640u32, 640u32, 2.5f32);
+    let v = 1000.0f32;
+    let pic = image(w, h, |x, y| {
+        if (x, y) == (320, 320) {
+            [v, 0.5 * v, 2.0 * v]
+        } else {
+            [0.0; 3]
+        }
+    });
+    let p = Params {
+        optics_halation_weight: 0.8,
+        optics_glare_weight: 0.8,
+        optics_diffusion_weight: 1.5,
+        optics_diffusion_mm: 0.4,
+        ..halo_only(0.8, 0.5)
+    };
+    let want = oracle(&p, &pic, ppm);
+    for (name, method) in [
+        ("kernel", 0),
+        ("pyramid", OPTICS_HALO_METHOD_PYRAMID),
+        ("gaussians", OPTICS_HALO_METHOD_GAUSSIANS),
+    ] {
+        let pm = Params {
+            optics_halo_method: method,
+            ..p
+        };
+        let out = run(&mut gpu, &pm, &pic, ppm);
+        assert!(out.rgba.iter().all(|x| x.is_finite()), "{name}: non-finite values");
+        let min = out.rgba.iter().fold(f32::INFINITY, |m, &x| m.min(x));
+        for c in 0..3 {
+            let tin = total(&pic, c);
+            let tout = total(&out, c);
+            let tor: f64 = want.rgb.iter().map(|q| q[c]).sum();
+            println!("{name} channel {c}: total out {tout:.3}, in {tin:.3}, oracle {tor:.3}; minimum value {min:.3e}");
+            assert!((tor / tin - 1.0).abs() < 1e-3, "oracle {c}: {tor} vs {tin}");
+            assert!(want.rgb.iter().all(|q| q[c] >= 0.0), "oracle {c}: negative light");
+            if method == 0 {
+                assert!(min >= 0.0, "{name}: negative light {min}");
+                assert!((tout / tin - 1.0).abs() < 5e-3, "{name} channel {c}: {tout} vs {tin}");
+            }
+        }
+    }
+    // Negative weights act as 0: the light passes unchanged (vignette 1, tint 1, no ambient).
+    let neg = Params {
+        optics_halation_weight: -0.5,
+        optics_glare_weight: -0.5,
+        optics_diffusion_weight: -1.0,
+        ..p
+    };
+    let small = game_frame(96, 64);
+    let out = run(&mut gpu, &neg, &small, ppm);
+    for (i, (&got, &x)) in out.rgba.iter().zip(&small.rgba).enumerate() {
+        assert!(
+            (f64::from(got) - f64::from(x)).abs() <= f64::from(x).abs() / 2048.0 + 1e-7,
+            "negative weights, texel {} channel {}: {got} vs {x}",
+            i / 4,
+            i % 4
+        );
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// The edge of a white half plane, a flat white field and a game-like frame with every effect on: the GPU
 /// (kernel method, default taps) against the oracle within the error budget, and the flat field keeps its
 /// level in the middle (redistribution only).

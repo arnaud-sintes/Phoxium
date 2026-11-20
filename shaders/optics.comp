@@ -10,6 +10,15 @@
 // The halo and the mean are computed from L, not D: the diffusion conserves the mean and is far narrower than
 // the halo (the difference is part of the measured error).
 //
+// Light bounds (review R-49, oracle crt_model::optics::light_weights): each weight is clamped to [0, 1] (NaN
+// reads as 0), and when w_h + w_g > 1 both are divided by their sum, so the direct weight 1 - w_h - w_g is
+// never negative and the redistributed fraction never exceeds 1 (the diffusion is a separate partition, w_d in
+// [0, 1]). With non-negative input light and a non-negative halo no weight setting can then give negative
+// light or create light. The halo of the `kernel` method (the default) is non-negative; the `pyramid` and
+// `gaussians` methods mix levels with signed amplitudes and can undershoot slightly far from the light. That
+// undershoot is part of their measured method error and is NOT clamped here: clamping it would add light and
+// break their energy budget (the halo holds the configured weight).
+//
 // pc.info: x mode (0 no halo, 1 kernel, 2 pyramid, 3 gaussians), y kernel level l, z diffusion radius R_d
 // (<= OPT_DIFF_MAX, 0 = none), w pyramid levels used. pc.scal: x mean scale (4^n / (W H): the top texel of an
 // n-level zero-padded box pyramid times it is the image mean). pc.w[0..2]: pyramid amplitudes, levels 1 to 12.
@@ -19,6 +28,11 @@
 #include "optics.glsl"
 
 #define TILE 8
+
+// A weight clamped to [0, 1]; NaN and w <= 0 give 0 (ordered compare: false for NaN).
+float opt_unit(float w) {
+    return w > 0.0 ? min(w, 1.0) : 0.0;
+}
 
 layout(local_size_x = TILE, local_size_y = TILE) in;
 
@@ -94,12 +108,17 @@ void main() {
         }
     }
     vec4 x = texelFetch(light_in, p, 0);
-    float wd = rd > 0 ? clamp(params.optics_diffusion_weight, 0.0, 1.0) : 0.0;
+    float wd = rd > 0 ? opt_unit(params.optics_diffusion_weight) : 0.0;
     vec3 d = (1.0 - wd) * x.rgb + wd * blur;
 
     int mode = pc.info.x;
-    float wh = mode != 0 ? clamp(params.optics_halation_weight, 0.0, 1.0) : 0.0;
-    float wg = clamp(params.optics_glare_weight, 0.0, 1.0);
+    float wh = mode != 0 ? opt_unit(params.optics_halation_weight) : 0.0;
+    float wg = opt_unit(params.optics_glare_weight);
+    float wsum = wh + wg;
+    if (wsum > 1.0) {
+        wh /= wsum;
+        wg /= wsum;
+    }
     vec3 h = vec3(0.0);
     if (mode == 1) {
         h = bilin_halo(p, pc.info.y);
@@ -108,6 +127,7 @@ void main() {
     } else if (mode == 3) {
         h = imageLoad(halo_img, p).rgb;
     }
+
     vec3 mean = wg > 0.0 ? imageLoad(top, ivec2(0)).rgb * pc.scal.x : vec3(0.0);
     vec3 g = (1.0 - wh - wg) * d + wh * h + wg * mean;
 

@@ -54,8 +54,31 @@
 //!
 //! Boundary: no light exists outside the tube image (zero padding); light the diffusion or the halo
 //! carries past the image edge is lost, as in the `screen` stage.
+//!
+//! **Light bounds (review R-49, [`light_weights`]):** every step only moves light, so its weights must form a
+//! partition of it. Each weight is clamped to [0, 1] (NaN reads as 0), and when w_h + w_g exceeds 1 both are
+//! divided by their sum: the direct weight 1 - w_h - w_g is then never negative and the redistributed
+//! fraction never exceeds 1. The diffusion is a separate step (D, then G), already a partition with w_d in
+//! [0, 1]. With non-negative input light, every term of G is non-negative and G holds the light of D (up to
+//! the edge loss), so no weight setting can create negative light or gain energy. The shader applies the
+//! same rule (its `pyramid` and `gaussians` halo methods approximate this model's non-negative kernel with
+//! signed amplitudes; their small undershoot is a method error, measured by the stage tests, not clamped).
 
 use std::f64::consts::PI;
+
+/// The redistribution weights (w_d, w_h, w_g) the model uses for the parameters `diffusion`, `halation` and
+/// `glare` (module doc, "Light bounds"): each clamped to [0, 1], NaN read as 0, and w_h, w_g divided by
+/// their sum when it exceeds 1. [D]
+pub fn light_weights(diffusion: f64, halation: f64, glare: f64) -> [f64; 3] {
+    let unit = |w: f64| if w > 0.0 { w.min(1.0) } else { 0.0 };
+    let (wd, wh, wg) = (unit(diffusion), unit(halation), unit(glare));
+    let sum = wh + wg;
+    if sum > 1.0 {
+        [wd, wh / sum, wg / sum]
+    } else {
+        [wd, wh, wg]
+    }
+}
 
 /// Fraction of the halo energy beyond the truncation radius of the halo kernel (then renormalised). [E]
 pub const HALO_TAIL: f64 = 0.01;
@@ -462,10 +485,10 @@ impl Optics {
             "Optics::apply needs a placed tube: {px_per_mm} px per mm"
         );
         let (w, h) = (img.width, img.height);
+        let [wd, wh, wg] = light_weights(self.diffusion_weight, self.halation_weight, self.glare_weight);
         let sigma_px = self.diffusion_sigma_mm * px_per_mm;
-        let d = if self.diffusion_weight > 0.0 && sigma_px > 0.0 {
+        let d = if wd > 0.0 && sigma_px > 0.0 {
             let g = diffuse(img, sigma_px);
-            let wd = self.diffusion_weight;
             let mut out = img.clone();
             for (o, gv) in out.rgb.iter_mut().zip(&g.rgb) {
                 for c in 0..3 {
@@ -476,7 +499,7 @@ impl Optics {
         } else {
             img.clone()
         };
-        let halo = if self.halation_weight > 0.0 {
+        let halo = if wh > 0.0 {
             let (rad, k) = halo_kernel_px(&self.halo(), px_per_mm);
             Some(convolve(&d, rad, &k))
         } else {
@@ -491,7 +514,6 @@ impl Optics {
         for m in &mut mean {
             *m /= (w * h) as f64;
         }
-        let (wh, wg) = (self.halation_weight, self.glare_weight);
         let (cx, cy) = (w as f64 / 2.0, h as f64 / 2.0);
         let rw = w as f64 - 2.0 * margin.0 as f64;
         let rh = h as f64 - 2.0 * margin.1 as f64;
@@ -528,6 +550,72 @@ impl Optics {
 mod tests {
     use super::*;
     use crate::close;
+
+    /// Review R-49: the weights form a partition of the light whatever the parameters (each in [0, 1], the
+    /// direct weight 1 - w_h - w_g >= 0, NaN as 0), and are unchanged inside the valid range.
+    #[test]
+    fn light_weights_are_a_partition() {
+        assert_eq!(light_weights(0.2, 0.03, 0.01), [0.2, 0.03, 0.01]);
+        assert_eq!(light_weights(0.2, 0.6, 0.4), [0.2, 0.6, 0.4]);
+        let [_, wh, wg] = light_weights(0.0, 0.8, 0.8);
+        assert!(close(wh, 0.5, 1e-15) && close(wg, 0.5, 1e-15));
+        let [_, wh, wg] = light_weights(0.0, 3.0, 1.0);
+        assert!(
+            close(wh, 0.5, 1e-15) && close(wg, 0.5, 1e-15),
+            "each clamped to 1 first"
+        );
+        assert_eq!(light_weights(-1.0, -0.5, f64::NAN), [0.0, 0.0, 0.0]);
+        assert_eq!(light_weights(2.0, f64::INFINITY, 0.0), [1.0, 1.0, 0.0]);
+        for wd in [-1.0, 0.0, 0.5, 1.0, 7.0, f64::NAN] {
+            for wh in [-1.0, 0.0, 0.3, 0.8, 1.0, 5.0, f64::NAN] {
+                for wg in [-1.0, 0.0, 0.3, 0.8, 1.0, 5.0, f64::NAN] {
+                    let [a, b, c] = light_weights(wd, wh, wg);
+                    for x in [a, b, c] {
+                        assert!((0.0..=1.0).contains(&x), "{wd} {wh} {wg}: {x}");
+                    }
+                    assert!(1.0 - b - c >= -1e-15, "{wd} {wh} {wg}: direct {}", 1.0 - b - c);
+                }
+            }
+        }
+    }
+
+    /// Review R-49: halation 0.8 with glare 0.8 (and a diffusion weight beyond 1) gives no negative light,
+    /// and with a neutral glass and no edge loss (a small spot far from the edges) the total light is kept.
+    #[test]
+    fn extreme_weights_keep_light_non_negative() {
+        let o = Optics {
+            glass: Glass {
+                thickness_mm: 2.0,
+                index: 1.52,
+                transmission: 0.9,
+            },
+            halation_weight: 0.8,
+            diffusion_weight: 1.5,
+            diffusion_sigma_mm: 0.2,
+            glare_weight: 0.8,
+            vignette_corner: 1.0,
+            tint: [1.0; 3],
+            ambient_lux: 0.0,
+            screen_reflectance: 0.0,
+            white_nits: 100.0,
+        };
+        // An image that holds the whole halo of the 8 x 8 spot (no edge loss).
+        let ppm = 4.0;
+        let r = (o.halo().support_mm * ppm).ceil() as usize + 4;
+        let (w, h) = (2 * r + 8, 2 * r + 8);
+        let mut img = TubeImage::new(w, h);
+        for y in r..r + 8 {
+            for x in r..r + 8 {
+                img.rgb[y * w + x] = [1.0, 0.5, 2.0];
+            }
+        }
+        let out = o.apply(&img, ppm, (0, 0));
+        for c in 0..3 {
+            let (tin, tout): (f64, f64) = (img.rgb.iter().map(|p| p[c]).sum(), out.rgb.iter().map(|p| p[c]).sum());
+            assert!(out.rgb.iter().all(|p| p[c] >= 0.0), "channel {c}: negative light");
+            assert!(close(tout, tin, 1e-6 * tin), "channel {c}: {tout} vs {tin}");
+        }
+    }
 
     #[test]
     fn halation() {

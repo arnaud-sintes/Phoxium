@@ -116,15 +116,22 @@ fn params(on: bool, rate_hz: f32, tail: [f32; 3]) -> Params {
 
 /// One frame of `phosphor` alone on `input` (injected after `screen`); its output image.
 fn run(gpu: &mut Headless, params: &Params, input: &ImageF32) -> ImageF32 {
+    run_at(gpu, params, input, 0.0)
+}
+
+/// As [`run`], the frame's measured period being `frame_ms` (0: none, as in [`run`]).
+fn run_at(gpu: &mut Headless, params: &Params, input: &ImageF32, frame_ms: f32) -> ImageF32 {
     gpu.enable_only(&["phosphor"]).unwrap();
     let settings = Settings::identity();
+    let mut fc = frame(input.width, input.height);
+    fc.frame_time_ms = frame_ms;
     let r = gpu
         .render_stages(&StageRun {
             input: StageInput::Image {
                 after: "screen",
                 image: input,
             },
-            frame: frame(input.width, input.height),
+            frame: fc,
             settings: &settings,
             params,
             format: TargetFormat::Rgba32F,
@@ -401,6 +408,130 @@ fn history_is_cleared() {
         black(b.0, b.1),
         "slot skipped a frame"
     );
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The green output of white texel 0 after a static white picture shown for the frame periods `lit_ms` is
+/// switched to black for the periods `black_ms`, all frames with their measured period: (time since the
+/// last lit frame began, output) per black frame. Each lit frame keeps the picture (within FP16).
+fn trail_in_time(gpu: &mut Headless, p: &Params, lit_ms: &[f32], black_ms: &[f32]) -> Vec<(f64, f64)> {
+    let white = image(W, H, |_, _| [1.0; 3]);
+    let zero = black(W, H);
+    gpu.clear_history();
+    for &dt in lit_ms {
+        let y = run_at(gpu, p, &white, dt);
+        assert!(
+            rel(f64::from(y.rgba[1]), 1.0) <= FP16 / 2.0 + 1e-5,
+            "static picture {} ({dt} ms)",
+            y.rgba[1]
+        );
+    }
+    let mut t = 0.0;
+    let mut prev = *lit_ms.last().unwrap();
+    let mut out = Vec::new();
+    for &dt in black_ms {
+        t += f64::from(prev);
+        out.push((t, f64::from(run_at(gpu, p, &zero, dt).rgba[1])));
+        prev = dt;
+    }
+    out
+}
+
+fn sample_at(curve: &[(f64, f64)], ms: f64) -> f64 {
+    curve.iter().find(|(t, _)| (t - ms).abs() < 1e-3).expect("sample").1
+}
+
+/// Review R-11, on the GPU: the default time base is real time (`phosphor_frame_rate_hz` 0). After a static
+/// white picture is switched off, the green trail at the same time since the last lit frame began (83.3 and
+/// 250 ms) agrees within 1 % of the steady state (plus FP16) at 60 Hz, at 144 Hz and at 144 Hz with jittered
+/// frame periods (0.8 / 1.2 of the period), each frame stepping by its measured period; the manual 60 Hz
+/// mode at 144 Hz frames (the previous default, decay per frame) gives the 2.4 times shorter trail. The
+/// oracle of the same comparison is `crt_model::phosphor` `trail_is_real_time_at_60_and_144_hz`.
+#[test]
+fn real_time_trail_at_60_and_144_hz() {
+    let Some(mut gpu) = common::gpu_or_skip("real_time_trail_at_60_and_144_hz") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    assert_eq!(Params::default().phosphor_frame_rate_hz, 0.0, "real time by default");
+    let auto = params(true, 0.0, [1.0; 3]);
+    let (p60, p144) = (1000.0_f32 / 60.0, 1000.0_f32 / 144.0);
+    // Enough lit frames for the automatic rate to settle on the new rate (a refit restarts the history
+    // primed to the static picture, so the lit frames stay at 1).
+    let c60 = trail_in_time(&mut gpu, &auto, &[p60; 80], &[p60; 16]);
+    let c144 = trail_in_time(&mut gpu, &auto, &[p144; 80], &[p144; 36]);
+    let jit: Vec<f32> = (0..80)
+        .map(|k| if k % 2 == 0 { 0.8 * p144 } else { 1.2 * p144 })
+        .collect();
+    let cj = trail_in_time(&mut gpu, &auto, &jit, &jit[..36]);
+    let old = trail_in_time(&mut gpu, &params(true, 60.0, [1.0; 3]), &[p144; 4], &[p144; 36]);
+    for ms in [1000.0 / 12.0, 250.0] {
+        let (a, b, j, o) = (
+            sample_at(&c60, ms),
+            sample_at(&c144, ms),
+            sample_at(&cj, ms),
+            sample_at(&old, ms),
+        );
+        println!(
+            "green trail at {ms:.1} ms: 60 Hz {a:.5}, 144 Hz {b:.5}, jittered {j:.5}, manual 60 Hz at 144 Hz {o:.5}"
+        );
+        assert!((a - b).abs() < 0.01 + FP16 * a, "{ms} ms: 60 Hz {a} vs 144 Hz {b}");
+        assert!((a - j).abs() < 0.01 + FP16 * a, "{ms} ms: 60 Hz {a} vs jittered {j}");
+        assert!((a - o).abs() > 0.03, "{ms} ms: the per-frame decay is separated");
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Review R-10, R-11 on the GPU: in real time a static picture keeps its brightness (within FP16) through
+/// jitter, dropped frames and a 10 minute gap (600,000 ms), and a trail decays over the gap like over
+/// 250 ms (the clamp), not like over 10 minutes (it would be exactly 0 then). The frame whose measured
+/// period is the gap decays the history it leaves to the next frame by that period (module doc of
+/// `src/gpu/stages/phosphor.rs`: the step lags the measured periods by one frame).
+#[test]
+fn real_time_static_picture_and_long_gap() {
+    let Some(mut gpu) = common::gpu_or_skip("real_time_static_picture_and_long_gap") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let p = params(true, 0.0, [1.0; 3]);
+    let pic = picture(W, H);
+    for (k, dt) in [16.7_f32, 16.2, 33.4, 17.0, 600_000.0, 16.6, 0.0, 16.8]
+        .iter()
+        .cycle()
+        .take(40)
+        .enumerate()
+    {
+        let y = run_at(&mut gpu, &p, &pic, *dt);
+        for (i, (&got, &x)) in y.rgba.iter().zip(&pic.rgba).enumerate() {
+            assert!(
+                rel(f64::from(got), f64::from(x)) <= FP16 / 2.0 + 1e-5,
+                "frame {k} ({dt} ms): texel {} channel {}: {got} vs {x}",
+                i / 4,
+                i % 4
+            );
+        }
+    }
+    // A trail across the gap: white, a black frame measured after the gap, then a 60 Hz black frame.
+    let white = image(W, H, |_, _| [1.0; 3]);
+    let zero = black(W, H);
+    let mut after = Vec::new();
+    for gap in [600_000.0_f32, 250.0, 1000.0 / 60.0] {
+        gpu.clear_history();
+        for _ in 0..40 {
+            let _ = run_at(&mut gpu, &p, &white, 1000.0 / 60.0);
+        }
+        let first = run_at(&mut gpu, &p, &zero, gap).rgba[1];
+        after.push((first, run_at(&mut gpu, &p, &zero, 1000.0 / 60.0).rgba[1]));
+    }
+    println!(
+        "green trail (first black, next black): 10 minute gap {:?}, 250 ms {:?}, 16.7 ms {:?}",
+        after[0], after[1], after[2]
+    );
+    assert_eq!(after[0], after[1], "a 10 minute gap decays like 250 ms");
+    assert!(after[0].1 > 0.0, "a pause does not decay the trail by hours");
+    assert!(after[0].1 < after[2].1, "the gap decays more than a 60 Hz frame");
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

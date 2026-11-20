@@ -17,7 +17,9 @@
 //!
 //!   Q_c += scale x (1 / (t_x t_y)) sum_p overlap_x(p) overlap_y(p) x_c(p),
 //!
-//! with scale = frame hours x acceleration x L_w / 350 (h_ref per unit light). The light x is the input of
+//! with scale = frame hours x acceleration x L_w / 350 (h_ref per unit light), the frame hours from the measured
+//! frame period clamped to [`crate::phosphor::MAX_FRAME_STEP_MS`] ([`frame_hours`], review R-10: a pause is not
+//! display time). The light x is the input of
 //! the wear stage: the beam current times the mask, before any efficiency (the charge, not the light the worn
 //! phosphor emits). The sum is monotonic (light is never negative) and the channels are independent.
 //!
@@ -33,6 +35,22 @@
 //! (i + 1/2) / width), clamped at the edges, so a uniform map stays uniform.
 
 use crate::ageing::WearLaw;
+use crate::phosphor::frame_step_ms;
+
+/// Hours of display time a frame adds to the burn-in charge, before the light and L_w / 350: the frame step
+/// of the measured period `measured_ms` ([`crate::phosphor::frame_step_ms`], clamped to
+/// [`crate::phosphor::MAX_FRAME_STEP_MS`]) in hours, times `acceleration`. 0 without a measurement (first
+/// frame) or for a negative or non-finite acceleration. One frame after a 10 minute pause adds at most
+/// 250 ms x acceleration (15 min at 3600), not 10 min x acceleration (600 h). [D]
+pub fn frame_hours(measured_ms: f64, acceleration: f64) -> f64 {
+    const MS_PER_HOUR: f64 = 3_600_000.0;
+    let accel = if acceleration.is_finite() {
+        acceleration.max(0.0)
+    } else {
+        0.0
+    };
+    frame_step_ms(measured_ms).map_or(0.0, |ms| ms / MS_PER_HOUR * accel)
+}
 
 /// Charge per texel and channel, reference hours, rows from top to bottom.
 #[derive(Clone, Debug, PartialEq)]
@@ -190,6 +208,19 @@ mod tests {
     use crate::ageing::{WearLaw, DEFAULT_RATES, REF_HOURS, REF_LOSS};
     use crate::close;
 
+    /// Review R-10: one frame after a 10 minute pause wears like a 250 ms frame (0.25 h at 3600), a normal
+    /// frame is unchanged, no measurement or a bad acceleration adds nothing.
+    #[test]
+    fn frame_hours_are_clamped() {
+        let normal = frame_hours(1000.0 / 60.0, 3600.0);
+        assert!(close(normal, 1.0 / 60.0, 1e-12), "{normal}");
+        assert_eq!(frame_hours(600_000.0, 3600.0), frame_hours(250.0, 3600.0));
+        assert!(close(frame_hours(600_000.0, 3600.0), 0.25, 1e-12));
+        assert_eq!(frame_hours(0.0, 3600.0), 0.0);
+        assert_eq!(frame_hours(f64::NAN, 3600.0), 0.0);
+        assert_eq!(frame_hours(16.0, -1.0), 0.0);
+        assert_eq!(frame_hours(16.0, f64::INFINITY), 0.0);
+    }
     fn flat(w: usize, h: usize, x: [f64; 3]) -> Vec<[f64; 3]> {
         vec![x; w * h]
     }
