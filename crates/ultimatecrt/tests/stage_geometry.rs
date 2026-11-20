@@ -827,6 +827,69 @@ fn trapezoid_rotation_barrel_match_the_oracle() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// Review D-08: pincushion and trapezoid over their whole hard range (|k| <= 0.3, |t| <= 0.5, and both at
+/// once), dots near the corner (one native pixel in from the raster's last row and column, whose spot is cut
+/// at the raster end) and elsewhere on the G10 tube, against the forward maps (pincushion
+/// s (1 + k |s|^2 / 6400), then trapezoid x (1 + t y / 48)). The former inverse (four fixed-point steps) left
+/// tens of px at k = -0.3 in the corner (about 10 px estimated at the dot (62, 46)). Tolerance 0.1 px, divided by the
+/// local radial scale f' = 1 + 3 k (r / rc)^2 where it is under 0.5: the host pixel's footprint is not resized
+/// for the local compression (geometry.glsl), so a barrel's corner (f' about 0.19 at k = -0.3) is sampled every
+/// 5 raster px and the dot's centroid moves by up to about 0.1 px there (0.11 px measured).
+#[test]
+fn pincushion_and_trapezoid_hard_range_match_the_forward_map() {
+    let test = "stage_geometry hard range";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let forward = |k: f64, t: f64, dot: (u32, u32)| {
+        let s = (
+            (f64::from(dot.0) + 0.5) * 2.0 - 64.0,
+            (f64::from(dot.1) + 0.5) * 2.0 - 48.0,
+        );
+        let f = 1.0 + k * (s.0 * s.0 + s.1 * s.1) / 6400.0;
+        let (x, y) = (s.0 * f, s.1 * f);
+        (128.0 + 2.0 * x * (1.0 + t * y / 48.0), 96.0 + 2.0 * y)
+    };
+    // (k, t, dots): the dots stay inside the visible opening after the distortion.
+    type Case = (f64, f64, &'static [(u32, u32)]);
+    let cases: [Case; 8] = [
+        (-0.3, 0.0, &[(62, 46), (56, 42), (10, 5), (1, 1)]),
+        (-0.15, 0.0, &[(62, 46), (10, 5)]),
+        (0.15, 0.0, &[(56, 42), (10, 5)]),
+        (0.3, 0.0, &[(56, 42), (50, 38), (10, 5)]),
+        (0.0, 0.5, &[(50, 38), (10, 5)]),
+        (0.0, -0.5, &[(50, 38), (10, 5)]),
+        (-0.3, 0.5, &[(50, 38), (62, 46)]),
+        (0.3, -0.5, &[(50, 38), (20, 30)]),
+    ];
+    for (k, t, dots) in cases {
+        let p = Params {
+            geometry_pincushion: k as f32,
+            geometry_trapezoid: t as f32,
+            ..base()
+        };
+        for &dot in dots {
+            let want = forward(k, t, dot);
+            assert!(
+                (0.0..256.0).contains(&want.0) && (0.0..192.0).contains(&want.1),
+                "{want:?}"
+            );
+            let got = dot_centroid(&mut gpu, &p, dot, want);
+            let r2 = ((f64::from(dot.0) + 0.5) * 2.0 - 64.0).powi(2) + ((f64::from(dot.1) + 0.5) * 2.0 - 48.0).powi(2);
+            let radial_scale = 1.0 + 3.0 * k * r2 / 6400.0;
+            let tol = 0.1 * (0.5 / radial_scale).max(1.0);
+            println!("{test} k {k} t {t} dot {dot:?}: centroid {got:?}, expected {want:?}");
+            assert!(
+                (got.0 - want.0).abs() <= tol && (got.1 - want.1).abs() <= tol,
+                "{test} k {k} t {t} dot {dot:?}: {got:?} vs {want:?} (tolerance {tol})"
+            );
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// G16, G17: the eye at 600 mm, spherical corner dot and cylindrical column, against the oracle.
 #[test]
 fn finite_eye_matches_the_oracle() {

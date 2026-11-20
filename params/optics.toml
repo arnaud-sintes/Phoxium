@@ -219,7 +219,7 @@ default = "kernel"
 values = ["kernel", "pyramid", "gaussians"]
 tag = "E"
 source = "QUESTIONS PHY-10 cost study (T-44): kernel = the exact halo kernel on one level of a box pyramid, bilinear upsample (chosen); pyramid = least-squares mix of the pyramid levels (bloom-like, cannot form a ring); gaussians = least-squares mix of four separable Gaussians at full resolution (slow, comparison only)"
-description = "How the wide halo is computed. Kernel (default): the physical ring kernel evaluated on a coarse level of an image pyramid, then interpolated. Pyramid: a weighted sum of blurred pyramid levels (cheaper, the ring becomes a soft glow). Gaussians: four large Gaussian blurs at full resolution (slow, for comparison)."
+description = "How the wide halo is computed. Kernel (default): the physical ring kernel evaluated on a coarse level of an image pyramid, then interpolated. Pyramid: a weighted sum of blurred pyramid levels (cheaper, the ring becomes a soft glow). Gaussians: four large Gaussian blurs at full resolution (slow, for comparison; above 1025 taps per pixel, a thick glass on a fine screen, the pyramid is used instead, with a notice)."
 group = "Optics"
 advanced = true
 

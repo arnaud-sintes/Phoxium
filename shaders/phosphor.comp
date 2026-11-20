@@ -81,8 +81,11 @@ void main() {
         vec4 t = s[ch];
         if (pc.mode != 0u) {
             // Cleared: the history is primed to the steady state of this frame's input, so a static
-            // picture shows y = x from the first frame (no fade-in).
-            t = pc.c[ch] * x[ch] / (vec4(1.0) - pc.rho[ch]);
+            // picture shows y = x from the first frame (no fade-in). A term whose rho rounds to 1 (a frame
+            // step of tens of ns: the CPU then sends c = 0) would be 0 / 0: primed to 0 instead (review D-13;
+            // the boolean mix selects, so the NaN of that lane is never used).
+            vec4 open = vec4(1.0) - pc.rho[ch];
+            t = mix(vec4(0.0), pc.c[ch] * x[ch] / open, greaterThan(open, vec4(0.0)));
         }
         y[ch] = pc.w0[ch] * (x[ch] + ((t.x + t.y) + (t.z + t.w)));
         vec4 n = pc.rho[ch] * t + pc.c[ch] * x[ch];

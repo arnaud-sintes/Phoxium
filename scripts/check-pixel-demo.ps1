@@ -16,7 +16,9 @@
     Opens windows: run it under the desktop and GPU token, hands off the keyboard and mouse. Every run
     is bounded and leftovers are killed. Exit code 0 when every check passes.
 .PARAMETER TargetDir
-    Cargo target directory holding release\ultimatecrt.exe and release\pixel-demo.exe.
+    Cargo target directory holding release\ultimatecrt.exe and release\pixel-demo.exe. Default: CARGO_TARGET_DIR,
+    else the target directory that cargo metadata reports. Binaries older than their sources are refused (rebuild
+    with cargo build --release --locked).
 .PARAMETER Rates
     Update rates to measure (default 30,50,60,75,120). Rates above the monitor refresh are still painted.
 .PARAMETER MoveTo
@@ -25,7 +27,7 @@
     Keep the captures in the work directory.
 #>
 param(
-    [string]$TargetDir = (Join-Path $PSScriptRoot '..\target'),
+    [string]$TargetDir = '',
     [int[]]$Rates = @(30, 50, 60, 75, 120),
     [string]$MoveTo = "",
     [switch]$KeepFiles
@@ -35,9 +37,15 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Drawing
 
+. (Join-Path $PSScriptRoot 'build-checks.ps1')
+$repoRoot = Split-Path $PSScriptRoot -Parent
+if (-not $TargetDir) { $TargetDir = Get-BinaryTargetDir $repoRoot }
 $ucrt = Join-Path $TargetDir 'release\ultimatecrt.exe'
 $demo = Join-Path $TargetDir 'release\pixel-demo.exe'
-if (-not (Test-Path $ucrt) -or -not (Test-Path $demo)) { throw "release binaries not found under $TargetDir" }
+# D-10: the binaries of this tree, not an old build elsewhere.
+Assert-FreshBinaries $repoRoot @($ucrt, $demo)
+# Start-Process joins -ArgumentList unquoted in Windows PowerShell 5.1: every argument is quoted (paths with spaces).
+function Join-Args([object[]]$a) { return @($a | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) }
 $work = Join-Path ([IO.Path]::GetTempPath()) ('ucrt-check-pixel-demo-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $work | Out-Null
 
@@ -62,7 +70,7 @@ function Stop-Leftovers { Get-Process ultimatecrt, pixel-demo -ErrorAction Silen
 
 function Start-Demo([string[]]$DemoArgs) {
     Stop-Leftovers
-    $p = Start-Process -FilePath $demo -ArgumentList $DemoArgs -PassThru
+    $p = Start-Process -FilePath $demo -ArgumentList (Join-Args $DemoArgs) -PassThru
     $deadline = (Get-Date).AddSeconds(10)
     while ($p.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100; $p.Refresh() }
     Start-Sleep -Milliseconds 800
@@ -77,7 +85,7 @@ function Get-Client($p) {
 
 function Save-Capture([string]$name) {
     $cap = Join-Path $work "$name.png"
-    $u = Start-Process -FilePath $ucrt -ArgumentList @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20') -PassThru -NoNewWindow `
+    $u = Start-Process -FilePath $ucrt -ArgumentList (Join-Args @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20')) -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $work 'u.out') -RedirectStandardError (Join-Path $work 'u.err')
     if (-not $u.WaitForExit(25000)) { $u.Kill() }
     if (Test-Path $cap) { return $cap } else { return $null }
@@ -176,7 +184,7 @@ try {
     foreach ($fps in $Rates) {
         Stop-Leftovers
         $out = Join-Path $work "rate-$fps.txt"
-        $p = Start-Process -FilePath $demo -ArgumentList @('--native', '256x240', '--mode', 'native', '--content', 'motion', '--fps', $fps, '--stats', '--exit-after', '6') `
+        $p = Start-Process -FilePath $demo -ArgumentList (Join-Args @('--native', '256x240', '--mode', 'native', '--content', 'motion', '--fps', $fps, '--stats', '--exit-after', '6')) `
             -PassThru -RedirectStandardOutput $out
         if (-not $p.WaitForExit(20000)) { $p.Kill() }
         $painted = @(Get-Content $out | Select-String 'painted ([0-9.]+)/s' | ForEach-Object { [double]$_.Matches[0].Groups[1].Value })

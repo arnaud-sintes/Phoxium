@@ -22,6 +22,28 @@ layout(set = ABL_STATE_SET, binding = ABL_STATE_BINDING, std430) ABL_STATE_QUALI
 } abl_state;
 #endif
 
+#ifdef ABL_STATE_WRITER
+// Whether x is finite (ordered compare: false for NaN and for +-inf).
+bool abl_finite(float x) {
+    return abs(x) <= 3.4028235e38;
+}
+
+// The state update of the reduce passes (reduce.comp, reduce_final.comp): apl_f += alpha (a - apl_f),
+// apl_frame = a. Feedback guard (review D-06; the phosphor history has the same, phosphor.comp): a
+// non-finite frame APL a (one frame with an inf or NaN beam current) is ignored, the filtered value is
+// kept; a non-finite state restarts from 0. A NaN would otherwise latch for the rest of the session.
+void abl_state_update(float a, float alpha) {
+    float prev = abl_finite(abl_state.apl_f) ? abl_state.apl_f : 0.0;
+    if (abl_finite(a)) {
+        abl_state.apl_f = prev + alpha * (a - prev);
+        abl_state.apl_frame = a;
+    } else {
+        abl_state.apl_f = prev;
+        abl_state.apl_frame = prev;
+    }
+}
+#endif
+
 // Gain slope k in 1/mA: (1/r - 1) / (I_fw - I_th), 0 when the limiter cannot act (I_fw <= I_th). The
 // limited current x I_fw g(x) rises with x only while k <= 1 / I_th, i.e. r >= I_th / I_fw: a smaller
 // ratio would make a brighter picture draw less current (non-physical), so r is clamped to that bound

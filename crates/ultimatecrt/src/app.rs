@@ -598,12 +598,15 @@ pub fn run() -> Res<()> {
     let mut was_idle = false;
 
     // R-01: the session loop. Every error in it (a `?`) ends the loop and comes out here as `outcome`; the
-    // shutdown below then runs on every exit path, normal or not.
-    #[allow(clippy::redundant_closure_call)]
-    let outcome: Res<()> = (|| -> Res<()> {
+    // shutdown below then runs on every exit path, normal or not. D-05: so does a panic (`crash::guard`), and
+    // a panic caught in a window procedure ends the loop at the next iteration.
+    let outcome: Res<()> = crate::crash::guard(|| -> Res<()> {
         loop {
             if !output::pump() {
                 break;
+            }
+            if let Some(panic) = crate::crash::take_callback_panic() {
+                return Err(panic.into());
             }
             live.tick(&mut ui, win.hwnd, &mut renderer, &mut params, &mut lost_watch);
             if live.controls.quit {
@@ -1587,7 +1590,7 @@ pub fn run() -> Res<()> {
             }
         }
         Ok(())
-    })();
+    });
 
     // R-01, R-16: the shutdown, on every exit path (quit, lost source, `--exit-after`, or an error above).
     let hwnd = win.hwnd;
@@ -2190,6 +2193,59 @@ mod tests {
         }
         let saved = settings::load(&dir).settings;
         assert_eq!(saved.global.overrides.get("exposure"), Some(&toml::Value::Float(1.75)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review D-05: a panic inside the session loop (as `run` wraps it, `crash::guard`) does not unwind past the
+    /// shutdown: every step runs in order, the session is saved, and the error names the panic.
+    #[test]
+    fn a_panic_in_the_loop_still_runs_the_shutdown() {
+        let dir = temp_dir("exit-panic");
+        let mut live = live::Live::new(
+            false,
+            settings::Settings::default(),
+            Some(dir.clone()),
+            presets::Library::embedded(),
+            None,
+            (800, 600),
+        );
+        live.set_gpu_adapter("Intel".into());
+        let mut tube = TubeState::new(Some(dir.clone()), false, Instant::now());
+        let mut frames = 0;
+        let outcome: Res<()> = crate::crash::guard(|| -> Res<()> {
+            loop {
+                frames += 1;
+                if frames == 3 {
+                    panic!("simulated failure in frame {frames}");
+                }
+            }
+        });
+        assert_eq!(frames, 3);
+        let mut exit = FakeExit {
+            order: Vec::new(),
+            live: &mut live,
+            tube: &mut tube,
+            host: FakeHost {
+                map: WearMap::new(4, 3),
+                reads: 0,
+            },
+        };
+        let message = shut_down(&mut exit, outcome).unwrap_err().to_string();
+        assert!(message.contains("simulated failure in frame 3"), "{message}");
+        assert!(message.contains("saved"), "{message}");
+        assert_eq!(
+            exit.order,
+            [
+                "close_menu",
+                "hide_window",
+                "save",
+                "summary",
+                "release_gpu",
+                "destroy_window",
+                "release_capture"
+            ]
+        );
+        assert_eq!(settings::load(&dir).settings.global.gpu.adapter, "Intel");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

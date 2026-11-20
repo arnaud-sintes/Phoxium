@@ -98,16 +98,39 @@ pub fn window_exists(hwnd: isize) -> bool {
     unsafe { IsWindow(Some(HWND(hwnd as *mut std::ffi::c_void))).as_bool() }
 }
 
-/// Window whose title starts with `needle`, else the first one that contains it (case insensitive).
-/// Starting with is preferred so a console titled with the program path does not win.
+/// Window whose title starts with `needle`, else the first one that contains it (case insensitive), among
+/// the windows the picker would list ([`crate::picker::exclusion`]: no cloaked, tool, owned or shell
+/// window, review D-17) that are not minimised. Starting with is preferred so a console titled with the
+/// program path does not win.
 pub fn find_by_title(needle: &str) -> Option<WinInfo> {
+    let windows = enumerate();
+    let w = find_title_in(&windows, needle)?;
+    Some(WinInfo {
+        hwnd: HWND(w.hwnd as *mut std::ffi::c_void),
+        title: w.title.clone(),
+        class: w.class.clone(),
+        width: w.width,
+        height: w.height,
+    })
+}
+
+/// The pure part of [`find_by_title`]: the first candidate of `windows` (z-order) whose title starts with
+/// `needle`, else the first that contains it, case insensitive; excluded and minimised windows are skipped.
+pub fn find_title_in<'a>(
+    windows: &'a [crate::picker::RawWindow],
+    needle: &str,
+) -> Option<&'a crate::picker::RawWindow> {
     let needle = needle.to_lowercase();
-    let mut windows = list_windows();
-    let pos = windows
+    let candidates: Vec<&crate::picker::RawWindow> = windows
         .iter()
-        .position(|w| w.title.to_lowercase().starts_with(&needle))
-        .or_else(|| windows.iter().position(|w| w.title.to_lowercase().contains(&needle)))?;
-    Some(windows.swap_remove(pos))
+        .filter(|w| crate::picker::exclusion(w).is_none() && !w.minimized)
+        .collect();
+    let title = |w: &&crate::picker::RawWindow| w.title.to_lowercase();
+    candidates
+        .iter()
+        .find(|w| title(w).starts_with(&needle))
+        .or_else(|| candidates.iter().find(|w| title(w).contains(&needle)))
+        .copied()
 }
 
 /// File name (last path component, either separator) of an executable path: `C:\Games\Foo.exe` -> `Foo.exe`.
@@ -329,7 +352,50 @@ pub fn exe_icon(path: &str) -> Option<(u32, u32, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::exe_file_name;
+    use super::{exe_file_name, find_title_in};
+    use crate::picker::RawWindow;
+
+    fn window(hwnd: isize, title: &str) -> RawWindow {
+        RawWindow {
+            hwnd,
+            title: title.into(),
+            class: "GameClass".into(),
+            exe: Some("game.exe".into()),
+            visible: true,
+            width: 640,
+            height: 480,
+            ..Default::default()
+        }
+    }
+
+    /// Review D-17: `--window` skips the windows the picker excludes (cloaked on another virtual desktop, a
+    /// tool window, our own) and minimised ones; starting with wins over containing.
+    #[test]
+    fn window_option_skips_excluded_windows() {
+        let cloaked = RawWindow {
+            cloaked: true,
+            ..window(1, "Pixel demo")
+        };
+        let tool = RawWindow {
+            tool_window: true,
+            ..window(2, "Pixel demo tools")
+        };
+        let own = RawWindow {
+            own_process: true,
+            ..window(3, "Pixel demo")
+        };
+        let minimised = RawWindow {
+            minimized: true,
+            ..window(4, "Pixel demo")
+        };
+        let contains = window(5, "The pixel demo");
+        let starts = window(6, "Pixel demo");
+        let all = [cloaked, tool, own, minimised, contains.clone(), starts];
+        assert_eq!(find_title_in(&all, "pixel").map(|w| w.hwnd), Some(6));
+        assert_eq!(find_title_in(&all[..5], "PIXEL").map(|w| w.hwnd), Some(5));
+        assert_eq!(find_title_in(&all[..4], "pixel"), None);
+        assert_eq!(find_title_in(&[contains], "nothing"), None);
+    }
 
     #[test]
     fn parses_executable_names() {

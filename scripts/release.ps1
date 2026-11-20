@@ -1,32 +1,51 @@
 <#
 .SYNOPSIS
     Publishes dist/ultimatecrt-v<version>-windows-x64.zip as a GitHub release tagged v<version>, with the
-    notes taken from the matching CHANGELOG.md section.
+    notes taken from the matching CHANGELOG.md section, in two steps: a DRAFT release first, then -Publish.
 .DESCRIPTION
     Run it after the version bump, the changelog update, the commit and the push, and after
     scripts/package.ps1. It refuses to run off `main`, on a dirty tree, with an unpushed HEAD, with a zip
     built from another commit, with a zip built from a dirty tree or with `-SkipTests` (recorded as `-dirty` and
     `-untested` in the .commit file), when the tag, the workspace version and the changelog disagree (no dated
     section for the version, entries left under Unreleased, Cargo.lock at another version), when the zip lacks
-    LICENSE, THIRD-PARTY.md or the executables, or when the release or the tag already exists. It never overwrites
-    a release. The release notes end with the SHA-256 of the zip and the unsigned-binary note.
-    If it fails after creating the tag, see "Recovery" in ENV.md.
+    LICENSE, THIRD-PARTY.md or the executables, when `origin` is not the target repository, or when the tag
+    already exists. It never overwrites a release. The release notes end with the SHA-256 of the zip and the
+    unsigned-binary note.
+
+    Without a switch it creates the release as a DRAFT on the target repository (-Repo, printed with the tag and
+    the assets), checks that the uploaded assets have the sizes of the local files, and stops: nothing is public
+    yet and the tag does not exist yet. Look at the draft (the printed URL), then run it again with -Publish: the
+    same checks, plus a draft for the tag whose assets match the local files, then the draft becomes public and
+    GitHub creates the tag at HEAD. Errors of git and gh are shown with their text. If it fails half way, see
+    "Recovery" in ENV.md.
 .PARAMETER DryRun
-    Run every check and print the release notes, but create nothing.
+    Run every check and print the target, the assets and the release notes, but create nothing.
+.PARAMETER Publish
+    Second step: make the existing draft release of this version public (after the checks).
+.PARAMETER Repo
+    The GitHub repository (owner/name) of the release. Default arnaud-sintes/ultimateCRT; `origin` must point to it.
 #>
-param([switch]$DryRun)
+param([switch]$DryRun, [switch]$Publish, [string]$Repo = 'arnaud-sintes/ultimateCRT')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 
-# Runs a native command, returns its output, throws on a non-zero exit code. Windows PowerShell 5.1 turns
-# stderr output into an error under 'Stop', so the preference is relaxed around the call.
+# Runs a native command, returns its standard output, throws on a non-zero exit code with the command's error
+# text (stderr). Windows PowerShell 5.1 turns stderr output into an error under 'Stop', so the preference is
+# relaxed around the call and stderr is captured separately (D-11: never hidden).
 function Invoke-Native([string]$what, [scriptblock]$block) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { $out = & $block 2>$null } finally { $ErrorActionPreference = $previous }
-    if ($LASTEXITCODE -ne 0) { throw "$what failed with exit code $LASTEXITCODE" }
+    try { $all = @(& $block 2>&1) } finally { $ErrorActionPreference = $previous }
+    $code = $LASTEXITCODE
+    $out = @($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+    $err = @($all | Where-Object { $_ -is [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" })
+    if ($code -ne 0) {
+        $detail = (($err + $out) -join "`n").Trim()
+        if ($detail) { throw "$what failed with exit code ${code}:`n$detail" }
+        throw "$what failed with exit code $code"
+    }
     return $out
 }
 
@@ -39,6 +58,34 @@ function Get-WorkspaceVersion {
     throw 'No version in [workspace.package] of Cargo.toml.'
 }
 
+# The release $tag of $Repo as an object (tagName, isDraft, url, assets), or $null when there is none. Any other
+# failure of gh is an error with its text.
+function Get-Release([string]$tag) {
+    $previous = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try { $all = @(gh release view $tag --repo $Repo --json 'tagName,isDraft,url,assets' 2>&1) } finally { $ErrorActionPreference = $previous }
+    $code = $LASTEXITCODE
+    $text = (@($all | ForEach-Object { "$_" }) -join "`n").Trim()
+    if ($code -eq 0) { return ($text | ConvertFrom-Json) }
+    if ($text -match '(?i)release not found|not found') { return $null }
+    throw "gh release view $tag --repo $Repo failed with exit code ${code}:`n$text"
+}
+
+# Throws unless the release's assets are exactly the local files $files (same names and sizes).
+function Assert-ReleaseAssets($release, [string[]]$files) {
+    $assets = @($release.assets)
+    $want = @($files | ForEach-Object { Split-Path $_ -Leaf })
+    $have = @($assets | ForEach-Object { $_.name })
+    if ((@($want | Sort-Object) -join '|') -ne (@($have | Sort-Object) -join '|')) {
+        throw "Release $($release.tagName) has the assets [$($have -join ', ')], expected [$($want -join ', ')]."
+    }
+    foreach ($f in $files) {
+        $a = $assets | Where-Object { $_.name -eq (Split-Path $f -Leaf) }
+        $size = (Get-Item -LiteralPath $f).Length
+        if ([int64]$a.size -ne $size) { throw "Asset $($a.name) of release $($release.tagName) has $($a.size) bytes, the local file $size." }
+    }
+}
+
 $version = Get-WorkspaceVersion
 $tag = "v$version"
 $name = "ultimatecrt-v$version-windows-x64"
@@ -48,12 +95,17 @@ $commitFile = "dist\$name.commit"
 
 Invoke-Native 'gh auth status' { gh auth status } | Out-Null
 
-$branch = (Invoke-Native 'git branch' { git rev-parse --abbrev-ref HEAD }).Trim()
+# D-11: the target repository is explicit; origin (where HEAD was pushed and the tag will live) must be it.
+$origin = (Invoke-Native 'git remote get-url' { git remote get-url origin }) -join ''
+if ($origin -notmatch ('[/:]' + [regex]::Escape($Repo) + '(\.git)?/?$')) {
+    throw "origin is $origin, not the target repository $Repo (give -Repo or fix the remote)."
+}
+$branch = ((Invoke-Native 'git branch' { git rev-parse --abbrev-ref HEAD }) -join '').Trim()
 if ($branch -ne 'main') { throw "Releases are made from main, current branch is '$branch'." }
 if (Invoke-Native 'git status' { git status --porcelain }) { throw 'Working tree is not clean: commit first.' }
 Invoke-Native 'git fetch' { git fetch origin --quiet --tags } | Out-Null
-$head = (Invoke-Native 'git rev-parse' { git rev-parse HEAD }).Trim()
-$upstream = (Invoke-Native 'git rev-parse' { git rev-parse '@{u}' }).Trim()
+$head = ((Invoke-Native 'git rev-parse' { git rev-parse HEAD }) -join '').Trim()
+$upstream = ((Invoke-Native 'git rev-parse' { git rev-parse '@{u}' }) -join '').Trim()
 if ($head -ne $upstream) { throw 'HEAD is not pushed (or differs from its upstream): push first.' }
 
 foreach ($f in $zip, $sha, $commitFile) {
@@ -97,14 +149,39 @@ if ($unreleasedAt -ge 0) {
         if ($changelogLines[$i] -match '^- ') { throw 'CHANGELOG.md still has entries under [Unreleased]: move them into the release section (ENV.md, Publish, step 2).' }
     }
 }
+# A draft release has no tag yet: the tag appears when the draft is published.
 if (Invoke-Native 'git tag' { git tag --list $tag }) { throw "Tag $tag already exists locally." }
 if (Invoke-Native 'git ls-remote' { git ls-remote --tags origin "refs/tags/$tag" }) { throw "Tag $tag already exists on origin." }
-$previous = $ErrorActionPreference
-$ErrorActionPreference = 'Continue'
-gh release view $tag 2>$null | Out-Null
-$exists = ($LASTEXITCODE -eq 0)
-$ErrorActionPreference = $previous
-if ($exists) { throw "Release $tag already exists." }
+$existing = Get-Release $tag
+$assetFiles = @($zip, $sha)
+
+Write-Host "Target repository: $Repo"
+Write-Host "Tag:               $tag (at $head, created when the draft is published)"
+Write-Host 'Assets:'
+foreach ($f in $assetFiles) { Write-Host ("  {0} ({1} bytes)" -f (Split-Path $f -Leaf), (Get-Item -LiteralPath $f).Length) }
+Write-Host "SHA-256 of the zip: $expected"
+
+if ($Publish) {
+    # Step 2: the draft made by step 1, for this tag, with these assets.
+    if (-not $existing) { throw "No draft release $tag on ${Repo}: run scripts/release.ps1 (without -Publish) first." }
+    if (-not $existing.isDraft) { throw "Release $tag on $Repo is already public: nothing to publish." }
+    Assert-ReleaseAssets $existing $assetFiles
+    if ($DryRun) {
+        Write-Host "Dry run: would publish the draft $($existing.url)."
+        return
+    }
+    Invoke-Native 'gh release edit' { gh release edit $tag --repo $Repo --draft=false } | Out-Null
+    Invoke-Native 'git fetch' { git fetch origin --quiet --tags } | Out-Null
+    $tagged = ((Invoke-Native 'git rev-parse' { git rev-parse "$tag^{commit}" }) -join '').Trim()
+    if ($tagged -ne $head) { throw "Published, but tag $tag points to $tagged, not HEAD ${head}: see Recovery in ENV.md." }
+    Write-Host "Published $tag on ${Repo}: $((Get-Release $tag).url)"
+    return
+}
+
+if ($existing) {
+    $kind = if ($existing.isDraft) { 'a draft' } else { 'a public release' }
+    throw "Release $tag already exists on $Repo ($kind, $($existing.url)). A draft is published with -Publish; a release is never overwritten."
+}
 
 # Notes: the changelog section "## [<version>]" up to the next "## [".
 $lines = @(Get-Content 'CHANGELOG.md')
@@ -128,14 +205,18 @@ $notesFile = Join-Path $env:TEMP "ultimatecrt-notes-$version.md"
 
 try {
     if ($DryRun) {
-        Write-Host "Dry run: would create release $tag at $head with $zip and $sha. Notes:"
+        Write-Host "Dry run: would create the DRAFT release $tag on $Repo at $head with $zip and $sha. Notes:"
         Write-Host $notes
         return
     }
     Invoke-Native 'gh release create' {
-        gh release create $tag $zip $sha --title "ultimateCRT $tag" --notes-file $notesFile --target $head
+        gh release create $tag $zip $sha --repo $Repo --draft --title "ultimateCRT $tag" --notes-file $notesFile --target $head
     } | Out-Null
-    Write-Host "Released $tag"
+    $draft = Get-Release $tag
+    if (-not $draft -or -not $draft.isDraft) { throw "gh release create succeeded but no draft $tag is visible on $Repo." }
+    Assert-ReleaseAssets $draft $assetFiles
+    Write-Host "Draft release created (not public, no tag yet): $($draft.url)"
+    Write-Host 'Check it (notes, assets), then run: .\scripts\release.ps1 -Publish'
 } finally {
     Remove-Item $notesFile -ErrorAction SilentlyContinue
 }

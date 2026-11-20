@@ -2,7 +2,8 @@
 
 use std::env;
 
-use crate::{lifecycle, params::Params, patterns, scaling, Res};
+use crate::params::{Applied, ParamValue, Params};
+use crate::{lifecycle, patterns, scaling, Res};
 
 pub const USAGE: &str = "ultimatecrt: captures a window and shows it in a second window through a GPU pipeline.
 
@@ -177,31 +178,56 @@ impl Args {
                 }
             }
         }
+        // Through the checked setter, like every other input path (review D-07): the hard ranges and the
+        // cross-parameter rules apply; a clamp is a notice, a rejected value an error.
         if let Some(n) = self.scale {
-            params.source_scale = n;
+            set_flag(params, "--scale", "source_scale", ParamValue::I32(n))?;
         }
         if let Some(c) = self.center {
-            params.source_center = c;
+            set_flag(params, "--align", "source_center", ParamValue::Bool(c))?;
         }
         if let Some(c) = self.surround {
-            params.source_surround_color = c;
+            set_flag(params, "--surround", "source_surround_color", ParamValue::Vec3(c))?;
         }
         if let Some(p) = self.par {
-            params.source_par = p;
+            set_flag(params, "--par", "source_par", ParamValue::F32(p))?;
         }
+        let par = ParamValue::Enum(crate::params::RASTER_ASPECT_PAR);
         match self.aspect {
             None => {}
             Some(Aspect::Par) => {
-                params.raster_aspect = crate::params::RASTER_ASPECT_PAR;
-                params.source_display_aspect = 0.0;
+                set_flag(params, "--aspect", "raster_aspect", par)?;
+                set_flag(params, "--aspect", "source_display_aspect", ParamValue::F32(0.0))?;
             }
-            Some(Aspect::Fill) => params.raster_aspect = crate::params::RASTER_ASPECT_FILL_TUBE,
+            Some(Aspect::Fill) => set_flag(
+                params,
+                "--aspect",
+                "raster_aspect",
+                ParamValue::Enum(crate::params::RASTER_ASPECT_FILL_TUBE),
+            )?,
             Some(Aspect::Display(a)) => {
-                params.raster_aspect = crate::params::RASTER_ASPECT_PAR;
-                params.source_display_aspect = a;
+                set_flag(params, "--aspect", "raster_aspect", par)?;
+                set_flag(params, "--aspect", "source_display_aspect", ParamValue::F32(a))?;
             }
         }
         Ok(())
+    }
+}
+
+/// Sets `id` to `value` for the command-line option `flag` through [`Params::set_checked`]: a clamp (hard
+/// range or cross-parameter rule) is recorded as a notice naming the option, a rejected value is an error.
+fn set_flag(params: &mut Params, flag: &str, id: &str, value: ParamValue) -> Res<()> {
+    match params.set_checked(id, value) {
+        Ok(Applied::Exact) => Ok(()),
+        Ok(Applied::Clamped(stored)) => {
+            crate::params::notify(format!("{flag}: {}", crate::params::clamp_message(id, value, stored)));
+            Ok(())
+        }
+        Err(why) => Err(format!(
+            "{flag}: value {} is rejected ({why})",
+            crate::params::value_text(id, value)
+        )
+        .into()),
     }
 }
 
@@ -370,5 +396,58 @@ mod tests {
         assert!(parse("--surround 1,2").is_err());
         assert!(parse("--par 0:1").is_err());
         assert!(parse("--scale-mode huge").unwrap().apply_source(&mut p).is_err());
+    }
+
+    /// Review D-07: --par, --aspect and --surround go through the checked setter. Values outside the hard
+    /// range (or under the forced-aspect minimum) are clamped with a notice that names the option; values
+    /// inside pass exactly with no notice.
+    #[test]
+    fn source_options_respect_the_hard_ranges() {
+        use crate::params::{self, MIN_DISPLAY_ASPECT};
+        params::clear_notices();
+        let mut p = Params::default();
+        parse("--par 1e-6 --aspect 0.01").unwrap().apply_source(&mut p).unwrap();
+        let par_min = params::meta("source_par").unwrap().hard_range.unwrap().0 as f32;
+        assert_eq!(p.source_par, par_min);
+        assert_eq!(p.source_display_aspect, MIN_DISPLAY_ASPECT);
+        let n = params::notices();
+        assert!(
+            n.iter().any(|m| m.starts_with("--par: ") && m.contains("source_par")),
+            "{n:?}"
+        );
+        assert!(
+            n.iter().any(|m| m.starts_with("--aspect: ") && m.contains("0.25")),
+            "{n:?}"
+        );
+        params::clear_notices();
+        let mut p = Params::default();
+        parse("--par 1000 --aspect 1000:1")
+            .unwrap()
+            .apply_source(&mut p)
+            .unwrap();
+        let (par_max, aspect_max) = (
+            params::meta("source_par").unwrap().hard_range.unwrap().1 as f32,
+            params::meta("source_display_aspect").unwrap().hard_range.unwrap().1 as f32,
+        );
+        assert_eq!((p.source_par, p.source_display_aspect), (par_max, aspect_max));
+        assert_eq!(params::notices().len(), 2, "{:?}", params::notices());
+        params::clear_notices();
+        let mut p = Params::default();
+        parse("--par 8:7 --aspect 4:3 --surround 0.5,0,1")
+            .unwrap()
+            .apply_source(&mut p)
+            .unwrap();
+        assert_eq!(
+            (p.source_par, p.source_display_aspect, p.source_surround_color),
+            (8.0 / 7.0, 4.0 / 3.0, [0.5, 0.0, 1.0])
+        );
+        assert!(params::notices().is_empty(), "{:?}", params::notices());
+        // A value the setter rejects is an error naming the option.
+        let e = set_flag(&mut p, "--par", "source_par", ParamValue::F32(f32::NAN)).unwrap_err();
+        assert!(
+            e.to_string().starts_with("--par: ") && e.to_string().contains("rejected"),
+            "{e}"
+        );
+        assert_eq!(p.source_par, 8.0 / 7.0, "a rejected value changes nothing");
     }
 }

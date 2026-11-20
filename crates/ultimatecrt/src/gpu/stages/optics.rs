@@ -83,8 +83,27 @@ const FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const GROUP: (u32, u32) = (8, 8);
 /// Largest Gaussian reach of the gaussians method, px.
 const GAUSS_RADIUS_MAX: i32 = 2048;
+/// Largest number of taps per pixel and per pass (2 r + 1) of the gaussians method (review D-12): above it,
+/// the frame takes the `pyramid` method instead, with a notice. The reach is 3.6 times the ring radius
+/// (1.747 t): the default glass (12 mm) needs 751 taps on a 1440-line 19 in tube (4.966 px/mm, the cost
+/// study of QUESTIONS PHY-10) and 379 in the tests at 2.5 px/mm, which stay on the method; the soft maximum
+/// (30 mm) on that tube needs about 1900 and the hard maximum about 4100 (the GPU-timeout risk), which fall
+/// back. The method is a slow comparison method in any case (`params/optics.toml`).
+pub const GAUSS_TAPS_MAX: i32 = 1025;
 /// Sigmas of the gaussians method relative to the ring radius.
 const GAUSS_SIGMAS: [f64; 4] = [0.3, 0.6, 0.9, 1.2];
+
+/// The sigmas (px) of the gaussians method for `halo` at `ppm` px per mm.
+fn gauss_sigmas_px(h: &Halo, ppm: f64) -> Vec<f64> {
+    let ring = h.ring_radius_mm() * ppm;
+    GAUSS_SIGMAS.iter().map(|f| (f * ring).max(0.5)).collect()
+}
+
+/// The reach (px, 3 sigma of the widest Gaussian) of the gaussians method for `halo` at `ppm` px per mm.
+fn gauss_radius_px(h: &Halo, ppm: f64) -> i32 {
+    let sig = gauss_sigmas_px(h, ppm);
+    ((3.0 * sig[3]).ceil() as i32).min(GAUSS_RADIUS_MAX)
+}
 
 /// Push constants of every optics pass (`OpticsPush` of `optics.glsl`, std430, 96 bytes).
 #[repr(C)]
@@ -132,6 +151,9 @@ pub struct Plan {
     pub diffusion_sigma_px: f64,
     /// Image mean = top texel x this (4^n / (W H)).
     pub mean_scale: f64,
+    /// The `gaussians` method was asked for but needs more than [`GAUSS_TAPS_MAX`] taps: `method` is
+    /// `Pyramid` instead.
+    pub gauss_fallback: bool,
 }
 
 /// Pyramid level sizes: ceil halvings of `size`, `levels` of them.
@@ -186,11 +208,18 @@ pub fn plan(p: &Params, fc: &FrameConstants, size: (u32, u32), halo: Option<&Hal
     if neutral {
         return None;
     }
-    let method = halo_on.then_some(match p.optics_halo_method {
+    let mut method = halo_on.then_some(match p.optics_halo_method {
         OPTICS_HALO_METHOD_PYRAMID => Method::Pyramid,
         OPTICS_HALO_METHOD_GAUSSIANS => Method::Gaussians,
         _ => Method::Kernel,
     });
+    // The gaussians method's cost grows with the reach (review D-12): above the tap budget, the pyramid.
+    // Without the halo at hand (the identity test), the method does not change the identity verdict.
+    let gauss_fallback = method == Some(Method::Gaussians)
+        && halo.is_some_and(|h| 2 * gauss_radius_px(h, f64::from(fc.px_per_mm)) + 1 > GAUSS_TAPS_MAX);
+    if gauss_fallback {
+        method = Some(Method::Pyramid);
+    }
     let levels = if halo_on || glare_on {
         let m = size.0.max(size.1).max(2);
         ((32 - (m - 1).leading_zeros()) as usize).min(MAX_LEVELS)
@@ -222,6 +251,7 @@ pub fn plan(p: &Params, fc: &FrameConstants, size: (u32, u32), halo: Option<&Hal
         diffusion_radius,
         diffusion_sigma_px,
         mean_scale: 4f64.powi(levels as i32) / (f64::from(size.0) * f64::from(size.1)),
+        gauss_fallback,
     })
 }
 
@@ -385,6 +415,8 @@ struct Optics {
     gauss_sigmas: [f32; 4],
     gauss_amps: [f32; 4],
     gauss_radius: i32,
+    /// The current plan is a gaussians fallback whose notice was given.
+    gauss_fallback_noticed: bool,
     /// Images created since the last recorded frame: the next record transitions them.
     fresh: bool,
     transition: bool,
@@ -606,13 +638,12 @@ impl Optics {
                     }
                 }
                 Some(Method::Gaussians) => {
-                    let ring = h.ring_radius_mm() * ppm;
-                    let sig: Vec<f64> = GAUSS_SIGMAS.iter().map(|f| (f * ring).max(0.5)).collect();
+                    let sig = gauss_sigmas_px(&h, ppm);
                     for (i, a) in gaussian_fit(&h, ppm, &sig).into_iter().enumerate() {
                         self.gauss_amps[i] = a as f32;
                         self.gauss_sigmas[i] = sig[i] as f32;
                     }
-                    self.gauss_radius = ((3.0 * sig[3]).ceil() as i32).min(GAUSS_RADIUS_MAX);
+                    self.gauss_radius = gauss_radius_px(&h, ppm);
                 }
                 None => {}
             }
@@ -744,6 +775,15 @@ impl Stage for Optics {
         } else {
             None
         };
+        // Review D-12: one notice when the gaussians method falls back to the pyramid (not every frame).
+        let fallback = self.plan.as_ref().is_some_and(|pl| pl.gauss_fallback);
+        if fallback && !self.gauss_fallback_noticed {
+            crate::params::notify(format!(
+                "optics: the 'gaussians' halo method would need more than {GAUSS_TAPS_MAX} taps per pixel at this \
+                 glass thickness and resolution; the 'pyramid' method is used instead"
+            ));
+        }
+        self.gauss_fallback_noticed = fallback;
         let Some(plan) = self.plan.clone() else {
             if self.alloc_key.is_some() {
                 d.device_wait_idle()?;
@@ -1027,6 +1067,47 @@ mod tests {
         }
         assert!((total - 1.0).abs() < 1e-12);
         assert!((pl.mean_scale - 4f64.powi(11) / (1920.0 * 1440.0)).abs() < 1e-12);
+    }
+
+    /// Review D-12: the gaussians method keeps its method within the tap budget (the default glass on the
+    /// 1440-line tube: 751 taps) and falls back to the pyramid above it (30 mm, the soft maximum; the hard
+    /// maximum thickness), never above GAUSS_TAPS_MAX taps.
+    #[test]
+    fn gaussians_method_falls_back_above_the_tap_budget() {
+        let fc = placed();
+        let ppm = f64::from(fc.px_per_mm);
+        let hard_max = crate::params::meta("optics_glass_thickness_mm")
+            .unwrap()
+            .hard_range
+            .unwrap()
+            .1 as f32;
+        for (t, fallback) in [(12.0, false), (30.0, true), (hard_max, true)] {
+            let p = Params {
+                optics_enable: true,
+                optics_halo_method: OPTICS_HALO_METHOD_GAUSSIANS,
+                optics_glass_thickness_mm: t,
+                ..Params::default()
+            };
+            let h = Halo::new(glass(&p).unwrap());
+            let taps = 2 * gauss_radius_px(&h, ppm) + 1;
+            let pl = plan(&p, &fc, (1920, 1440), Some(&h)).unwrap();
+            assert_eq!(pl.gauss_fallback, fallback, "{t} mm: {taps} taps");
+            assert_eq!(taps > GAUSS_TAPS_MAX, fallback, "{t} mm: {taps} taps");
+            let want = if fallback { Method::Pyramid } else { Method::Gaussians };
+            assert_eq!(pl.method, Some(want), "{t} mm");
+        }
+        // The default glass at 1440 lines: 751 taps (the module documentation).
+        let h = Halo::new(glass(&Params::default()).unwrap());
+        assert_eq!(2 * gauss_radius_px(&h, ppm) + 1, 751);
+        // Other methods never carry the flag.
+        let p = Params {
+            optics_enable: true,
+            optics_glass_thickness_mm: hard_max,
+            ..Params::default()
+        };
+        let h = Halo::new(glass(&p).unwrap());
+        let pl = plan(&p, &fc, (1920, 1440), Some(&h)).unwrap();
+        assert_eq!((pl.method, pl.gauss_fallback), (Some(Method::Kernel), false));
     }
 
     /// Diffusion weights sum to 1; the fit of a halo by Gaussians sums to 1.

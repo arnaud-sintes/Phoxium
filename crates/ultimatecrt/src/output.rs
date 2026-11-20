@@ -794,7 +794,23 @@ pub fn set_title(hwnd: HWND, title: &str) {
     }
 }
 
+/// D-05: a panic cannot unwind out of an `extern "system"` function (the process would abort with no report):
+/// it is caught here, recorded for the loop (`crash::take_callback_panic`, which ends the session through the
+/// shutdown), and the message gets the default answer.
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    // SAFETY (closure): the same call as this function's; DefWindowProcW below on the arguments we were given.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
+        wndproc_body(hwnd, msg, wparam, lparam)
+    })) {
+        Ok(r) => r,
+        Err(payload) => {
+            crate::crash::record_callback_panic(&*payload);
+            DefWindowProcW(hwnd, msg, wparam, lparam)
+        }
+    }
+}
+
+unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     if let Some(r) = menu_wndproc(hwnd, msg, wparam, lparam) {
         return r;
     }

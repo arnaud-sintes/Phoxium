@@ -1,4 +1,5 @@
-"""Builds the embedded UI font subsets from the Inter 4.1 release (https://github.com/rsms/inter, SIL OFL 1.1).
+"""Builds the embedded UI font subsets from the Inter 4.1 release (https://github.com/rsms/inter, SIL OFL 1.1),
+whose fonts carry the font version 4.001 (name record "Version 4.001;git-9221beed3", kept in the subsets).
 
 Usage (fontTools 4.x):
     python subset.py <Inter-4.1/extras/ttf> <output dir>

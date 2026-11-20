@@ -23,8 +23,9 @@
 // Kernel reaches (4 sigma, then normalised, as the oracle) are capped so that the whole chain fits the
 // halo: channel 32, notch box 128 (length), demodulator 160 samples. Within the caps the result equals the
 // oracle up to f32 rounding; beyond them (a Q bandwidth under about 0.37 MHz at a 14.3 MHz pixel clock,
-// f_sc / f_px under 1/16, a channel bandwidth under about 0.13 x the pixel clock) the kernels are
-// truncated.
+// f_sc / f_px under 1/16) the kernels are truncated. The channel never is: the oracle itself lifts the
+// channel bandwidth to 0.1325 x the pixel clock (sigma 8 samples = CAP_CHANNEL / 4) and caps the ACC gain at
+// 8 (crt_model::composite::CHANNEL_SIGMA_MAX_SAMPLES, ACC_GAIN_MAX; review D-03), and the CPU pushes both.
 
 #include "params.glsl"
 #include "common.glsl"

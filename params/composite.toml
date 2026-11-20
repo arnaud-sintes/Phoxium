@@ -169,7 +169,7 @@ hard_max = 50.0
 hard_why = "0 is no channel filter; a bandwidth is not negative"
 tag = "K"
 source = "NTSC broadcast luma bandwidth 4.2 MHz (standards practice); Gaussian channel and burst-referenced colour gain (ACC) are model forms"
-description = "-3 dB bandwidth of the composite channel (Gaussian), before the decoder; 0 = no channel filter. Softens luma detail; the decoder's automatic colour control restores the chroma level at the subcarrier, as a real set does from the colour burst. Not applied to S-Video."
+description = "-3 dB bandwidth of the composite channel (Gaussian), before the decoder; 0 = no channel filter. Softens luma detail; the decoder's automatic colour control restores the chroma level at the subcarrier, as a real set does from the colour burst, up to 8 times (+18 dB): below about 1.5 MHz (NTSC) the colour fades. Values under 0.13 x the pixel clock act as that value. Not applied to S-Video."
 group = "Composite video"
 advanced = true
 

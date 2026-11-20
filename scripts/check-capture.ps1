@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Capture fidelity check (T-12, SP-5, QUESTIONS CAP-3): are captured pixels bit-exact?
 .DESCRIPTION
@@ -11,7 +11,9 @@
     Opens windows: run it under the desktop and GPU token, hands off the keyboard and mouse. Each run is
     bounded (--save-capture exits after one frame, hard timeout, leftovers killed).
 .PARAMETER TargetDir
-    Cargo target directory holding release\ultimatecrt.exe and release\pixel-demo.exe.
+    Cargo target directory holding release\ultimatecrt.exe and release\pixel-demo.exe. Default: CARGO_TARGET_DIR,
+    else the target directory cargo metadata reports. Binaries older than their sources are refused (rebuild with
+    cargo build --release --locked).
 .PARAMETER Scales
     Integer scales to test (default 1,2,3,4; 5 does not fit a 1080p screen: 1200 px tall).
 .PARAMETER Occlude
@@ -23,7 +25,7 @@
     Keep the generated PNGs in the work directory.
 #>
 param(
-    [string]$TargetDir = (Join-Path $PSScriptRoot '..\target'),
+    [string]$TargetDir = '',
     [int[]]$Scales = @(1, 2, 3, 4),
     [switch]$Occlude,
     [string]$MoveTo = "",
@@ -34,9 +36,15 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 Add-Type -AssemblyName System.Drawing
 
+. (Join-Path $PSScriptRoot 'build-checks.ps1')
+$repoRoot = Split-Path $PSScriptRoot -Parent
+if (-not $TargetDir) { $TargetDir = Get-BinaryTargetDir $repoRoot }
 $ucrt = Join-Path $TargetDir 'release\ultimatecrt.exe'
 $demo = Join-Path $TargetDir 'release\pixel-demo.exe'
-if (-not (Test-Path $ucrt) -or -not (Test-Path $demo)) { throw "release binaries not found under $TargetDir" }
+# D-10: the binaries of this tree, not an old build elsewhere.
+Assert-FreshBinaries $repoRoot @($ucrt, $demo)
+# Start-Process joins -ArgumentList unquoted in Windows PowerShell 5.1: every argument is quoted (paths with spaces).
+function Join-Args([object[]]$a) { return @($a | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) }
 $work = Join-Path ([IO.Path]::GetTempPath()) ('ucrt-check-capture-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $work | Out-Null
 
@@ -153,7 +161,7 @@ try {
         foreach ($scale in $Scales) {
             Stop-Leftovers
             $cap = Join-Path $work ("cap-x$scale" + $(if ($occ) { '-occluded' } else { '' }) + '.png')
-            $p = Start-Process -FilePath $demo -ArgumentList @('--image', $png, '--scene', 'image', '--scale', $scale) -PassThru
+            $p = Start-Process -FilePath $demo -ArgumentList (Join-Args @('--image', $png, '--scene', 'image', '--scale', $scale)) -PassThru
             $deadline = (Get-Date).AddSeconds(10)
             while ($p.MainWindowHandle -eq 0 -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 100; $p.Refresh() }
             Start-Sleep -Milliseconds 500
@@ -167,10 +175,10 @@ try {
             $occProc = $null
             if ($occ) {
                 $ow = [int](($rc.R - $rc.L) / 2); $oh = $rc.B - $rc.T
-                $occProc = Start-Process powershell -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $occluderScript, $rc.L, $rc.T, $ow, $oh, 12) -PassThru -WindowStyle Hidden
+                $occProc = Start-Process powershell -ArgumentList (Join-Args @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $occluderScript, $rc.L, $rc.T, $ow, $oh, 12)) -PassThru -WindowStyle Hidden
                 Start-Sleep -Seconds 3
             }
-            $u = Start-Process -FilePath $ucrt -ArgumentList @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20') -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $work 'u.out') -RedirectStandardError (Join-Path $work 'u.err')
+            $u = Start-Process -FilePath $ucrt -ArgumentList (Join-Args @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $work 'u.out') -RedirectStandardError (Join-Path $work 'u.err')
             if (-not $u.WaitForExit(25000)) { $u.Kill() }
             if ($occProc -and -not $occProc.HasExited) { $occProc.Kill() }
             Stop-Leftovers
