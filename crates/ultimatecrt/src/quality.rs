@@ -98,6 +98,7 @@ pub fn keep(new: &mut Params, old: &Params) {
 /// (rounded up), and never below the table default 4 (`gpu::AMP_K`) or below the setting when it is lower. A
 /// sub-sample narrower than a host pixel is box-filtered by the beam spot (sigma above one host pixel at every
 /// preset), so the finer amplifier sampling only moves light within a pixel (measured error in the tier table).
+/// The renderer then limits the result to what the GPU can allocate, in every tier ([`clamp_amp_k`], R-02).
 pub fn amp_k(p: &Params, px_per_source_px: f64) -> i32 {
     let k = p.amp_samples.max(1);
     let placed = px_per_source_px > 0.0; // false for NaN
@@ -106,6 +107,55 @@ pub fn amp_k(p: &Params, px_per_source_px: f64) -> i32 {
     }
     let resolved = px_per_source_px.ceil().min(f64::from(i32::MAX)) as i32;
     k.min(resolved.max(crate::gpu::AMP_K as i32))
+}
+
+/// What the GPU allows for one chain image (R-02): its largest 2D image side (`maxImageDimension2D`, 16384 on
+/// Intel and AMD, 32768 on recent NVIDIA, 4096 at the Vulkan minimum) and the memory budget of one image in bytes
+/// (`gpu::Context::image_limits`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ImageLimits {
+    pub max_dim: u32,
+    pub budget_bytes: u64,
+}
+
+/// Memory budget of one chain image at most (R-02): 256 MiB, 32 Mtexel of RGBA16F. The amp domain has three
+/// images of that size (`amp`, `gun`, `abl`).
+pub const IMAGE_BUDGET_BYTES: u64 = 256 << 20;
+
+/// Bytes per texel of the chain images (RGBA16F, `gpu::NATIVE_FORMAT`).
+pub const CHAIN_TEXEL_BYTES: u64 = 8;
+
+/// The per-image budget of a device whose largest device-local heap is `heap_bytes`: [`IMAGE_BUDGET_BYTES`], or a
+/// sixteenth of the heap when that is smaller (a 1 GiB GPU gets 64 MiB per image), at least 16 MiB. A heap of 0
+/// (unknown) gives the full budget.
+pub fn image_budget(heap_bytes: u64) -> u64 {
+    if heap_bytes == 0 {
+        return IMAGE_BUDGET_BYTES;
+    }
+    (heap_bytes / 16).clamp(16 << 20, IMAGE_BUDGET_BYTES)
+}
+
+/// The largest amplifier K whose amp-domain image (`native.0 * K` x `native.1`, RGBA16F) fits `limits`: its width
+/// within `max_dim` and its bytes within `budget_bytes`. At least 1 (K = 1 is the native raster itself, which the
+/// pipeline checks on its own). No overflow for any input.
+pub fn amp_k_cap(native: (u32, u32), limits: ImageLimits) -> i32 {
+    let w = u64::from(native.0.max(1));
+    let h = u64::from(native.1.max(1));
+    let by_dim = u64::from(limits.max_dim) / w;
+    let by_budget = limits.budget_bytes / w.saturating_mul(h).saturating_mul(CHAIN_TEXEL_BYTES);
+    by_dim.min(by_budget).clamp(1, i32::MAX as u64) as i32
+}
+
+/// The amplifier K a frame really uses, in every tier (R-02): the tier's K ([`amp_k`], at least 1) limited by
+/// [`amp_k_cap`]. The flag is true when the limit lowered it (the renderer tells the user once).
+pub fn clamp_amp_k(k: i32, native: (u32, u32), limits: ImageLimits) -> (i32, bool) {
+    let k = k.max(1);
+    let cap = amp_k_cap(native, limits);
+    if k > cap {
+        (cap, true)
+    } else {
+        (k, false)
+    }
 }
 
 /// Smallest spot sigma at peak current in line-image grid steps (the warp path's sampling rule,
@@ -307,6 +357,74 @@ mod tests {
         assert_eq!(amp_k(&p(Tier::Fast, 0), 9.0), 1);
         assert_eq!(amp_k(&p(Tier::Fast, 16), 0.0), 16, "unplaced: the setting");
         assert_eq!(amp_k(&p(Tier::Fast, 16), 40.0), 16);
+    }
+
+    /// R-02: K is limited by the GPU's largest image side, per vendor, in every tier.
+    #[test]
+    fn amp_k_is_clamped_to_the_device_image_limit() {
+        // A short raster, so only the image side limits K (budget unlimited here).
+        let lim = |max_dim| ImageLimits {
+            max_dim,
+            budget_bytes: u64::MAX,
+        };
+        let native = (2560, 240);
+        // NVIDIA 32768, Intel and AMD 16384, the Vulkan minimum 4096.
+        assert_eq!(clamp_amp_k(16, native, lim(32768)), (12, true));
+        assert_eq!(clamp_amp_k(16, native, lim(16384)), (6, true));
+        assert_eq!(clamp_amp_k(16, native, lim(4096)), (1, true));
+        assert_eq!(
+            clamp_amp_k(4, native, lim(16384)),
+            (4, false),
+            "within the limit: unchanged"
+        );
+        assert_eq!(clamp_amp_k(6, native, lim(16384)), (6, false), "exactly at the limit");
+        // A 1280-wide source on the Intel iGPU: K 16 would be 20480 px wide.
+        assert_eq!(clamp_amp_k(16, (1280, 720), lim(16384)), (12, true));
+        // Floor of 1, even when the native raster alone is wider than the limit.
+        assert_eq!(clamp_amp_k(16, (5000, 100), lim(4096)), (1, true));
+        assert_eq!(clamp_amp_k(0, (256, 240), lim(16384)), (1, false));
+        assert_eq!(clamp_amp_k(-3, (256, 240), lim(16384)), (1, false));
+        // No overflow for absurd inputs.
+        assert_eq!(clamp_amp_k(i32::MAX, (1, 1), lim(u32::MAX)), (i32::MAX, false));
+        assert_eq!(clamp_amp_k(i32::MAX, (u32::MAX, u32::MAX), lim(u32::MAX)), (1, true));
+        assert_eq!(amp_k_cap((0, 0), lim(16384)), 16384, "an empty raster counts as 1 px");
+        // Every quality tier is clamped (the tier's K first, then the limit).
+        for t in Tier::ALL {
+            let p = Params {
+                quality_tier: t.param(),
+                amp_samples: 16,
+                ..Params::default()
+            };
+            let k = amp_k(&p, 1.0);
+            assert_eq!(clamp_amp_k(k, native, lim(16384)).0, k.min(6), "{t:?}");
+        }
+    }
+
+    /// R-02: the memory budget per amp-domain image.
+    #[test]
+    fn amp_k_is_clamped_to_the_memory_budget() {
+        let lim = ImageLimits {
+            max_dim: 32768,
+            budget_bytes: IMAGE_BUDGET_BYTES,
+        };
+        // 2560 x 1440 x 8 bytes is 29.5 MB per K: 256 MiB holds 9.
+        assert_eq!(clamp_amp_k(16, (2560, 1440), lim), (9, true));
+        // 1920 x 1080: 16.6 MB per K, 16 fit (265 MB of 268 MB).
+        assert_eq!(clamp_amp_k(16, (1920, 1080), lim), (16, false));
+        // 3840 x 2160: 66 MB per K, 4 fit.
+        assert_eq!(clamp_amp_k(16, (3840, 2160), lim), (4, true));
+        // A typical pixel-art raster is far from both limits.
+        assert_eq!(clamp_amp_k(16, (320, 240), lim), (16, false));
+        // A small GPU heap lowers the budget.
+        assert_eq!(image_budget(0), IMAGE_BUDGET_BYTES);
+        assert_eq!(image_budget(8 << 30), IMAGE_BUDGET_BYTES);
+        assert_eq!(image_budget(1 << 30), 64 << 20);
+        assert_eq!(image_budget(64 << 20), 16 << 20, "never below 16 MiB");
+        let small = ImageLimits {
+            max_dim: 16384,
+            budget_bytes: image_budget(1 << 30),
+        };
+        assert_eq!(clamp_amp_k(16, (1920, 1080), small), (4, true));
     }
 
     fn run(a: &mut AutoQuality, user: Tier, secs: u32, gpu: f64) -> Vec<Change> {
