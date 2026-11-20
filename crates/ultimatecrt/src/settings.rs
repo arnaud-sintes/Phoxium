@@ -40,6 +40,7 @@ pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
     ("toggle_bypass", "Ctrl+Alt+F7"),
     ("next_preset", "Ctrl+Alt+PageDown"),
     ("previous_preset", "Ctrl+Alt+PageUp"),
+    ("toggle_click_through", "Ctrl+Alt+F6"),
 ];
 
 /// The generation of the default hotkeys a file was written with (`[global] hotkey_defaults`): 1 (the key is
@@ -171,6 +172,10 @@ pub struct OutputState {
     /// Outer rectangle of the framed windowed output in virtual-screen pixels: left, top, right, bottom. The
     /// position holds the monitor; a rectangle that is no longer on a monitor is ignored (`modes::restore_rect`).
     pub windowed: Option<[i32; 4]>,
+    /// The output ignores the mouse while the menu is closed: clicks reach the captured window under it
+    /// (`output::behaviour`). Off by default (PLAN D-8). Toggled by its hotkey (Ctrl+Alt+F6) or the menu
+    /// (Interface, "Click-through").
+    pub click_through: bool,
 }
 
 /// The value of `gpu.adapter` that means the automatic choice.
@@ -558,8 +563,8 @@ impl Settings {
     }
 
     /// "Reset everything to defaults" (menu, owner definition 2026-11-20): the parameter overrides cleared (the
-    /// preset in force stays, with its own values), the hotkeys, the UI scale, the GPU adapter and the capture path
-    /// back to their defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
+    /// preset in force stays, with its own values), the hotkeys, the UI scale, the GPU adapter, the capture path
+    /// and click-through back to their defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
     /// layout, the first-run state; user presets and burn-in maps are files this never touches.
     pub fn reset_everything(&mut self) {
         let g = &mut self.global;
@@ -568,6 +573,7 @@ impl Settings {
         g.ui.scale = UiScale::Auto;
         g.gpu = GpuSettings::default();
         g.capture = CaptureSettings::default();
+        g.output.click_through = false;
     }
 
     /// Inserts or replaces the profile with the same executable and class.
@@ -1704,6 +1710,30 @@ mod tests {
         assert_eq!(s.global.output.windowed, None);
         let s = Settings::from_toml("version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n").unwrap();
         assert_eq!(s.global.output.windowed, Some([10, 20, 1290, 740]));
+    }
+
+    /// `[global.output] click_through`: off by default and in a file of an earlier build (no key), round-trips,
+    /// and a file with the new hotkey missing still binds Ctrl+Alt+F6.
+    #[test]
+    fn click_through_defaults_off_and_round_trips() {
+        assert!(!Settings::default().global.output.click_through);
+        let old = "version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n";
+        assert!(!Settings::from_toml(old).unwrap().global.output.click_through);
+        let mut s = Settings::default();
+        s.global.output.click_through = true;
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("click_through = true"), "{text}");
+        assert!(Settings::from_toml(&text).unwrap().global.output.click_through);
+        let mut hk = default_hotkeys();
+        hk.remove("toggle_click_through");
+        let (b, w) = crate::hotkeys::Bindings::from_settings(&hk);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(
+            b.get(crate::hotkeys::Action::ToggleClickThrough)
+                .map(|c| c.to_string())
+                .as_deref(),
+            Some("Ctrl+Alt+F6")
+        );
     }
 
     /// The menu's UI scale and first-run keys (`[global.ui] scale`, `first_run_done`) round-trip; a file without

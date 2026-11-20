@@ -94,6 +94,11 @@ pub struct UiState {
     pub profiles: Vec<crate::profiles::ProfileRow>,
     /// The capture path (A29): asked, in force, why not zero-copy, the copy cost.
     pub capture: CaptureView,
+    /// `[global.output] click_through` (the Interface section's row shows and changes it).
+    pub click_through: bool,
+    /// The session notices the menu shows (GPU and system): the output moved to a monitor of another adapter,
+    /// the source is minimised or on another desktop. Also in the title bar.
+    pub notices: Vec<String>,
 }
 
 /// The capture path as the Source, Performance and About sections show it (A29).
@@ -275,6 +280,8 @@ pub struct UiOutput {
     pub reset: Option<ResetKind>,
     /// A native dialog to open between frames (`crate::shell`), then [`Ui::dialog_result`].
     pub dialog: Option<DialogRequest>,
+    /// Click-through switched in the Interface section (`[global.output] click_through`).
+    pub click_through: Option<bool>,
 }
 
 /// A burn-in action of the menu's ageing panel (T-43).
@@ -384,6 +391,13 @@ impl UiConfig {
             hotkey_message: None,
         }
     }
+}
+
+/// The click-through hotkey text of a registration (its default without one: headless, or unbound).
+fn click_through_key_of(reg: Option<&Registration>) -> String {
+    reg.and_then(|r| r.bound(Action::ToggleClickThrough))
+        .unwrap_or_else(|| Action::ToggleClickThrough.default_chord())
+        .to_string()
 }
 
 /// The menu key text of a registration (`(no menu hotkey)` when none registered).
@@ -561,6 +575,7 @@ impl Ui {
             .layout
             .first_run_due()
             .then(|| first_run_text(config.registration.as_ref(), &menu_key));
+        let click_through_key = click_through_key_of(config.registration.as_ref());
         let mut ui = Ui {
             renderer: Some(renderer),
             pool,
@@ -615,6 +630,7 @@ impl Ui {
             extras: ExtrasModel {
                 monitor_scale: 1.0,
                 vulkan_device: config.vulkan_device,
+                click_through_key,
                 ..ExtrasModel::default()
             },
             dialog_open: false,
@@ -1099,6 +1115,7 @@ impl Ui {
     /// the menu: the rows, the menu key, the problems and the first-run hint follow it.
     pub fn set_hotkeys(&mut self, reg: &Registration, message: Option<(bool, String)>) {
         self.menu_key = menu_key_of(reg);
+        self.extras.click_through_key = click_through_key_of(Some(reg));
         self.hotkey_problems = reg.problems();
         self.hotkeys.registration = Some(reg.clone());
         self.hotkeys.outcome(message);
@@ -1382,6 +1399,9 @@ impl UiPass for Ui {
             }
             if r.dialog.is_some() {
                 self.out.dialog = r.dialog;
+            }
+            if r.click_through.is_some() {
+                self.out.click_through = r.click_through;
             }
             if let Some(s) = r.scale {
                 // Between frames: the next frame is built at the new scale.

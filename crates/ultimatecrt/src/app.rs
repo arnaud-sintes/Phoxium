@@ -390,6 +390,7 @@ pub fn run() -> Res<()> {
         client_size: windowed_size,
         hotkeys: bindings,
         saved_rect: stored.global.output.windowed.map(modes::IRect::from_array),
+        click_through: stored.global.output.click_through,
     })?;
     // HW-3: the adapter owning the monitor the output window really covers (auto), or the requested one.
     let cover = output::outer_rect(win.hwnd);
@@ -1235,6 +1236,12 @@ pub fn run() -> Res<()> {
                 stepped_preset = live.current_preset().map(str::to_string);
                 baseline = baseline_of(live.library(), stepped_preset.as_deref(), &profile);
             }
+            // Click-through: the settings are the reference (hotkey, menu row, "Reset everything"); the output window
+            // follows them through its one style rule (`output::sync_activation`).
+            if output::click_through() != live.click_through() {
+                output::set_click_through(win.hwnd, live.click_through());
+            }
+            ui_state.click_through = live.click_through();
             if ui.is_open() || ui.overlay_on() {
                 ui_state.params = params;
                 // The preset in force, also when a preset hotkey stepped to it.
@@ -1310,6 +1317,9 @@ pub fn run() -> Res<()> {
                     detect_key = (0, 0, None);
                     remap = true;
                 }
+            }
+            if let Some(on) = changes.click_through {
+                live.set_click_through(win.hwnd, on);
             }
             if let Some(adapter) = changes.gpu_adapter {
                 println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");

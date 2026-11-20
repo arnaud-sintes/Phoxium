@@ -70,6 +70,8 @@ pub enum Command {
     StepPreset(Step),
     /// F11: fullscreen to windowed or back.
     ToggleWindowMode,
+    /// Click-through of the output on or off (the owner of the window and the settings applies it).
+    ToggleClickThrough,
 }
 
 /// Applies `action`: updates `controls`, calls the UI, and returns the command that needs the window or the
@@ -95,6 +97,7 @@ pub fn dispatch(action: Action, controls: &mut Controls, ui: &mut dyn UiHook) ->
         Action::NextPreset => Some(Command::StepPreset(Step::Next)),
         Action::PreviousPreset => Some(Command::StepPreset(Step::Previous)),
         Action::ToggleFullscreen => Some(Command::ToggleWindowMode),
+        Action::ToggleClickThrough => Some(Command::ToggleClickThrough),
     }
 }
 
@@ -258,7 +261,11 @@ mod tests {
         // Adding an action without a dispatch arm fails to compile; this checks the arms are the intended ones.
         let (mut c, mut ui) = (Controls::default(), NoUi);
         let commands: Vec<_> = Action::ALL.iter().map(|&a| dispatch(a, &mut c, &mut ui)).collect();
-        assert_eq!(commands.iter().filter(|c| c.is_some()).count(), 4);
+        assert_eq!(commands.iter().filter(|c| c.is_some()).count(), 5);
+        assert_eq!(
+            dispatch(Action::ToggleClickThrough, &mut c, &mut ui),
+            Some(Command::ToggleClickThrough)
+        );
     }
 
     // ---- bypass plan ----

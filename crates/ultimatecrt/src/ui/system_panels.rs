@@ -46,6 +46,8 @@ pub struct ExtrasModel {
     pub copy_message: Option<(bool, String)>,
     /// The third-party list is open.
     pub show_licences: bool,
+    /// The chord of the click-through hotkey in force (for the tooltip), e.g. `Ctrl+Alt+F6`.
+    pub click_through_key: String,
 }
 
 /// `150 %`.
@@ -69,12 +71,36 @@ fn small(ui: &Frame, colour: theme::Rgba, text: &str) {
     });
 }
 
-/// The Interface section: UI scale and the two resets.
-pub fn interface(ui: &Frame, fonts: &Fonts, scale: UiScale, m: &mut ExtrasModel, r: &mut MenuResult) {
+/// The tooltip of the click-through row; `hotkey` is the chord of its hotkey.
+pub fn click_through_tip(hotkey: &str) -> String {
+    format!(
+        "While the menu is closed, the output ignores the mouse: clicks and the wheel go to the window under it (the \
+         captured game). The menu takes the mouse back while it is open, and its key always works. {hotkey} switches \
+         it from anywhere."
+    )
+}
+
+/// The Interface section: UI scale, click-through and the two resets.
+pub fn interface(
+    ui: &Frame,
+    fonts: &Fonts,
+    scale: UiScale,
+    click_through: bool,
+    m: &mut ExtrasModel,
+    r: &mut MenuResult,
+) {
     let (open, header) = theme::section_header(ui, fonts, "Interface", None, false, false);
     r.items.push(("header:Interface".to_string(), header));
     if !open {
         return;
+    }
+    let mut on = click_through;
+    if ui.checkbox("Click-through (mouse to the game)", &mut on) {
+        r.click_through = Some(on);
+    }
+    record(ui, r, "click_through");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, &click_through_tip(&m.click_through_key));
     }
     let width = theme::row_label(ui, "Interface size");
     ui.set_next_item_width(width);

@@ -319,6 +319,8 @@ pub struct MenuResult {
     pub dialog: Option<super::files_panel::DialogRequest>,
     /// The UI scale chosen (Interface section).
     pub scale: Option<crate::settings::UiScale>,
+    /// Click-through switched (Interface section).
+    pub click_through: Option<bool>,
     /// A text to put on the clipboard (About: the settings folder).
     pub copy: Option<String>,
     pub rects: MenuRects,
@@ -514,7 +516,7 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     }
 
     // Interface (UI scale, resets) and About.
-    super::system_panels::interface(ui, &fonts, m.layout.scale, m.extras, r);
+    super::system_panels::interface(ui, &fonts, m.layout.scale, m.state.click_through, m.extras, r);
     super::system_panels::about_section(ui, &fonts, m.extras, m.system, r);
 }
 
@@ -1617,6 +1619,11 @@ fn system_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
             }
         }
         None => theme::kv_row(ui, "In use", "not known yet", PALETTE.text_faint),
+    }
+    // Session notices (the output on a monitor of another adapter, a minimised or hidden source).
+    if !m.state.notices.is_empty() {
+        theme::callout(ui, PALETTE.problem, &m.state.notices);
+        record(ui, r, "system:notices");
     }
     // The choice for the next start: automatic, or one adapter with a Vulkan device.
     let width = theme::row_label(ui, "Next start");

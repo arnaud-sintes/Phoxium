@@ -134,6 +134,7 @@ fn label(a: Action) -> &'static str {
         Action::ToggleBypass => "A/B bypass",
         Action::NextPreset => "Next preset",
         Action::PreviousPreset => "Previous preset",
+        Action::ToggleClickThrough => "Click-through",
     }
 }
 

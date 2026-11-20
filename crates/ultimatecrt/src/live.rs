@@ -77,7 +77,8 @@ impl Live {
     }
 
     /// One loop iteration: drains the hotkey actions, follows a monitor change, and sets the host cursor
-    /// (hidden over the output while the UI does not want input; there is no click-through option yet).
+    /// (hidden over the output while the UI does not want input; with click-through on the output gets no
+    /// mouse message and the cursor is the one of the window under it).
     /// `lost` learns the mode so that only a fullscreen output drops to a window when the source is lost.
     pub fn tick(
         &mut self,
@@ -168,6 +169,30 @@ impl Live {
                 println!("output: {}", describe(&placement, &monitors));
                 self.save_window_rect();
             }
+            Command::ToggleClickThrough => {
+                let on = !self.click_through();
+                self.set_click_through(hwnd, on);
+            }
+        }
+    }
+
+    /// Whether click-through is on (`[global.output] click_through`).
+    pub fn click_through(&self) -> bool {
+        self.settings.global.output.click_through
+    }
+
+    /// Click-through on or off (its hotkey, the menu row): applied to the output window at once
+    /// (`output::set_click_through`, suspended while the menu is open) and written at once. A null `hwnd` only
+    /// changes the setting.
+    pub fn set_click_through(&mut self, hwnd: HWND, on: bool) {
+        if !hwnd.is_invalid() {
+            output::set_click_through(hwnd, on);
+        }
+        if self.settings.global.output.click_through != on {
+            self.settings.global.output.click_through = on;
+            println!("{}", click_through_line(on));
+            self.mark_dirty();
+            self.flush_settings(true);
         }
     }
 
@@ -468,6 +493,15 @@ pub fn writable_dir(dir: Option<&std::path::Path>, loaded: &settings::Loaded) ->
     dir.filter(|_| loaded.writable).map(std::path::Path::to_path_buf)
 }
 
+/// The console line of a click-through change.
+pub fn click_through_line(on: bool) -> &'static str {
+    if on {
+        "output: click-through on (clicks go to the window under the output; the menu takes the mouse while open)"
+    } else {
+        "output: click-through off"
+    }
+}
+
 /// The console text of a placement: `fullscreen on monitor 1 (2560x1440 at 2560,0)` or `windowed 1296x759 at 100,80`.
 fn describe(p: &Placement, monitors: &[IRect]) -> String {
     match p {
@@ -726,6 +760,33 @@ mod tests {
         // A valid file stays writable.
         std::fs::write(dir.join(settings::SETTINGS_FILE), "version = 1\n").unwrap();
         assert_eq!(writable_dir(Some(&dir), &settings::load(&dir)), Some(dir.clone()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Click-through: off by default, the hotkey command toggles it, the change is written at once, "Reset
+    /// everything" turns it off.
+    #[test]
+    fn click_through_is_toggled_written_and_reset() {
+        let dir = std::env::temp_dir().join(format!("ucrt-live-click-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut live = Live::new(
+            false,
+            Settings::default(),
+            Some(dir.clone()),
+            Library::embedded(),
+            None,
+            (800, 600),
+        );
+        assert!(!live.click_through(), "off by default");
+        live.set_click_through(HWND::default(), true);
+        assert!(stored(&live, &dir).global.output.click_through);
+        live.set_click_through(HWND::default(), true);
+        assert!(live.dirty_since.is_none(), "same value: nothing to write");
+        live.reset_everything();
+        assert!(!live.click_through());
+        assert!(!stored(&live, &dir).global.output.click_through);
+        assert!(click_through_line(true).contains("on") && click_through_line(false).ends_with("off"));
+        live.finish(HWND::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
