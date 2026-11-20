@@ -19,6 +19,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Tests: the glow and vignette model against the f64 oracle (energy, radius, threshold, falloff, exact defaults, monotonic falloff, black corners, centre offset), the GPU against the oracle, a recorded fingerprint of the 0.2.0 vignette, the hard-bound sweep with the glow on, a typed value on the glow slider, and a cost study run by hand (`glow_cost_study`).
 - Phosphor persistence controls for a clearly visible trail, beyond the measured P22 phosphor and off by default (the picture is unchanged until they are moved; owner feedback "the trail is too short", QUESTIONS PHY-18): `phosphor_extra_afterglow_rgb` and `phosphor_extra_afterglow_time_ms`, an exponential glow per channel mixed into the phosphor's decay (red included, real time, a still picture keeps its brightness), and `phosphor_decay_scale`, a multiplier of every time constant of the measured decay. The menu's Phosphor panel opens with a short explanation of the trail and of its physical default; the README has a section with recommended values.
 - `tests/persistence_chain.rs`: the persistence trail checked through the whole chain (defaults and all ten presets, 60 and 144 Hz frame periods) and the trail of a moving bar in the display output; `Headless::set_frame_time_ms` gives headless frames a fixed frame period.
+- Click-through (ARCHITECTURE A32): `[global.output] click_through` (off by default), the hotkey `Ctrl+Alt+F6` (`toggle_click_through`, fallback `Ctrl+Alt+Shift+F6`) and a "Click-through (mouse to the game)" checkbox in the menu's Interface section. When on, the output ignores the mouse and clicks reach the window under it; the open menu or window list takes the mouse back, closing it returns to click-through, and F10 always opens the menu. "Reset everything to defaults" turns it off.
+- Notices for a minimised source or one on another virtual desktop ("source minimised: no frames"), instead of a frozen picture and, 10 s later, "not drawing"; they clear when the window comes back.
+- A notice when the settings cannot be written (disk full, read-only folder, locked file), cleared by the next successful write.
+- A simple snap for the framed output (whose own drag turns off Windows' snap): released at the left or right edge of a screen it takes that half, at the top edge the whole work area.
 
 ### Changed
 
@@ -27,6 +31,12 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - "Reset everything to defaults" also puts the capture path back to the default (zero-copy).
 - `phosphor_tail_strength_rgb` goes up to 10 (log slider; above 1 is beyond the measured P22, and changes little at 60 Hz).
 - Changing a tail strength now restarts the persistence history primed to the picture, like the new controls, so a still picture does not flash while a slider moves.
+- A move of the output onto a monitor driven by another GPU is noticed (title, console, the menu's GPU and system section): "moved to a monitor driven by another GPU: frames cross adapters (slower); restart to use that GPU"; the GPU is never switched during a session. The automatic quality drop restarts its counting on the new monitor, and the UI scale follows the new monitor's DPI also when the DPI message was missed (ARCHITECTURE A32).
+- The capture restart onto the renderer's adapter falls back to the first adapter (CPU copy), then to the window list, instead of ending the session on a failure.
+- Preset files are read at most 256 KB whatever size they report (import, and the presets folder at start: a larger file is skipped with a warning).
+- A wrong-typed `first_run_done` or `click_through` in `settings.toml` no longer makes the whole file unusable.
+- Fixed: zero-copy: after a capture restart, a reattach or a new attach, the renderer could keep sampling the previous session's shared textures (each session numbered its texture pools from 1); pool generations are now unique in the process and the renderer re-imports on any new pool.
+- Fixed: a DPI change queued in the same moment as the menu closing was dropped; a title-bar drag across monitors of different scaling now keeps the size Windows suggests.
 
 ## [0.2.0] - 2026-11-20
 
