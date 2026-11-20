@@ -7,6 +7,15 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- Zero-copy capture, an optional and experimental performance setting (`[global.capture] path = "zero_copy"`, the "Capture path" choice at the top of the menu's Performance and diagnostics section, `--capture-path cpu|zero-copy` for one run; ARCHITECTURE A29). The captured client area is copied on the GPU into one of three textures shared between Direct3D 11 and Vulkan and read in place by the first stage of the chain, without the CPU read-back and upload: measured headless on the development laptop, the capture thread's copy drops from about 3.1 to 3.8 ms to 0.2 to 0.3 ms per frame at 2560 x 1440 (6.4 to 7.4 ms to 0.4 to 0.5 ms at 4K) and the upload goes (QUESTIONS CAP-2). The picture is bit-identical to the CPU copy. The simple CPU copy stays the default because it works on every PC. Zero-copy needs capture and rendering on one adapter; any problem (another adapter, a driver that cannot import the textures, a failure during the session) falls back to the CPU copy by itself, with a notice in the console, the window title and the menu. Switching to it after the start applies at the next start. The automatic detections still read the picture back, about ten times a second. Not yet checked on a real window.
+- `--stats` prints the capture path in force and the capture thread's copy cost per frame; `--log` adds the `capture_path` and `capture_copy_ms` columns (after the GPU columns, so the earlier columns keep their position). The About section names the capture path.
+
+### Changed
+
+- "Reset everything to defaults" also puts the capture path back to the CPU copy.
+
 ## [0.2.0] - 2026-11-20
 
 ultimateCRT v0.2.0 is the first public release (MIT licence, binaries not code-signed). It captures the window of a game or a program, runs it through a virtual CRT tube on the GPU and shows the result in a second window that can go fullscreen over the source without taking its keyboard focus; nothing is injected into the captured program. What is in it:
