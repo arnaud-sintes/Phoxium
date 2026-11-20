@@ -234,9 +234,9 @@ mod tests {
 
     #[test]
     fn report_text_and_messages() {
-        let t = report_text("0.2.0", 0, "main", "boom", "src/app.rs:1:2", "(none)");
+        let t = report_text("0.3.0", 0, "main", "boom", "src/app.rs:1:2", "(none)");
         for part in [
-            "0.2.0",
+            "0.3.0",
             "1970-01-01 00:00:00 UTC",
             "thread: main",
             "src/app.rs:1:2",
