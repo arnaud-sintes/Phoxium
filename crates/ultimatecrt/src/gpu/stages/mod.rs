@@ -51,6 +51,7 @@ pub(super) mod encode;
 
 pub(super) mod abl;
 pub(super) mod amp;
+pub(super) mod composite;
 pub(super) mod gun;
 pub(super) mod optics;
 pub(super) mod phosphor;
@@ -190,7 +191,9 @@ pub(super) trait Stage {
     }
 }
 
-/// A slot whose stage is not written yet: always bypassed (exact identity).
+/// A slot whose stage is not written yet: always bypassed (exact identity). No slot uses it since T-31
+/// filled `signal`; kept for new slots.
+#[allow(dead_code)]
 #[derive(Default)]
 pub(super) struct Placeholder;
 

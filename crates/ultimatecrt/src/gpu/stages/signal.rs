@@ -1,7 +1,8 @@
-//! Slot `signal` (voltage domain, native -> native): composite or S-Video encode and decode (T-31,
-//! optional, off by default). Placeholder until then: bypassed, exact identity.
+//! Slot `signal` (voltage domain, native -> native): the optional composite or S-Video encode and decode
+//! (T-31, [`super::composite`]), off by default: skipped as an exact identity while `composite_enable` is
+//! off.
 
-use super::{Domain, Placeholder, Registration, Stage};
+use super::{Domain, Registration, Stage};
 
 /// Registration of the slot (see [`super::CHAIN`]).
 pub(in crate::gpu) const SLOT: Registration = Registration {
@@ -12,5 +13,5 @@ pub(in crate::gpu) const SLOT: Registration = Registration {
 };
 
 fn new() -> Box<dyn Stage> {
-    Box::<Placeholder>::default()
+    Box::<super::composite::CompositeStage>::default()
 }

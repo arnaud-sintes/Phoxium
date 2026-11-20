@@ -1,0 +1,248 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `signal` (T-31, ARCHITECTURE 3.7): optional composite or S-Video encode and decode, native domain ->
+// native domain, voltage domain (drive voltages R'G'B'), before the video amplifier. Skipped as an exact
+// identity while `composite_enable` is off (`Stage::is_identity`).
+//
+// The model and every formula are those of the f64 oracle `crates/crt-model/src/composite.rs` (read it
+// first); the CPU computes the derived constants from it (`stages/composite.rs`, push constants below):
+// subcarrier cycles per pixel, the phase advance per line, the phase of this frame, the ACC gain, the
+// kernel sigmas and the notch box length, all in samples of the line simulation (S = 8 per source pixel).
+//
+// One workgroup = TILE output pixels of one native row; it simulates the line over TILE + 2 HALO pixels
+// in shared memory, in four phases separated by barriers:
+//   1. encode: per sample, Y + C (composite) or C and Y (S-Video) of the row, and of the previous row when
+//      the comb or the PAL delay line needs it; blanking (0) outside the active line;
+//   2. channel: Gaussian low-pass of the composite (identity when sigma_ch is 0; skipped for S-Video);
+//   3. separation and demodulation: notch (box of one subcarrier period) or the band-split 1-line comb;
+//      chroma times the ACC gain; the products 2 chroma cos(t) and 2 chroma sin(t);
+//   4. per output pixel: luma = mean of its S samples, A and B = normalised Gaussians of the products at
+//      the pixel centre; NTSC I/Q to U/V, or the PAL V switch and the delay-line average; saturation; YUV
+//      to R'G'B', clamped to [0, 1]; alpha of the source pixel.
+// Kernel reaches (4 sigma, then normalised, as the oracle) are capped so that the whole chain fits the
+// halo: channel 32, notch box 128 (length), demodulator 160 samples. Within the caps the result equals the
+// oracle up to f32 rounding; beyond them (a Q bandwidth under about 0.37 MHz at a 14.3 MHz pixel clock,
+// f_sc / f_px under 1/16, a channel bandwidth under about 0.13 x the pixel clock) the kernels are
+// truncated.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 64, local_size_y = 1) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // native domain
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // native domain
+
+// Derived constants (std430 push block, 48 bytes; `composite::Push`).
+layout(push_constant) uniform Push {
+    float cycles_per_px; // f_sc / f_px
+    float line_advance;  // frac(f_sc / f_line), cycles
+    float frame_phase;   // frac(n a_frame + phi0), cycles
+    float acc_gain;      // 1 / |H_ch(f_sc)|
+    float sigma_ch;      // channel sigma, samples (0: none)
+    float sigma_a;       // demodulator A (NTSC I, PAL V) sigma, samples
+    float sigma_b;       // demodulator B (NTSC Q, PAL U) sigma, samples
+    float box_len;       // notch box length, samples
+    float demod_angle;   // axis turn + hue, radians
+    float axis_turn;     // 33 degrees (NTSC) or 0 (PAL), radians
+    float saturation;
+    uint flags;          // 1: S-Video, 2: PAL, 4: comb (NTSC) or delay line (PAL)
+} pc;
+
+const int S = 8;      // samples per source pixel (crt_model::composite::SAMPLES_PER_PX)
+const int TILE = 64;  // output pixels per workgroup (= local_size_x)
+const int HALO = 32;  // pixels simulated on each side
+const int N = (TILE + 2 * HALO) * S;
+const float REACH_SIGMAS = 4.0;
+const float CAP_CHANNEL = 32.0;
+const float CAP_BOX = 128.0;
+const float CAP_DEMOD = 160.0;
+const float TWO_PI = 6.283185307179586;
+// BT.601 luma, BT.470 U and V scales (crt_model::composite).
+const vec3 LUMA = vec3(0.299, 0.587, 0.114);
+const float U_SCALE = 0.492111;
+const float V_SCALE = 0.877283;
+
+shared float sh_sig[2 * N];  // raw composite (S-Video: C), then the products 2 chroma cos(t)
+shared float sh_flt[2 * N];  // channel output (S-Video: Y)
+shared float sh_b[2 * N];    // products 2 chroma sin(t)
+shared float sh_luma[N];     // luma of the current row
+
+// Normalised Gaussian of sigma `sigma` samples around the (fractional) local position `centre`, over the
+// array selected by `which` (0: sh_sig, 1: sh_b) at offset `off`; reach min(4 sigma, cap). Samples
+// outside the buffer count as 0 with their weight (only the halo's edges see them).
+float gauss(int which, int off, float centre, float sigma, float cap) {
+    if (sigma < 1e-3) {
+        int k = int(round(centre));
+        if (k < 0 || k >= N) {
+            return 0.0;
+        }
+        return which == 0 ? sh_sig[off + k] : sh_b[off + k];
+    }
+    float r = min(REACH_SIGMAS * sigma, cap);
+    int lo = int(ceil(centre - r));
+    int hi = int(floor(centre + r));
+    float inv = 1.0 / sigma;
+    float sum = 0.0;
+    float wsum = 0.0;
+    for (int k = lo; k <= hi; ++k) {
+        float d = (float(k) - centre) * inv;
+        float w = exp(-0.5 * d * d);
+        wsum += w;
+        if (k >= 0 && k < N) {
+            sum += w * (which == 0 ? sh_sig[off + k] : sh_b[off + k]);
+        }
+    }
+    return sum / wsum;
+}
+
+// Channel low-pass of sh_sig (row offset `off`) at integer sample k.
+float channel(int off, int k) {
+    if (pc.sigma_ch < 1e-3) {
+        return sh_sig[off + k];
+    }
+    return gauss(0, off, float(k), pc.sigma_ch, CAP_CHANNEL);
+}
+
+// Box mean of sh_flt (row offset `off`) of length `len` samples centred on sample k (fractional end
+// weights; outside the buffer 0).
+float box_flt(int off, int k, float len) {
+    float lo = float(k) - 0.5 * len;
+    float hi = float(k) + 0.5 * len;
+    float sum = 0.0;
+    for (int m = int(ceil(lo - 0.5)); m <= int(floor(hi + 0.5)); ++m) {
+        float w = min(float(m) + 0.5, hi) - max(float(m) - 0.5, lo);
+        if (w > 0.0 && m >= 0 && m < N) {
+            sum += w * sh_flt[off + m];
+        }
+    }
+    return sum / len;
+}
+
+void main() {
+    int width = textureSize(drive_in, 0).x;
+    int y = int(gl_WorkGroupID.y);
+    int x0 = int(gl_WorkGroupID.x) * TILE;
+    int lid = int(gl_LocalInvocationID.x);
+    int base = (x0 - HALO) * S; // line sample index of local sample 0
+    bool svideo = (pc.flags & 1u) != 0u;
+    bool pal = (pc.flags & 2u) != 0u;
+    bool two = (pc.flags & 4u) != 0u && y > 0; // the previous row is used
+    bool comb = two && !pal && !svideo;          // NTSC luma comb
+    bool delay = two && pal;                     // PAL delay line
+    int rows = two ? 2 : 1;
+    float box_len = min(pc.box_len, CAP_BOX);
+
+    // 1. Encode.
+    for (int r = 0; r < rows; ++r) {
+        int yy = y - r;
+        float line_phase = fract(float(yy) * pc.line_advance + pc.frame_phase);
+        float sw = (pal && (yy & 1) == 1) ? -1.0 : 1.0;
+        for (int k = lid; k < N; k += TILE) {
+            int g = base + k;
+            float sig = 0.0;
+            float lum = 0.0;
+            if (g >= 0 && g / S < width) {
+                vec3 rgb = texelFetch(drive_in, ivec2(g / S, yy), 0).rgb;
+                float yv = dot(LUMA, rgb);
+                float u = U_SCALE * (rgb.b - yv);
+                float v = V_SCALE * (rgb.r - yv);
+                float t = TWO_PI * fract(pc.cycles_per_px * (float(g) + 0.5) / float(S) + line_phase);
+                float c = u * sin(t) + sw * v * cos(t);
+                sig = svideo ? c : yv + c;
+                lum = yv;
+            }
+            sh_sig[r * N + k] = sig;
+            if (svideo) {
+                sh_flt[r * N + k] = lum;
+            }
+        }
+    }
+    barrier();
+
+    // 2. Channel (composite only).
+    if (!svideo) {
+        for (int r = 0; r < rows; ++r) {
+            for (int k = lid; k < N; k += TILE) {
+                sh_flt[r * N + k] = channel(r * N, k);
+            }
+        }
+    }
+    barrier();
+
+    // 3. Separation and demodulation (the previous row only for the PAL delay line).
+    int demod_rows = delay ? 2 : 1;
+    for (int r = 0; r < demod_rows; ++r) {
+        int yy = y - r;
+        float line_phase = fract(float(yy) * pc.line_advance + pc.frame_phase);
+        for (int k = lid; k < N; k += TILE) {
+            int i = r * N + k;
+            float luma;
+            float chroma;
+            if (svideo) {
+                luma = sh_flt[i];
+                chroma = sh_sig[i];
+            } else if (comb) {
+                float f0 = sh_flt[k];
+                float f1 = sh_flt[N + k];
+                float c = 0.5 * (f0 - f1) - 0.5 * (box_flt(0, k, box_len) - box_flt(N, k, box_len));
+                luma = f0 - c;
+                chroma = pc.acc_gain * c;
+            } else {
+                float b = box_flt(r * N, k, box_len);
+                luma = b;
+                chroma = pc.acc_gain * (sh_flt[i] - b);
+            }
+            if (r == 0) {
+                sh_luma[k] = luma;
+            }
+            int g = base + k;
+            float t = TWO_PI * fract(pc.cycles_per_px * (float(g) + 0.5) / float(S) + line_phase) + pc.demod_angle;
+            sh_sig[i] = 2.0 * chroma * cos(t);
+            sh_b[i] = 2.0 * chroma * sin(t);
+        }
+    }
+    barrier();
+
+    // 4. Output pixel x0 + lid.
+    int j = x0 + lid;
+    if (j >= width) {
+        return;
+    }
+    int first = (HALO + lid) * S;
+    float luma = 0.0;
+    for (int k = 0; k < S; ++k) {
+        luma += sh_luma[first + k];
+    }
+    luma /= float(S);
+    float centre = float(first) + 0.5 * float(S - 1);
+    float a = gauss(0, 0, centre, pc.sigma_a, CAP_DEMOD);
+    float b = gauss(1, 0, centre, pc.sigma_b, CAP_DEMOD);
+    float u;
+    float v;
+    if (pal) {
+        float sw = (y & 1) == 1 ? -1.0 : 1.0;
+        u = b;
+        v = sw * a;
+        if (delay) {
+            float a1 = gauss(0, N, centre, pc.sigma_a, CAP_DEMOD);
+            float b1 = gauss(1, N, centre, pc.sigma_b, CAP_DEMOD);
+            u = 0.5 * (u + b1);
+            v = 0.5 * (v - sw * a1); // the previous row has the other V switch
+        }
+    } else {
+        float s = sin(pc.axis_turn);
+        float c = cos(pc.axis_turn);
+        u = -a * s + b * c;
+        v = a * c + b * s;
+    }
+    u *= pc.saturation;
+    v *= pc.saturation;
+    float red = luma + v / V_SCALE;
+    float blue = luma + u / U_SCALE;
+    float green = (luma - LUMA.r * red - LUMA.b * blue) / LUMA.g;
+    vec3 rgb = clamp(vec3(red, green, blue), 0.0, 1.0);
+    float alpha = texelFetch(drive_in, ivec2(j, y), 0).a;
+    imageStore(drive_out, ivec2(j, y), round_f16(vec4(rgb, alpha)));
+}

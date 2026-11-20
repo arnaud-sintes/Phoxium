@@ -123,6 +123,15 @@ Both are off by default; the picture is then exactly the same as without them. T
 - **Where the wear is kept:** one file per tube preset, `%APPDATA%\ultimateCRT\tubes\<preset>.state` (`default.state` without a preset), next to `settings.toml`. It is loaded when burn-in is on, saved every 5 minutes (without stopping the picture), when you switch to another preset, and at exit. A damaged or unknown file is not used: the tube starts new, a warning is printed and the file is kept as `<preset>.state.bak`.
 - **Reset (a new tube):** the button "New tube (reset wear)" in the menu, or start with `--reset-burnin` (the stored wear of the preset in force is replaced at the next save). Deleting the `.state` file while the app is closed does the same.
 
+## Composite video (T-31, optional)
+
+Off by default (`composite_enable`); the picture is then exactly the same as without it. The settings are in the menu panel "Signal and amplifier", group "Composite video". It re-encodes the captured RGB as a composite (or S-Video) signal and decodes it again, before the video amplifier, as a TV fed by an 8-bit era console would:
+
+- **Set the source's pixel clock first:** `amp_pixel_clock_mhz` (same panel) is the clock of the source's video mode, which the capture cannot know. Its ratio to the colour subcarrier makes the artifact colours: 5.37 MHz (NES, SNES, default), 6.71 MHz (Genesis H40), 7.16 MHz (Apple II high res, CGA 320), 14.32 MHz (CGA 640). These clocks are from general knowledge, not from `CRT.md`; check your machine's.
+- `composite_connection`: `composite` (cross-colour, dot crawl, chroma bleed) or `svideo` (chroma bleed only). `composite_standard`: `ntsc` or `pal`. `composite_separation`: `notch` (soft luma, strong false colour on fine luma detail) or `comb` (NTSC: a 1-line comb that removes it where adjacent lines match; PAL: the colour delay line).
+- `composite_frame_advance_deg`: 180 makes the dot pattern and artifact colours alternate every frame (broadcast NTSC), 0 keeps them still. `composite_hue_deg` (tint) and `composite_saturation` (colour) are the TV's knobs; `composite_i_bandwidth_mhz` and `composite_q_bandwidth_mhz` set how far colour bleeds past edges.
+- Advanced: the subcarrier and line rate (0 = the standard's), the channel bandwidth, and `composite_phase_deg`, which picks the hues of the artifact colours (machine specific, try values to match a known screenshot).
+
 ## Source scaling
 
 The CRT model needs the native raster: scanlines are native rows. A game shown at 3× is captured as 768×720, so the app recovers 256×240 with a divisor:

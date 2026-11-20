@@ -19,6 +19,7 @@ pub mod ageing;
 pub mod beam;
 pub mod burnin;
 pub mod colour;
+pub mod composite;
 pub mod geometry;
 pub mod gun;
 pub mod mask;
