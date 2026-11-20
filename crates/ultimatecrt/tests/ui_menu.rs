@@ -11,7 +11,7 @@ mod common;
 use std::sync::{Mutex, MutexGuard};
 
 use dear_imgui_rs::StyleColor;
-use ultimatecrt::gpu::{Headless, ImageF32, Settings, SourceFrame, TargetFormat};
+use ultimatecrt::gpu::{Headless, ImageF32, Settings, SourceFrame, StageReadback, TargetFormat};
 use ultimatecrt::params::Params;
 use ultimatecrt::presets::Library;
 use ultimatecrt::scaling::View;
@@ -53,6 +53,8 @@ struct Rig {
     out: UiOutput,
     /// Render with the parameters the menu edits (else the identity gun, a passthrough under the UI).
     live_params: bool,
+    /// The background is on the GPU: later frames reuse the upload (nothing under test changes it).
+    uploaded: bool,
 }
 
 impl Rig {
@@ -61,7 +63,14 @@ impl Rig {
     }
 
     fn with_config(test: &str, w: u32, h: u32, config: UiConfig) -> Option<Rig> {
-        let gpu = common::gpu_or_skip(test)?;
+        let mut gpu = common::gpu_or_skip(test)?;
+        // The UI draws after `encode`, over whatever the chain made: these tests are about the UI, so every
+        // chain slot is off (bypassed: an exact identity, or a plain resample where the domain changes) instead
+        // of running the beam and mask on every frame. `full_chain` turns them back on.
+        gpu.enable_only(&[]).expect("chain slots off");
+        // Only the output is looked at: the chain images (four times the output's texels at K = 4) are not
+        // read back.
+        gpu.set_read_stages(StageReadback::None);
         let mut ui =
             Ui::new(gpu.context(), Headless::vk_format(TargetFormat::Bgra8Unorm), config).expect("create the UI");
         // Headless frames are slow and irregular: a fixed 60 Hz frame time keeps ImGui's timing (double-click) stable.
@@ -78,7 +87,42 @@ impl Rig {
             },
             out: UiOutput::default(),
             live_params: false,
+            uploaded: false,
         })
+    }
+
+    /// Every chain slot on again (the whole physical chain under the UI).
+    fn full_chain(&mut self) {
+        for n in self.gpu.stage_names() {
+            self.gpu.set_stage_enabled(n, true).expect("chain slot on");
+        }
+    }
+
+    /// Renders one frame of the background (uploaded on the first render only, then reused by the pipeline)
+    /// with `params`, the UI drawn over it when `ui`.
+    fn render(&mut self, params: &Params, ui: bool) -> ImageF32 {
+        let upload = !std::mem::replace(&mut self.uploaded, true);
+        let src = upload.then_some(SourceFrame {
+            width: self.w,
+            height: self.h,
+            bgra: &self.bg,
+        });
+        let (view, size) = (View::full(self.w, self.h), (self.w, self.h));
+        let r = if ui {
+            self.gpu.render_with_ui(
+                src,
+                view,
+                &Settings::identity(),
+                params,
+                size,
+                TargetFormat::Bgra8Unorm,
+                &mut self.ui,
+            )
+        } else {
+            self.gpu
+                .render(src, view, &Settings::identity(), params, size, TargetFormat::Bgra8Unorm)
+        };
+        r.expect("render").output
     }
 
     /// Feeds `msgs` to the UI, then renders one frame with the UI over the passthrough of the background.
@@ -101,48 +145,17 @@ impl Rig {
         if out.gpu_adapter.is_some() {
             self.out.gpu_adapter = out.gpu_adapter;
         }
-        let src = SourceFrame {
-            width: self.w,
-            height: self.h,
-            bgra: &self.bg,
-        };
         let params = if self.live_params {
             self.state.params
         } else {
             Params::identity_gun()
         };
-        self.gpu
-            .render_with_ui(
-                Some(src),
-                View::full(self.w, self.h),
-                &Settings::identity(),
-                &params,
-                (self.w, self.h),
-                TargetFormat::Bgra8Unorm,
-                &mut self.ui,
-            )
-            .expect("render with the UI")
-            .output
+        self.render(&params, true)
     }
 
     /// The output without any UI (plain `render`).
     fn plain(&mut self) -> ImageF32 {
-        let src = SourceFrame {
-            width: self.w,
-            height: self.h,
-            bgra: &self.bg,
-        };
-        self.gpu
-            .render(
-                Some(src),
-                View::full(self.w, self.h),
-                &Settings::identity(),
-                &Params::identity_gun(),
-                (self.w, self.h),
-                TargetFormat::Bgra8Unorm,
-            )
-            .expect("render")
-            .output
+        self.render(&Params::identity_gun(), false)
     }
 
     /// Clicks at `p`: move, press, release, one frame each.
@@ -161,22 +174,7 @@ impl Rig {
 
     /// The output for `params` without any UI (plain `render`).
     fn plain_with(&mut self, params: Params) -> ImageF32 {
-        let src = SourceFrame {
-            width: self.w,
-            height: self.h,
-            bgra: &self.bg,
-        };
-        self.gpu
-            .render(
-                Some(src),
-                View::full(self.w, self.h),
-                &Settings::identity(),
-                &params,
-                (self.w, self.h),
-                TargetFormat::Bgra8Unorm,
-            )
-            .expect("render")
-            .output
+        self.render(&params, false)
     }
 
     /// The rectangle of the menu item `key` in the last frame (`widget:<id>`, `header:<panel>`, ...).
@@ -598,6 +596,7 @@ fn ui_can_be_created_and_destroyed_repeatedly() {
             state: UiState::default(),
             out: UiOutput::default(),
             live_params: false,
+            uploaded: false,
         };
         rig.ui.toggle_overlay();
         rig.frame(&[]);
@@ -710,6 +709,8 @@ fn preview(name: &str, w: u32, h: u32, scale: f32, expand: bool, combo: bool) {
     let Some(mut rig) = Rig::with_config(name, w, h, config) else {
         return;
     };
+    // The previews show the menu over the whole chain, as the app does.
+    rig.full_chain();
     rig.bg = preview_background(w, h);
     rig.state = preview_state();
     rig.ui.set_ui_scale(scale);
@@ -780,6 +781,8 @@ fn a_slider_changes_its_parameter_and_the_rendered_frame() {
     let Some(mut rig) = Rig::new("a_slider_changes_its_parameter_and_the_rendered_frame", 800, 720) else {
         return;
     };
+    // The rendered frame must follow the menu through the whole physical chain.
+    rig.full_chain();
     rig.live_params = true;
     rig.state.params.exposure = 0.5;
     rig.open_menu();
@@ -1090,6 +1093,7 @@ fn panel_preview(name: &str, config: UiConfig, setup: impl FnOnce(&mut Rig)) {
     let Some(mut rig) = Rig::with_config(name, 1280, 720, config) else {
         return;
     };
+    rig.full_chain();
     rig.bg = preview_background(1280, 720);
     rig.state = preview_state();
     // The preset's own parameters: only what the setup changes shows as modified.

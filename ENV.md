@@ -62,7 +62,7 @@ There is no automated test of capture or output, and no CI yet: a hosted runner 
 
 ### Test policy
 
-Running the whole gate (fmt, clippy, 600+ tests in 34 test programs, many on the GPU, about 7 minutes) after every change is wasted time when a change touches one module. `scripts\impact.ps1` analyses the change and runs only what it can affect.
+Running the whole gate (fmt, clippy, 700 tests in about 30 test programs, many on the GPU; the tests took about 7 minutes alone before 2026-11-20, about 70 s since, see Test cost below) after every change is wasted time when a change touches one module. `scripts\impact.ps1` analyses the change and runs only what it can affect.
 
 | Gate | When |
 |---|---|
@@ -120,6 +120,50 @@ Precision check (2026-11-20): the last three merges of the Win32 window work (`o
 Limits: the model is textual (module paths, quoted stage names, shader names, parameter ids, item names), not a type analysis. It cannot see a test that reaches a module only through a re-export from another crate item it does not name, or behaviour shared through a data file it does not know. When a change is risky, or the plan looks too small, run `-Full`.
 
 Shared build cache: `impact.ps1` and `check.ps1` set `CARGO_TARGET_DIR` to `C:\projects\personal\ultimateCRT-wt\target-shared` when it is not already set, and `CARGO_INCREMENTAL=0`. Every agent and worktree then reuses the compiled external dependencies (`windows`, `ash`, and the Dear ImGui C++ sources built by `dear-imgui-sys`, about 16 s in release) instead of building them cold. The workspace crates themselves rebuild once per worktree path, which is expected. Cargo takes a file lock on the target folder, so parallel cargo runs on it wait for each other (the "Blocking waiting for file lock" line) instead of corrupting it. Do not delete the shared folder after a task; `scripts\clean-targets.ps1` prints the sizes of the shared and per-worktree `target` folders and deletes the shared one only when the free disk space is under 30 GB (or with `-Force`, and never while cargo runs). An `.exe` in the shared folder cannot be replaced while it runs, as with any target folder.
+
+#### Test cost: normal tier and slow tier
+
+Tiers. The normal tier is every test `cargo test` runs: the gate. The slow tier is the `#[ignore = "..."]` tests, run on purpose with a documented command, never silently dropped. A test goes to the slow tier only when it is redundant with a normal-tier test or a pure long-run measurement or stress run. Today the slow tier is the three GPU-time profiles (print a table, assert at most a cost ratio), unchanged by the 2026-11-20 work:
+
+```
+cargo test -p ultimatecrt -- --ignored --nocapture        # the whole slow tier (UCRT_REQUIRE_GPU=1 on the dev machine)
+```
+
+(`stage_beam_fast::screen_profile`, `stage_beam_fast::screen_profile_geometry`, `stage_beam_warp::screen_profile_warp`; `UCRT_PROFILE_FRAMES` sets their frame count.) No test was moved to the slow tier by the speed-up, and `presets::all_ten_presets_render_finite_images` left it (about 1 s now).
+
+Budget: the whole normal tier at most about 3 minutes alone, `ui_menu` at most about 40 s, no single normal-tier test above about 20 s. A new test above that budget either gets cheaper (below) or argues its case for the slow tier in its `ignore` reason.
+
+What makes the suite fast (2026-11-20, owner decision "the tests poison the workflow"), and what to keep doing in new tests:
+
+- The `test` profile optimises the CPU-heavy packages (`Cargo.toml`: `crt-model` opt-level 3, `ultimatecrt` 2, the PNG encoder crates 3); debug assertions and overflow checks stay on. The GPU tests were CPU-bound in debug code (f64 oracles over millions of texels, the f16 to f32 readback conversion, per-texel checks in the test files, the PNG encoder of the menu previews). Cost: `cargo build` no longer shares the test build's `ultimatecrt`, a change to the `ultimatecrt` library rebuilds its 27 integration test programs at opt-level 2 (about 60 s instead of about 20 s on the dev machine, measured under load), a change to one test file about 40 s instead of a few seconds. Measured alternatives: `ultimatecrt` at opt-level 0 left `ui_menu` at 137 s and the suite at 321 s; at opt-level 1 the suite took 131 s (`ui_menu` 32 s) for about 42 s of rebuild.
+- Read back only what the test looks at: `Headless::set_read_stages(StageReadback::None)` (output only) or `StageReadback::Last` (output and the encode input). By default every routed chain image is read back, converted to `f32` and cloned once per slot that routes it: at 1280 x 1080 that is about 8 million texels and 160 ms of CPU per frame, against 6 ms of GPU.
+- A UI test renders the UI over a bypassed chain (`enable_only(&[])`), uploads its background once, and reads back the output only; tests about what the chain shows (`a_slider_changes_its_parameter_and_the_rendered_frame`, the previews) turn the chain back on.
+- A per-texel oracle over a full-size image is split over threads (`presets.rs`, `par_sums`): the same arithmetic per texel, the partial sums added in order.
+- Use the stage's own contract instead of long loops to reach a state: `clear_history` then one black frame primes the phosphor history to 0, where a flush took a few hundred frames per preset (the flush to exactly 0 is still tested once, `stage_phosphor::step_response`).
+- Not done, by measurement: one shared `Headless` per test program. Creating the context and pipeline with validation costs about 0.1 to 0.2 s (the smallest GPU tests take 0.2 s in all), the test threads of one program run in parallel on their own contexts, and a shared renderer behind a lock would serialise them and couple their validation counts. cargo-nextest (one process per test, all at once) would add GPU contention on the one shared GPU without saving work: not adopted.
+
+Measured on the dev machine (RTX A2000 Laptop, validation and synchronization validation on, `UCRT_REQUIRE_GPU=1`), each test program run once, one program at a time, its tests in parallel as `cargo test` runs them; other agents were building and using the GPU at the same time, so take the after column as a range of two runs (s):
+
+| Program | Before | After |
+|---|---|---|
+| `ui_menu` | 952.4 | 15.2 to 20.4 |
+| `presets` | 146.8 | 7.8 to 8.6 |
+| `stage_beam_fast` | 19.1 | 4.5 to 4.6 |
+| `stage_beam_warp` | 18.3 | 3.9 to 4.2 |
+| `stage_beam_vertical` | 16.4 | 3.3 to 3.6 |
+| `stage_phosphor` | 11.3 | 2.8 to 2.9 |
+| `crt-model` unit tests | 10.3 | 2.1 to 3.0 |
+| `stage_beam_horizontal` | 9.3 | 2.7 |
+| `stage_mask_grille` | 7.6 | 1.8 to 2.0 |
+| `stage_mask_slot_delta` | 7.3 | 3.4 to 3.6 |
+| `gpu_timings` | 5.0 | 1.0 to 1.1 |
+| `pipeline_skip` | 4.6 | 2.2 to 2.3 |
+| `stage_abl` | 4.2 | 1.5 |
+| the 17 other programs | 20.5 | 13.9 to 14.7 |
+| **Total (30 programs)** | **1233** | **67 to 74** |
+
+Before, `ui_menu` alone was about 160 s on an idle GPU and 950 s under contention; after, its 15 tests take 15.6 s in sequence, the slowest 3.1 s (`menu_preview_images`). The slowest normal-tier test is now `presets::flat_white_through_the_chain_in_every_headroom_mode` (8.3 s: 50 full-chain renders at 2560 x 1440 and their oracle). Per-test times: `-Z unstable-options --report-time --format json` on a test binary, with `RUSTC_BOOTSTRAP=1` set for that run only (stable toolchain).
+
 ### Scripts (`scripts/`)
 
 | Script | Use |

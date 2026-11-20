@@ -7,6 +7,36 @@ version = "0.1.0"
 edition = "2021"
 publish = false
 
+# `cargo test` only (the `test` profile; `cargo build` and `cargo run` keep the plain dev profile). The GPU tests
+# spend most of their time on the CPU in debug code: the f64 oracles of crt-model, the readback conversions of
+# the headless renderer, the per-texel checks of the test files and the PNG encoder of the UI previews.
+# Optimising these packages cuts the suite several times over (ENV.md, Test policy); debug assertions and
+# overflow checks stay on (inherited from dev), so the tests check the same arithmetic. The other external
+# dependencies and the Dear ImGui C++ build keep the dev settings.
+[profile.test.package.crt-model]
+opt-level = 3
+
+[profile.test.package.ultimatecrt]
+opt-level = 2
+
+[profile.test.package.png]
+opt-level = 3
+
+[profile.test.package.fdeflate]
+opt-level = 3
+
+[profile.test.package.miniz_oxide]
+opt-level = 3
+
+[profile.test.package.crc32fast]
+opt-level = 3
+
+[profile.test.package.simd-adler32]
+opt-level = 3
+
+[profile.test.package.adler2]
+opt-level = 3
+
 [profile.release]
 opt-level = 3
 lto = "thin"

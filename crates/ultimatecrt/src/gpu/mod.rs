@@ -29,7 +29,7 @@ pub use ui_render::UiPass;
 pub use context::{gpu_required, validation_layer_available, ValidationCounter};
 pub use context::{list_gpus, vulkan_report, Context, DeviceRequest, ExternalMemoryProbe, GpuInfo, VulkanReport};
 pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
-pub use headless::{StageInput, StageRun};
+pub use headless::{StageInput, StageReadback, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
 pub use present::Presenter;
 pub use stages::encode::{output_matrix, ClipCounts};
