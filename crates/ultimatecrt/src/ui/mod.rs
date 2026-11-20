@@ -33,6 +33,7 @@ pub mod input;
 pub mod menu;
 pub mod overlay;
 pub mod panels;
+pub mod picker;
 pub mod theme;
 
 use std::path::PathBuf;
@@ -75,6 +76,80 @@ pub struct UiState {
     pub timings: Option<FrameTimings>,
     pub capture_fps: f64,
     pub render_fps: f64,
+    /// The source as the menu's Source section shows it (A23).
+    pub source: SourceView,
+}
+
+/// The captured window as the menu shows it (A23): what was attached and what the automatic handling found.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SourceView {
+    /// The attached window, `None` without one.
+    pub attached: Option<AttachedView>,
+    /// While a lost source is waited for: what is waited for and for how long (`pixel-demo.exe (class), 12 s
+    /// left`).
+    pub waiting: Option<String>,
+}
+
+/// One attached window and what was detected on it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AttachedView {
+    pub exe: Option<String>,
+    pub class: String,
+    pub title: String,
+    /// Captured frame size (px).
+    pub frame: (u32, u32),
+    /// Native raster after the crop and the divisor.
+    pub native: (u32, u32),
+    /// The integer scale in words: `x3 detected`, `x2 x 3 (manual)`, `detecting...`, `none (x1)`.
+    pub scale: String,
+    /// The capture area in words: `client area`, `manual 8, 4, 320 x 240`, `whole window`.
+    pub crop: String,
+    /// A source profile (`[[source]]` for this program and class) is applied.
+    pub profile: bool,
+}
+
+/// The source selection settings the menu and the picker edit (`[global.source]`, A23).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SourcePrefs {
+    pub ask_at_start: bool,
+    /// Seconds a lost source is waited for; 0 forever.
+    pub wait_s: f64,
+}
+
+impl Default for SourcePrefs {
+    fn default() -> Self {
+        let d = settings::SourceSettings::default();
+        Self {
+            ask_at_start: d.ask_at_start,
+            wait_s: d.wait_s,
+        }
+    }
+}
+
+/// A source request of the picker or the menu's Source section (A23), for the app.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SourceAction {
+    /// Capture this window (the picker's Capture, Enter, double-click).
+    Attach(isize),
+    /// The picker was closed without a choice; the source still attached stays.
+    Cancel,
+    /// Stop capturing (the menu's Detach): the "Choose a window" screen comes back.
+    Detach,
+    /// Open the picker with the source still attached (the menu's Change source).
+    ChangeSource,
+    /// Enumerate the windows again now.
+    Refresh,
+    /// Take the preview again now.
+    RefreshPreview,
+}
+
+/// Which content the open menu mode shows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum View {
+    /// The settings menu (the menu key).
+    Settings,
+    /// The window picker (no source, or Change source).
+    Picker,
 }
 
 /// What the user changed through the menu in the frame last drawn ([`Ui::frame`]).
@@ -91,6 +166,10 @@ pub struct UiOutput {
     pub gpu_adapter: Option<String>,
     /// A burn-in action (T-43), for `tube_state::TubeState`.
     pub wear_action: Option<WearAction>,
+    /// A source request (A23): attach, cancel, detach, change source, refresh.
+    pub source: Option<SourceAction>,
+    /// `[global.source]` changed in the picker or the menu (A23).
+    pub source_prefs: Option<SourcePrefs>,
 }
 
 /// A burn-in action of the menu's ageing panel (T-43).
@@ -127,6 +206,8 @@ pub struct UiConfig {
     pub gpu: Option<crate::adapters::Current>,
     /// `[global.gpu] adapter` as the settings hold it now.
     pub gpu_setting: String,
+    /// `[global.source]` ask at start and lost-source wait (A23).
+    pub source_prefs: SourcePrefs,
 }
 
 impl UiConfig {
@@ -155,6 +236,10 @@ impl UiConfig {
             settings_dir,
             gpu: crate::adapters::current().cloned(),
             gpu_setting: settings.global.gpu.adapter.clone(),
+            source_prefs: SourcePrefs {
+                ask_at_start: settings.global.source.ask_at_start,
+                wait_s: settings.global.source.wait_s,
+            },
         }
     }
 
@@ -172,6 +257,7 @@ impl UiConfig {
             settings_dir: None,
             gpu: None,
             gpu_setting: settings::GPU_ADAPTER_AUTO.to_string(),
+            source_prefs: SourcePrefs::default(),
         }
     }
 }
@@ -238,6 +324,14 @@ pub struct Ui {
     last: Option<Instant>,
     /// A fixed frame time for ImGui instead of the measured one ([`Ui::set_frame_time`]).
     fixed_dt: Option<f32>,
+    /// What the open menu mode shows (A23).
+    view: View,
+    /// No source is attached: the menu mode never closes, it falls back to the picker (A23).
+    needs_source: bool,
+    /// The window picker (A23).
+    picker: picker::Picker,
+    /// `[global.source]` as the menu and the picker edit it.
+    prefs: SourcePrefs,
     /// Dropped last (declared last, and `Drop for Ui` shuts the renderer down before).
     imgui: ImContext,
 }
@@ -334,6 +428,13 @@ impl Ui {
             fonts,
             last: None,
             fixed_dt: None,
+            view: View::Settings,
+            needs_source: false,
+            picker: picker::Picker {
+                ask_at_start: config.source_prefs.ask_at_start,
+                ..picker::Picker::default()
+            },
+            prefs: config.source_prefs,
             imgui,
         };
         if let Some(out) = ui.output {
@@ -352,12 +453,159 @@ impl Ui {
     /// Opens the settings menu when it is closed, closes it when it is open (the menu key, T-54).
     /// Opening takes the foreground from the source and routes the output's input to the menu; closing gives
     /// both back ([`menu::Menu`]). Call it from the hotkey handler: `SetForegroundWindow` is allowed there.
+    ///
+    /// With the picker shown (A23), the menu key switches to the settings; closing the settings without a source
+    /// goes back to the picker (the menu mode stays on: there is nothing else to show).
     pub fn request_toggle(&mut self) {
-        if self.menu.is_open() {
-            self.close(CloseReason::Toggle);
-        } else {
+        if !self.menu.is_open() {
+            self.view = View::Settings;
+            self.open();
+            return;
+        }
+        match self.view {
+            View::Picker => {
+                self.view = View::Settings;
+                self.focus_menu = true;
+            }
+            View::Settings if self.needs_source => self.view = View::Picker,
+            View::Settings => self.close(CloseReason::Toggle),
+        }
+    }
+
+    // ---- Source selection (A23) ----
+
+    /// Shows the window picker: opens the menu mode if needed (the output becomes activating and takes the
+    /// foreground, as for the menu). `attached`: a source is still captured behind it (Change source: Esc and
+    /// Cancel go back to it); without one the picker cannot be closed, only replaced by the settings.
+    pub fn show_picker(&mut self, attached: bool) {
+        self.picker.attached = attached;
+        self.needs_source = !attached;
+        self.picker.ask_at_start = self.prefs.ask_at_start;
+        self.view = View::Picker;
+        if !self.menu.is_open() {
             self.open();
         }
+    }
+
+    /// A window was attached (A23): it becomes the source, the picker closes and the foreground goes to that
+    /// window (the non-activating behaviour of the output resumes). The picker's message is cleared.
+    pub fn attached(&mut self, source: isize) {
+        self.set_source(Some(source));
+        self.needs_source = false;
+        self.picker.attached = true;
+        self.picker.message = None;
+        if self.menu.is_open() {
+            self.close(CloseReason::Attached);
+        }
+    }
+
+    /// The source is gone (detached, or given up after the wait): the menu mode cannot close any more and the
+    /// app shows the picker ([`Ui::show_picker`]).
+    pub fn source_gone(&mut self) {
+        self.set_source(None);
+        self.needs_source = true;
+        self.picker.attached = false;
+    }
+
+    /// Whether the picker is shown.
+    pub fn picker_open(&self) -> bool {
+        self.menu.is_open() && self.view == View::Picker
+    }
+
+    /// What the open menu mode shows.
+    pub fn view(&self) -> View {
+        self.view
+    }
+
+    /// The picker's state (tests, the app's preview requests).
+    pub fn picker(&self) -> &picker::Picker {
+        &self.picker
+    }
+
+    /// Replaces the picker's window list (sorted by the app).
+    pub fn set_picker_rows(&mut self, rows: Vec<crate::picker::Row>) {
+        self.picker.set_rows(rows);
+    }
+
+    /// The message card of the picker: (good news, text), or none.
+    pub fn set_picker_message(&mut self, message: Option<(bool, String)>) {
+        self.picker.message = message;
+    }
+
+    /// `[global.source]` as the settings hold it (the menu and the picker show it).
+    pub fn set_source_prefs(&mut self, prefs: SourcePrefs) {
+        self.prefs = prefs;
+        self.picker.ask_at_start = prefs.ask_at_start;
+    }
+
+    /// The source selection settings shown.
+    pub fn source_prefs(&self) -> SourcePrefs {
+        self.prefs
+    }
+
+    /// The preview of `hwnd` (RGBA, `w` x `h`): replaces the previous one (its texture is released).
+    pub fn set_thumbnail(&mut self, hwnd: isize, w: u32, h: u32, rgba: &[u8]) {
+        self.drop_thumbnail();
+        if let Ok(data) = dear_imgui_rs::OwnedTextureData::from_pixels(dear_imgui_rs::TextureFormat::RGBA32, w, h, rgba)
+        {
+            let tex = self.imgui.register_texture(data);
+            self.picker.thumb = Some(picker::Thumb {
+                hwnd,
+                tex,
+                size: [w as f32, h as f32],
+            });
+            self.picker.thumb_failed = None;
+        }
+    }
+
+    /// The preview capture of `hwnd` gave no frame in time.
+    pub fn set_thumbnail_failed(&mut self, hwnd: isize) {
+        if self.picker.thumb.is_some_and(|t| t.hwnd == hwnd) {
+            self.drop_thumbnail();
+        }
+        self.picker.thumb_failed = Some(hwnd);
+    }
+
+    /// Applies a picker action: the app's requests go to [`UiOutput::source`]; Cancel also closes the picker
+    /// (the foreground goes back as for the menu key) when a source is attached.
+    fn picker_action(&mut self, a: picker::PickerAction) {
+        use picker::PickerAction as A;
+        match a {
+            A::Attach(h) => self.out.source = Some(SourceAction::Attach(h)),
+            A::Cancel => {
+                if !self.needs_source {
+                    self.out.source = Some(SourceAction::Cancel);
+                    self.close(CloseReason::Toggle);
+                }
+            }
+            A::Refresh => self.out.source = Some(SourceAction::Refresh),
+            A::RefreshPreview => self.out.source = Some(SourceAction::RefreshPreview),
+            A::AskAtStart(on) => {
+                self.prefs.ask_at_start = on;
+                self.out.source_prefs = Some(self.prefs);
+            }
+        }
+    }
+
+    fn drop_thumbnail(&mut self) {
+        if let Some(t) = self.picker.thumb.take() {
+            let _ = self.imgui.remove_texture(t.tex);
+        }
+    }
+
+    /// The icon of the executable `path` (RGBA 32 x 32), or `None` when it has none (a placeholder is drawn).
+    pub fn set_icon(&mut self, path: &str, icon: Option<(u32, u32, Vec<u8>)>) {
+        let tex = icon.and_then(|(w, h, rgba)| {
+            dear_imgui_rs::OwnedTextureData::from_pixels(dear_imgui_rs::TextureFormat::RGBA32, w, h, &rgba)
+                .ok()
+                .map(|d| self.imgui.register_texture(d))
+        });
+        self.picker.icons.insert(path.to_string(), tex);
+    }
+
+    /// The executables listed whose icon is not loaded yet.
+    pub fn missing_icons(&self) -> Vec<String> {
+        self.picker.missing_icons()
     }
 
     /// Shows or hides the read-only stats overlay (T-52b). It never takes input or focus.
@@ -389,14 +637,37 @@ impl Ui {
     /// close the output).
     pub fn handle_win32_message(&mut self, msg: u32, wparam: usize, lparam: isize) -> bool {
         if msg == input::WM_ACTIVATE {
-            if let Some(reason) = menu::on_activate(self.menu.is_open(), wparam & 0xFFFF != input::WA_INACTIVE) {
+            // Without a source the picker stays when the user goes to another window (A23): there is nothing
+            // else to show, and closing would bring it back at once, taking the foreground again.
+            let closable = !self.needs_source;
+            if let Some(reason) =
+                menu::on_activate(self.menu.is_open() && closable, wparam & 0xFFFF != input::WA_INACTIVE)
+            {
+                if self.view == View::Picker {
+                    self.out.source = Some(SourceAction::Cancel);
+                }
                 self.close(reason);
             }
             return false;
         }
         let open = self.menu.is_open();
+        // The picker's keys and its search text (A23): handled here, Dear ImGui never sees them.
+        if open && self.view == View::Picker {
+            if msg == input::WM_KEYDOWN {
+                let (used, action) = self.picker.on_key(wparam);
+                if let Some(a) = action {
+                    self.picker_action(a);
+                }
+                if used {
+                    return true;
+                }
+            } else if msg == input::WM_CHAR && self.picker.on_char(wparam) {
+                return true;
+            }
+        }
         if menu::closes_on_key(open, msg, wparam) {
-            self.close(CloseReason::Toggle);
+            // Esc in the settings: as the menu key (back to the picker without a source).
+            self.request_toggle();
             return true;
         }
         let mut events = Vec::new();
@@ -629,6 +900,7 @@ impl UiPass for Ui {
         }
         let open = self.menu.is_open();
         let mut result = None;
+        let mut picked = None;
         let mut overlay_rect = None;
         let frame = self.imgui.begin_frame();
         let ui = frame.ui();
@@ -638,7 +910,9 @@ impl UiPass for Ui {
             let rows = overlay::lines(&self.state);
             overlay_rect = Some(overlay::build(ui, &rows, &self.fonts, display, size));
         }
-        if open {
+        if open && self.view == View::Picker {
+            picked = Some(picker::build(ui, &mut self.picker, &self.fonts, &self.menu_key));
+        } else if open {
             let focus = std::mem::take(&mut self.focus_menu);
             result = Some(menu::build(
                 ui,
@@ -656,6 +930,7 @@ impl UiPass for Ui {
                     hotkey_problems: &self.hotkey_problems,
                     focus,
                     fonts: self.fonts,
+                    prefs: &mut self.prefs,
                 },
             ));
         }
@@ -690,6 +965,23 @@ impl UiPass for Ui {
             }
             if r.wear_action.is_some() {
                 self.out.wear_action = r.wear_action;
+            }
+            if r.prefs_changed {
+                self.picker.ask_at_start = self.prefs.ask_at_start;
+                self.out.source_prefs = Some(self.prefs);
+            }
+            if let Some(a) = r.source {
+                self.out.source = Some(a);
+                if a == SourceAction::ChangeSource {
+                    // The picker replaces the settings at once; the app learns it from the action.
+                    self.show_picker(!self.needs_source);
+                }
+            }
+        }
+        if let Some(r) = picked {
+            self.items = r.items;
+            if let Some(a) = r.action {
+                self.picker_action(a);
             }
         }
         if open && self.output.is_some() {

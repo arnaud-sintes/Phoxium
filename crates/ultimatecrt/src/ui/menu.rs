@@ -70,6 +70,25 @@ pub enum CloseReason {
     /// The output lost the activation while the menu was open (the user chose another window): the menu
     /// closes and the foreground stays with the window the user chose.
     Deactivated,
+    /// A window was chosen in the picker and attached (A23): the foreground goes to that window, the new
+    /// source, not to the window that had it when the picker opened.
+    Attached,
+}
+
+/// The window that gets the foreground when the menu mode closes for `reason`: [`restore_target`] of the
+/// remembered window then the source (`Toggle`), the source only (`Attached`), none (`Deactivated`).
+pub fn close_target(
+    reason: CloseReason,
+    remembered: Option<isize>,
+    source: Option<isize>,
+    output: isize,
+    exists: impl Fn(isize) -> bool,
+) -> Option<isize> {
+    match reason {
+        CloseReason::Toggle => restore_target(remembered, source, output, exists),
+        CloseReason::Attached => restore_target(None, source, output, exists),
+        CloseReason::Deactivated => None,
+    }
 }
 
 /// What a `WM_ACTIVATE` of the output means for the menu: `activated` is false for `WA_INACTIVE`. The
@@ -88,9 +107,9 @@ pub fn closes_on_key(open: bool, msg: u32, wparam: usize) -> bool {
     open && msg == super::input::WM_KEYDOWN && wparam == VK_ESCAPE
 }
 
-/// Whether a close for `reason` hands the foreground back to [`restore_target`].
+/// Whether a close for `reason` hands the foreground to a window ([`close_target`]).
 pub fn restores_foreground(reason: CloseReason) -> bool {
-    reason == CloseReason::Toggle
+    reason != CloseReason::Deactivated
 }
 
 // ---------------------------------------------------------------------------------------------------------
@@ -157,11 +176,7 @@ impl Menu {
         let remembered = self.remembered.take();
         let out = output?;
         crate::output::set_menu_open(hwnd(out), false);
-        let target = if restores_foreground(reason) {
-            restore_target(remembered, source, out, window_exists)
-        } else {
-            None
-        };
+        let target = close_target(reason, remembered, source, out, window_exists);
         if let Some(t) = target {
             set_foreground(t);
         }
@@ -254,6 +269,8 @@ pub struct MenuModel<'a> {
     pub focus: bool,
     /// The theme's fonts ([`theme::load_fonts`]).
     pub fonts: Fonts,
+    /// `[global.source]` ask at start and lost-source wait, edited in the Source section (A23).
+    pub prefs: &'a mut super::SourcePrefs,
 }
 
 /// What the menu window did in one frame.
@@ -269,6 +286,10 @@ pub struct MenuResult {
     pub gpu_adapter: Option<String>,
     /// A burn-in action asked in this frame (T-43): "Burn in now" or "New tube".
     pub wear_action: Option<super::WearAction>,
+    /// Change source or Detach clicked in the Source section (A23).
+    pub source: Option<super::SourceAction>,
+    /// The ask-at-start box or the lost-source wait changed (A23).
+    pub prefs_changed: bool,
     /// The layout (position, size, opacity, collapsed) changed.
     pub layout_changed: bool,
     pub rects: MenuRects,
@@ -402,6 +423,7 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
         return;
     }
 
+    source_section(ui, m, r);
     preset_section(ui, m, r, &reference);
 
     // Output and headroom (T-84): the readout, the mode in effect, then the output panel (open by default).
@@ -549,6 +571,7 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
     let s = theme::scale_of(ui);
     let list = filtered_presets(m.library, m.filter);
     let count = format!("{} of {}", list.len(), m.library.list().len());
+    // Right under the closed Source header: the gap of a first section.
     if !theme::section(ui, &fonts, "Preset", Some(&count), true) {
         return;
     }
@@ -700,6 +723,132 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
             drop(wrap);
         });
     }
+}
+
+/// The lost-source wait as the menu shows it: `30 s`, `forever` for 0.
+pub fn wait_text(wait_s: f64) -> String {
+    if wait_s <= 0.0 {
+        "forever".to_string()
+    } else {
+        format!("{wait_s:.0} s")
+    }
+}
+
+/// Source (A23): the window attached and what the automatic handling found (native size, integer scale, crop),
+/// Change source and Detach, the ask-at-start box and the lost-source wait. The manual overrides (scale mode,
+/// crop and divisor modes, centring, surround, aspect) are the "Source and placement" panel's parameters.
+fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
+    let fonts = m.fonts;
+    let s = theme::scale_of(ui);
+    let src = &m.state.source;
+    // The header names the program; the section opens on a click (closed by default, so the presets and the
+    // output panel stay where they were). The window list is the picker's.
+    let note = match (&src.attached, &src.waiting) {
+        (_, Some(_)) => "waiting".to_string(),
+        (Some(a), None) => a.exe.clone().unwrap_or_else(|| "attached".to_string()),
+        (None, None) => "none".to_string(),
+    };
+    let (open, header) = theme::section_header(ui, &fonts, "Source", Some(&note), true, false);
+    r.items.push(("header:Source".to_string(), header));
+    if !open {
+        return;
+    }
+    let width = ui.content_region_avail()[0];
+    match &src.attached {
+        Some(a) => {
+            let program = a.exe.as_deref().unwrap_or("unknown program");
+            let head = ellipsize_text(ui, &format!("{program}  \u{00B7}  {}", a.title), width);
+            ui.text_colored(PALETTE.text, head);
+            theme::with_font(ui, None, METRICS.font_small, || {
+                let wrap = ui.push_text_wrap_pos(0.0);
+                ui.text_colored(
+                    PALETTE.text_muted,
+                    format!(
+                        "native {} \u{00D7} {}  \u{00B7}  scale {}  \u{00B7}  {}  \u{00B7}  captured {} \u{00D7} {}{}",
+                        a.native.0,
+                        a.native.1,
+                        a.scale,
+                        a.crop,
+                        a.frame.0,
+                        a.frame.1,
+                        if a.profile { "  \u{00B7}  source profile" } else { "" }
+                    ),
+                );
+                drop(wrap);
+            });
+            record(ui, r, "source:detected");
+        }
+        None => ui.text_colored(PALETTE.text_faint, "No window is captured."),
+    }
+    if let Some(w) = &src.waiting {
+        theme::callout(ui, PALETTE.accent, std::slice::from_ref(w));
+    }
+    ui.dummy([0.0, 2.0 * s]);
+    if theme::button(ui, "Change source") {
+        r.source = Some(super::SourceAction::ChangeSource);
+    }
+    record(ui, r, "source:change");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Choose another window to capture. Esc in the list keeps the current one.",
+        );
+    }
+    if src.attached.is_some() || src.waiting.is_some() {
+        ui.same_line();
+        if theme::button(ui, "Detach") {
+            r.source = Some(super::SourceAction::Detach);
+        }
+        record(ui, r, "source:detach");
+        if ui.is_item_hovered() {
+            theme::tooltip(ui, "Stop capturing: the window list comes back.");
+        }
+    }
+    if ui.checkbox("Ask at every start", &mut m.prefs.ask_at_start) {
+        r.prefs_changed = true;
+    }
+    record(ui, r, "source:ask");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "On: the window list opens at every start. Off: the program chosen last is captured again at start \
+             when it is running.",
+        );
+    }
+    let label_w = theme::row_label(ui, "Wait for a closed window");
+    let value = wait_text(m.prefs.wait_s);
+    let track = label_w - ui.calc_text_size("forever")[0] - ui.clone_style().item_spacing()[0];
+    let mut wait = m.prefs.wait_s as f32;
+    if theme::slider_ex(ui, "##source_wait", &mut wait, 0.0, 300.0, track, false, "%.0f") {
+        m.prefs.wait_s = f64::from(wait.round());
+        r.prefs_changed = true;
+    }
+    record(ui, r, "source:wait");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "When the captured window closes, a new window of the same program and class is attached by itself \
+             during this wait; then the window list comes back. 0 waits forever.",
+        );
+    }
+    ui.same_line();
+    theme::text_right(ui, PALETTE.text, &value);
+}
+
+/// `text` cut with an ellipsis to fit `width` px in the current font.
+fn ellipsize_text(ui: &Frame, text: &str, width: f32) -> String {
+    if ui.calc_text_size(text)[0] <= width {
+        return text.to_string();
+    }
+    let mut chars: Vec<char> = text.chars().collect();
+    while !chars.is_empty() {
+        chars.pop();
+        let s: String = chars.iter().collect::<String>() + "...";
+        if ui.calc_text_size(&s)[0] <= width {
+            return s;
+        }
+    }
+    "...".to_string()
 }
 
 /// "Save as new": checks the name, writes `<dir>\<id>.toml`, reloads the library and selects the new preset.
@@ -1072,6 +1221,31 @@ mod tests {
         assert!(restores_foreground(CloseReason::Toggle));
     }
 
+    /// A23: after an attach the foreground goes to the new source, never to the window that had it when the
+    /// picker opened (the terminal that started the app, the previous game).
+    #[test]
+    fn an_attach_hands_the_foreground_to_the_new_source() {
+        const NEW: isize = 0x40;
+        assert_eq!(
+            close_target(CloseReason::Attached, Some(OTHER), Some(NEW), OUT, |_| true),
+            Some(NEW)
+        );
+        assert_eq!(
+            close_target(CloseReason::Attached, Some(OTHER), Some(NEW), OUT, |h| h != NEW),
+            None
+        );
+        assert_eq!(
+            close_target(CloseReason::Toggle, Some(OTHER), Some(NEW), OUT, |_| true),
+            Some(OTHER)
+        );
+        assert_eq!(
+            close_target(CloseReason::Deactivated, Some(OTHER), Some(NEW), OUT, |_| true),
+            None
+        );
+        assert!(restores_foreground(CloseReason::Attached));
+        assert!(!restores_foreground(CloseReason::Deactivated));
+    }
+
     #[test]
     fn esc_closes_the_open_menu_only() {
         use super::super::input::{WM_KEYDOWN, WM_KEYUP};
@@ -1122,6 +1296,13 @@ mod tests {
         assert!(!adapter_restart_needed("auto", "AUTO"));
         assert!(!adapter_restart_needed("", "auto"));
         assert!(adapter_restart_needed(&rtx.setting_value(), "auto"));
+    }
+
+    #[test]
+    fn the_wait_reads_in_seconds_or_forever() {
+        assert_eq!(wait_text(30.0), "30 s");
+        assert_eq!(wait_text(0.0), "forever");
+        assert_eq!(wait_text(-1.0), "forever");
     }
 
     #[test]

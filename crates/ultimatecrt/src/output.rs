@@ -318,6 +318,12 @@ thread_local! {
     static DRAG: std::cell::Cell<Option<Drag>> = const { std::cell::Cell::new(None) };
 }
 
+/// The source window changed (an attach in the picker, a reattach, a detach: 0), the last fallback of the T-07
+/// hand-back (A23).
+pub fn set_source(source: HWND) {
+    SOURCE.store(source.0 as isize, Ordering::Relaxed);
+}
+
 /// Activations handed back since the last call (for a console line).
 pub fn take_handbacks() -> u32 {
     HANDBACKS.swap(0, Ordering::Relaxed)

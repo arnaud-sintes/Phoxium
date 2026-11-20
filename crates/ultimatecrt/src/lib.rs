@@ -17,6 +17,7 @@ pub mod modes;
 pub mod output;
 pub mod params;
 pub mod patterns;
+pub mod picker;
 pub mod placement;
 pub mod presets;
 pub mod render_cmd;

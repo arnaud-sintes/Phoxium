@@ -80,9 +80,9 @@ $running = @"
 ultimateCRT $version
 
 1. Start the program to capture (any window; pixel-demo.exe is a demo source).
-2. Start:  ultimatecrt.exe --window "title of that window"     (ultimatecrt.exe --help lists the options)
-3. Fullscreen over the source, never taking focus:  ultimatecrt.exe --window "title" --fullscreen
-   Quit with Ctrl+Alt+Q (Esc in a windowed output).
+2. Start ultimatecrt.exe (double-click) and choose that window in the list it shows (Enter or double-click).
+3. F11: fullscreen over the source, never taking focus. F10: settings (Change source, Detach, every parameter).
+   Quit with Ctrl+Alt+Q or the close button. Developer options: ultimatecrt.exe --help from a terminal.
 
 Needs Windows 11 x64 and a GPU driver with Vulkan 1.3. The executables are not code-signed: SmartScreen or
 antivirus tools may warn on first run. Licences of the dependencies: THIRD-PARTY.md.

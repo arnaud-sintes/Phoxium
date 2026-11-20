@@ -276,6 +276,51 @@ impl Live {
         self.mode.force_windowed();
     }
 
+    /// A fullscreen output becomes the framed window of F11 (non-activating, at the remembered rectangle): a
+    /// lost source given up after the wait (A23), so the only monitor shows the window picker in a normal
+    /// window. Nothing happens when the output is already a window. Returns whether it changed.
+    pub fn go_windowed(&mut self, hwnd: HWND) -> bool {
+        if self.mode.mode != WindowMode::Fullscreen {
+            return false;
+        }
+        let monitors = output::monitor_irects();
+        let placement = self.mode.toggle(
+            output::outer_rect(hwnd),
+            output::monitor_of(hwnd),
+            &monitors,
+            self.default_outer,
+        );
+        output::apply_placement(hwnd, &placement);
+        println!("output: {}", describe(&placement, &monitors));
+        self.save_window_rect();
+        true
+    }
+
+    /// Whether the output is the fullscreen one.
+    pub fn is_fullscreen(&self) -> bool {
+        self.mode.mode == WindowMode::Fullscreen
+    }
+
+    /// A window was attached (A23): it becomes `[global.source] last`, written at once.
+    pub fn remember_source(&mut self, last: settings::LastSource) {
+        if self.settings.global.source.last.as_ref() != Some(&last) {
+            self.settings.global.source.last = Some(last);
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    /// The menu or the picker changed `[global.source] ask_at_start` or `wait_s` (A23): written with the next
+    /// [`Live::flush_settings`] (debounced).
+    pub fn set_source_prefs(&mut self, ask_at_start: bool, wait_s: f64) {
+        let s = &mut self.settings.global.source;
+        if s.ask_at_start != ask_at_start || s.wait_s != wait_s {
+            s.ask_at_start = ask_at_start;
+            s.wait_s = wait_s.max(0.0);
+            self.mark_dirty();
+        }
+    }
+
     /// At exit: remembers where the framed window is and writes it to the settings.
     pub fn finish(&mut self, hwnd: HWND) {
         if self.mode.mode == WindowMode::Windowed {
@@ -374,6 +419,19 @@ mod tests {
         // The adapter choice is written without waiting.
         live.set_gpu_adapter("Intel".to_string());
         assert_eq!(settings::load(&dir).settings.global.gpu.adapter, "Intel");
+        // A23: the last source is written at once, the source preferences debounced.
+        let last = settings::LastSource {
+            exe: "pixel-demo.exe".into(),
+            class: "pixel_demo".into(),
+            title: "pixel-demo".into(),
+        };
+        live.remember_source(last.clone());
+        assert_eq!(settings::load(&dir).settings.global.source.last, Some(last));
+        live.set_source_prefs(false, 12.0);
+        assert!(!live.flush_settings(false));
+        assert!(live.flush_settings(true));
+        let s = settings::load(&dir).settings.global.source;
+        assert_eq!((s.ask_at_start, s.wait_s), (false, 12.0));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
