@@ -116,6 +116,16 @@ pub(super) trait Stage {
     /// `d` must be a live device.
     unsafe fn create(&mut self, d: &ash::Device) -> Res<()>;
 
+    /// Allocates the device memory of the stage's own buffers, right after [`Stage::create`] and before
+    /// [`Stage::link_abl_state`]: choosing the memory type needs the context (R-30). On error what was created
+    /// stays for [`Stage::destroy`]. Default: nothing.
+    ///
+    /// # Safety
+    /// `ctx` is the context of the device given to `create`, which succeeded.
+    unsafe fn allocate(&mut self, _ctx: &crate::gpu::Context) -> Res<()> {
+        Ok(())
+    }
+
     /// The stage is an exact identity for these parameters and constants: its output equals its input
     /// bit for bit, and running it has no effect that a later stage or a later frame needs (no state
     /// buffer or history that it would update, no probe texel). The pipeline then routes around a slot

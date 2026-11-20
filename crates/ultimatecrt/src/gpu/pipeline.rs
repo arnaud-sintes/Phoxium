@@ -691,6 +691,7 @@ impl Pipeline {
         self.resample.create(d, RESAMPLE_SPV, 0)?;
         for l in &mut self.chain {
             l.stage.create(d)?;
+            l.stage.allocate(ctx)?;
         }
         // T-37: the ABL state buffer (owned by `abl`) is read by `screen` for raster_scale.
         if let Some(abl) = self.chain.iter().find_map(|l| l.stage.abl_state()) {

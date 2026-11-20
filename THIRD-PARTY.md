@@ -8,12 +8,12 @@ policy (permissive only, no GPL, LGPL or AGPL) is checked by `cargo deny check l
 
 ## Dear ImGui crates (`dear-imgui-sys`, `dear-imgui-rs`, `dear-imgui-ash`, `dear-imgui-build-support` 0.22.0)
 
-The four crates, by Mingzhen Zhuang (the author named in their manifests, repository <https://github.com/Latias94/dear-imgui-rs>), declare `MIT OR Apache-2.0` and ship no licence file (checked at T-08 and again for 0.22.0). ultimateCRT uses them under the MIT terms, which are the terms of the notice below (the standard MIT text; the copyright holder is the author named in the manifests, the year is not stated by the packages).
+The four crates, by Mingzhen Zhuang (the author named in their manifests, repository <https://github.com/Latias94/dear-imgui-rs>), declare `MIT OR Apache-2.0` and ship no licence file (checked at T-08 and again for 0.22.0; their READMEs only point to `LICENSE-MIT` and `LICENSE-APACHE` at the repository root). ultimateCRT uses them under the MIT terms. The notice below is the repository's `LICENSE-MIT` at the commit the 0.22.0 packages were built from (`7424350518efb54693b8acd4a417b69d9d0f015b`, from their `.cargo_vcs_info.json`).
 
 ```
 MIT License
 
-Copyright (c) the authors of dear-imgui-rs (Mingzhen Zhuang)
+Copyright (c) 2025 Mingzhen Zhuang
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal

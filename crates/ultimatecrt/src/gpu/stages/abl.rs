@@ -16,8 +16,8 @@
 //! Design (PHY-13 "a reduction pass, a frame of latency or an estimate"): the state lives on the GPU, in
 //! a 16-byte storage buffer owned by this stage (set 1, `ABL_STATE_SET` of `abl.glsl`). No CPU readback
 //! (gate 10) and no wait: the gain of frame N+1 is computed by the GPU from frame N in queue order. The
-//! buffer is never mapped, so its memory is the first type the buffer's requirements allow (the stage
-//! creation only receives the device); it is cleared by `vkCmdFillBuffer` in the first recorded frame.
+//! buffer is never mapped, so its memory is `DEVICE_LOCAL` (R-30, allocated in [`Stage::allocate`]); it is
+//! cleared by `vkCmdFillBuffer` in the first recorded frame.
 //! This stage records the barriers on its own buffer (the pipeline owns and tracks images only): at the
 //! start, the previous frame's reduce writes (and the first clear) before this frame's apply reads; between
 //! the passes, the apply reads before the reduce writes.
@@ -132,17 +132,7 @@ impl Stage for Abl {
                 .sharing_mode(vk::SharingMode::EXCLUSIVE),
             None,
         )?;
-        let req = d.get_buffer_memory_requirements(self.buffer);
-        if req.memory_type_bits == 0 {
-            return Err("abl: no memory type for the state buffer".into());
-        }
-        self.memory = d.allocate_memory(
-            &vk::MemoryAllocateInfo::default()
-                .allocation_size(req.size)
-                .memory_type_index(req.memory_type_bits.trailing_zeros()),
-            None,
-        )?;
-        d.bind_buffer_memory(self.buffer, self.memory, 0)?;
+        // Its memory and the descriptor writes follow in `allocate`, which has the context.
 
         let sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
@@ -157,6 +147,27 @@ impl Stage for Abl {
                 .descriptor_pool(self.pool)
                 .set_layouts(&layouts),
         )?[0];
+        Ok(())
+    }
+
+    /// R-30: the state buffer lives in `DEVICE_LOCAL` memory (it is never mapped; the first allowed type when the
+    /// device offers no device-local one for it), bound before the pipeline hands it to `screen`.
+    unsafe fn allocate(&mut self, ctx: &crate::gpu::Context) -> Res<()> {
+        let d = &ctx.device;
+        let req = d.get_buffer_memory_requirements(self.buffer);
+        if req.memory_type_bits == 0 {
+            return Err("abl: no memory type for the state buffer".into());
+        }
+        let index = ctx
+            .memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)
+            .unwrap_or(req.memory_type_bits.trailing_zeros());
+        self.memory = d.allocate_memory(
+            &vk::MemoryAllocateInfo::default()
+                .allocation_size(req.size)
+                .memory_type_index(index),
+            None,
+        )?;
+        d.bind_buffer_memory(self.buffer, self.memory, 0)?;
         let info = [vk::DescriptorBufferInfo::default()
             .buffer(self.buffer)
             .range(STATE_BYTES)];

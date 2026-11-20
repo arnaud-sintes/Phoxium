@@ -498,7 +498,7 @@ impl Preset {
     /// warning per override that could not be applied or was clamped ([`apply_overrides_checked`]).
     pub fn with_overrides(&self, overrides: &BTreeMap<String, toml::Value>) -> (Params, Vec<String>) {
         let mut p = self.params();
-        let warnings = apply_overrides_checked(&mut p, overrides, "settings overrides");
+        let warnings = apply_overrides_checked(&mut p, overrides, crate::settings::SETTINGS_FILE);
         (p, warnings)
     }
 

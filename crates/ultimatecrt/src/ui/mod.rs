@@ -702,8 +702,8 @@ impl Ui {
     /// so for the messages it queued, by [`input::consumes`]). While the menu is closed only DPI changes are
     /// used. A deactivation of the output while the menu is open closes the menu without taking the
     /// foreground back ([`menu::on_activate`]). Esc while the menu is open closes it and gives the foreground
-    /// back, like the menu key ([`menu::closes_on_key`]); the output window never sees that Esc (it would
-    /// close the output).
+    /// back, like the menu key ([`menu::closes_on_key`]); the output window never sees that Esc (Esc does not
+    /// quit; Ctrl+Alt+Q does).
     pub fn handle_win32_message(&mut self, msg: u32, wparam: usize, lparam: isize) -> bool {
         if msg == input::WM_ACTIVATE {
             // Without a source the picker stays when the user goes to another window (A23): there is nothing

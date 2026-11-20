@@ -39,7 +39,7 @@ use ash::vk;
 
 use super::{binding, compute_pipeline, push, ComputePass, Domain, Registration, Stage, GROUP};
 use crate::gpu::headless::{GpuImage, HostBuffer};
-use crate::gpu::{barrier, Context, FrameConstants};
+use crate::gpu::{barrier, vk_error, wait_fences, Context, FrameConstants, GpuError};
 use crate::params::Params;
 use crate::Res;
 
@@ -393,7 +393,8 @@ unsafe fn to_host(d: &ash::Device, cb: vk::CommandBuffer) {
     d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&m));
 }
 
-/// Records `f` into a one-time command buffer, submits it and waits for it.
+/// Records `f` into a one-time command buffer, submits it and waits for it (at most
+/// [`crate::gpu::FENCE_TIMEOUT`]).
 ///
 /// # Safety
 /// `ctx` is live; the commands of `f` are valid on its queue.
@@ -429,15 +430,30 @@ unsafe fn one_shot(ctx: &Context, f: impl FnOnce(vk::CommandBuffer)) -> Res<()> 
         let fence = d.create_fence(&vk::FenceCreateInfo::default(), None)?;
         let cbs = [cb];
         let submit = vk::SubmitInfo::default().command_buffers(&cbs);
+        // R-01: a bounded wait; a GPU that does not finish in time is a lost device, never an endless wait.
         let done = d
             .queue_submit(ctx.queue, &[submit], fence)
-            .map_err(Into::into)
-            .and_then(|()| d.wait_for_fences(&[fence], true, u64::MAX).map_err(Into::into));
-        d.destroy_fence(fence, None);
+            .map_err(|r| vk_error(r, "submitting a burn-in map transfer"))
+            .and_then(|()| wait_fences(d, &[fence], "a burn-in map transfer"));
+        if !hung(&done) {
+            d.destroy_fence(fence, None);
+        }
         done
     })();
-    d.destroy_command_pool(pool, None);
+    // A hung GPU may still use the command buffer and the fence: they are leaked rather than destroyed in use (the
+    // device is lost anyway).
+    if !hung(&r) {
+        d.destroy_command_pool(pool, None);
+    }
     r
+}
+
+/// True when `r` failed on a GPU that did not finish within [`crate::gpu::FENCE_TIMEOUT`].
+fn hung(r: &Res<()>) -> bool {
+    r.as_ref()
+        .err()
+        .and_then(|e| e.downcast_ref::<GpuError>())
+        .is_some_and(|g| matches!(g, GpuError::DeviceLost { hung: true, .. }))
 }
 
 impl Stage for Wear {

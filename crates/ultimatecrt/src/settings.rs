@@ -529,20 +529,11 @@ pub fn record_edit(
     changed
 }
 
-/// Applies overrides onto `params`. Returns one warning per unknown id or malformed value (skipped).
+/// Applies the overrides of `settings.toml` onto `params` through [`crate::presets::apply_overrides_checked`]:
+/// an unknown id, a malformed or non-finite value is skipped, a value outside the hard range is clamped. Returns
+/// one warning per problem, each naming `settings.toml`.
 pub fn apply_overrides(params: &mut Params, overrides: &BTreeMap<String, toml::Value>) -> Vec<String> {
-    let mut warnings = Vec::new();
-    for (id, val) in overrides {
-        let Some(m) = PARAMS_META.iter().find(|m| m.id == id) else {
-            warnings.push(format!("unknown parameter '{id}' ignored"));
-            continue;
-        };
-        match from_value(m.ty, val) {
-            Some(v) if params.set(id, v) => {}
-            _ => warnings.push(format!("invalid value for parameter '{id}' ignored")),
-        }
-    }
-    warnings
+    crate::presets::apply_overrides_checked(params, overrides, SETTINGS_FILE)
 }
 
 /// `%APPDATA%\ultimateCRT`, or `None` when `APPDATA` is not set.
@@ -1048,7 +1039,15 @@ mod tests {
         o.insert("no_such_param".to_string(), toml::Value::Float(1.0));
         o.insert(some_id().id.to_string(), toml::Value::String("x".into()));
         let mut p = Params::default();
-        assert_eq!(apply_overrides(&mut p, &o).len(), 2);
+        let w = apply_overrides(&mut p, &o);
+        assert_eq!(w.len(), 2);
+        // WP4: the warnings name the file; a value outside the hard range is clamped with a warning too.
+        assert!(w.iter().all(|w| w.starts_with("settings.toml: ")), "{w:?}");
+        let mut o = BTreeMap::new();
+        o.insert("tube_visible_height_mm".to_string(), toml::Value::Float(-1.0));
+        let w = apply_overrides(&mut p, &o);
+        assert!(w.len() == 1 && w[0].starts_with("settings.toml: "), "{w:?}");
+        assert!(p.tube_visible_height_mm > 0.0);
     }
 
     #[test]
