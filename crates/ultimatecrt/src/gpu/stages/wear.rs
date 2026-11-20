@@ -21,6 +21,16 @@
 //! the tube's, not the picture's). CPU operations (upload of a loaded map, reset to a new tube, blocking
 //! readback at exit) idle the device and run in a one-time command buffer; they are rare.
 //!
+//! **Known deviation (review R-14, listed in DESIGN section 12):** the accumulation box-averages the light after
+//! the mask over each texel of the fixed map, so with a resolved mask (and with the scanlines) the texel grid
+//! beats against the triad and line pitches and a uniform field charges neighbouring texels unequally
+//! (physically every stripe of one colour wears the same). Not fixed for now (opt-in feature); the fix would
+//! accumulate the beam light before the mask, or the mask prefiltered.
+//!
+//! **Time base (review R-10):** the charge of a frame uses its measured period clamped to
+//! [`crt_model::phosphor::MAX_FRAME_STEP_MS`] ([`crt_model::burnin::frame_hours`]), so the first frame after a
+//! minimise or a stall never wears the map by the whole pause times the acceleration.
+//!
 //! The stage records its own barriers on the map: a memory barrier at the start of every run orders the
 //! previous frame's accumulation and the one-time copies before this frame's reads and writes; one between
 //! the two passes (the apply pass reads what the accumulation then writes).
@@ -44,8 +54,6 @@ pub const MAP_SIZE: (u32, u32) = (640, 480);
 const MAP_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
 const MAP_TEXELS: usize = MAP_SIZE.0 as usize * MAP_SIZE.1 as usize;
 const MAP_BYTES: usize = MAP_TEXELS * 16;
-/// Milliseconds per hour.
-const MS_PER_HOUR: f64 = 3_600_000.0;
 
 /// Registration of the slot (see [`super::CHAIN`]).
 pub(in crate::gpu) const SLOT: Registration = Registration {
@@ -92,6 +100,16 @@ pub(in crate::gpu) fn map_place(fc: &FrameConstants, params: &Params) -> [f32; 4
         p.texel_px[0] as f32,
         p.texel_px[1] as f32,
     ]
+}
+
+/// Reference hours per unit light that one frame adds to the map: the frame's display hours
+/// ([`crt_model::burnin::frame_hours`]: the measured period `frame_time_ms` clamped to
+/// [`crt_model::phosphor::MAX_FRAME_STEP_MS`], times the acceleration; review R-10) plus the 'burn in now'
+/// hours `extra_h`, times `per_light_hour`. The first frame after a minimise or a stall therefore wears like
+/// a 250 ms frame at most, not like the whole pause times the acceleration.
+fn charge_scale(frame_time_ms: f32, acceleration: f32, extra_h: f64, per_light_hour: f64) -> f64 {
+    let frame_h = crt_model::burnin::frame_hours(f64::from(frame_time_ms), f64::from(acceleration));
+    (frame_h + extra_h) * per_light_hour
 }
 
 /// The bits of every parameter the wear law depends on (cache key of the calibration).
@@ -507,11 +525,13 @@ impl Stage for Wear {
         let per_light_hour = crate::ageing::charge_per_light_hour(params);
         let mut scale = 0.0;
         if burn {
-            let accel = f64::from(params.burnin_acceleration);
-            let accel = if accel.is_finite() { accel.max(0.0) } else { 0.0 };
-            let frame_h = f64::from(fc.frame_time_ms).max(0.0) / MS_PER_HOUR;
             self.extra_used = std::mem::take(&mut self.extra_hours);
-            scale = (frame_h * accel + self.extra_used) * per_light_hour;
+            scale = charge_scale(
+                fc.frame_time_ms,
+                params.burnin_acceleration,
+                self.extra_used,
+                per_light_hour,
+            );
         }
         let scale = if scale.is_finite() { scale as f32 } else { 0.0 };
         self.push = Push {
@@ -634,6 +654,21 @@ mod tests {
                 assert!(glsl.contains(m), "{m}");
             }
         }
+    }
+
+    /// Review R-10: the charge of the first frame after a 10 minute minimise (600000 ms) equals that of a
+    /// 250 ms frame (the clamp), not 600 h at an acceleration of 3600; a normal frame is unchanged, the
+    /// first frame (0 ms) adds only the 'burn in now' hours.
+    #[test]
+    fn long_frame_gap_does_not_wear_by_hours() {
+        let per = 2.0;
+        let gap = charge_scale(600_000.0, 3600.0, 0.0, per);
+        assert_eq!(gap, charge_scale(250.0, 3600.0, 0.0, per));
+        assert!((gap - 0.25 * 3600.0 / 3600.0 * per).abs() < 1e-9, "{gap}");
+        let frame = charge_scale(1000.0 / 60.0, 3600.0, 0.0, per);
+        assert!((frame - per / 60.0).abs() < 1e-6, "{frame}");
+        assert_eq!(charge_scale(0.0, 3600.0, 0.5, per), 0.5 * per);
+        assert_eq!(charge_scale(f32::NAN, f32::INFINITY, 0.0, per), 0.0);
     }
 
     /// Unplaced tube: the map covers the tube image; placed: the visible mm, centred.

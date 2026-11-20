@@ -202,6 +202,7 @@ fn ageing_and_burnin_on_the_gpu() {
     eprintln!("ageing {:?}", t0.elapsed());
     burnin_accumulation_and_ghost(&mut gpu);
     calibration_point(&mut gpu);
+    long_frame_gap_does_not_wear_by_hours(&mut gpu);
     real_time_increments_are_not_lost(&mut gpu);
     eprintln!("burn-in {:?}", t0.elapsed());
     frozen_map_and_persistence(&mut gpu);
@@ -471,14 +472,16 @@ fn burnin_accumulation_and_ghost(gpu: &mut Headless) {
 }
 
 /// The calibration point on the GPU: a full-white field for 20,000 h at 350 cd/m2 keeps 0.85 of its
-/// luminance (+/- 0.01), blue the most worn; the acceleration path (one 1 h frame at x 20,000).
+/// luminance (+/- 0.01), blue the most worn; the acceleration path (one frame of the longest step, 250 ms =
+/// 1/14400 h, at x 288,000,000).
 fn calibration_point(gpu: &mut Headless) {
     let mut p = burn_params();
-    p.burnin_acceleration = REF_HOURS as f32;
+    p.burnin_acceleration = (REF_HOURS * 14_400.0) as f32;
     gpu.reset_wear();
     let white = image(W, H, |_, _| [1.0; 3]);
-    // One frame of 3,600,000 ms = 1 h at acceleration 20,000 (unplaced: the map covers the whole image).
-    let _ = wear(gpu, &p, tube(0.0, 3_600_000.0), &white);
+    // One frame of 250 ms (the clamp of the frame step, review R-10) at acceleration 2.88e8: 20,000 h
+    // (unplaced: the map covers the whole image).
+    let _ = wear(gpu, &p, tube(0.0, 250.0), &white);
     let map = gpu.read_wear_map().unwrap().unwrap();
     // Uniform within the f32 placement of the texel edges (see `assert_map`).
     let worst = map
@@ -502,6 +505,39 @@ fn calibration_point(gpu: &mut Headless) {
         (ratio / want - 1.0).abs() < 0.01,
         "blue to red wear ratio {ratio}, rates give {want}"
     );
+}
+
+/// Review R-10: the first frame after a 10 minute minimise (frame time 600,000 ms) at acceleration 3600 wears
+/// like a 250 ms frame (0.25 h of a white field, 350 cd/m2: 0.25 h_ref), not 600 h; the next normal frame adds
+/// its own 16 ms.
+fn long_frame_gap_does_not_wear_by_hours(gpu: &mut Headless) {
+    let p = Params {
+        burnin_acceleration: 3600.0,
+        ..burn_params()
+    };
+    gpu.reset_wear();
+    let white = image(W, H, |_, _| [1.0; 3]);
+    let _ = wear(gpu, &p, tube(0.0, 600_000.0), &white);
+    let map = gpu.read_wear_map().unwrap().unwrap();
+    let worst = map
+        .q
+        .iter()
+        .map(|q| (f64::from(*q) / 0.25 - 1.0).abs())
+        .fold(0.0, f64::max);
+    assert!(
+        worst < 2e-4,
+        "a 10 minute gap wears 0.25 h_ref, worst {worst:.2e} off ({})",
+        map.q[0]
+    );
+    let _ = wear(gpu, &p, tube(0.0, 16.0), &white);
+    let map = gpu.read_wear_map().unwrap().unwrap();
+    let want = 0.25 + 16.0 / 3_600_000.0 * 3600.0;
+    let worst = map
+        .q
+        .iter()
+        .map(|q| (f64::from(*q) / want - 1.0).abs())
+        .fold(0.0, f64::max);
+    assert!(worst < 2e-4, "then a 16 ms frame: {want}, worst {worst:.2e} off");
 }
 
 /// Real time on an old tube: 1000 h already worn, frames of 3.6 ms at acceleration 1 and 350 cd/m2 add 1e-6 h
