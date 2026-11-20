@@ -201,6 +201,8 @@ pub fn run() -> Res<()> {
         .as_ref()
         .and_then(|l| live::writable_dir(settings_dir.as_deref(), l));
     let settings_notice = loaded.as_ref().and_then(|l| l.warning.clone());
+    // Review D-01: what the load upgraded (the old default hotkeys), shown once and written back at once.
+    let settings_notes = loaded.as_ref().map(|l| l.notes.join(" ")).filter(|n| !n.is_empty());
     // No settings file yet: a first start, the first-run hint is due (shown on the window picker).
     let first_start = loaded.as_ref().is_some_and(|l| l.state == settings::FileState::Missing);
     let stored = loaded.map(|l| l.settings).unwrap_or_default();
@@ -428,15 +430,27 @@ pub fn run() -> Res<()> {
     for w in &selection.warnings {
         eprintln!("warning: gpu: {w}");
     }
+    // Review D-02: a configured adapter that is missing is also shown in the title (the menu's GPU panel lists the
+    // selection's warnings), not only on a console a release build does not have.
+    let adapter_notice = selection.missing_notice();
+    // An earlier build's LUID setting that still names an adapter is stored as its stable identity (below).
+    let upgraded_gpu = selection.upgraded_setting.clone().filter(|_| args.gpu.is_none());
     let capture_luid = selection.capture_luid();
     adapters::publish(adapters::Current {
         selection,
         adapters: topology.entries(),
-        setting: stored.global.gpu.adapter.clone(),
+        setting: upgraded_gpu
+            .clone()
+            .unwrap_or_else(|| stored.global.gpu.adapter.clone()),
     });
     // The output never takes the keyboard (OUT-2), except while the menu or the picker is shown.
-    println!("quit: Ctrl+Alt+Q");
+    if let Some(q) = win.hotkeys.bound(hotkeys::Action::Quit) {
+        println!("quit: {q}");
+    }
     println!("hotkeys: {}", win.hotkeys.summary());
+    if let Some(n) = &settings_notes {
+        println!("notice: {n}");
+    }
 
     let mut log = args
         .log
@@ -527,6 +541,12 @@ pub fn run() -> Res<()> {
     if first_start {
         live.mark_first_run();
     }
+    if settings_notes.is_some() {
+        live.save_now();
+    }
+    if let Some(v) = upgraded_gpu {
+        live.set_gpu_adapter(v); // written at once
+    }
     let mut ui_config = crate::ui::UiConfig::live(
         win.hwnd.0 as isize,
         follow.0 as isize,
@@ -536,6 +556,12 @@ pub fn run() -> Res<()> {
         &win.hotkeys,
     );
     ui_config.vulkan_device = Some(renderer.gpu_name.clone());
+    // The settings' hotkey warnings and the upgrade note, in the Hotkeys rows (review D-01).
+    ui_config.hotkey_message = match (hotkey_warnings.is_empty(), &settings_notes) {
+        (false, _) => Some((false, hotkey_warnings.join(" "))),
+        (true, Some(n)) => Some((true, n.clone())),
+        (true, None) => None,
+    };
     let mut ui = crate::ui::Ui::new(renderer.context(), renderer.output_format(), ui_config)?;
     let mut ui_state = crate::ui::UiState::default();
     let mut stepped_preset = live.current_preset().map(str::to_string);
@@ -570,7 +596,13 @@ pub fn run() -> Res<()> {
         _ => None,
     };
     output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
-    ui.set_picker_message(start_message.take().or(settings_notice.map(|w| (false, w))));
+    ui.set_picker_message(
+        start_message
+            .take()
+            .or(settings_notice.map(|w| (false, w)))
+            .or(adapter_notice.clone().map(|w| (false, w)))
+            .or(settings_notes.map(|n| (true, n))),
+    );
     let mut source_request: Option<SourceAction> = None;
     // The Source section's picture area (Auto detection, manual limits) and multiplier edits; `remap` recomputes
     // the view (native size, placement, readouts) at the next frame even when the source sends none.
@@ -1508,7 +1540,8 @@ pub fn run() -> Res<()> {
                 // R-02, R-01: what the renderer limited (amplifier samples, an empty tube area, ...). The renderer
                 // prints each one once when it appears; the queue is drained here so it stays bounded.
                 let _ = renderer.take_gpu_notices();
-                let shown_notice = title_notice(notice.as_deref(), renderer.gpu_notice().as_deref());
+                let gpu_notice = title_notice(adapter_notice.as_deref(), renderer.gpu_notice().as_deref());
+                let shown_notice = title_notice(notice.as_deref(), gpu_notice.as_deref());
                 let secs = stat_time.elapsed().as_secs_f64();
                 // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
                 let gpu = renderer.take_timing_average();

@@ -46,7 +46,7 @@
       - with the menu open, Esc: the menu closes, the source gets the foreground back, the output stays open;
       - with the menu open, F11 (both directions): the mode changes, the menu stays open and usable; close the
         menu: the source has the foreground and the output does not take it again (T-07 hand-back only);
-      - Ctrl+Alt+O shows and hides the overlay without any foreground change; with the menu open, Ctrl+Alt+Q
+      - Ctrl+Alt+F9 shows and hides the overlay without any foreground change; with the menu open, Ctrl+Alt+End
         quits and the source gets the foreground back;
       - with a hotkey made unavailable (another program holding F10), the menu shows the registration message.
 .PARAMETER Bin

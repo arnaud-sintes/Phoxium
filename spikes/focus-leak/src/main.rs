@@ -3,7 +3,7 @@
 //!   --windowed        WS_OVERLAPPEDWINDOW + WS_EX_NOACTIVATE instead of the fullscreen popup
 //!   --title           SetWindowTextW every second (as app.rs does)
 //!   --print           a stdout line every second (as --stats does)
-//!   --hotkey          RegisterHotKey Ctrl+Alt+Q (as output.rs does)
+//!   --hotkey          RegisterHotKey Ctrl+Alt+End (the quit default of output.rs; Ctrl+Alt+Q until review D-01)
 //!   --guard-pos       WM_WINDOWPOSCHANGING adds SWP_NOACTIVATE to every position change
 //!   --refuse          WM_ACTIVATE (activated) hands the foreground back to the window it came from
 //!   --exit-after <s>  quit after s seconds (default 40)
@@ -158,7 +158,7 @@ fn main() {
         }
         .unwrap();
         if has("--hotkey") {
-            let _ = RegisterHotKey(Some(hwnd), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 'Q' as u32);
+            let _ = RegisterHotKey(Some(hwnd), 1, MOD_CONTROL | MOD_ALT | MOD_NOREPEAT, 0x23); // VK_END
         }
         if has("--disabled") {
             let _ = windows::Win32::UI::Input::KeyboardAndMouse::EnableWindow(hwnd, false);

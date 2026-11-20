@@ -23,7 +23,7 @@
 //! passes them to [`Ui::handle_win32_message`]. The overlay never takes input.
 //!
 //! Hotkeys (T-54): [`Ui`] implements `crate::controls::UiHook`; the menu key (default F10, fallbacks
-//! Ctrl+Alt+F10 and Ctrl+Alt+F12) calls [`Ui::request_toggle`], the overlay key (Ctrl+Alt+O)
+//! Ctrl+Alt+F10 and Ctrl+Alt+F12) calls [`Ui::request_toggle`], the overlay key (Ctrl+Alt+F9)
 //! [`Ui::toggle_overlay`]. The registration problems are shown in the menu ([`UiConfig::hotkey_problems`]).
 //! Settings: the UI holds no settings of its own; the app's session settings (`live::Live`) give the layout
 //! and take it back ([`Ui::take_layout_change`]); parameter edits, the preset, a new preset library and the
@@ -300,6 +300,11 @@ pub struct UiConfig {
     pub vulkan_device: Option<String>,
     /// Offer the native Save and Open dialogs of the preset files (the live app).
     pub dialogs: bool,
+    /// What the keyboard layouts type with AltGr, for the Hotkeys rows' warning (`keyboard_layout::altgr_text`
+    /// in the live app, `None` headless).
+    pub layout_probe: Option<crate::hotkeys::LayoutProbe>,
+    /// A first message of the Hotkeys rows (the settings' hotkey warnings and the note on the upgraded defaults).
+    pub hotkey_message: Option<(bool, String)>,
 }
 
 impl UiConfig {
@@ -332,6 +337,8 @@ impl UiConfig {
             registration: Some(hotkeys.clone()),
             vulkan_device: None,
             dialogs: true,
+            layout_probe: Some(crate::keyboard_layout::altgr_text),
+            hotkey_message: None,
         }
     }
 
@@ -353,6 +360,8 @@ impl UiConfig {
             registration: None,
             vulkan_device: None,
             dialogs: false,
+            layout_probe: None,
+            hotkey_message: None,
         }
     }
 }
@@ -572,6 +581,8 @@ impl Ui {
             hotkeys: HotkeyModel {
                 registration: config.registration,
                 rows: config.hotkeys,
+                layout_probe: config.layout_probe,
+                message: config.hotkey_message,
                 ..HotkeyModel::default()
             },
             files: FilesModel {
@@ -809,7 +820,7 @@ impl Ui {
     /// used. A deactivation of the output while the menu is open closes the menu without taking the
     /// foreground back ([`menu::on_activate`]). Esc while the menu is open closes it and gives the foreground
     /// back, like the menu key ([`menu::closes_on_key`]); the output window never sees that Esc (Esc does not
-    /// quit; Ctrl+Alt+Q does).
+    /// quit; the Quit hotkey does).
     pub fn handle_win32_message(&mut self, msg: u32, wparam: usize, lparam: isize) -> bool {
         if msg == input::WM_ACTIVATE {
             // Without a source the picker stays when the user goes to another window (A23): there is nothing
@@ -1070,9 +1081,7 @@ impl Ui {
         self.menu_key = menu_key_of(reg);
         self.hotkey_problems = reg.problems();
         self.hotkeys.registration = Some(reg.clone());
-        if message.is_some() {
-            self.hotkeys.message = message;
-        }
+        self.hotkeys.outcome(message);
         if self.picker.first_run.is_some() {
             self.picker.first_run = Some(first_run_text(Some(reg), &self.menu_key));
         }
@@ -1086,6 +1095,11 @@ impl Ui {
     /// The last message of the Hotkeys rows.
     pub fn hotkey_message(&self) -> Option<&(bool, String)> {
         self.hotkeys.message.as_ref()
+    }
+
+    /// The AltGr warning of the last chord asked for in the Hotkeys rows (review D-01), if any.
+    pub fn hotkey_warning(&self) -> Option<&str> {
+        self.hotkeys.warning.as_deref()
     }
 
     /// A registered hotkey (`WM_HOTKEY`, `pressed` its action and `chord` its keys) arrived while the Hotkeys rows

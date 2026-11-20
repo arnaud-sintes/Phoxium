@@ -2,8 +2,9 @@
 //!
 //! - Topology: the DXGI adapters with their outputs (monitors) and the Vulkan devices with their LUID.
 //! - Selection ([`select`], pure): which adapter runs the whole chain (capture device and Vulkan renderer),
-//!   from `--gpu`, the `[global.gpu] adapter` setting (`auto`, a LUID or a name part) and the rectangle the
-//!   output window covers, with the warnings to show ([`GpuSelection`]).
+//!   from `--gpu`, the `[global.gpu] adapter` setting (`auto`, a stable [`AdapterId`] as the menu writes it, and
+//!   for older files a LUID or a name part) and the rectangle the output window covers, with the warnings to show
+//!   ([`GpuSelection`]). A LUID is valid until Windows restarts only (review D-02): it is never stored alone.
 //! - The selection in force and the adapter list for the settings menu: [`publish`], [`current`].
 //! - `--list-adapters` ([`run`]): prints the topology, marks the chosen adapter, the capture adapter, a verdict
 //!   and the warnings. Read-only: no window, no capture session, no logical Vulkan device, no rendering.
@@ -95,6 +96,11 @@ pub struct AdapterInfo {
     pub index: usize,
     pub name: String,
     pub vendor_id: u32,
+    /// PCI device id (`DXGI_ADAPTER_DESC1::DeviceId`).
+    pub device_id: u32,
+    /// PCI subsystem id (`DXGI_ADAPTER_DESC1::SubSysId`): the board maker and model, 0 when unknown.
+    pub subsys_id: u32,
+    /// Valid until the system restarts only: use [`AdapterId`] to remember an adapter.
     pub luid: Luid,
     /// The Microsoft Basic Render Driver or another software adapter.
     pub software: bool,
@@ -191,26 +197,178 @@ pub fn verdict(capture: (&str, Luid), render: Option<(&str, Option<Luid>)>, adap
 /// A rectangle in virtual-desktop pixels: left, top, right, bottom (right and bottom exclusive).
 pub type Rect = (i32, i32, i32, i32);
 
+/// A stable adapter identity (review D-02): what the menu stores in `[global.gpu] adapter`. Windows keeps an
+/// adapter LUID only until the system restarts, so the adapter is remembered by its name and its PCI ids, with
+/// the LUID as a hint that is only used within the same boot. Text form (hand-editable):
+/// `NVIDIA RTX A2000 Laptop GPU (PCI 10DE:25B8:0A3D1028, LUID 00000000:00017801)`, with `#2` after the PCI ids for
+/// the second of two identical adapters.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AdapterId {
+    /// The DXGI adapter name.
+    pub name: String,
+    pub vendor: u32,
+    pub device: u32,
+    /// PCI subsystem id, 0 when unknown (then not compared).
+    pub subsys: u32,
+    /// Rank (from 1) among the adapters with the same PCI ids and name, in DXGI order: tells two identical GPUs
+    /// apart. DXGI lists the adapter driving the primary monitor first, so the rank can swap when the primary
+    /// monitor moves to the other GPU; the LUID hint settles it within a boot.
+    pub nth: u32,
+    /// The LUID when it was chosen: a hint, used only to tell identical adapters apart within the same boot.
+    pub luid: Option<Luid>,
+}
+
+impl AdapterId {
+    /// The identity of `dxgi[i]`.
+    pub fn of(dxgi: &[AdapterInfo], i: usize) -> AdapterId {
+        let a = &dxgi[i];
+        let nth = 1 + dxgi[..i].iter().filter(|b| same_hardware(a, b)).count() as u32;
+        AdapterId {
+            name: a.name.clone(),
+            vendor: a.vendor_id,
+            device: a.device_id,
+            subsys: a.subsys_id,
+            nth,
+            luid: Some(a.luid),
+        }
+    }
+
+    /// Parses the text form (see [`AdapterId`]); `None` when `s` is not one.
+    pub fn parse(s: &str) -> Option<AdapterId> {
+        let s = s.trim();
+        let body = s.strip_suffix(')')?;
+        let at = body.rfind(" (PCI ")?;
+        let name = body[..at].trim().to_string();
+        let mut parts = body[at + " (PCI ".len()..].split(',').map(str::trim);
+        let hex = |p: &str| {
+            (!p.is_empty() && p.len() <= 8 && p.chars().all(|c| c.is_ascii_hexdigit()))
+                .then(|| u32::from_str_radix(p, 16).ok())
+                .flatten()
+        };
+        let ids: Vec<&str> = parts.next()?.split(':').collect();
+        let (vendor, device, subsys) = match ids.as_slice() {
+            [v, d] => (hex(v)?, hex(d)?, 0),
+            [v, d, s] => (hex(v)?, hex(d)?, hex(s)?),
+            _ => return None,
+        };
+        let mut id = AdapterId {
+            name,
+            vendor,
+            device,
+            subsys,
+            nth: 1,
+            luid: None,
+        };
+        for p in parts {
+            if let Some(n) = p.strip_prefix('#') {
+                id.nth = n.parse().ok().filter(|&n| n >= 1)?;
+            } else {
+                id.luid = Some(Luid::parse(p.strip_prefix("LUID ")?)?);
+            }
+        }
+        (!id.name.is_empty()).then_some(id)
+    }
+
+    /// The same adapter as `other`, the LUID hint aside.
+    pub fn same(&self, other: &AdapterId) -> bool {
+        (self.vendor, self.device, self.subsys, self.nth) == (other.vendor, other.device, other.subsys, other.nth)
+            && self.name.trim().eq_ignore_ascii_case(other.name.trim())
+    }
+
+    /// The DXGI adapter this identity names now, if present. Matched by vendor and device id (and subsystem id
+    /// when both are known); among several, the ones with the same name are preferred (a driver update may
+    /// rename an adapter, so a different name alone does not exclude a match); among identical adapters, the one
+    /// with the LUID hint when it is still valid (same boot), else the `nth`. A single match is taken whatever
+    /// its rank (the other of two identical cards was removed: the one left is the same model).
+    pub fn find<'a>(&self, dxgi: &'a [AdapterInfo]) -> Option<&'a AdapterInfo> {
+        let hw: Vec<&AdapterInfo> = dxgi
+            .iter()
+            .filter(|a| {
+                a.vendor_id == self.vendor
+                    && a.device_id == self.device
+                    && (self.subsys == 0 || a.subsys_id == 0 || a.subsys_id == self.subsys)
+            })
+            .collect();
+        let named: Vec<&AdapterInfo> = hw
+            .iter()
+            .copied()
+            .filter(|a| a.name.trim().eq_ignore_ascii_case(self.name.trim()))
+            .collect();
+        let pool = if named.is_empty() { hw } else { named };
+        match pool.as_slice() {
+            [] => None,
+            [one] => Some(*one),
+            many => self
+                .luid
+                .and_then(|l| many.iter().find(|a| a.luid == l))
+                .or_else(|| many.get(self.nth as usize - 1))
+                .copied(),
+        }
+    }
+}
+
+/// Same PCI ids and name: adapters [`AdapterId::nth`] tells apart.
+fn same_hardware(a: &AdapterInfo, b: &AdapterInfo) -> bool {
+    (a.vendor_id, a.device_id, a.subsys_id) == (b.vendor_id, b.device_id, b.subsys_id)
+        && a.name.trim().eq_ignore_ascii_case(b.name.trim())
+}
+
+impl fmt::Display for AdapterId {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{} (PCI {:04X}:{:04X}:{:08X}",
+            self.name.trim(),
+            self.vendor,
+            self.device,
+            self.subsys
+        )?;
+        if self.nth > 1 {
+            write!(f, ", #{}", self.nth)?;
+        }
+        if let Some(l) = self.luid {
+            write!(f, ", LUID {l}")?;
+        }
+        f.write_str(")")
+    }
+}
+
 /// What `[global.gpu] adapter` asks for.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AdapterSpec {
     /// The adapter owning the monitor the output covers.
     Auto,
+    /// A stable identity (what the menu writes, review D-02).
+    Id(AdapterId),
+    /// A LUID (written by earlier builds; valid until the system restarts only).
     Luid(Luid),
     /// A case-insensitive part of the adapter name (DXGI or Vulkan name).
     Name(String),
 }
 
 impl AdapterSpec {
-    /// `auto` (any case) or empty: [`AdapterSpec::Auto`]; `HHHHHHHH:LLLLLLLL`: a LUID; anything else: a name part.
+    /// `auto` (any case) or empty: [`AdapterSpec::Auto`]; `HHHHHHHH:LLLLLLLL`: a LUID; `Name (PCI ...)`: an
+    /// [`AdapterId`]; anything else: a name part.
     pub fn parse(s: &str) -> Self {
         let s = s.trim();
         if s.is_empty() || s.eq_ignore_ascii_case(crate::settings::GPU_ADAPTER_AUTO) {
             Self::Auto
         } else if let Some(l) = Luid::parse(s) {
             Self::Luid(l)
+        } else if let Some(id) = AdapterId::parse(s) {
+            Self::Id(id)
         } else {
             Self::Name(s.to_string())
+        }
+    }
+
+    /// Whether two setting values ask for the same adapter (an identity's LUID hint aside, names and `auto`
+    /// compared case-insensitively).
+    pub fn same(a: &str, b: &str) -> bool {
+        match (Self::parse(a), Self::parse(b)) {
+            (Self::Id(x), Self::Id(y)) => x.same(&y),
+            (Self::Name(x), Self::Name(y)) => x.eq_ignore_ascii_case(&y),
+            (x, y) => x == y,
         }
     }
 }
@@ -219,6 +377,7 @@ impl fmt::Display for AdapterSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auto => f.write_str(crate::settings::GPU_ADAPTER_AUTO),
+            Self::Id(id) => write!(f, "{id}"),
             Self::Luid(l) => write!(f, "{l}"),
             Self::Name(n) => f.write_str(n),
         }
@@ -276,11 +435,24 @@ pub struct GpuSelection {
     pub reason: Reason,
     /// The adapter owning the monitor the output covers, when known.
     pub owner: Option<Owner>,
-    /// Problems to show (console `warning:` lines, later the menu).
+    /// Problems to show (console `warning:` lines, the menu's GPU panel).
     pub warnings: Vec<String>,
+    /// The configured adapter (`[global.gpu] adapter` or `--gpu`) that matched no usable device, as the user
+    /// knows it: the automatic choice runs instead (review D-02: shown in the title and the menu).
+    pub missing: Option<String>,
+    /// The stable identity ([`AdapterId`]) of the adapter an earlier build's LUID setting still names in this
+    /// boot: the app stores it instead, so that the choice survives the next restart.
+    pub upgraded_setting: Option<String>,
 }
 
 impl GpuSelection {
+    /// The short notice for the title bar when the configured adapter is missing.
+    pub fn missing_notice(&self) -> Option<String> {
+        self.missing
+            .as_ref()
+            .map(|m| format!("configured GPU {m} not found, automatic choice in use (see the menu, GPU)"))
+    }
+
     /// The renderer request: by LUID when the chosen device has one, else by index.
     pub fn device_request(&self) -> crate::gpu::DeviceRequest {
         use crate::gpu::DeviceRequest;
@@ -412,30 +584,74 @@ pub fn select(
     const AUTO: &str = "using the automatic choice";
 
     let mut pick: Option<(&VulkanDevice, Reason)> = None;
+    let mut missing = None;
+    let mut upgraded_setting = None;
     if let Some(i) = cli {
         match by_index(i) {
             Some(v) => pick = Some((v, Reason::CommandLine)),
-            None => warnings.push(format!(
-                "--gpu {i}: no usable Vulkan device has that index (see --list-gpus); {AUTO}"
-            )),
+            None => {
+                warnings.push(format!(
+                    "--gpu {i}: no usable Vulkan device has that index (see --list-gpus); {AUTO}"
+                ));
+                missing = Some(format!("--gpu {i}"));
+            }
         }
     } else {
         match setting {
             AdapterSpec::Auto => {}
+            AdapterSpec::Id(id) => {
+                match id.find(dxgi) {
+                    Some(a) => match by_luid(a.luid) {
+                        Some(v) => pick = Some((v, Reason::Setting)),
+                        None => {
+                            warnings.push(format!(
+                                "the configured GPU {} is present but has no usable Vulkan 1.3 device; {AUTO}",
+                                id.name
+                            ));
+                            missing = Some(id.name.clone());
+                        }
+                    },
+                    None => {
+                        warnings.push(format!(
+                        "the configured GPU {} (PCI {:04X}:{:04X}{}) was not found (removed, disabled or its driver \
+                         changed); {AUTO}. Choose it again in the menu (GPU and system) or pick Automatic.",
+                        id.name,
+                        id.vendor,
+                        id.device,
+                        if id.nth > 1 { format!(", #{}", id.nth) } else { String::new() }
+                    ));
+                        missing = Some(id.name.clone());
+                    }
+                }
+            }
             AdapterSpec::Luid(l) => match by_luid(*l) {
-                Some(v) => pick = Some((v, Reason::Setting)),
-                None => warnings.push(format!(
-                    "gpu.adapter = \"{l}\": no usable Vulkan device has that LUID (see --list-adapters); {AUTO}"
-                )),
+                Some(v) => {
+                    pick = Some((v, Reason::Setting));
+                    // An earlier build's LUID still valid in this boot: remember the adapter by its identity.
+                    upgraded_setting = dxgi
+                        .iter()
+                        .position(|a| a.luid == *l)
+                        .map(|i| AdapterId::of(dxgi, i).to_string());
+                }
+                None => {
+                    warnings.push(format!(
+                        "gpu.adapter = \"{l}\": no usable Vulkan device has that LUID (a LUID changes when Windows \
+                         restarts: choose the GPU again in the menu, GPU and system); {AUTO}"
+                    ));
+                    missing = Some(format!("LUID {l}"));
+                }
             },
             AdapterSpec::Name(n) => match by_name(n, dxgi, vulkan).as_slice() {
-                [] => warnings.push(format!(
-                    "gpu.adapter = \"{n}\": no usable Vulkan device matches that name (see --list-adapters); {AUTO}"
-                )),
+                [] => {
+                    warnings.push(format!(
+                        "gpu.adapter = \"{n}\": no usable Vulkan device matches that name (see --list-adapters); {AUTO}"
+                    ));
+                    missing = Some(format!("\u{201C}{n}\u{201D}"));
+                }
                 [v, rest @ ..] => {
                     if !rest.is_empty() {
                         warnings.push(format!(
-                            "gpu.adapter = \"{n}\" matches several adapters ({}); using {} (give its LUID to be exact)",
+                            "gpu.adapter = \"{n}\" matches several adapters ({}); using {} (choose it in the menu to be exact)",
                             std::iter::once(*v)
                                 .chain(rest.iter().copied())
                                 .map(|d| d.name.as_str())
@@ -496,6 +712,8 @@ pub fn select(
         chosen: pick.map(|(v, _)| v.clone()),
         owner,
         warnings,
+        missing,
+        upgraded_setting,
     }
 }
 
@@ -509,12 +727,26 @@ pub struct AdapterEntry {
     pub software: bool,
     /// The usable Vulkan device on it, `None` when it cannot run the chain.
     pub vulkan_index: Option<usize>,
+    /// Its stable identity (a DXGI adapter), `None` for a Vulkan device DXGI does not list.
+    pub id: Option<AdapterId>,
 }
 
 impl AdapterEntry {
-    /// The `[global.gpu] adapter` value that selects this entry: its LUID, else its name.
+    /// The `[global.gpu] adapter` value that selects this entry: its stable identity (review D-02), else its
+    /// name (a Vulkan-only device).
     pub fn setting_value(&self) -> String {
-        self.luid.map_or_else(|| self.name.clone(), |l| l.to_string())
+        self.id.as_ref().map_or_else(|| self.name.clone(), AdapterId::to_string)
+    }
+
+    /// Whether the setting `value` selects this entry: an identity (its LUID hint aside), a LUID (an earlier
+    /// build's value, valid in this boot), or the exact name (case-insensitive).
+    pub fn matches_setting(&self, value: &str) -> bool {
+        match AdapterSpec::parse(value) {
+            AdapterSpec::Auto => false,
+            AdapterSpec::Id(id) => self.id.as_ref().is_some_and(|mine| mine.same(&id)),
+            AdapterSpec::Luid(l) => self.luid == Some(l),
+            AdapterSpec::Name(n) => self.name.trim().eq_ignore_ascii_case(n.trim()),
+        }
     }
 }
 
@@ -523,12 +755,14 @@ impl AdapterEntry {
 pub fn entries(dxgi: &[AdapterInfo], vulkan: &[VulkanDevice]) -> Vec<AdapterEntry> {
     let mut out: Vec<AdapterEntry> = dxgi
         .iter()
-        .map(|a| AdapterEntry {
+        .enumerate()
+        .map(|(i, a)| AdapterEntry {
             name: a.name.clone(),
             luid: Some(a.luid),
             owns_monitors: a.owns_monitors(),
             software: a.software,
             vulkan_index: vulkan.iter().find(|v| v.luid == Some(a.luid)).map(|v| v.index),
+            id: Some(AdapterId::of(dxgi, i)),
         })
         .collect();
     for v in vulkan {
@@ -539,6 +773,7 @@ pub fn entries(dxgi: &[AdapterInfo], vulkan: &[VulkanDevice]) -> Vec<AdapterEntr
                 owns_monitors: false,
                 software: false,
                 vulkan_index: Some(v.index),
+                id: None,
             });
         }
     }
@@ -657,6 +892,8 @@ pub fn dxgi_adapters() -> Res<Vec<AdapterInfo>> {
                 index: i as usize,
                 name: wide_to_string(&desc.Description),
                 vendor_id: desc.VendorId,
+                device_id: desc.DeviceId,
+                subsys_id: desc.SubSysId,
                 luid: Luid::from_windows(desc.AdapterLuid),
                 software: desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0,
                 outputs,
@@ -699,16 +936,18 @@ pub fn run(cli: Option<usize>, setting: &str, covered: Option<Rect>) -> Res<()> 
     };
     let dxgi = &topo.dxgi;
     println!("DXGI adapters ({}):", dxgi.len());
-    for a in dxgi {
+    for (i, a) in dxgi.iter().enumerate() {
         println!(
-            "  [{}] {} (vendor 0x{:04X}, LUID {}){}{}",
+            "  [{}] {} (vendor 0x{:04X}, device 0x{:04X}, LUID {}){}{}",
             a.index,
             a.name,
             a.vendor_id,
+            a.device_id,
             a.luid,
             if a.software { " software" } else { "" },
             mark(Some(a.luid))
         );
+        println!("      gpu.adapter value: \"{}\"", AdapterId::of(dxgi, i));
         if a.outputs.is_empty() {
             println!("      no outputs");
         }
@@ -778,6 +1017,7 @@ pub fn run(cli: Option<usize>, setting: &str, covered: Option<Rect>) -> Res<()> 
                 "gpu.adapter = \"{setting}\" (settings file; read as {})",
                 match &spec {
                     AdapterSpec::Auto => "auto".to_string(),
+                    AdapterSpec::Id(id) => format!("the adapter {id}"),
                     AdapterSpec::Luid(l) => format!("the LUID {l}"),
                     AdapterSpec::Name(n) => format!("a name part \"{n}\""),
                 }
@@ -839,6 +1079,8 @@ mod tests {
             index,
             name: name.into(),
             vendor_id: 0,
+            device_id: 0,
+            subsys_id: 0,
             luid: l,
             software: false,
             outputs: outputs
@@ -878,6 +1120,13 @@ mod tests {
         a[0].outputs.push(output(RTX_MON));
         a[1].outputs.push(output(INTEL_MON));
         a[2].software = true;
+        for (x, (v, d, s)) in a.iter_mut().zip([
+            (0x10DE, 0x25B8, 0x0A3D_1028),
+            (0x8086, 0x9A60, 0x0A3D_1028),
+            (0x1414, 0x8C, 0),
+        ]) {
+            (x.vendor_id, x.device_id, x.subsys_id) = (v, d, s);
+        }
         let v = vec![
             VulkanDevice {
                 index: 0,
@@ -1122,11 +1371,213 @@ mod tests {
         assert_eq!((e[1].vulkan_index, e[1].owns_monitors), (Some(1), true));
         assert_eq!((e[2].vulkan_index, e[2].software), (None, true));
         assert_eq!(e[3].name, "llvmpipe");
-        assert_eq!(e[0].setting_value(), "00000000:00017801");
+        assert_eq!(
+            e[0].setting_value(),
+            "NVIDIA RTX A2000 Laptop GPU (PCI 10DE:25B8:0A3D1028, LUID 00000000:00017801)"
+        );
         assert_eq!(e[3].setting_value(), "llvmpipe");
         // The setting value selects the entry back.
         let s = select(None, &AdapterSpec::parse(&e[1].setting_value()), &a, &v, Some(0), None);
         assert_eq!(chosen(&s), Some(1));
+        assert!(s.warnings.is_empty() && s.missing.is_none(), "{:?}", s.warnings);
+        assert!(e[1].matches_setting(&e[1].setting_value()));
+        assert!(!e[0].matches_setting(&e[1].setting_value()));
+        assert!(
+            e[0].matches_setting("00000000:00017801"),
+            "an earlier build's LUID value"
+        );
+        assert!(e[3].matches_setting("LLVMPIPE"));
+        assert!(!e[0].matches_setting("auto"));
+    }
+
+    fn id_of(text: &str) -> AdapterId {
+        AdapterId::parse(text).unwrap_or_else(|| panic!("{text}"))
+    }
+
+    /// Review D-02: the identity's text round-trips, with or without the subsystem, the rank and the LUID hint.
+    #[test]
+    fn adapter_id_text_round_trips() {
+        let (a, _) = dev_machine();
+        for i in 0..a.len() {
+            let id = AdapterId::of(&a, i);
+            assert_eq!(id.nth, 1);
+            assert_eq!(AdapterId::parse(&id.to_string()), Some(id.clone()), "{id}");
+            assert_eq!(AdapterSpec::parse(&id.to_string()), AdapterSpec::Id(id));
+        }
+        let id = id_of("Radeon RX 7600 (PCI 1002:7480, #2)");
+        assert_eq!(
+            (id.vendor, id.device, id.subsys, id.nth, id.luid),
+            (0x1002, 0x7480, 0, 2, None)
+        );
+        assert_eq!(id.to_string(), "Radeon RX 7600 (PCI 1002:7480:00000000, #2)");
+        assert_eq!(id_of(" A (B) (PCI 1:2:3, LUID 0:5) ").name, "A (B)");
+        for bad in [
+            "Radeon",
+            "Radeon (PCI 1002)",
+            "Radeon (PCI 1002:7480",
+            "Radeon (PCI XYZ:7480)",
+            "Radeon (PCI 1002:7480, #0)",
+            "Radeon (PCI 1002:7480, LUID nope)",
+            "Radeon (PCI 1002:7480, extra)",
+            " (PCI 1002:7480)",
+        ] {
+            assert_eq!(AdapterId::parse(bad), None, "{bad}");
+        }
+        // Not an identity: still a name part, as before.
+        assert_eq!(
+            AdapterSpec::parse("Radeon (PCI 1002)"),
+            AdapterSpec::Name("Radeon (PCI 1002)".into())
+        );
+        // The LUID hint does not make two values different settings.
+        assert!(AdapterSpec::same(
+            "Radeon (PCI 1002:7480, LUID 0:1)",
+            "radeon (PCI 1002:7480:00000000, LUID 0:99)"
+        ));
+        assert!(!AdapterSpec::same(
+            "Radeon (PCI 1002:7480)",
+            "Radeon (PCI 1002:7480, #2)"
+        ));
+        assert!(AdapterSpec::same("AUTO", ""));
+    }
+
+    /// Review D-02: after a reboot every LUID has changed; the identity still finds the adapter (by vendor,
+    /// device and name), even when a driver update renamed it.
+    #[test]
+    fn the_identity_survives_new_luids_and_a_renamed_adapter() {
+        let (a, v) = dev_machine();
+        let stored = AdapterId::of(&a, 0).to_string();
+        // The next boot: new LUIDs everywhere.
+        let mut a2 = a.clone();
+        let mut v2 = v.clone();
+        for (x, low) in a2.iter_mut().zip([0x2_0001, 0x2_0002, 0x2_0003]) {
+            x.luid = luid(0, low);
+        }
+        v2[0].luid = Some(luid(0, 0x2_0001));
+        v2[1].luid = Some(luid(0, 0x2_0002));
+        let s = select(None, &AdapterSpec::parse(&stored), &a2, &v2, Some(1), Some(INTEL_MON));
+        assert_eq!((chosen(&s), s.reason), (Some(0), Reason::Setting));
+        assert_eq!(s.missing, None);
+        assert_eq!(s.missing_notice(), None);
+        // A driver update renamed it: the PCI ids still match.
+        a2[0].name = "NVIDIA RTX A2000 8GB Laptop GPU".into();
+        let s = select(None, &AdapterSpec::parse(&stored), &a2, &v2, Some(1), None);
+        assert_eq!(chosen(&s), Some(0));
+        // The old LUID-only value fails after the reboot, and says so (menu, title).
+        let s = select(None, &AdapterSpec::Luid(RTX), &a2, &v2, Some(1), None);
+        assert_eq!((chosen(&s), s.reason), (Some(1), Reason::Default));
+        assert!(
+            s.warnings[0].contains("a LUID changes when Windows restarts"),
+            "{:?}",
+            s.warnings
+        );
+        assert!(s.missing_notice().unwrap().contains("LUID 00000000:00017801"));
+        assert_eq!(s.upgraded_setting, None);
+    }
+
+    /// Review D-02: an earlier build's LUID value that is still valid (same boot) is upgraded to the identity.
+    #[test]
+    fn a_valid_old_luid_setting_is_upgraded_to_the_identity() {
+        let (a, v) = dev_machine();
+        let s = select(None, &AdapterSpec::Luid(INTEL), &a, &v, Some(0), None);
+        assert_eq!(chosen(&s), Some(1));
+        let up = s.upgraded_setting.expect("an identity to store");
+        assert!(up.starts_with("Intel(R) UHD Graphics (PCI 8086:9A60:0A3D1028"), "{up}");
+        let s = select(None, &AdapterSpec::parse(&up), &a, &v, Some(0), None);
+        assert_eq!(chosen(&s), Some(1));
+        assert_eq!(s.upgraded_setting, None, "an identity needs no upgrade");
+    }
+
+    /// Review D-02: a configured adapter that is gone (or has no usable Vulkan device) falls back to auto with a
+    /// warning for the menu and a notice for the title.
+    #[test]
+    fn a_missing_configured_adapter_warns_and_uses_auto() {
+        let (a, v) = dev_machine();
+        let gone = "Radeon RX 7600 (PCI 1002:7480:00000000, LUID 00000000:00099999)";
+        let s = select(None, &AdapterSpec::parse(gone), &a, &v, Some(0), Some(INTEL_MON));
+        assert_eq!((chosen(&s), s.reason), (Some(1), Reason::MonitorOwner));
+        assert!(
+            s.warnings[0].contains("Radeon RX 7600") && s.warnings[0].contains("not found"),
+            "{:?}",
+            s.warnings
+        );
+        let n = s.missing_notice().unwrap();
+        assert!(n.contains("Radeon RX 7600") && n.contains("automatic"), "{n}");
+        // The software adapter is present but has no Vulkan device.
+        let soft = AdapterId::of(&a, 2).to_string();
+        let s = select(None, &AdapterSpec::parse(&soft), &a, &v, Some(0), None);
+        assert_eq!(s.reason, Reason::Default);
+        assert!(
+            s.warnings[0].contains("no usable Vulkan 1.3 device"),
+            "{:?}",
+            s.warnings
+        );
+        assert!(s.missing.is_some());
+    }
+
+    /// Review D-02: two identical GPUs (same vendor, device, subsystem and name) are told apart by their rank in
+    /// the DXGI order (`#2`), and within one boot by the LUID hint (the rank can change when the primary monitor
+    /// moves to the other card).
+    #[test]
+    fn two_identical_gpus_are_told_apart_by_rank_then_luid() {
+        let twin = |index: usize, l: Luid| {
+            let mut x = adapter(index, "NVIDIA GeForce RTX 4060", l, &[]);
+            (x.vendor_id, x.device_id, x.subsys_id) = (0x10DE, 0x2882, 0x1234_1458);
+            x
+        };
+        let a = vec![twin(0, luid(0, 0x100)), twin(1, luid(0, 0x200))];
+        let v = vec![
+            VulkanDevice {
+                index: 0,
+                name: "NVIDIA GeForce RTX 4060".into(),
+                luid: Some(luid(0, 0x100)),
+            },
+            VulkanDevice {
+                index: 1,
+                name: "NVIDIA GeForce RTX 4060".into(),
+                luid: Some(luid(0, 0x200)),
+            },
+        ];
+        let e = entries(&a, &v);
+        let first = e[0].setting_value();
+        let second = e[1].setting_value();
+        assert!(!first.contains('#'), "{first}");
+        assert!(second.contains(", #2,"), "{second}");
+        assert!(!AdapterSpec::same(&first, &second));
+        assert!(e[1].matches_setting(&second) && !e[0].matches_setting(&second));
+        let pick = |setting: &str, a: &[AdapterInfo], v: &[VulkanDevice]| {
+            chosen(&select(None, &AdapterSpec::parse(setting), a, v, Some(0), None))
+        };
+        assert_eq!(pick(&second, &a, &v), Some(1));
+        assert_eq!(pick(&first, &a, &v), Some(0));
+        // Same boot, DXGI order swapped (the primary monitor moved): the LUID hint keeps the same card.
+        let swapped = vec![twin(0, luid(0, 0x200)), twin(1, luid(0, 0x100))];
+        assert_eq!(pick(&second, &swapped, &v), Some(1), "the card with LUID 0x200");
+        // After a reboot (new LUIDs): the rank decides.
+        let rebooted = vec![twin(0, luid(0, 0x300)), twin(1, luid(0, 0x400))];
+        let v3 = vec![
+            VulkanDevice {
+                index: 0,
+                name: "NVIDIA GeForce RTX 4060".into(),
+                luid: Some(luid(0, 0x300)),
+            },
+            VulkanDevice {
+                index: 1,
+                name: "NVIDIA GeForce RTX 4060".into(),
+                luid: Some(luid(0, 0x400)),
+            },
+        ];
+        assert_eq!(pick(&second, &rebooted, &v3), Some(1));
+        // One card removed: the one left is the same model, and it is taken for either choice.
+        let s = select(
+            None,
+            &AdapterSpec::parse(&second),
+            &rebooted[..1],
+            &v3[..1],
+            Some(0),
+            None,
+        );
+        assert_eq!((chosen(&s), s.missing.clone()), (Some(0), None));
+        assert_eq!(pick(&first, &rebooted[..1], &v3[..1]), Some(0));
     }
 
     #[test]

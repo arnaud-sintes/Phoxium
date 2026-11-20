@@ -14,6 +14,7 @@ pub mod gpu;
 pub mod headroom;
 pub mod hotkeys;
 pub mod interlace;
+pub mod keyboard_layout;
 pub mod lifecycle;
 pub mod live;
 pub mod modes;

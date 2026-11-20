@@ -300,7 +300,8 @@ fn write_png(img: &ImageF32, name: &str) -> PathBuf {
 /// Hotkey rebinding: Change, then the keys as Win32 messages; Esc cancels without closing the menu; Backspace
 /// gives the default; a chord of our own actions is refused with its reason, a chord another program owns is
 /// refused by the system and the old one kept; a registered hotkey pressed while waiting is taken as the chord
-/// (Quit always passes); the menu key moved keeps F10 as its safety chord and says so; Reset all.
+/// (Quit always passes); the menu key moved keeps F10 as its safety chord and says so; Quit is rebindable (review
+/// D-01); a Ctrl+Alt+letter chord that types a character with AltGr is accepted with a warning; Reset all.
 #[test]
 fn hotkeys_are_rebound_from_the_menu() {
     let _g = lock();
@@ -309,8 +310,13 @@ fn hotkeys_are_rebound_from_the_menu() {
         ..FakeSystem::default()
     };
     let mut reg = registered(&mut system);
+    // A German layout as far as the test goes: AltGr+M types 'µ'.
+    fn german(vk: u16, shift: bool) -> Option<String> {
+        (vk == u16::from(b'M') && !shift).then(|| "'\u{B5}' (keyboard layout de-DE)".to_string())
+    }
     let config = UiConfig {
         registration: Some(reg.clone()),
+        layout_probe: Some(german),
         ..tall(UiConfig::headless(), 1400.0)
     };
     let Some(mut rig) = Rig::new("hotkeys_are_rebound_from_the_menu", 1280, 1400, config) else {
@@ -320,8 +326,8 @@ fn hotkeys_are_rebound_from_the_menu() {
     rig.click("header:GPU and system");
     for a in Action::ALL {
         rig.item(&format!("hotkey:{}", a.id()));
+        rig.item(&format!("hotkey:{}:change", a.id()));
     }
-    assert!(rig.ui.item_rect("hotkey:quit:change").is_none(), "Quit is fixed");
     // The app's part: register, then hand the registration back.
     let apply = |rig: &mut Rig, reg: &mut Registration, system: &mut FakeSystem| -> Option<Result<String, String>> {
         let edit = rig.take().hotkey?;
@@ -351,6 +357,10 @@ fn hotkeys_are_rebound_from_the_menu() {
     assert!(apply(&mut rig, &mut reg, &mut system).unwrap().is_ok());
     assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+M")));
     assert_eq!(reg.to_settings()["toggle_overlay"], "Ctrl+Alt+M");
+    // Ctrl+Alt+M is AltGr+M, which types 'µ' on the (fake) German layout: accepted, with the warning.
+    let w = rig.ui.hotkey_warning().expect("an AltGr warning").to_string();
+    assert!(w.contains("AltGr+M") && w.contains("de-DE"), "{w}");
+    rig.item("hotkeys:warning");
 
     // Esc cancels the wait and the menu stays open.
     rig.click("hotkey:toggle_bypass:change");
@@ -373,26 +383,37 @@ fn hotkeys_are_rebound_from_the_menu() {
     rig.click("hotkey:toggle_bypass:change");
     rig.ctrl_alt(b'P' as usize);
     let r = apply(&mut rig, &mut reg, &mut system).unwrap();
-    assert!(r.unwrap_err().contains("Ctrl+Alt+B is kept"));
-    assert_eq!(reg.bound(Action::ToggleBypass), Some(chord("Ctrl+Alt+B")));
+    assert!(r.unwrap_err().contains("Ctrl+Alt+F7 is kept"));
+    assert_eq!(reg.bound(Action::ToggleBypass), Some(chord("Ctrl+Alt+F7")));
     rig.item("hotkeys:message");
+    assert!(
+        rig.ui.hotkey_warning().is_none(),
+        "Ctrl+Alt+P types nothing with AltGr here"
+    );
 
     // Backspace: back to the default (the overlay was moved above).
     rig.click("hotkey:toggle_overlay:change");
     rig.key(0x08, false);
     assert!(apply(&mut rig, &mut reg, &mut system).unwrap().is_ok());
-    assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+O")));
+    assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
+
+    // Quit can be rebound like the others (review D-01).
+    rig.click("hotkey:quit:change");
+    rig.ctrl_alt(0x24); // Home
+    assert!(apply(&mut rig, &mut reg, &mut system).unwrap().is_ok());
+    assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Alt+Home")));
+    assert_eq!(reg.to_settings()["quit"], "Ctrl+Alt+Home");
 
     // A registered hotkey arriving while waiting is the chord (our own keys never come as key messages)...
     rig.click("hotkey:next_preset:change");
     assert!(
-        !rig.ui.capture_chord(Action::Quit, chord("Ctrl+Alt+Q")),
+        !rig.ui.capture_chord(Action::Quit, chord("Ctrl+Alt+Home")),
         "Quit always runs"
     );
-    assert!(rig.ui.capture_chord(Action::ToggleOverlay, chord("Ctrl+Alt+O")));
+    assert!(rig.ui.capture_chord(Action::ToggleOverlay, chord("Ctrl+Alt+F9")));
     assert!(rig.take().hotkey.is_none(), "the overlay's chord is refused");
     // ... and nothing is taken when nothing waits.
-    assert!(!rig.ui.capture_chord(Action::ToggleOverlay, chord("Ctrl+Alt+O")));
+    assert!(!rig.ui.capture_chord(Action::ToggleOverlay, chord("Ctrl+Alt+F9")));
 
     // The menu key moved: F10 stays as the safety chord, and the menu says so.
     rig.click("hotkey:toggle_menu:change");
@@ -712,7 +733,7 @@ fn the_first_run_hint_is_shown_once() {
     };
     assert_eq!(
         rig.ui.first_run_hint(),
-        Some("Press F10 for the menu, F11 for fullscreen, Ctrl+Alt+Q to quit.")
+        Some("Press F10 for the menu, F11 for fullscreen, Ctrl+Alt+End to quit.")
     );
     rig.ui.show_picker(false);
     for _ in 0..3 {

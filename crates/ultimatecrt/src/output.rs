@@ -5,7 +5,7 @@
 //!   not activate it;
 //! - fullscreen: borderless, topmost, covering one monitor.
 //!
-//! Quitting: Ctrl+Alt+Q (always registered) or the close button. Esc does not quit (it belongs to the captured
+//! Quitting: the Quit hotkey (Ctrl+Alt+End by default, always registered) or the close button. Esc does not quit (it belongs to the captured
 //! program, and to the menu while it is open). Both quit paths only hide the window and post `WM_QUIT`
 //! ([`request_quit`]); the window is destroyed by `Drop for Output`, after the application has run its shutdown
 //! and dropped the renderer, so the Vulkan surface never outlives its window (contract of
@@ -21,7 +21,7 @@
 //! the mode (every mode is non-activating) and the menu state ([`effective_no_activate`]: the open menu always
 //! makes the output activating, closing it restores the mode's behaviour).
 //!
-//! The hotkeys (T-54) are `RegisterHotKey` registrations on this window ([`hotkeys`]): Ctrl+Alt+Q always quits,
+//! The hotkeys (T-54) are `RegisterHotKey` registrations on this window ([`hotkeys`]): the Quit hotkey always quits,
 //! since a non-activating fullscreen window cannot receive keyboard input; the others arrive as `WM_HOTKEY`,
 //! become [`Action`]s in a queue that the application loop drains with [`take_actions`].
 //!
@@ -663,9 +663,21 @@ pub fn create(opts: &Options) -> Result<Output> {
                 .find(|o| o.action == Action::Quit)
                 .and_then(|o| o.failures.first().map(|f| f.1))
                 .unwrap_or(hotkeys::ERROR_HOTKEY_ALREADY_REGISTERED);
+            let tried = registration
+                .outcome(Action::Quit)
+                .map(|o| {
+                    o.failures
+                        .iter()
+                        .map(|f| f.0.to_string())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                })
+                .unwrap_or_default();
             return Err(windows::core::Error::new(
                 HRESULT::from_win32(code),
-                "cannot register the Ctrl+Alt+Q quit hotkey (another program owns it); refusing to go fullscreen",
+                format!(
+                    "cannot register the quit hotkey ({tried}: another program owns it); refusing to go fullscreen"
+                ),
             ));
         }
         FULLSCREEN.store(opts.fullscreen, Ordering::Relaxed);
@@ -731,7 +743,7 @@ pub fn hide(hwnd: HWND) {
     }
 }
 
-/// The quit paths (Ctrl+Alt+Q, the close button): hide the window and leave the message loop. The window is not
+/// The quit paths (the Quit hotkey, the close button): hide the window and leave the message loop. The window is not
 /// destroyed here (see the module documentation).
 fn request_quit(hwnd: HWND) {
     hide(hwnd);
@@ -902,7 +914,7 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
         WM_ERASEBKGND => LRESULT(1),
-        // The close button (and Alt+F4 while the menu has the focus): the same path as Ctrl+Alt+Q.
+        // The close button (and Alt+F4 while the menu has the focus): the same path as the Quit hotkey.
         WM_CLOSE => {
             request_quit(hwnd);
             LRESULT(0)

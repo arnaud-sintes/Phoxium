@@ -4,9 +4,18 @@
 //!
 //! `RegisterHotKey` only (no low-level hook): a registered chord is swallowed system-wide, so the captured game
 //! loses it while ultimatecrt runs (documented in the README), but the foreground window never changes.
-//! Defaults: Quit `Ctrl+Alt+Q` (fixed), fullscreen `F11`, settings menu `F10` (F12 is registered by another
-//! program on the dev machine, error 1409), overlay `Ctrl+Alt+O`, A/B bypass `Ctrl+Alt+B`, next and previous
-//! preset `Ctrl+Alt+PageDown` and `Ctrl+Alt+PageUp`.
+//! Defaults: Quit `Ctrl+Alt+End`, fullscreen `F11`, settings menu `F10` (F12 is registered by another program on
+//! the dev machine, error 1409), overlay `Ctrl+Alt+F9`, A/B bypass `Ctrl+Alt+F7`, next and previous preset
+//! `Ctrl+Alt+PageDown` and `Ctrl+Alt+PageUp`. Every action, Quit included, can be rebound; Quit is never left
+//! unbound by a rebind or a reset (the old chord is kept when the new one cannot be registered).
+//!
+//! AltGr (review D-01): Windows sends AltGr as LeftCtrl+RightAlt, so a `Ctrl+Alt+<key>` hotkey also fires on
+//! AltGr+key and swallows the character that key types on European layouts (`@` is AltGr+Q in German, `ó` is
+//! AltGr+O in Polish). The defaults therefore use no character key with Ctrl+Alt: only function and navigation
+//! keys, which type nothing under AltGr on any layout. They also avoid the chords of the Intel graphics hotkeys
+//! (Ctrl+Alt+F1, F3, F4, F8, F11, F12 and the arrows, which rotate the screen). Earlier builds used
+//! `Ctrl+Alt+Q`, `Ctrl+Alt+O` and `Ctrl+Alt+B` ([`Action::old_default_text`], migrated by `settings`). A chord
+//! the user picks with Ctrl+Alt and a character key is checked against the installed layouts ([`altgr_conflict`]).
 
 use std::{collections::BTreeMap, fmt, str::FromStr};
 
@@ -267,13 +276,24 @@ impl Action {
     /// The default chord text (the same as `settings::DEFAULT_HOTKEYS`, checked by a test).
     pub fn default_text(self) -> &'static str {
         match self {
-            Action::Quit => "Ctrl+Alt+Q",
+            Action::Quit => "Ctrl+Alt+End",
             Action::ToggleFullscreen => "F11",
             Action::ToggleMenu => "F10",
-            Action::ToggleOverlay => "Ctrl+Alt+O",
-            Action::ToggleBypass => "Ctrl+Alt+B",
+            Action::ToggleOverlay => "Ctrl+Alt+F9",
+            Action::ToggleBypass => "Ctrl+Alt+F7",
             Action::NextPreset => "Ctrl+Alt+PageDown",
             Action::PreviousPreset => "Ctrl+Alt+PageUp",
+        }
+    }
+
+    /// The default chord of earlier builds, for the actions whose default changed (review D-01: these fired on
+    /// AltGr). A settings file written before the change holds them explicitly; `settings` upgrades them.
+    pub fn old_default_text(self) -> Option<&'static str> {
+        match self {
+            Action::Quit => Some("Ctrl+Alt+Q"),
+            Action::ToggleOverlay => Some("Ctrl+Alt+O"),
+            Action::ToggleBypass => Some("Ctrl+Alt+B"),
+            _ => None,
         }
     }
 
@@ -282,15 +302,15 @@ impl Action {
     }
 
     /// Chords tried in this order when the wanted one cannot be registered (another program owns it).
-    /// The menu list ends with `Ctrl+Alt+F12` (D-17). Quit has none: it is fixed, and a fullscreen output
-    /// refuses to start without it.
+    /// The menu list ends with `Ctrl+Alt+F12` (D-17). A fullscreen output refuses to start without a Quit chord.
     pub fn fallbacks(self) -> &'static [&'static str] {
         match self {
-            Action::Quit => &[],
+            // The default first: a rebound Quit whose chord is taken at start goes back to Ctrl+Alt+End.
+            Action::Quit => &["Ctrl+Alt+End", "Ctrl+Alt+Shift+End"],
             Action::ToggleFullscreen => &["Ctrl+Alt+F11"],
             Action::ToggleMenu => &["F10", "Ctrl+Alt+F10", "Ctrl+Alt+F12"],
-            Action::ToggleOverlay => &["Ctrl+Alt+Shift+O"],
-            Action::ToggleBypass => &["Ctrl+Alt+Shift+B"],
+            Action::ToggleOverlay => &["Ctrl+Alt+Shift+F9"],
+            Action::ToggleBypass => &["Ctrl+Alt+Shift+F7"],
             Action::NextPreset => &["Ctrl+Alt+Shift+PageDown"],
             Action::PreviousPreset => &["Ctrl+Alt+Shift+PageUp"],
         }
@@ -348,10 +368,10 @@ impl Bindings {
     }
 
     /// Reads `[global.hotkeys]` (action id to chord text). Every invalid entry gives a warning and the
-    /// default chord; `quit` cannot be rebound; a chord already taken by an earlier action (in
-    /// [`Action::ALL`] order) is rejected, the default is used instead, and the action stays unbound when the
-    /// default is taken as well; unknown action ids are ignored with a warning. Returns the bindings and the
-    /// warnings to show.
+    /// default chord; a chord already taken by an earlier action (in [`Action::ALL`] order) is rejected, the
+    /// default is used instead, and the action stays unbound when the default is taken as well; unknown action
+    /// ids are ignored with a warning. Quit comes first, so it always gets its chord (or its default). Returns the
+    /// bindings and the warnings to show.
     pub fn from_settings(map: &BTreeMap<String, String>) -> (Bindings, Vec<String>) {
         let mut warnings = Vec::new();
         for key in map.keys() {
@@ -365,14 +385,6 @@ impl Bindings {
             let id = action.id();
             let wanted = match map.get(id) {
                 None => default,
-                Some(text) if action == Action::Quit => {
-                    if text.parse::<Chord>().ok() != Some(default) {
-                        warnings.push(format!(
-                            "hotkey quit: cannot be rebound; '{text}' ignored, {default} used"
-                        ));
-                    }
-                    default
-                }
                 Some(text) => match text.parse::<Chord>() {
                     Ok(c) => c,
                     Err(e) => {
@@ -536,12 +548,9 @@ impl Registration {
             .collect()
     }
 
-    /// Whether `chord` may become the chord of `action`: Quit is fixed, and a chord another action asks for or
-    /// holds is refused. The message is for the menu.
+    /// Whether `chord` may become the chord of `action`: a chord another action asks for or holds is refused.
+    /// The message is for the menu.
     pub fn check(&self, action: Action, chord: Chord) -> Result<(), String> {
-        if action == Action::Quit {
-            return Err(format!("Quit is fixed ({}).", Action::Quit.default_text()));
-        }
         match self
             .outcomes
             .iter()
@@ -568,7 +577,7 @@ impl Registration {
         self.outcomes.iter().any(|o| !o.failures.is_empty())
     }
 
-    /// `quit Ctrl+Alt+Q, fullscreen / windowed F11, ...` for the console and the menu help.
+    /// `quit Ctrl+Alt+End, fullscreen / windowed F11, ...` for the console and the menu help.
     pub fn summary(&self) -> String {
         self.outcomes
             .iter()
@@ -698,6 +707,19 @@ pub fn rebind(
     chord: Chord,
 ) -> Result<String, String> {
     state.check(action, chord)?;
+    let result = set_chord(reg, state, action, chord);
+    update_menu_fallback(reg, state);
+    result
+}
+
+/// [`rebind`] without the check and without the menu's safety chord. Quit is never left without a chord: when
+/// neither the new chord nor the old one can be registered, its default and its fallbacks are tried.
+fn set_chord(
+    reg: &mut dyn Registrar,
+    state: &mut Registration,
+    action: Action,
+    chord: Chord,
+) -> Result<String, String> {
     let id = action.hotkey_id();
     let i = match state.outcomes.iter().position(|o| o.action == action) {
         Some(i) => i,
@@ -722,7 +744,6 @@ pub fn rebind(
         let o = &mut state.outcomes[i];
         o.wanted = chord;
         o.failures.clear();
-        update_menu_fallback(reg, state);
         return Ok(format!("{what}: {chord} (unchanged)."));
     }
     if state.menu_fallback == Some(chord) {
@@ -733,7 +754,7 @@ pub fn rebind(
     if old.is_some() {
         reg.unregister(id);
     }
-    let result = match reg.register(id, &chord) {
+    match reg.register(id, &chord) {
         Ok(()) => {
             state.outcomes[i] = Outcome {
                 action,
@@ -750,21 +771,66 @@ pub fn rebind(
                 Some(o) => {
                     state.outcomes[i].bound = None;
                     state.outcomes[i].failures = vec![(chord, code)];
+                    if action == Action::Quit {
+                        if let Some(safe) = rescue_quit(reg, state, &[chord, o]) {
+                            return Err(format!(
+                                "{chord} cannot be used ({why}), and {o} could not be taken back: Quit is on {safe} now."
+                            ));
+                        }
+                    }
                     Err(format!(
                         "{chord} cannot be used ({why}), and {o} could not be taken back: {what} has no hotkey now."
                     ))
                 }
+                None if action == Action::Quit => match rescue_quit(reg, state, &[chord]) {
+                    Some(safe) => Err(format!("{chord} cannot be used ({why}); Quit is on {safe}.")),
+                    None => Err(format!("{chord} cannot be used ({why}).")),
+                },
                 None => Err(format!("{chord} cannot be used ({why}).")),
             }
         }
-    };
-    update_menu_fallback(reg, state);
-    result
+    }
 }
 
-/// Every action except Quit back to its default chord (with the documented fallbacks when a default is taken by
-/// another program), registered at once. Returns the registration problems (empty when every default went
-/// through).
+/// Quit lost its chord: its default, then its fallbacks (except `tried` and the chords other actions ask for or
+/// hold), until one registers. Returns the chord now bound.
+fn rescue_quit(reg: &mut dyn Registrar, state: &mut Registration, tried: &[Chord]) -> Option<Chord> {
+    let others: Vec<Chord> = state
+        .outcomes
+        .iter()
+        .filter(|o| o.action != Action::Quit)
+        .flat_map(|o| [Some(o.wanted), o.bound])
+        .flatten()
+        .chain(state.menu_fallback)
+        .collect();
+    // The fallbacks start with the default.
+    let candidates = Action::Quit
+        .fallbacks()
+        .iter()
+        .map(|t| t.parse::<Chord>().expect("the quit chords are valid"))
+        .filter(|c| !tried.contains(c) && !others.contains(c));
+    let id = Action::Quit.hotkey_id();
+    for c in candidates {
+        match reg.register(id, &c) {
+            Ok(()) => {
+                if let Some(o) = state.outcomes.iter_mut().find(|o| o.action == Action::Quit) {
+                    o.bound = Some(c);
+                }
+                return Some(c);
+            }
+            Err(code) => {
+                if let Some(o) = state.outcomes.iter_mut().find(|o| o.action == Action::Quit) {
+                    o.failures.push((c, code));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Every action back to its default chord (with the documented fallbacks when a default is taken by another
+/// program), registered at once. Quit goes first and keeps its chord when its default cannot be registered (it is
+/// never left unbound). Returns the registration problems (empty when every default went through).
 pub fn reset_all(reg: &mut dyn Registrar, state: &mut Registration) -> Vec<String> {
     for o in state
         .outcomes
@@ -776,16 +842,52 @@ pub fn reset_all(reg: &mut dyn Registrar, state: &mut Registration) -> Vec<Strin
     if state.menu_fallback.take().is_some() {
         reg.unregister(MENU_FALLBACK_ID);
     }
+    state.outcomes.retain(|o| o.action == Action::Quit);
+    // Quit to its default now that no other action holds a chord (the old one is kept when the default fails).
+    let quit = Action::Quit.default_chord();
+    if state
+        .outcome(Action::Quit)
+        .is_none_or(|o| o.bound != Some(quit) || o.wanted != quit)
+    {
+        let _ = set_chord(reg, state, Action::Quit, quit);
+    }
     let plan: Vec<Attempt> = plan_registration(&Bindings::default())
         .into_iter()
         .filter(|a| a.action != Action::Quit)
         .collect();
     let fresh = register_plan(reg, &plan, state.bound(Action::Quit).into_iter().collect());
-    state.outcomes.retain(|o| o.action == Action::Quit);
     state.outcomes.extend(fresh.outcomes);
     state.outcomes.sort_by_key(|o| o.action);
     update_menu_fallback(reg, state);
     state.problems()
+}
+
+/// Which character the installed keyboard layouts type for a key with AltGr held (`vk`, `shift`): a description
+/// such as `'@' (German keyboard layout)`, `None` when no layout types one. The live app uses
+/// `keyboard_layout::altgr_text` (Win32 `ToUnicodeEx`); the tests a fake.
+pub type LayoutProbe = fn(vk: u16, shift: bool) -> Option<String>;
+
+/// The menu's warning for a chord that also fires on AltGr (review D-01): Ctrl+Alt (without Win) on a letter, a
+/// digit or Space that types a character with AltGr on an installed layout. `None` for any other chord, or when `probe` finds no
+/// character.
+pub fn altgr_conflict(chord: Chord, probe: LayoutProbe) -> Option<String> {
+    let m = chord.mods;
+    // Only the character keys a chord can use (letters, digits, Space) type something; function and navigation
+    // keys never do.
+    let character_key = matches!(chord.vk, 0x20 | 0x30..=0x39 | 0x41..=0x5A);
+    if !(m.contains(Mods::CTRL) && m.contains(Mods::ALT)) || m.contains(Mods::WIN) || !character_key {
+        return None;
+    }
+    let what = probe(chord.vk, m.contains(Mods::SHIFT))?;
+    let altgr = if m.contains(Mods::SHIFT) {
+        format!("AltGr+Shift+{}", key_name(chord.vk))
+    } else {
+        format!("AltGr+{}", key_name(chord.vk))
+    };
+    Some(format!(
+        "{chord} is also {altgr}, which types {what}: while ultimateCRT runs, that character cannot be typed in any \
+         program, and typing it triggers this hotkey. A function key or a navigation key avoids this."
+    ))
 }
 
 fn capitalise(s: &str) -> String {
@@ -956,9 +1058,70 @@ mod tests {
             );
         }
         assert_eq!(crate::settings::DEFAULT_HOTKEYS.len(), Action::ALL.len());
-        assert_eq!(Action::Quit.default_text(), "Ctrl+Alt+Q");
+        assert_eq!(Action::Quit.default_text(), "Ctrl+Alt+End");
         assert_eq!(Action::ToggleMenu.default_text(), "F10");
         assert_eq!(Action::ToggleFullscreen.default_text(), "F11");
+        assert_eq!(Action::ToggleOverlay.default_text(), "Ctrl+Alt+F9");
+        assert_eq!(Action::ToggleBypass.default_text(), "Ctrl+Alt+F7");
+    }
+
+    /// Review D-01: no default or fallback chord can fire on AltGr+<character> (Ctrl+Alt on a letter, a digit or
+    /// Space), none uses the arrows (screen rotation of some graphics drivers) or the Intel graphics hotkeys
+    /// (Ctrl+Alt+F1, F3, F4, F8), and the old defaults are not taken by any default.
+    #[test]
+    fn defaults_and_fallbacks_avoid_altgr_and_driver_chords() {
+        let character_key = |vk: u16| matches!(vk, 0x20 | 0x30..=0x39 | 0x41..=0x5A);
+        let intel = ["Ctrl+Alt+F1", "Ctrl+Alt+F3", "Ctrl+Alt+F4", "Ctrl+Alt+F8"].map(chord);
+        for a in Action::ALL {
+            for text in std::iter::once(a.default_text()).chain(a.fallbacks().iter().copied()) {
+                let c = chord(text);
+                let ctrl_alt = c.mods.contains(Mods::CTRL | Mods::ALT);
+                assert!(!(ctrl_alt && character_key(c.vk)), "{a:?}: {c} fires on AltGr");
+                assert!(!(0x25..=0x28).contains(&c.vk), "{a:?}: {c} uses an arrow");
+                assert!(!intel.contains(&c), "{a:?}: {c} is an Intel graphics hotkey");
+                // A fake layout where every key types a character: no warning for any of them.
+                assert_eq!(altgr_conflict(c, |_, _| Some("'x'".into())), None, "{c}");
+            }
+            if let Some(old) = a.old_default_text() {
+                assert_ne!(chord(old), a.default_chord());
+                assert!(Action::ALL.iter().all(|b| b.default_chord() != chord(old)), "{old}");
+            }
+        }
+        assert_eq!(Action::Quit.old_default_text(), Some("Ctrl+Alt+Q"));
+        assert_eq!(Action::ToggleMenu.old_default_text(), None);
+    }
+
+    /// Review D-01: a chord with Ctrl+Alt (no Win) on a key that types a character under AltGr is reported, with
+    /// the AltGr spelling and what it types; others are not.
+    #[test]
+    fn a_ctrl_alt_character_chord_is_reported_when_a_layout_types_something() {
+        fn german(vk: u16, shift: bool) -> Option<String> {
+            (vk == u16::from(b'Q') && !shift).then(|| "'@' (German keyboard layout)".to_string())
+        }
+        let w = altgr_conflict(chord("Ctrl+Alt+Q"), german).expect("AltGr+Q is '@'");
+        assert!(
+            w.contains("Ctrl+Alt+Q is also AltGr+Q") && w.contains("'@' (German"),
+            "{w}"
+        );
+        assert_eq!(
+            altgr_conflict(chord("Ctrl+Alt+Shift+Q"), german),
+            None,
+            "AltGr+Shift+Q types nothing"
+        );
+        assert_eq!(altgr_conflict(chord("Ctrl+Alt+W"), german), None);
+        assert_eq!(
+            altgr_conflict(chord("Ctrl+Q"), german),
+            None,
+            "no Alt: AltGr cannot fire it"
+        );
+        assert_eq!(altgr_conflict(chord("Alt+Q"), german), None);
+        assert_eq!(
+            altgr_conflict(chord("Ctrl+Alt+Win+Q"), german),
+            None,
+            "Win must be held as well"
+        );
+        let w = altgr_conflict(chord("Ctrl+Alt+Shift+7"), |_, shift| shift.then(|| "'x'".to_string())).unwrap();
+        assert!(w.contains("AltGr+Shift+7"), "{w}");
     }
 
     #[test]
@@ -1010,14 +1173,19 @@ mod tests {
     }
 
     #[test]
-    fn quit_cannot_be_rebound() {
-        let (b, w) = Bindings::from_settings(&map(&[("quit", "Ctrl+Q")]));
-        assert_eq!(b.get(Action::Quit), Some(chord("Ctrl+Alt+Q")));
-        assert_eq!(w.len(), 1);
-        assert!(w[0].contains("quit") && w[0].contains("cannot be rebound"), "{w:?}");
-        // Writing the default is not a warning, in any case.
-        let (_, w) = Bindings::from_settings(&map(&[("quit", "ctrl+alt+q")]));
+    fn quit_can_be_rebound_and_always_gets_a_chord() {
+        let (b, w) = Bindings::from_settings(&map(&[("quit", "Ctrl+Shift+F12")]));
         assert!(w.is_empty(), "{w:?}");
+        assert_eq!(b.get(Action::Quit), Some(chord("Ctrl+Shift+F12")));
+        // Writing the default is not a warning, in any case.
+        let (b, w) = Bindings::from_settings(&map(&[("quit", "ctrl+alt+end")]));
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(b.get(Action::Quit), Some(Action::Quit.default_chord()));
+        // An invalid chord gives the default; another action asking for the quit chord loses (quit comes first).
+        let (b, w) = Bindings::from_settings(&map(&[("quit", "Q"), ("toggle_menu", "Ctrl+Alt+End")]));
+        assert_eq!(b.get(Action::Quit), Some(chord("Ctrl+Alt+End")));
+        assert_eq!(b.get(Action::ToggleMenu), Some(chord("F10")));
+        assert_eq!(w.len(), 2, "{w:?}");
     }
 
     #[test]
@@ -1025,15 +1193,15 @@ mod tests {
         // The overlay asks for the menu's F10: rejected, its default is used.
         let (b, w) = Bindings::from_settings(&map(&[("toggle_overlay", "F10")]));
         assert_eq!(b.get(Action::ToggleMenu), Some(chord("F10")));
-        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("Ctrl+Alt+O")));
+        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
         assert_eq!(w.len(), 1);
         assert!(
             w[0].contains("toggle_overlay") && w[0].contains("already used by toggle_menu"),
             "{w:?}"
         );
         // Nothing can take the quit chord.
-        let (b, w) = Bindings::from_settings(&map(&[("toggle_bypass", "Ctrl+Alt+Q")]));
-        assert_eq!(b.get(Action::ToggleBypass), Some(chord("Ctrl+Alt+B")));
+        let (b, w) = Bindings::from_settings(&map(&[("toggle_bypass", "Ctrl+Alt+End")]));
+        assert_eq!(b.get(Action::ToggleBypass), Some(chord("Ctrl+Alt+F7")));
         assert!(w[0].contains("already used by quit"), "{w:?}");
         // Same chord for two rebinds: the earlier action keeps it.
         let (b, w) = Bindings::from_settings(&map(&[("next_preset", "F8"), ("previous_preset", "F8")]));
@@ -1045,8 +1213,11 @@ mod tests {
     #[test]
     fn an_action_stays_unbound_when_chord_and_default_are_both_taken() {
         // The menu takes the bypass default, and the bypass asks for the menu's chord.
-        let (b, w) = Bindings::from_settings(&map(&[("toggle_menu", "Ctrl+Alt+B"), ("toggle_bypass", "Ctrl+Alt+B")]));
-        assert_eq!(b.get(Action::ToggleMenu), Some(chord("Ctrl+Alt+B")));
+        let (b, w) = Bindings::from_settings(&map(&[
+            ("toggle_menu", "Ctrl+Alt+F7"),
+            ("toggle_bypass", "Ctrl+Alt+F7"),
+        ]));
+        assert_eq!(b.get(Action::ToggleMenu), Some(chord("Ctrl+Alt+F7")));
         assert_eq!(b.get(Action::ToggleBypass), None);
         assert!(w.iter().any(|m| m.contains("left unbound")), "{w:?}");
         // Unbound actions have no registration attempt.
@@ -1114,7 +1285,11 @@ mod tests {
         let plan = plan_registration(&Bindings::default());
         assert_eq!(plan.len(), 7);
         assert_eq!(plan[0].action, Action::Quit, "quit is registered first");
-        assert_eq!(plan[0].candidates, vec![chord("Ctrl+Alt+Q")], "quit has no fallback");
+        assert_eq!(
+            plan[0].candidates,
+            vec![chord("Ctrl+Alt+End"), chord("Ctrl+Alt+Shift+End")],
+            "quit has one fallback"
+        );
         let menu = plan.iter().find(|a| a.action == Action::ToggleMenu).unwrap();
         // F10 is the wanted chord, so the plain F10 fallback is not repeated; the list ends with Ctrl+Alt+F12.
         assert_eq!(
@@ -1166,7 +1341,7 @@ mod tests {
         assert!(p.contains("using Ctrl+Alt+F10 instead"), "{p}");
         // The other actions are unaffected.
         assert_eq!(reg.bound(Action::ToggleFullscreen), Some(chord("F11")));
-        assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Alt+Q")));
+        assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Alt+End")));
     }
 
     #[test]
@@ -1233,15 +1408,23 @@ mod tests {
 
     #[test]
     fn quit_failing_is_visible_to_the_caller() {
-        let mut fake = Fake::taking(&["Ctrl+Alt+Q"]);
+        let mut fake = Fake::taking(&["Ctrl+Alt+End"]);
+        let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
+        assert_eq!(
+            reg.bound(Action::Quit),
+            Some(chord("Ctrl+Alt+Shift+End")),
+            "the fallback"
+        );
+        assert!(reg.problems()[0].contains("Ctrl+Alt+End"));
+        let mut fake = Fake::taking(&["Ctrl+Alt+End", "Ctrl+Alt+Shift+End"]);
         let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
         assert_eq!(reg.bound(Action::Quit), None, "output.rs refuses to go fullscreen then");
-        assert!(reg.problems()[0].contains("Ctrl+Alt+Q"));
+        assert!(reg.problems()[0].contains("Ctrl+Alt+Shift+End"));
     }
 
     #[test]
     fn unregister_all_releases_exactly_the_registered_ids() {
-        let mut fake = Fake::taking(&["Ctrl+Alt+O"]);
+        let mut fake = Fake::taking(&["Ctrl+Alt+F9"]);
         let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
         fake.unregistered.clear();
         reg.unregister_all(&mut fake);
@@ -1297,26 +1480,26 @@ mod tests {
         let mut fake = Fake::default();
         let mut reg = started(&mut fake);
         assert_eq!(reg.menu_fallback, None, "the default menu key needs no safety chord");
-        let msg = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap();
-        assert!(msg.contains("Overlay: Ctrl+Alt+F9"), "{msg}");
-        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
+        let msg = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F5")).unwrap();
+        assert!(msg.contains("Overlay: Ctrl+Alt+F5"), "{msg}");
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F5")));
         assert_eq!(
             fake.registered[&Action::ToggleOverlay.hotkey_id()],
-            chord("Ctrl+Alt+F9")
+            chord("Ctrl+Alt+F5")
         );
         assert!(
-            !fake.registered.values().any(|c| *c == chord("Ctrl+Alt+O")),
+            !fake.registered.values().any(|c| *c == chord("Ctrl+Alt+F9")),
             "the old chord is released"
         );
         let text = reg.to_settings();
-        assert_eq!(text["toggle_overlay"], "Ctrl+Alt+F9");
-        assert_eq!(text["quit"], "Ctrl+Alt+Q");
+        assert_eq!(text["toggle_overlay"], "Ctrl+Alt+F5");
+        assert_eq!(text["quit"], "Ctrl+Alt+End");
         // The written text reads back as the same bindings, without a warning.
         let (b, w) = Bindings::from_settings(&text);
         assert!(w.is_empty(), "{w:?}");
-        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
+        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F5")));
         // The same chord again: nothing to do.
-        let msg = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap();
+        let msg = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F5")).unwrap();
         assert!(msg.contains("unchanged"), "{msg}");
     }
 
@@ -1325,21 +1508,21 @@ mod tests {
         let mut fake = Fake::default();
         let mut reg = started(&mut fake);
         fake.owned_elsewhere
-            .insert(chord("Ctrl+Alt+F9"), ERROR_HOTKEY_ALREADY_REGISTERED);
-        let e = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap_err();
+            .insert(chord("Ctrl+Alt+F5"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        let e = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F5")).unwrap_err();
         assert!(
-            e.contains("Ctrl+Alt+F9 cannot be used") && e.contains("1409") && e.contains("Ctrl+Alt+O is kept"),
+            e.contains("Ctrl+Alt+F5 cannot be used") && e.contains("1409") && e.contains("Ctrl+Alt+F9 is kept"),
             "{e}"
         );
-        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+O")));
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
         assert_eq!(
             fake.registered[&Action::ToggleOverlay.hotkey_id()],
-            chord("Ctrl+Alt+O"),
+            chord("Ctrl+Alt+F9"),
             "registered again"
         );
         assert_eq!(
             reg.to_settings()["toggle_overlay"],
-            "Ctrl+Alt+O",
+            "Ctrl+Alt+F9",
             "the settings keep the old chord"
         );
     }
@@ -1351,12 +1534,37 @@ mod tests {
         let calls = fake.calls.len();
         let e = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("F11")).unwrap_err();
         assert!(e.contains("F11 is already used for fullscreen"), "{e}");
-        let e = rebind(&mut fake, &mut reg, Action::ToggleBypass, chord("Ctrl+Alt+Q")).unwrap_err();
+        let e = rebind(&mut fake, &mut reg, Action::ToggleBypass, chord("Ctrl+Alt+End")).unwrap_err();
         assert!(e.contains("already used for quit"), "{e}");
-        let e = rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Q")).unwrap_err();
-        assert!(e.contains("Quit is fixed"), "{e}");
+        let e = rebind(&mut fake, &mut reg, Action::Quit, chord("F10")).unwrap_err();
+        assert!(e.contains("F10 is already used for settings menu"), "{e}");
         assert_eq!(fake.calls.len(), calls);
         assert_eq!(reg, started(&mut Fake::default()));
+    }
+
+    /// Review D-01: Quit is rebindable like the others, keeps its chord when the new one is refused, and falls
+    /// back to its default (then its fallback) when even the old chord cannot be taken back.
+    #[test]
+    fn quit_rebinds_keeps_the_old_chord_when_refused_and_is_never_left_unbound() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        let msg = rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Shift+F12")).unwrap();
+        assert!(msg.contains("Quit: Ctrl+Shift+F12"), "{msg}");
+        assert_eq!(fake.registered[&Action::Quit.hotkey_id()], chord("Ctrl+Shift+F12"));
+        assert_eq!(reg.to_settings()["quit"], "Ctrl+Shift+F12");
+        // Refused by the system: the old chord stays.
+        fake.owned_elsewhere
+            .insert(chord("Ctrl+Alt+Home"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        let e = rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Alt+Home")).unwrap_err();
+        assert!(e.contains("Ctrl+Shift+F12 is kept"), "{e}");
+        assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Shift+F12")));
+        // The old chord is taken by another program in between: Quit goes to its default.
+        fake.owned_elsewhere
+            .insert(chord("Ctrl+Shift+F12"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        let e = rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Alt+Home")).unwrap_err();
+        assert!(e.contains("Quit is on Ctrl+Alt+End now"), "{e}");
+        assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Alt+End")));
+        assert_eq!(fake.registered[&Action::Quit.hotkey_id()], chord("Ctrl+Alt+End"));
     }
 
     #[test]
@@ -1375,7 +1583,7 @@ mod tests {
         assert_eq!(reg.menu_fallback, Some(chord("Ctrl+Alt+F10")));
         assert_eq!(fake.registered[&MENU_FALLBACK_ID], chord("Ctrl+Alt+F10"));
         // F10 back for the menu (the overlay first gives it up): no safety chord any more.
-        rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+O")).unwrap();
+        rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap();
         rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("F10")).unwrap();
         assert_eq!(reg.menu_fallback, None);
         assert!(!fake.registered.contains_key(&MENU_FALLBACK_ID));
@@ -1404,6 +1612,9 @@ mod tests {
         let mut reg = started(&mut fake);
         rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("Ctrl+Alt+M")).unwrap();
         rebind(&mut fake, &mut reg, Action::NextPreset, chord("Ctrl+Alt+N")).unwrap();
+        // Quit on the overlay's default and the overlay elsewhere: the reset sorts it out.
+        rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F5")).unwrap();
+        rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Alt+F9")).unwrap();
         assert!(reg.menu_fallback.is_some());
         let problems = reset_all(&mut fake, &mut reg);
         assert!(problems.is_empty(), "{problems:?}");
@@ -1414,6 +1625,20 @@ mod tests {
         assert_eq!(reg.menu_fallback, None);
         assert_eq!(reg.to_settings(), crate::settings::default_hotkeys());
         assert_eq!(fake.registered.len(), Action::ALL.len());
+    }
+
+    /// The reset never leaves Quit unbound: a default taken by another program keeps the chord in force.
+    #[test]
+    fn reset_all_keeps_quit_when_its_default_is_taken() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Shift+F12")).unwrap();
+        fake.owned_elsewhere
+            .insert(chord("Ctrl+Alt+End"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        reset_all(&mut fake, &mut reg);
+        assert_eq!(reg.bound(Action::Quit), Some(chord("Ctrl+Shift+F12")));
+        assert_eq!(fake.registered[&Action::Quit.hotkey_id()], chord("Ctrl+Shift+F12"));
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
     }
 
     #[test]

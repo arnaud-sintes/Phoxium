@@ -28,17 +28,40 @@ pub const SCHEMA_VERSION: u32 = 1;
 pub const SETTINGS_FILE: &str = "settings.toml";
 pub const BACKUP_FILE: &str = "settings.toml.bak";
 
-/// Hotkey action ids with their default chords (T-54; parsed and validated by `hotkeys::Bindings::from_settings`,
-/// which also fixes `quit`). The menu key is F10 (PLAN D-17: F12 is owned by another program on the dev machine).
+/// Hotkey action ids with their default chords (T-54; parsed and validated by `hotkeys::Bindings::from_settings`).
+/// The menu key is F10 (PLAN D-17: F12 is owned by another program on the dev machine). No default uses Ctrl+Alt
+/// with a character key: those fire on AltGr on European keyboard layouts (review D-01).
 pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
-    ("quit", "Ctrl+Alt+Q"),
+    ("quit", "Ctrl+Alt+End"),
     ("toggle_fullscreen", "F11"),
     ("toggle_menu", "F10"),
-    ("toggle_overlay", "Ctrl+Alt+O"),
-    ("toggle_bypass", "Ctrl+Alt+B"),
+    ("toggle_overlay", "Ctrl+Alt+F9"),
+    ("toggle_bypass", "Ctrl+Alt+F7"),
     ("next_preset", "Ctrl+Alt+PageDown"),
     ("previous_preset", "Ctrl+Alt+PageUp"),
 ];
+
+/// The generation of the default hotkeys a file was written with (`[global] hotkey_defaults`): 1 (the key is
+/// absent) for the files of earlier builds, which wrote every chord and whose defaults were Ctrl+Alt+Q, O and B;
+/// 2 since review D-01. A file of generation 1 has its old defaults upgraded at load ([`Settings::from_toml`]).
+pub const HOTKEY_DEFAULTS: u32 = 2;
+
+fn legacy_hotkey_defaults() -> u32 {
+    1
+}
+
+/// Writes `[global.hotkeys]` without the chords equal to their default: only what the user changed is stored, so
+/// a later change of a default reaches everyone who kept it.
+fn serialize_hotkeys<S: serde::Serializer>(map: &BTreeMap<String, String>, s: S) -> Result<S::Ok, S::Error> {
+    let changed: BTreeMap<&String, &String> = map
+        .iter()
+        .filter(|(id, text)| {
+            let default = crate::hotkeys::Action::from_id(id).map(crate::hotkeys::Action::default_chord);
+            default.is_none() || text.parse::<crate::hotkeys::Chord>().ok() != default
+        })
+        .collect();
+    changed.serialize(s)
+}
 
 fn default_version() -> u32 {
     SCHEMA_VERSION
@@ -157,9 +180,11 @@ pub const GPU_ADAPTER_AUTO: &str = "auto";
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct GpuSettings {
-    /// `auto` (the adapter owning the monitor the output covers), an adapter LUID (`00000000:00017801`, as
-    /// `--list-adapters` prints it), or a case-insensitive part of the adapter name (`RTX`, `Intel`). Parsed by
-    /// `adapters::AdapterSpec::parse`.
+    /// `auto` (the adapter owning the monitor the output covers), an adapter identity as the menu and
+    /// `--list-adapters` write it (`NVIDIA RTX A2000 Laptop GPU (PCI 10DE:25B8:0A3D1028, LUID 00000000:00017801)`:
+    /// name and PCI ids, the LUID only a hint within one boot, review D-02), or a case-insensitive part of the
+    /// adapter name (`RTX`, `Intel`). An adapter LUID alone (`00000000:00017801`, earlier builds) is still read,
+    /// but Windows keeps it only until a restart. Parsed by `adapters::AdapterSpec::parse`.
     pub adapter: String,
 }
 
@@ -249,8 +274,13 @@ pub struct Global {
     pub preset: String,
     /// Parameter id to value, only for ids that differ from the defaults.
     pub overrides: BTreeMap<String, toml::Value>,
-    /// Action id to chord text (`F11`, `Ctrl+Alt+Q`).
+    /// Action id to chord text (`F11`, `Ctrl+Alt+End`). In memory every action has an entry (the missing ones
+    /// are filled with their default at load); the file holds only the chords that differ from their default.
+    #[serde(serialize_with = "serialize_hotkeys")]
     pub hotkeys: BTreeMap<String, String>,
+    /// The generation of the default hotkeys the file was written with ([`HOTKEY_DEFAULTS`]; absent: 1).
+    #[serde(default = "legacy_hotkey_defaults")]
+    pub hotkey_defaults: u32,
     pub ui: UiState,
     /// Windowed output rectangle (T-57).
     pub output: OutputState,
@@ -266,6 +296,7 @@ impl Default for Global {
             preset: String::new(),
             overrides: BTreeMap::new(),
             hotkeys: default_hotkeys(),
+            hotkey_defaults: HOTKEY_DEFAULTS,
             ui: UiState::default(),
             output: OutputState::default(),
             gpu: GpuSettings::default(),
@@ -518,8 +549,17 @@ impl Settings {
     }
 
     /// Parses a file. Missing hotkeys are filled with their defaults; a remembered window rectangle that cannot
-    /// be one (`modes::IRect::from_saved`) is dropped.
+    /// be one (`modes::IRect::from_saved`) is dropped; the old default hotkeys of an earlier build's file are
+    /// upgraded ([`Settings::from_toml_noted`]).
     pub fn from_toml(text: &str) -> Result<Self, String> {
+        Self::from_toml_noted(text).map(|(s, _)| s)
+    }
+
+    /// [`Settings::from_toml`], with the notes for the user: what was upgraded (review D-01). A file of hotkey
+    /// generation 1 ([`HOTKEY_DEFAULTS`]) wrote every chord, so a chord equal to an old default
+    /// (`hotkeys::Action::old_default_text`) is one the user never changed: it becomes the new default. A chord the
+    /// user changed stays, and so does an old default whose new default another action already uses.
+    pub fn from_toml_noted(text: &str) -> Result<(Self, Vec<String>), String> {
         if let Some(v) = newer_version(text) {
             return Err(format!(
                 "schema version {v} is newer than the supported {SCHEMA_VERSION}"
@@ -527,13 +567,60 @@ impl Settings {
         }
         let mut s: Settings = toml::from_str(text).map_err(|e| e.to_string())?;
         s.version = SCHEMA_VERSION;
+        let mut notes = Vec::new();
+        if s.global.hotkey_defaults < HOTKEY_DEFAULTS {
+            notes.extend(upgrade_hotkeys(&mut s.global.hotkeys));
+            s.global.hotkey_defaults = HOTKEY_DEFAULTS;
+        }
         for (a, c) in DEFAULT_HOTKEYS {
             s.global.hotkeys.entry(a.to_string()).or_insert_with(|| c.to_string());
         }
         let w = &mut s.global.output.windowed;
         *w = w.filter(|a| crate::modes::IRect::from_saved(*a).is_some());
-        Ok(s)
+        Ok((s, notes))
     }
+}
+
+/// Review D-01: the old default chords (Ctrl+Alt+Q, O, B, which fire on AltGr) of a generation-1 file become the
+/// new defaults. Returns the note for the user (none when nothing changed).
+fn upgrade_hotkeys(hotkeys: &mut BTreeMap<String, String>) -> Option<String> {
+    use crate::hotkeys::{Action, Chord};
+    let parsed = |t: &str| t.parse::<Chord>().ok();
+    let mut done = Vec::new();
+    let mut kept = Vec::new();
+    for a in Action::ALL {
+        let Some(old) = a.old_default_text() else { continue };
+        let Some(text) = hotkeys.get(a.id()) else { continue };
+        if parsed(text) != parsed(old) {
+            continue;
+        }
+        let new = a.default_chord();
+        let user = hotkeys
+            .iter()
+            .find(|(id, t)| id.as_str() != a.id() && parsed(t) == Some(new))
+            .map(|(id, _)| id.clone());
+        match user {
+            Some(other) => kept.push(format!("{} stays {old} ({new} is used by {other})", a.describe())),
+            None => {
+                hotkeys.insert(a.id().to_string(), new.to_string());
+                done.push(format!("{} {new} (was {old})", a.describe()));
+            }
+        }
+    }
+    if done.is_empty() && kept.is_empty() {
+        return None;
+    }
+    let mut note = String::from(
+        "Hotkeys: the old Ctrl+Alt+letter defaults also fired on AltGr (they swallowed characters such as '@' on \
+         many keyboard layouts).",
+    );
+    if !done.is_empty() {
+        note.push_str(&format!(" New defaults: {}.", done.join(", ")));
+    }
+    if !kept.is_empty() {
+        note.push_str(&format!(" Not changed: {}.", kept.join(", ")));
+    }
+    Some(note)
 }
 
 pub(crate) fn to_value(v: ParamValue) -> toml::Value {
@@ -681,6 +768,9 @@ pub struct Loaded {
     /// Whether the session may write `settings.toml` (false for an unreadable file or a newer schema: the
     /// session runs with the defaults in memory and leaves the file as it is).
     pub writable: bool,
+    /// What the load upgraded, for the user (the old default hotkeys, review D-01); the app writes the file back
+    /// at once so that the note is shown once.
+    pub notes: Vec<String>,
 }
 
 /// Loads `dir\settings.toml`. A missing file gives defaults without a warning; see [`FileState`] for the rest.
@@ -709,6 +799,7 @@ pub fn load(dir: &Path) -> Loaded {
             warning: Some(warning),
             state,
             writable: state == FileState::Invalid,
+            notes: Vec::new(),
         }
     };
     let text = match fs::read(&path) {
@@ -719,6 +810,7 @@ pub fn load(dir: &Path) -> Loaded {
                 warning: None,
                 state: FileState::Missing,
                 writable: true,
+                notes: Vec::new(),
             }
         }
         Err(e) => return unusable(FileState::Unreadable, e.to_string()),
@@ -730,12 +822,13 @@ pub fn load(dir: &Path) -> Loaded {
     if newer_version(&text).is_some() {
         return unusable(FileState::Newer, Settings::from_toml(&text).unwrap_err());
     }
-    match Settings::from_toml(&text) {
-        Ok(settings) => Loaded {
+    match Settings::from_toml_noted(&text) {
+        Ok((settings, notes)) => Loaded {
             settings,
             warning: None,
             state: FileState::Valid,
             writable: true,
+            notes,
         },
         Err(e) => unusable(FileState::Invalid, e),
     }
@@ -1166,16 +1259,85 @@ mod tests {
 
     #[test]
     fn hotkey_defaults_fill_gaps_and_the_menu_key_is_f10() {
-        let s = Settings::from_toml("version = 1\n[global.hotkeys]\nquit = \"Ctrl+Q\"\n").unwrap();
+        let s = Settings::from_toml("version = 1\n[global.hotkeys]\nquit = \"Q\"\n").unwrap();
         assert_eq!(s.global.hotkeys["toggle_fullscreen"], "F11");
         assert_eq!(s.global.hotkeys["toggle_menu"], "F10");
-        assert_eq!(s.global.hotkeys["toggle_bypass"], "Ctrl+Alt+B");
+        assert_eq!(s.global.hotkeys["toggle_bypass"], "Ctrl+Alt+F7");
         assert_eq!(s.global.hotkeys["previous_preset"], "Ctrl+Alt+PageUp");
-        // Parsing keeps the text as written; the validation is `hotkeys::Bindings::from_settings` (it fixes quit).
-        assert_eq!(s.global.hotkeys["quit"], "Ctrl+Q");
+        // Parsing keeps the text as written; the validation is `hotkeys::Bindings::from_settings`.
+        assert_eq!(s.global.hotkeys["quit"], "Q");
         let (b, w) = crate::hotkeys::Bindings::from_settings(&s.global.hotkeys);
-        assert_eq!(b.get(crate::hotkeys::Action::Quit).unwrap().to_string(), "Ctrl+Alt+Q");
+        assert_eq!(b.get(crate::hotkeys::Action::Quit).unwrap().to_string(), "Ctrl+Alt+End");
         assert_eq!(w.len(), 1, "{w:?}");
+    }
+
+    /// The text an earlier build wrote: every chord, the old defaults, no `hotkey_defaults`.
+    const OLD_FILE: &str =
+        "version = 1\n[global]\npreset = \"\"\n[global.hotkeys]\nnext_preset = \"Ctrl+Alt+PageDown\"\n\
+         previous_preset = \"Ctrl+Alt+PageUp\"\nquit = \"Ctrl+Alt+Q\"\ntoggle_bypass = \"Ctrl+Alt+B\"\n\
+         toggle_fullscreen = \"F11\"\ntoggle_menu = \"F10\"\ntoggle_overlay = \"Ctrl+Alt+O\"\n";
+
+    /// Review D-01: an earlier build's file with the old defaults gets the new ones, with one note; written back,
+    /// it stores no chord and the next load upgrades nothing.
+    #[test]
+    fn old_default_hotkeys_are_upgraded_once_and_defaults_are_not_stored() {
+        let (s, notes) = Settings::from_toml_noted(OLD_FILE).unwrap();
+        assert_eq!(s.global.hotkeys, default_hotkeys());
+        assert_eq!(s.global.hotkey_defaults, HOTKEY_DEFAULTS);
+        assert_eq!(notes.len(), 1, "{notes:?}");
+        let n = &notes[0];
+        assert!(n.contains("AltGr"), "{n}");
+        assert!(n.contains("quit Ctrl+Alt+End (was Ctrl+Alt+Q)"), "{n}");
+        assert!(n.contains("overlay Ctrl+Alt+F9 (was Ctrl+Alt+O)"), "{n}");
+        assert!(n.contains("A/B bypass Ctrl+Alt+F7 (was Ctrl+Alt+B)"), "{n}");
+        let text = s.to_toml().unwrap();
+        assert!(!text.contains("Ctrl+Alt"), "no default chord is stored:\n{text}");
+        assert!(text.contains("hotkey_defaults = 2"), "{text}");
+        let (back, notes) = Settings::from_toml_noted(&text).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
+        assert_eq!(back.global.hotkeys, default_hotkeys());
+        // A chord picked by the user after the upgrade, even an old default, stays as it is.
+        let mut s = back;
+        s.global.hotkeys.insert("quit".into(), "Ctrl+Alt+Q".into());
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("quit = \"Ctrl+Alt+Q\""), "{text}");
+        let (back, notes) = Settings::from_toml_noted(&text).unwrap();
+        assert!(notes.is_empty());
+        assert_eq!(back.global.hotkeys["quit"], "Ctrl+Alt+Q");
+        // A fresh file has nothing to upgrade.
+        let (_, notes) = Settings::from_toml_noted("version = 1\n").unwrap();
+        assert!(notes.is_empty());
+    }
+
+    /// Review D-01: in an earlier build's file, a chord the user changed stays, and an old default whose new
+    /// default another action already uses stays too (with the reason in the note).
+    #[test]
+    fn customised_hotkeys_survive_the_upgrade() {
+        let text = OLD_FILE
+            .replace("toggle_overlay = \"Ctrl+Alt+O\"", "toggle_overlay = \"Ctrl+Alt+M\"")
+            .replace("toggle_menu = \"F10\"", "toggle_menu = \"Ctrl+Alt+F7\"");
+        let (s, notes) = Settings::from_toml_noted(&text).unwrap();
+        assert_eq!(s.global.hotkeys["toggle_overlay"], "Ctrl+Alt+M");
+        assert_eq!(s.global.hotkeys["toggle_menu"], "Ctrl+Alt+F7");
+        assert_eq!(
+            s.global.hotkeys["toggle_bypass"], "Ctrl+Alt+B",
+            "its new default is the menu's"
+        );
+        assert_eq!(s.global.hotkeys["quit"], "Ctrl+Alt+End");
+        let n = &notes[0];
+        assert!(n.contains("quit Ctrl+Alt+End (was Ctrl+Alt+Q)"), "{n}");
+        assert!(
+            n.contains("A/B bypass stays Ctrl+Alt+B (Ctrl+Alt+F7 is used by toggle_menu)"),
+            "{n}"
+        );
+        assert!(!n.contains("overlay"), "{n}");
+        // Nothing old in the file: no note.
+        let text = OLD_FILE
+            .replace("\"Ctrl+Alt+Q\"", "\"Ctrl+Alt+End\"")
+            .replace("\"Ctrl+Alt+O\"", "\"F9\"")
+            .replace("\"Ctrl+Alt+B\"", "\"F8\"");
+        let (_, notes) = Settings::from_toml_noted(&text).unwrap();
+        assert!(notes.is_empty(), "{notes:?}");
     }
 
     #[test]

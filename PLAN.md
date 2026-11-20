@@ -14,7 +14,7 @@ A physically based CRT shader for Windows. It captures an external window (no in
 - `ultimatecrt` is a binary only (no `lib.rs`). `main.rs` holds argument parsing, the main loop, stats and the PNG dump.
 - `capture.rs`: Windows.Graphics.Capture, free-threaded frame pool, client-area crop, CPU copy through a D3D11 staging texture, latest frame wins. The D3D11 device uses the default adapter.
 - `scaling.rs`: pure integer-upscale detector and `View` (origin, divisor, native size), 5 unit tests. These are the only automated tests.
-- `output.rs`: raw Win32 output, windowed or fullscreen `WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, `MA_NOACTIVATE`, Ctrl+Alt+Q via `RegisterHotKey`. No click-through, no second window.
+- `output.rs`: raw Win32 output, windowed or fullscreen `WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, `MA_NOACTIVATE`, Ctrl+Alt+Q via `RegisterHotKey` (the quit chord then; Ctrl+Alt+End since review D-01). No click-through, no second window.
 - `gpu.rs` (812 lines, ash 0.38): Vulkan 1.3, dynamic rendering, synchronization2, one frame in flight, `B8G8R8A8_UNORM` texture and swapchain, FIFO, one graphics pipeline with a 40-byte push-constant block. Device choice: `--gpu`, else NVIDIA discrete, else any discrete. Nothing checks that capture and render share an adapter.
 - `shaders/`: `fullscreen.vert`, `passthrough.frag` (texelFetch at block centres). `build.rs` compiles a fixed list with `glslc`.
 - `scripts/package.ps1` and `scripts/release.ps1` implement the publish procedure of `ENV.md` section 7.
@@ -63,7 +63,7 @@ Out of M3: ABL, phosphor saturation, persistence (afterglow), halation, diffusio
 - **Worktrees.** Every task that runs in a wave with other tasks runs in its own git worktree on branch `task/T-xx` (Agent tool `isolation: "worktree"`). Spikes that are throw-away use `spike/T-xx` and are never merged; only their documentation is. Merging a task is a commit plus merge, done only when the owner asks (a standing per-wave permission is the recommended way).
 - **Hotspot files** take append-only edits and are merged in task-id order, keeping both sides: `crates/ultimatecrt/src/lib.rs`, `cli.rs`, `app.rs`, `gpu/mod.rs`, `gpu/pipeline.rs`, `gpu/stages/mod.rs` (one registration line per stage), `build.rs`, `crates/crt-model/src/lib.rs` (one `mod` line per module), all `Cargo.toml`, `CHANGELOG.md`, `README.md`, `ARCHITECTURE.md`, `QUESTIONS.md` (each task edits only its own question entries).
 - **Concurrency.** At most 5 agents at once. A wave with more tasks runs in sub-batches in the order listed. Each worktree uses its own `CARGO_TARGET_DIR` so builds never lock each other's executables.
-- **Desktop and GPU token** (gate 13). There is one desktop, one keyboard focus, one global Ctrl+Alt+Q and one GPU. Tasks marked `live` in section 4 (windows, fullscreen, foreground polling, GPU timings) run one at a time, never concurrently, and say so in their report.
+- **Desktop and GPU token** (gate 13). There is one desktop, one keyboard focus, one global quit hotkey (Ctrl+Alt+Q then, Ctrl+Alt+End since review D-01) and one GPU. Tasks marked `live` in section 4 (windows, fullscreen, foreground polling, GPU timings) run one at a time, never concurrently, and say so in their report.
 - **Oracle independence.** A stage task that adds an oracle function and its expected numbers to `crt-model` has them checked first by a model that has not seen the shader: it re-derives the numbers from `CRT.md`. The author's own oracle is never the only check (gate 11).
 - **Shell.** Scripts and commands are PowerShell (the Bash tool is broken on the dev machine).
 
@@ -652,7 +652,7 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 
 ### T-54 Hotkeys
 - **M3, W5, S.** Settles OUT-5. Deps: T-52a. Ctrl+Alt+PageDown and PageUp raise `NextPreset` and `PreviousPreset` events that T-53 handles.
-- **Do:** `RegisterHotKey` only (no low-level hook): F11 toggle fullscreen and resizable windowed output (also the panic key, fixed), F12 toggle the settings menu (T-52a), Ctrl+Alt+Q quit (exists), Ctrl+Alt+O overlay, Ctrl+Alt+B A/B and bypass, Ctrl+Alt+PageDown/PageUp next/previous preset; chords configurable in settings except quit and F11; F11 and F12 are registered globally, so the game loses those two keys while ultimatecrt runs (configurable, documented); a failed registration names the chord. The keys still arrive as `WM_HOTKEY` while the menu has the focus, so F12 closes it.
+- **Do:** `RegisterHotKey` only (no low-level hook): F11 toggle fullscreen and resizable windowed output (also the panic key, fixed), F12 toggle the settings menu (T-52a), Ctrl+Alt+Q quit (exists), Ctrl+Alt+O overlay, Ctrl+Alt+B A/B and bypass (the chords then: review D-01 moved quit, overlay and bypass to Ctrl+Alt+End, F9 and F7 because Ctrl+Alt+letter fires on AltGr), Ctrl+Alt+PageDown/PageUp next/previous preset; chords configurable in settings except quit and F11; F11 and F12 are registered globally, so the game loses those two keys while ultimatecrt runs (configurable, documented); a failed registration names the chord. The keys still arrive as `WM_HOTKEY` while the menu has the focus, so F12 closes it.
 - **Files:** `src/hotkeys.rs`, `src/output.rs`, `src/settings.rs`, `src/app.rs`, README.
 - **Accept:** unit tests of chord parsing and formatting; double registration reports the failing chord; F11 and F12 work while the source has the focus; manual checklist.
 - **Model:** Sonnet medium. **Review:** none. **Owner:** no.
@@ -824,7 +824,7 @@ Not modelled and ranked by visual impact (audit): optics (T-45: glare, halation,
 10. Performance: after T-21, the report gives the GPU ms of every stage the task touched; no new per-frame allocation or CPU readback in the render loop.
 11. **Counter-review (standing instruction):** physics, unsafe/FFI and GPU-synchronisation changes are reviewed by a different model (column Review) before merge. The reviewer gets the spec, the diff, the `CRT.md` section and the test output, not the author's reasoning. Each finding is fixed or rejected with a written reason. For a stage task that adds an oracle function and expected numbers to `crt-model`, the reviewer first re-derives those numbers from `CRT.md` without seeing the shader, because the author wrote both the shader and its oracle.
 12. Owner-needed tasks: results recorded in `QUESTIONS.md` with the date before the task counts as done.
-13. Desktop and GPU token: a task that opens windows, goes fullscreen, registers Ctrl+Alt+Q, polls the foreground window or measures GPU time runs alone on the machine (no other agent's window, no other GPU load), and its report says so. Each worktree builds with its own `CARGO_TARGET_DIR`.
+13. Desktop and GPU token: a task that opens windows, goes fullscreen, registers the global hotkeys (the quit chord), polls the foreground window or measures GPU time runs alone on the machine (no other agent's window, no other GPU load), and its report says so. Each worktree builds with its own `CARGO_TARGET_DIR`.
 
 ## 10. Open owner decisions, proposals and risks
 

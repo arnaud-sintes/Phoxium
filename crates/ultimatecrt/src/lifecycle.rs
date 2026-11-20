@@ -244,7 +244,7 @@ pub const LOST_REMIND_S: f64 = 10.0;
 /// window.
 pub const DEFAULT_WAIT_SOURCE_S: f64 = 30.0;
 /// The console reminder.
-pub const LOST_REMINDER: &str = "source lost; Ctrl+Alt+Q to quit";
+pub const LOST_REMINDER: &str = "source lost; the Quit hotkey (Ctrl+Alt+End by default) quits";
 
 /// What to do when the source is lost (command line: `--wait-source`, `--exit-on-lost`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -282,7 +282,7 @@ pub enum LostAction {
 
 /// Decides what happens while the source stays lost. Without it a fullscreen, topmost,
 /// non-activating, taskbar-less output over the only monitor stays up with a frozen frame and only
-/// Ctrl+Alt+Q closes it. Reattaching is not decided here ([`Reattacher`] keeps going in every mode).
+/// The Quit hotkey closes it. Reattaching is not decided here ([`Reattacher`] keeps going in every mode).
 #[derive(Debug)]
 pub struct LostWatch {
     policy: LostPolicy,

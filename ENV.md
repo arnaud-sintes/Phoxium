@@ -186,10 +186,10 @@ Before, `ui_menu` alone was about 160 s on an idle GPU and 950 s under contentio
 1. Start the source: `target\release\pixel-demo.exe` (`--scale 3`, `--res 160x144`, `--scene card`, `--image file.png`; Space cycles content, 1 to 9 sets the scale, Esc quits pixel-demo, not ultimatecrt).
 2. Start the CRT app: `target\release\ultimatecrt.exe --stats --validation`.
 3. Expect: a second window duplicating the demo, `render` near the display refresh rate, a line `source scaling: detected x3/x3, native 256x240` (or `native (x1)` at scale 1), and no validation messages.
-4. Press F10: the settings menu opens and takes the focus. Press F10 or Esc to close it: the focus goes back to the source. Esc never quits the output (in the framed window or fullscreen); quit with `Ctrl+Alt+Q` or the close button of the framed window. F11 toggles fullscreen and the framed window.
+4. Press F10: the settings menu opens and takes the focus. Press F10 or Esc to close it: the focus goes back to the source. Esc never quits the output (in the framed window or fullscreen); quit with `Ctrl+Alt+End` or the close button of the framed window. F11 toggles fullscreen and the framed window.
 
 Useful variants:
-- `--fullscreen` covers the source's monitor and never takes focus. Quit with `Ctrl+Alt+Q`. Use `--exit-after 10` on the first tries so it ends by itself.
+- `--fullscreen` covers the source's monitor and never takes focus. Quit with `Ctrl+Alt+End`. Use `--exit-after 10` on the first tries so it ends by itself.
 - `--save-capture out.png` saves the first captured frame (check that the client area is exact, for example 768×720 for a 256×240 source at 3×).
 - `--list-windows`, `--list-gpus`, `--gpu N`, `--window "text"`, `--divisor N`, `--crop x,y,w,h`, `--integer`.
 
@@ -261,8 +261,8 @@ Check the result with `gh release view vX.Y.Z`.
 | `no visible window with "..." in its title` | The target is minimised or has another title. Use `--list-windows` and `--window`. |
 | `no frame captured within 5 seconds` | The window is not drawing, is protected content, or capture is blocked for it. Moving or redrawing the window often helps. |
 | `no Vulkan 1.3 device can present to the output window` | Update the GPU driver, or pick a device with `--gpu` (see `--list-gpus`). |
-| Output window does not respond to the keyboard | By design in fullscreen: quit with `Ctrl+Alt+Q`. |
-| `cannot register the Ctrl+Alt+Q quit hotkey` | Another program owns that shortcut. Close it, or use a windowed output and close it with its close button. |
+| Output window does not respond to the keyboard | By design in fullscreen: quit with `Ctrl+Alt+End` (or the quit chord set in the menu). |
+| `cannot register the quit hotkey (...)` | Another program owns that shortcut and its fallback. Close it, set another quit chord in the menu (GPU and system, Hotkeys), or use a windowed output and close it with its close button. |
 | `no such monitor` | `--monitor` index out of range: see the monitor lines of `--list-windows`. |
 | `cargo clippy` or `fmt` fails during packaging | Fix the warning or run `cargo fmt --all`, commit, package again. |
 | Capture reports few frames per second on a static window | Windows.Graphics.Capture only delivers a frame when the window content changes. |
