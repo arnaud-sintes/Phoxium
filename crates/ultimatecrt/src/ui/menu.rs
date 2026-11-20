@@ -104,7 +104,7 @@ pub fn on_activate(open: bool, activated: bool) -> Option<CloseReason> {
 pub const VK_ESCAPE: usize = 0x1B;
 
 /// Whether the key message `msg` (`wparam` the virtual key) closes the open menu: Esc pressed. The menu
-/// consumes it. Esc does nothing else in the output window (it never quits; Ctrl+Alt+Q does). The other
+/// consumes it. Esc does nothing else in the output window (it never quits; the Quit hotkey does). The other
 /// hotkeys (F11, the quit chord) are `WM_HOTKEY` registrations and keep working with the menu open.
 pub fn closes_on_key(open: bool, msg: u32, wparam: usize) -> bool {
     open && msg == super::input::WM_KEYDOWN && wparam == VK_ESCAPE
@@ -1500,26 +1500,20 @@ pub fn adapter_choice_name(value: &str, adapters: &[crate::adapters::AdapterEntr
     if value.trim().is_empty() || value.trim().eq_ignore_ascii_case(settings::GPU_ADAPTER_AUTO) {
         return "Automatic".to_string();
     }
-    adapters
-        .iter()
-        .find(|a| a.setting_value().eq_ignore_ascii_case(value.trim()))
-        .map_or_else(
-            || format!("\u{201C}{}\u{201D} (as written in the settings)", value.trim()),
-            |a| a.name.clone(),
-        )
+    match adapters.iter().find(|a| a.matches_setting(value)) {
+        Some(a) => a.name.clone(),
+        None => match crate::adapters::AdapterSpec::parse(value) {
+            // Review D-02: a remembered adapter that is not there now (removed, disabled, driver changed).
+            crate::adapters::AdapterSpec::Id(id) => format!("{} (not found)", id.name),
+            _ => format!("\u{201C}{}\u{201D} (as written in the settings)", value.trim()),
+        },
+    }
 }
 
-/// Whether the adapter setting `now` differs from the one the session started with (a restart applies it).
+/// Whether the adapter setting `now` differs from the one the session started with (a restart applies it). An
+/// identity's LUID hint does not count (`adapters::AdapterSpec::same`).
 pub fn adapter_restart_needed(now: &str, at_start: &str) -> bool {
-    let norm = |s: &str| {
-        let t = s.trim();
-        if t.is_empty() {
-            settings::GPU_ADAPTER_AUTO.to_string()
-        } else {
-            t.to_lowercase()
-        }
-    };
-    norm(now) != norm(at_start)
+    !crate::adapters::AdapterSpec::same(now, at_start)
 }
 
 /// GPU and system: the adapter in use and the choice for the next start, the hotkeys, the settings folder.
@@ -1565,7 +1559,11 @@ fn system_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
             options.push((a.setting_value(), label, a.vulkan_index.is_some() && !a.software));
         }
         for (value, label, usable) in options {
-            let selected = value.eq_ignore_ascii_case(m.system.gpu_setting.trim());
+            let selected = crate::adapters::AdapterSpec::same(&value, &m.system.gpu_setting)
+                || adapters
+                    .iter()
+                    .find(|a| a.setting_value() == value)
+                    .is_some_and(|a| a.matches_setting(&m.system.gpu_setting));
             let disabled = ui.begin_disabled_with_cond(!usable);
             if ui
                 .selectable_config(format!("{label}##{value}"))
@@ -1794,19 +1792,46 @@ mod tests {
 
     #[test]
     fn adapter_choice_names_and_restart_note() {
-        use crate::adapters::{AdapterEntry, Luid};
+        use crate::adapters::{AdapterEntry, AdapterId, Luid};
+        let luid = Luid { high: 0, low: 0x17801 };
+        let id = AdapterId {
+            name: "NVIDIA RTX A2000 Laptop GPU".into(),
+            vendor: 0x10DE,
+            device: 0x25B8,
+            subsys: 0,
+            nth: 1,
+            luid: Some(luid),
+        };
         let rtx = AdapterEntry {
             name: "NVIDIA RTX A2000 Laptop GPU".into(),
-            luid: Some(Luid { high: 0, low: 0x17801 }),
+            luid: Some(luid),
             owns_monitors: false,
             software: false,
             vulkan_index: Some(0),
+            id: Some(id.clone()),
         };
         let list = [rtx.clone()];
         assert!(adapter_choice_name("auto", &list).starts_with("Automatic"));
         assert!(adapter_choice_name("", &list).starts_with("Automatic"));
         assert_eq!(adapter_choice_name(&rtx.setting_value(), &list), rtx.name);
         assert!(adapter_choice_name("Intel", &list).contains("Intel"));
+        // An earlier build's LUID value still names the entry in this boot.
+        assert_eq!(adapter_choice_name("00000000:00017801", &list), rtx.name);
+        // Review D-02: after a reboot the LUID hint differs; the identity still names the entry, and no restart
+        // is asked for.
+        let after_reboot = AdapterId {
+            luid: Some(Luid { high: 0, low: 0x1A2B3 }),
+            ..id.clone()
+        }
+        .to_string();
+        assert_eq!(adapter_choice_name(&after_reboot, &list), rtx.name);
+        assert!(!adapter_restart_needed(&after_reboot, &rtx.setting_value()));
+        // A remembered adapter that is gone is named as such.
+        let gone = AdapterId { device: 0x1234, ..id }.to_string();
+        assert_eq!(
+            adapter_choice_name(&gone, &list),
+            "NVIDIA RTX A2000 Laptop GPU (not found)"
+        );
         assert!(!adapter_restart_needed("auto", "AUTO"));
         assert!(!adapter_restart_needed("", "auto"));
         assert!(adapter_restart_needed(&rtx.setting_value(), "auto"));

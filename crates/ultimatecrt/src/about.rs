@@ -131,10 +131,10 @@ mod tests {
             "{COMMIT}"
         );
         assert_eq!(
-            first_run_text(Some("F10"), Some("F11"), Some("Ctrl+Alt+Q")),
-            "Press F10 for the menu, F11 for fullscreen, Ctrl+Alt+Q to quit."
+            first_run_text(Some("F10"), Some("F11"), Some("Ctrl+Alt+End")),
+            "Press F10 for the menu, F11 for fullscreen, Ctrl+Alt+End to quit."
         );
-        let t = first_run_text(Some("Ctrl+Alt+F10"), None, Some("Ctrl+Alt+Q"));
+        let t = first_run_text(Some("Ctrl+Alt+F10"), None, Some("Ctrl+Alt+End"));
         assert!(
             t.starts_with("Press Ctrl+Alt+F10 for the menu") && t.contains("no key"),
             "{t}"

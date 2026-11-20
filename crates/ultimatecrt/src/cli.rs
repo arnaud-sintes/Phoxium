@@ -73,10 +73,11 @@ Usage: ultimatecrt [options]
   --version            print the version and exit
   --help               print this text
 
-Quit: Ctrl+Alt+Q (the output does not take the keyboard focus), or the close button of the framed window.
+Quit: Ctrl+Alt+End (the output does not take the keyboard focus), or the close button of the framed window.
 Hotkeys (global, configurable in settings.toml [global.hotkeys]): F11 fullscreen or framed window, F10
-settings menu, Ctrl+Alt+O overlay, Ctrl+Alt+B A/B bypass of the CRT chain, Ctrl+Alt+PageDown and
-Ctrl+Alt+PageUp next and previous preset. A chord another program owns falls back and is reported.";
+settings menu, Ctrl+Alt+F9 overlay, Ctrl+Alt+F7 A/B bypass of the CRT chain, Ctrl+Alt+PageDown and
+Ctrl+Alt+PageUp next and previous preset, all rebindable (Quit included) in the settings menu. No default
+uses Ctrl+Alt with a letter: that also fires on AltGr. A chord another program owns falls back and is reported.";
 
 #[derive(Default)]
 pub struct Args {

@@ -1031,7 +1031,15 @@ fn user_preset_save_and_load_round_trip() {
 
 /// A made-up adapter list like the dev machine's: the RTX (Vulkan 0) and the Intel UHD driving the monitors.
 fn fake_gpu() -> ultimatecrt::adapters::Current {
-    use ultimatecrt::adapters::{AdapterEntry, Current, GpuSelection, Luid, Owner, Reason, VulkanDevice};
+    use ultimatecrt::adapters::{AdapterEntry, AdapterId, Current, GpuSelection, Luid, Owner, Reason, VulkanDevice};
+    let id = |name: &str, vendor: u32, device: u32, luid: Luid| AdapterId {
+        name: name.into(),
+        vendor,
+        device,
+        subsys: 0,
+        nth: 1,
+        luid: Some(luid),
+    };
     let rtx = Luid { high: 0, low: 0x17801 };
     let uhd = Luid { high: 0, low: 0x10301 };
     Current {
@@ -1047,6 +1055,8 @@ fn fake_gpu() -> ultimatecrt::adapters::Current {
                 luid: uhd,
             }),
             warnings: vec!["the chosen adapter does not drive the covered monitor (cross-adapter present)".into()],
+            missing: None,
+            upgraded_setting: None,
         },
         adapters: vec![
             AdapterEntry {
@@ -1055,6 +1065,7 @@ fn fake_gpu() -> ultimatecrt::adapters::Current {
                 owns_monitors: false,
                 software: false,
                 vulkan_index: Some(0),
+                id: Some(id("NVIDIA RTX A2000 Laptop GPU", 0x10DE, 0x25B8, rtx)),
             },
             AdapterEntry {
                 name: "Intel(R) UHD Graphics".into(),
@@ -1062,6 +1073,7 @@ fn fake_gpu() -> ultimatecrt::adapters::Current {
                 owns_monitors: true,
                 software: false,
                 vulkan_index: Some(1),
+                id: Some(id("Intel(R) UHD Graphics", 0x8086, 0x9A60, uhd)),
             },
         ],
         setting: "auto".into(),
@@ -1075,8 +1087,8 @@ fn system_config() -> UiConfig {
         hotkeys: vec![
             HotkeyRow {
                 action: "Quit".into(),
-                bound: Some("Ctrl+Alt+Q".into()),
-                wanted: "Ctrl+Alt+Q".into(),
+                bound: Some("Ctrl+Alt+End".into()),
+                wanted: "Ctrl+Alt+End".into(),
             },
             HotkeyRow {
                 action: "Settings menu".into(),
@@ -1086,7 +1098,7 @@ fn system_config() -> UiConfig {
             HotkeyRow {
                 action: "Overlay".into(),
                 bound: None,
-                wanted: "Ctrl+Alt+O".into(),
+                wanted: "Ctrl+Alt+F9".into(),
             },
         ],
         settings_dir: Some(std::path::PathBuf::from(

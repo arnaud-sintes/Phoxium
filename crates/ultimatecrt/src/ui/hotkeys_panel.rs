@@ -1,14 +1,16 @@
 //! The Hotkeys rows of the GPU and system panel (owner request 2026-11-20): every action with the chord in force,
 //! a Change button (click, then press the new chord: Esc cancels, Backspace or Delete sets the default) and a
-//! Default button; Quit is fixed. The chord is checked here against our own actions
-//! (`hotkeys::Registration::check`) and handed to the app ([`HotkeyEdit`]), which registers it at once
-//! (`output::Output::rebind`) and gives the outcome back (`super::Ui::set_hotkeys`): a chord another program owns
-//! is refused and the old one kept, with the registrar's reason. While the menu key is not its default, the
-//! documented fallback stays registered and the panel says which one (`hotkeys::update_menu_fallback`).
+//! Default button, Quit included (review D-01; it can be changed but never removed). The chord is checked here
+//! against our own actions (`hotkeys::Registration::check`) and handed to the app ([`HotkeyEdit`]), which
+//! registers it at once (`output::Output::rebind`) and gives the outcome back (`super::Ui::set_hotkeys`): a chord
+//! another program owns is refused and the old one kept, with the registrar's reason. While the menu key is not
+//! its default, the documented fallback stays registered and the panel says which one
+//! (`hotkeys::update_menu_fallback`). A `Ctrl+Alt+<character key>` chord that types a character with AltGr on an
+//! installed keyboard layout is accepted with a warning (`hotkeys::altgr_conflict`).
 
 use dear_imgui_rs::{StyleVar, Ui as Frame};
 
-use crate::hotkeys::{capture_key, Action, Captured, Chord, Mods, Registration};
+use crate::hotkeys::{altgr_conflict, capture_key, Action, Captured, Chord, LayoutProbe, Mods, Registration};
 
 use super::input::Modifiers;
 use super::menu::{record, HotkeyRow, MenuResult};
@@ -35,6 +37,11 @@ pub struct HotkeyModel {
     pub capturing: Option<Action>,
     /// The outcome of the last change: (good news, text).
     pub message: Option<(bool, String)>,
+    /// The AltGr warning of the last chord asked for ([`altgr_conflict`]), shown under the message.
+    pub warning: Option<String>,
+    /// What the installed keyboard layouts type with AltGr (`keyboard_layout::altgr_text` in the live app);
+    /// `None`: no AltGr check (headless tests).
+    pub layout_probe: Option<LayoutProbe>,
 }
 
 /// The `hotkeys::Mods` of the modifier keys held.
@@ -85,7 +92,9 @@ impl HotkeyModel {
     }
 
     /// Checks `chord` for `action` against our own actions; the edit to register, or the reason in the message.
+    /// A chord that also fires on AltGr is registered all the same, with a warning ([`HotkeyModel::warning`]).
     pub fn request(&mut self, action: Action, chord: Chord) -> Option<HotkeyEdit> {
+        self.warning = None;
         if let Some(reg) = &self.registration {
             if let Err(why) = reg.check(action, chord) {
                 self.message = Some((false, why));
@@ -100,7 +109,18 @@ impl HotkeyModel {
             }
         }
         self.message = Some((true, format!("Registering {chord}...")));
+        self.warning = self.layout_probe.and_then(|p| altgr_conflict(chord, p));
         Some(HotkeyEdit::Set(action, chord))
+    }
+
+    /// The outcome of a change from the app: the warning stays only while the chord went through.
+    pub fn outcome(&mut self, message: Option<(bool, String)>) {
+        if let Some(m) = message {
+            if !m.0 {
+                self.warning = None;
+            }
+            self.message = Some(m);
+        }
     }
 }
 
@@ -170,9 +190,7 @@ pub fn rows(ui: &Frame, fonts: &Fonts, m: &mut HotkeyModel, r: &mut MenuResult) 
                 (None, _) => ("none".to_string(), PALETTE.problem),
             }
         };
-        let buttons_w = if action == Action::Quit {
-            0.0
-        } else if capturing {
+        let buttons_w = if capturing {
             cancel_w
         } else {
             change_w + spacing + default_w
@@ -181,13 +199,6 @@ pub fn rows(ui: &Frame, fonts: &Fonts, m: &mut HotkeyModel, r: &mut MenuResult) 
         ui.text_colored(colour, &text);
         record(ui, r, &format!("hotkey:{id}"));
         let right = start + width;
-        if action == Action::Quit {
-            ui.same_line();
-            theme::with_font(ui, None, METRICS.font_small, || {
-                theme::text_right(ui, PALETTE.text_faint, "fixed");
-            });
-            continue;
-        }
         ui.same_line_with_pos((right - buttons_w).max(ui.cursor_pos()[0]));
         if capturing {
             if small_button(ui, "Cancel") {
@@ -200,13 +211,16 @@ pub fn rows(ui: &Frame, fonts: &Fonts, m: &mut HotkeyModel, r: &mut MenuResult) 
         if small_button(ui, "Change") {
             m.capturing = Some(action);
             m.message = None;
+            m.warning = None;
         }
         record(ui, r, &format!("hotkey:{id}:change"));
         if ui.is_item_hovered() {
             theme::tooltip(
                 ui,
-                "Click, then press the new keys (for example Ctrl+Alt+M or F9). Only F1 to F24 work without Ctrl, \
-                 Alt or Win. The hotkey is global: other programs no longer get these keys while ultimateCRT runs.",
+                "Click, then press the new keys (for example Ctrl+Alt+F5 or F9). Only F1 to F24 work without Ctrl, \
+                 Alt or Win. The hotkey is global: other programs no longer get these keys while ultimateCRT runs. \
+                 Ctrl+Alt with a letter or a digit also fires on AltGr on many keyboard layouts: prefer a function \
+                 key or a navigation key.",
             );
         }
         ui.same_line();
@@ -242,6 +256,10 @@ pub fn rows(ui: &Frame, fonts: &Fonts, m: &mut HotkeyModel, r: &mut MenuResult) 
     if let Some((ok, text)) = &m.message {
         small_text(ui, if *ok { PALETTE.ok } else { PALETTE.problem }, text);
         record(ui, r, "hotkeys:message");
+    }
+    if let Some(w) = &m.warning {
+        small_text(ui, PALETTE.accent, &format!("Warning: {w}"));
+        record(ui, r, "hotkeys:warning");
     }
     let all_default = Action::ALL.iter().all(|a| {
         reg.outcome(*a)

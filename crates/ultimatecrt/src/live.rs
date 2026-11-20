@@ -239,6 +239,13 @@ impl Live {
         }
     }
 
+    /// Writes the settings now (the load upgraded something, `settings::Loaded::notes`: written back at once so
+    /// that the upgrade and its note happen once).
+    pub fn save_now(&mut self) {
+        self.mark_dirty();
+        self.flush_settings(true);
+    }
+
     fn mark_dirty(&mut self) {
         self.dirty_since = Some(std::time::Instant::now());
     }
