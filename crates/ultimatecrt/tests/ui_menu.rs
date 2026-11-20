@@ -432,6 +432,35 @@ fn slider_combo_and_text_input_through_win32_messages() {
     rig.finish();
 }
 
+/// R-05 (owner decision Q1): a value typed into a slider (Ctrl+click, type, Enter) beyond its range is clamped
+/// to the slider range, on the logarithmic exposure slider (0.05 to 8): 500 gives 8, 0 and -3 give 0.05.
+#[test]
+fn a_typed_value_beyond_the_slider_range_is_clamped() {
+    let _g = lock();
+    let Some(mut rig) = Rig::new("a_typed_value_beyond_the_slider_range_is_clamped", 800, 720) else {
+        return;
+    };
+    rig.open_menu();
+    let (lo, hi) = ultimatecrt::params::meta("exposure").unwrap().soft_range.unwrap();
+    for (text, want) in [("500", hi as f32), ("0", lo as f32), ("-3", lo as f32), ("2.5", 2.5)] {
+        let p = MenuRects::at(rig.ui.menu_rects().exposure, 0.5, 0.5);
+        let l = mouse_lparam(p[0] as i16, p[1] as i16);
+        // Ctrl+click opens the text entry of the slider (its text selected), then type and Enter.
+        rig.frame(&[(WM_KEYDOWN, 0x11, key_lparam(0x1D, false, false))]);
+        rig.frame(&[(WM_MOUSEMOVE, 0, l)]);
+        rig.frame(&[(WM_LBUTTONDOWN, 1, l)]);
+        rig.frame(&[(WM_LBUTTONUP, 0, l)]);
+        rig.frame(&[(WM_KEYUP, 0x11, key_lparam(0x1D, false, true))]);
+        rig.type_text(text);
+        rig.key(0x0D, 0x1C, false); // Enter
+        rig.frame(&[]);
+        let got = rig.state.params.exposure;
+        eprintln!("typed {text}: exposure {got}");
+        assert_eq!(got, want, "typed {text}");
+    }
+    rig.finish();
+}
+
 #[test]
 fn preset_selector_applies_the_preset() {
     let _g = lock();
