@@ -37,6 +37,7 @@ use ash::vk;
 
 use super::barrier;
 use super::context::Context;
+use super::external::{self, ExternalSet};
 use super::headless::{DeviceBuffer, GpuImage, HostBuffer, ImageF32};
 use super::stages::{self, decode, decode::Decode, encode, encode::Encode, ComputePass, Domain, Registration, Stage};
 use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
@@ -515,6 +516,9 @@ struct Slot {
     frame_ubo: HostBuffer,
     params_ubo: HostBuffer,
     decode_set: vk::DescriptorSet,
+    /// The image view decode_set's source binding was last written with (`src`, or an imported image of the
+    /// zero-copy path, A29), null when it must be written again.
+    decode_src: vk::ImageView,
     encode_set: vk::DescriptorSet,
     encode_bound: vk::ImageView,
     /// Clip counters as the CPU reads them (`encode::CLIP_BYTES` bytes): a copy of `clip_dev` made at the end of
@@ -542,6 +546,14 @@ pub struct Pipeline {
     src: Img,
     /// `src` holds an uploaded frame (or one is recorded for upload).
     src_valid: bool,
+    /// Zero-copy (A29): the imported images of the capture pool in use.
+    ext: Option<ExternalSet>,
+    /// The imported image that is the source now (in place of `src`), `None` on the CPU path.
+    ext_current: Option<usize>,
+    /// The imported image the frame being recorded reads (committed by `submit`: its first use is then done).
+    ext_recorded: Option<usize>,
+    /// The last submitted frame read an imported image (the renderer keeps that slot held until its fence).
+    ext_submitted: bool,
     /// Native raster, `NATIVE_FORMAT`.
     native: Img,
     /// Image injected by a stage test, `INJECT_FORMAT`.
@@ -653,6 +665,10 @@ impl Pipeline {
             current: 0,
             src: Img::default(),
             src_valid: false,
+            ext: None,
+            ext_current: None,
+            ext_recorded: None,
+            ext_submitted: false,
             native: Img::default(),
             inject: Img::default(),
             routed: Vec::with_capacity(chain.len() + 1),
@@ -1044,7 +1060,75 @@ impl Pipeline {
         // Host writes before vkQueueSubmit are visible to the device (implicit host write ordering).
         std::ptr::copy_nonoverlapping(bgra.as_ptr(), s.staging.mapped, bytes);
         s.upload = true;
+        // The uploaded frame is the source from now on (not an imported image).
+        self.ext_current = None;
         Ok(())
+    }
+
+    /// Zero-copy (A29): makes `slot` of the shared texture pool `pool` the source of the next frames, in place of
+    /// `src`. The pool's textures are imported once (all of them, the device idled first, the previous pool's
+    /// imports destroyed) when its generation is new. A frame staged in an upload buffer and not recorded yet is
+    /// dropped (this one is newer). On an error nothing is the source any more until the next staged frame, and
+    /// the pipeline keeps working with the CPU path. Returns true when the pool was imported (the device was idled:
+    /// no frame reads any earlier shared texture any more).
+    ///
+    /// # Safety
+    /// `ctx` is the pipeline's context and [`Pipeline::wait_slot`] was called for the current slot.
+    pub(super) unsafe fn stage_external(
+        &mut self,
+        ctx: &Context,
+        pool: &std::sync::Arc<crate::capture::SharedTextures>,
+        slot: usize,
+    ) -> Res<bool> {
+        if ctx.external_memory().is_none() {
+            return Err(if ctx.external_memory_requested() {
+                "zero-copy: the Vulkan device cannot import Direct3D 11 textures".into()
+            } else {
+                "zero-copy: the Vulkan device was created without VK_KHR_external_memory_win32".into()
+            });
+        }
+        let (width, height) = pool.size();
+        let max = self.limits.max_dim;
+        if width == 0 || height == 0 || width > max || height > max {
+            return Err(
+                format!("zero-copy: a shared frame of {width}x{height} (this GPU's image limit is {max} px)").into(),
+            );
+        }
+        let imported = self.ext.as_ref().map(|e| e.generation) != Some(pool.generation());
+        if imported {
+            ctx.device.device_wait_idle()?;
+            self.ext_current = None;
+            if let Some(mut old) = self.ext.take() {
+                old.destroy(&ctx.device);
+            }
+            for s in &mut self.slots {
+                s.decode_src = vk::ImageView::null();
+            }
+            self.ext = Some(ExternalSet::import(ctx, pool)?);
+        }
+        if slot >= self.ext.as_ref().map_or(0, |e| e.images.len()) {
+            return Err(format!("zero-copy: no shared slot {slot}").into());
+        }
+        for s in &mut self.slots {
+            s.upload = false;
+        }
+        self.ext_current = Some(slot);
+        Ok(imported)
+    }
+
+    /// The source is an imported shared texture (zero-copy), not `src`.
+    pub(super) fn source_is_external(&self) -> bool {
+        self.ext_current.is_some()
+    }
+
+    /// The last submitted frame read an imported shared texture.
+    pub(super) fn submitted_external(&self) -> bool {
+        self.ext_submitted
+    }
+
+    /// Forgets the imported source (after a zero-copy failure): the next frames draw `src` if it holds a frame.
+    pub(super) fn drop_external_source(&mut self) {
+        self.ext_current = None;
     }
 
     /// Stage tests: copies `image` (RGBA f32) for upload by the next [`Pipeline::record_with`], where it
@@ -1147,22 +1231,39 @@ impl Pipeline {
         }
         for (s, b) in self.slots.iter_mut().zip(staging) {
             s.staging = b;
+            // Written again by `plan_frame` (with this `src`, or an imported image).
+            s.decode_src = vk::ImageView::null();
+        }
+        Ok(())
+    }
+
+    /// Points `decode_set` of frame slot `cur` at the frame's source: `src` (`SHADER_READ_ONLY_OPTIMAL`) or the
+    /// imported image of the zero-copy path (`GENERAL`). Written only when it changed.
+    ///
+    /// # Safety
+    /// The slot's previous submission finished ([`Pipeline::wait_slot`]).
+    unsafe fn bind_decode_source(&mut self, d: &ash::Device, cur: usize) {
+        let (view, layout) = match (self.ext_current, &self.ext) {
+            (Some(i), Some(e)) => (e.images[i].view, vk::ImageLayout::GENERAL),
+            _ => (self.src.gpu.view, vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL),
+        };
+        let s = &mut self.slots[cur];
+        if s.decode_src == view || view == vk::ImageView::null() {
+            return;
         }
         let info = [vk::DescriptorImageInfo::default()
             .sampler(self.sampler)
-            .image_view(self.src.gpu.view)
-            .image_layout(vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL)];
-        for s in &self.slots {
-            d.update_descriptor_sets(
-                &[vk::WriteDescriptorSet::default()
-                    .dst_set(s.decode_set)
-                    .dst_binding(decode::BINDING_SRC)
-                    .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
-                    .image_info(&info)],
-                &[],
-            );
-        }
-        Ok(())
+            .image_view(view)
+            .image_layout(layout)];
+        d.update_descriptor_sets(
+            &[vk::WriteDescriptorSet::default()
+                .dst_set(s.decode_set)
+                .dst_binding(decode::BINDING_SRC)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&info)],
+            &[],
+        );
+        s.decode_src = view;
     }
 
     /// Usage of the chain images (and `native`): written by compute, sampled, read back by tests.
@@ -1427,7 +1528,8 @@ impl Pipeline {
         let inject_at = self.slots[cur].inject_at;
         let staged = self.slots[cur].upload;
         let native = fc.domain_size(Domain::Native);
-        let mut have_source = inject_at.is_some() || ((self.src_valid || staged) && native.0 > 0 && native.1 > 0);
+        let source = self.src_valid || staged || self.ext_current.is_some();
+        let mut have_source = inject_at.is_some() || (source && native.0 > 0 && native.1 > 0);
         if inject_at.is_none() && have_source && native != view.native {
             return Err("pipeline: FrameConstants native size differs from the view".into());
         }
@@ -1474,6 +1576,7 @@ impl Pipeline {
                     if native != self.native.size {
                         self.reallocate_native(ctx, native)?;
                     }
+                    self.bind_decode_source(&ctx.device, cur);
                     self.routed.push(("decode", ImgRef::Native));
                     0
                 }
@@ -1656,6 +1759,7 @@ impl Pipeline {
         self.saved.extend(self.chain.iter().map(|l| l.out.track()));
         self.recorded = true;
         self.uploads = staged;
+        self.ext_recorded = None;
 
         if staged {
             self.src.use_for_write(
@@ -1695,17 +1799,33 @@ impl Pipeline {
 
         if have_source {
             if inject_at.is_none() {
+                // Zero-copy (A29): the imported image is acquired from the external owner for `decode` and released
+                // after it; otherwise `src` is read.
+                let ext = self.ext_current.and_then(|i| {
+                    self.ext
+                        .as_ref()
+                        .map(|e| (i, e.images[i].image, e.images[i].initialized))
+                });
+                match ext {
+                    Some((_, image, initialized)) => {
+                        external::ownership_barrier(d, cb, image, ctx.queue_family, initialized, false)
+                    }
+                    None => self.src.use_for_read(
+                        d,
+                        cb,
+                        vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
+                        vk::PipelineStageFlags2::COMPUTE_SHADER,
+                        vk::AccessFlags2::SHADER_SAMPLED_READ,
+                    ),
+                }
                 // Decode overwrites every texel of `native`.
-                self.src.use_for_read(
-                    d,
-                    cb,
-                    vk::ImageLayout::SHADER_READ_ONLY_OPTIMAL,
-                    vk::PipelineStageFlags2::COMPUTE_SHADER,
-                    vk::AccessFlags2::SHADER_SAMPLED_READ,
-                );
                 self.native.use_for_storage_write(d, cb);
                 self.decode
                     .record(d, cb, self.slots[cur].decode_set, view, settings.source);
+                if let Some((i, image, _)) = ext {
+                    external::ownership_barrier(d, cb, image, ctx.queue_family, true, true);
+                    self.ext_recorded = Some(i);
+                }
                 self.timer.mark(d, cb, cur, timing::DECODE, false);
             }
             for k in 0..self.plan.len() {
@@ -1917,6 +2037,12 @@ impl Pipeline {
             self.slots[cur].upload = false;
             self.src_valid = true;
         }
+        // Zero-copy: the imported image it read has left `UNDEFINED`.
+        let ext = self.ext_recorded.take();
+        if let (Some(i), Some(e)) = (ext, self.ext.as_mut()) {
+            e.images[i].initialized = true;
+        }
+        self.ext_submitted = ext.is_some();
         self.recorded = false;
         self.timer.submitted(cur);
         self.current = (self.current + 1) % FRAMES_IN_FLIGHT;
@@ -1934,6 +2060,7 @@ impl Pipeline {
             return;
         }
         self.uploads = false;
+        self.ext_recorded = None;
         // Stage-owned state the frame consumed (pending history clears and layout transitions).
         for l in &mut self.chain {
             l.stage.abandon();
@@ -1962,6 +2089,10 @@ impl Pipeline {
         let d = &ctx.device;
         self.native.gpu.destroy(d);
         self.src.gpu.destroy(d);
+        if let Some(mut e) = self.ext.take() {
+            e.destroy(d);
+        }
+        self.ext_current = None;
         self.inject.gpu.destroy(d);
         for l in &mut self.chain {
             l.out.gpu.destroy(d);

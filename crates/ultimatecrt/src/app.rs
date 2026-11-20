@@ -18,7 +18,7 @@ use crate::{
     picker::{self, Event, Phase},
     placement, presets, scaling, settings, source, sources,
     ui::{AttachedView, SourceAction, SourcePrefs, SourceView},
-    Res,
+    zerocopy, Res,
 };
 
 /// The rectangle the output window will cover, as far as it is known before the window exists (HW-3): in
@@ -56,6 +56,7 @@ fn idle_frame() -> capture::Frame {
         height: IDLE_SIZE.1,
         data: [0u8, 0, 0, 255].repeat((IDLE_SIZE.0 * IDLE_SIZE.1) as usize),
         seq: 0,
+        ..capture::Frame::default()
     }
 }
 
@@ -284,7 +285,7 @@ pub fn run() -> Res<()> {
         None => None,
         Some(entry) => match capture::Capture::start(hwnd_of(entry.hwnd), map.client_area, guess.capture_luid()) {
             Ok(c) => {
-                println!("capture: Windows.Graphics.Capture on {} (CPU copy)", c.adapter);
+                println!("capture: Windows.Graphics.Capture on {}", c.adapter);
                 Some(c)
             }
             // The developer path stops on the error, as before; the last choice falls back to the picker.
@@ -397,12 +398,18 @@ pub fn run() -> Res<()> {
         &gpu_spec,
         Some((cover.left, cover.top, cover.right, cover.bottom)),
     );
+    // A29: the capture path asked for (`--capture-path` wins over `[global.capture] path`). The Vulkan device gets the
+    // external memory extension only when zero-copy is asked for at start.
+    let mut capture_mode = zerocopy::Fallback::new(args.capture_path.unwrap_or(stored.global.capture.path()));
+    let mut capture_notice: Option<String> = None;
+    let mut shared_seq: Option<u64> = None; // the frame whose shared texture the renderer holds
     let mut renderer = gpu::Renderer::new(
         win.hwnd.0 as isize,
         win.hinstance,
         selection.device_request(),
         args.validation,
         args.integer,
+        capture_mode.requested() == zerocopy::CapturePath::ZeroCopy,
     )?;
     let got = &renderer.context().gpu;
     selection.note_renderer(adapters::VulkanDevice {
@@ -426,6 +433,18 @@ pub fn run() -> Res<()> {
     }
     renderer.set_params(params);
     println!("render: Vulkan on {}", renderer.gpu_name);
+    println!(
+        "capture path: {} asked{}",
+        capture_mode.requested(),
+        if capture_mode.requested() == zerocopy::CapturePath::ZeroCopy {
+            format!(
+                " (Vulkan import: {})",
+                renderer.zero_copy_support().map_or("not supported", |k| k.name())
+            )
+        } else {
+            String::new()
+        }
+    );
     println!("{}", selection.summary());
     for w in &selection.warnings {
         eprintln!("warning: gpu: {w}");
@@ -916,6 +935,27 @@ pub fn run() -> Res<()> {
                 thumbs.reset();
             }
 
+            // ---- Capture path (A29): failures reported once, the path in force applied to the session ----
+            if let Some(why) = renderer.take_external_failure() {
+                refuse_zero_copy(&mut capture_mode, &mut capture_notice, zerocopy::Refusal::Failed(why));
+            }
+            if let Some(c) = &capture {
+                if let Some(why) = c.take_failure() {
+                    refuse_zero_copy(&mut capture_mode, &mut capture_notice, zerocopy::Refusal::Failed(why));
+                }
+                if capture_mode.active() == zerocopy::CapturePath::ZeroCopy {
+                    let support = renderer.zero_copy_check(Some(c.adapter_luid));
+                    if let Err(r) =
+                        zerocopy::decide(zerocopy::CapturePath::ZeroCopy, renderer.zero_copy_requested(), support)
+                    {
+                        refuse_zero_copy(&mut capture_mode, &mut capture_notice, r);
+                    }
+                }
+                c.set_path(capture_mode.active());
+                // Zero-copy samples the pixels for the analyses; every frame while a detection runs.
+                c.set_full_rate_samples(!detector.is_locked() || bars_state.auto.running());
+            }
+
             // ---- Frames ----
             let got = match &capture {
                 _ if idle => false,
@@ -932,11 +972,16 @@ pub fn run() -> Res<()> {
                     println!("source size changed: {}x{}", frame.width, frame.height);
                 }
                 if capture.is_some() {
-                    let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
+                    // Zero-copy (A29): `frame.data` may be an earlier sample; the analyses take new pixels only.
+                    let black =
+                        (!frame.pixels_old && health.wants_sample(now)).then(|| lifecycle::is_black(&frame.data));
                     health.note_frame(now, black);
                     // Auto picture area (or stale stored manual limits): every frame while a detection runs, else a
                     // few sampled frames per second.
-                    if bars::detects(&params, &profile, cli_crop, (frame.width, frame.height)) && map.client_area {
+                    if !frame.pixels_old
+                        && bars::detects(&params, &profile, cli_crop, (frame.width, frame.height))
+                        && map.client_area
+                    {
                         bars_state.auto.feed(now, &frame.data, frame.width, frame.height);
                     }
                 }
@@ -1132,7 +1177,7 @@ pub fn run() -> Res<()> {
                 let fixed = map.divisor.or((synthetic || capture.is_none()).then_some((1, 1)));
                 // A capture is always analysed (until the detection locks), also under a forced multiplier, so the
                 // Source section shows what was detected next to the forced value.
-                if capture.is_some() {
+                if capture.is_some() && !(got && frame.pixels_old) {
                     let was_locked = detector.is_locked();
                     detector.feed(&frame.data, frame.width, region);
                     if detector.is_locked() && !was_locked {
@@ -1163,11 +1208,22 @@ pub fn run() -> Res<()> {
                 // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
                 // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
                 let eligible = capture.is_some() && map.divisor.is_none() && detector.is_locked() && div == (1, 1);
-                if got && smoothing.feed(&frame.data, frame.width, region, eligible) {
+                if got && !frame.pixels_old && smoothing.feed(&frame.data, frame.width, region, eligible) {
                     println!("warning: {}", lifecycle::SMOOTHED_WARNING);
                 }
             }
-            let upload = fresh.then_some((frame.width, frame.height, frame.data.as_slice()));
+            // A29: a shared texture goes to the renderer as it is (moved: the renderer holds it from now on); the frame
+            // whose shared texture the renderer already holds is not uploaded again; anything else is a CPU frame.
+            let upload = if !fresh || idle {
+                None
+            } else if let Some(s) = frame.shared.take() {
+                shared_seq = Some(frame.seq);
+                Some(gpu::Upload::Shared(s))
+            } else if shared_seq == Some(frame.seq) && renderer.source_is_shared() {
+                None
+            } else {
+                Some(gpu::Upload::Cpu(frame.width, frame.height, frame.data.as_slice()))
+            };
             // SRC-8: a source size change or a new capture session clears the persistence history (T-41).
             if size_watch.take_history_clear() {
                 renderer.clear_history();
@@ -1260,6 +1316,14 @@ pub fn run() -> Res<()> {
             if let Some(adapter) = changes.gpu_adapter {
                 println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
                 live.set_gpu_adapter(adapter);
+            }
+            if let Some(path) = changes.capture_path {
+                // A29: stored, and applied from the next frame on (restart-free on the capture side; zero-copy needs the
+                // GPU device made for it at start, else it applies at the next start).
+                println!("capture: path set to {path}");
+                live.set_capture_path(path);
+                capture_mode.request(path);
+                capture_notice = None;
             }
             if let Some(SourcePrefs {
                 ask_at_start,
@@ -1478,7 +1542,7 @@ pub fn run() -> Res<()> {
             } else {
                 // R-01: a lost device ends the loop (the shutdown saves, `fatal_message` tells the user); what the
                 // renderer recovers from is a status, not an error.
-                let status = renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
+                let status = renderer.render_source(upload, view, out_size, Some(&mut ui))?;
                 // The frame was staged for upload whatever the status: it is consumed.
                 fresh = false;
                 let presented = match status {
@@ -1539,7 +1603,8 @@ pub fn run() -> Res<()> {
                 // R-02, R-01: what the renderer limited (amplifier samples, an empty tube area, ...). The renderer
                 // prints each one once when it appears; the queue is drained here so it stays bounded.
                 let _ = renderer.take_gpu_notices();
-                let gpu_notice = title_notice(adapter_notice.as_deref(), renderer.gpu_notice().as_deref());
+                let machine_notice = title_notice(adapter_notice.as_deref(), capture_notice.as_deref());
+                let gpu_notice = title_notice(machine_notice.as_deref(), renderer.gpu_notice().as_deref());
                 let shown_notice = title_notice(notice.as_deref(), gpu_notice.as_deref());
                 let secs = stat_time.elapsed().as_secs_f64();
                 // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
@@ -1560,6 +1625,21 @@ pub fn run() -> Res<()> {
                         user_tier.name()
                     )
                 });
+                // A29: the capture path in force and the capture thread's copy cost of this second.
+                let copy = capture.as_ref().and_then(|c| c.take_copy_cost());
+                ui_state.capture = crate::ui::CaptureView {
+                    requested: capture_mode.requested(),
+                    active: capture_mode.active(),
+                    reason: capture_mode
+                        .reason()
+                        .filter(|r| **r != zerocopy::Refusal::NotEnabledAtStart)
+                        .map(ToString::to_string),
+                    restart_needed: capture_mode.reason() == Some(&zerocopy::Refusal::NotEnabledAtStart),
+                    copy_ms: copy.map(|(mean, _, _)| mean),
+                };
+                if let Some(l) = log.as_mut() {
+                    l.set_capture(capture_mode.active(), copy.map(|(mean, _, _)| mean));
+                }
                 // A diagnostics log that cannot be written is closed with a warning; the session goes on.
                 let log_failed = log
                     .as_mut()
@@ -1607,6 +1687,14 @@ pub fn run() -> Res<()> {
                     if let Some(g) = &gpu {
                         println!("  {}", g.stats_line());
                     }
+                    // A29: the capture path and the capture thread's copy cost per frame.
+                    println!(
+                        "  capture path: {}{}",
+                        capture_mode.describe(),
+                        copy.map_or_else(String::new, |(mean, max, n)| format!(
+                            ", copy {mean:.3} ms per frame (max {max:.3} ms, {n} frames)"
+                        ))
+                    );
                 }
                 // The Auto picture area's periodic check: frames sampled and CPU time spent in the last second.
                 let (samples, spent) = bars_state.auto.take_cost();
@@ -1696,6 +1784,24 @@ fn fatal_message(e: &(dyn std::error::Error + 'static)) -> String {
 /// The message of a session that ended on a lost GPU device (R-01).
 const DEVICE_LOST_MESSAGE: &str =
     "The GPU was lost (driver reset or update). Settings and burn-in were saved; restart the application.";
+
+/// Falls back from zero-copy to the CPU copy (A29) for why: printed once, kept as the title notice while the
+/// setting asks for zero-copy.
+fn refuse_zero_copy(mode: &mut zerocopy::Fallback, notice: &mut Option<String>, why: zerocopy::Refusal) {
+    if mode.refuse(why) {
+        let text = capture_fallback_notice(mode);
+        println!("notice: {}", text.as_deref().unwrap_or("capture: the CPU copy is used"));
+        *notice = text;
+    }
+}
+
+/// The title notice of a zero-copy request that runs the CPU copy, None otherwise.
+fn capture_fallback_notice(mode: &zerocopy::Fallback) -> Option<String> {
+    mode.reason().map(|r| match r {
+        zerocopy::Refusal::NotEnabledAtStart => "capture: zero-copy applies at the next start".to_string(),
+        r => format!("capture: CPU copy ({r})"),
+    })
+}
 
 /// The notice of the title bar: the source's (lost, black, smoothed, interlace) and the renderer's (R-02, R-01),
 /// joined, each shown once.
@@ -2330,6 +2436,26 @@ mod tests {
     }
 
     /// The title's notice shows the source's and the renderer's, a repeated one once.
+    #[test]
+    fn a_refused_zero_copy_is_noticed_once_with_its_reason() {
+        let mut mode = zerocopy::Fallback::new(zerocopy::CapturePath::ZeroCopy);
+        let mut notice = None;
+        assert_eq!(capture_fallback_notice(&mode), None);
+        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::NotEnabledAtStart);
+        assert_eq!(notice.as_deref(), Some("capture: zero-copy applies at the next start"));
+        // Not news: the notice stays as it was.
+        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::CrossAdapter);
+        assert_eq!(notice.as_deref(), Some("capture: zero-copy applies at the next start"));
+        let mut mode = zerocopy::Fallback::new(zerocopy::CapturePath::ZeroCopy);
+        refuse_zero_copy(&mut mode, &mut notice, zerocopy::Refusal::CrossAdapter);
+        assert!(notice
+            .as_deref()
+            .is_some_and(|n| n.starts_with("capture: CPU copy (capture and rendering run on different adapters")));
+        // The CPU path asked: no notice.
+        mode.request(zerocopy::CapturePath::Cpu);
+        assert_eq!(capture_fallback_notice(&mode), None);
+    }
+
     #[test]
     fn title_notice_joins_and_deduplicates() {
         assert_eq!(title_notice(None, None), None);

@@ -17,6 +17,7 @@ use windows::Win32::{
 };
 
 use crate::gpu::FrameTimings;
+use crate::zerocopy::CapturePath;
 use crate::Res;
 
 /// An interval longer than this counts as a gap.
@@ -157,6 +158,8 @@ pub struct Log {
     totals: Totals,
     /// Names of the GPU timing segments, one `gpu_<name>_ms` column each (after `gpu_frame_ms`).
     gpu_names: Vec<&'static str>,
+    /// The capture path in force and the capture thread's mean copy cost of the second (A29), the last two columns.
+    capture_path: (CapturePath, Option<f64>),
 }
 
 /// The columns before the GPU timings; their order never changes (readers index them by position). Column 14
@@ -164,10 +167,19 @@ pub struct Log {
 const BASE_HEADER: &str = "t_s,capture_fps,cap_min_ms,cap_max_ms,cap_p99_ms,cap_gaps_50ms,render_fps,render_min_ms,\
                            render_max_ms,render_p99_ms,render_gaps_50ms,fg_changes,fg_pid,fg_exe,fg_is_source";
 
+/// The columns after the GPU timings (A29): the capture path in force (`cpu` or `zero-copy`) and the capture
+/// thread's mean copy cost per frame in that second (empty without frames).
+const CAPTURE_COLUMNS: &str = ",capture_path,capture_copy_ms";
+
+/// The values of [`CAPTURE_COLUMNS`], each after a comma.
+fn capture_fields((path, copy_ms): (CapturePath, Option<f64>)) -> String {
+    format!(",{path},{}", copy_ms.map_or_else(String::new, |ms| format!("{ms:.3}")))
+}
+
 /// The CSV header: the fixed columns, then `gpu_frame_ms` and one `gpu_<segment>_ms` per GPU timing
-/// segment (T-21), appended so that the earlier columns keep their position.
+/// segment (T-21), then the capture path columns, appended so that the earlier columns keep their position.
 pub fn csv_header(gpu_names: &[&str]) -> String {
-    format!("{BASE_HEADER}{}", crate::gpu::csv_columns(gpu_names))
+    format!("{BASE_HEADER}{}{CAPTURE_COLUMNS}", crate::gpu::csv_columns(gpu_names))
 }
 
 impl Log {
@@ -193,7 +205,13 @@ impl Log {
                 fps_min: f64::MAX,
                 ..Totals::default()
             },
+            capture_path: (CapturePath::Cpu, None),
         })
+    }
+
+    /// The capture path in force and the copy cost of the second about to be written (A29).
+    pub fn set_capture(&mut self, path: CapturePath, copy_ms: Option<f64>) {
+        self.capture_path = (path, copy_ms);
     }
 
     /// Call once per loop iteration, after the render, with the capture frame counter.
@@ -231,7 +249,7 @@ impl Log {
         let is_source = self.fg.is_source();
         writeln!(
             self.out,
-            "{:.1},{:.1},{:.2},{:.2},{:.2},{},{:.1},{:.2},{:.2},{:.2},{},{},{},{},{}{}",
+            "{:.1},{:.1},{:.2},{:.2},{:.2},{},{:.1},{:.2},{:.2},{:.2},{},{},{},{},{}{}{}",
             self.start.elapsed().as_secs_f64(),
             cap_fps,
             c.min_ms,
@@ -247,7 +265,8 @@ impl Log {
             pid,
             exe,
             u8::from(is_source),
-            FrameTimings::csv_values(gpu, &self.gpu_names)
+            FrameTimings::csv_values(gpu, &self.gpu_names),
+            capture_fields(self.capture_path)
         )?;
         self.out.flush()?;
         let t = &mut self.totals;
@@ -349,11 +368,16 @@ mod tests {
         let cols: Vec<&str> = h.split(',').collect();
         assert_eq!(&cols[..15], &fixed[..]);
         assert_eq!(
-            &cols[15..],
+            &cols[15..19],
             ["gpu_frame_ms", "gpu_upload_ms", "gpu_decode_ms", "gpu_encode_ms"]
         );
-        // With no timing segments only the frame column is added.
-        assert_eq!(csv_header(&[]), format!("{BASE_HEADER},gpu_frame_ms"));
+        // A29: the capture path columns come last.
+        assert_eq!(&cols[19..], ["capture_path", "capture_copy_ms"]);
+        // With no timing segments only the frame column is added before them.
+        assert_eq!(
+            csv_header(&[]),
+            format!("{BASE_HEADER},gpu_frame_ms,capture_path,capture_copy_ms")
+        );
     }
 
     #[test]
@@ -374,11 +398,22 @@ mod tests {
         };
         let fixed_row = "1.0,60.0,16.60,16.70,16.70,0,60.0,16.60,16.70,16.70,0,0,,,1";
         for gpu in [Some(&t), None] {
-            let row = format!("{fixed_row}{}", FrameTimings::csv_values(gpu, &names));
-            assert_eq!(row.split(',').count(), csv_header(&names).split(',').count());
+            for capture in [(CapturePath::Cpu, None), (CapturePath::ZeroCopy, Some(0.125))] {
+                let row = format!(
+                    "{fixed_row}{}{}",
+                    FrameTimings::csv_values(gpu, &names),
+                    capture_fields(capture)
+                );
+                assert_eq!(row.split(',').count(), csv_header(&names).split(',').count());
+            }
         }
-        let row = format!("{fixed_row}{}", FrameTimings::csv_values(Some(&t), &names));
-        assert!(row.ends_with(",1,0.500,,0.250,0.250"), "{row}");
+        let row = format!(
+            "{fixed_row}{}{}",
+            FrameTimings::csv_values(Some(&t), &names),
+            capture_fields((CapturePath::ZeroCopy, Some(0.125)))
+        );
+        assert!(row.ends_with(",1,0.500,,0.250,0.250,zero-copy,0.125"), "{row}");
+        assert!(capture_fields((CapturePath::Cpu, None)).ends_with(",cpu,"));
     }
 
     #[test]

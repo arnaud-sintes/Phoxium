@@ -239,6 +239,15 @@ impl Live {
         }
     }
 
+    /// The menu chose the capture path (`[global.capture] path`, A29): written at once.
+    pub fn set_capture_path(&mut self, path: crate::zerocopy::CapturePath) {
+        if self.settings.global.capture.path != path.id() {
+            self.settings.global.capture.path = path.id().to_string();
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
     /// Writes the settings now (the load upgraded something, `settings::Loaded::notes`: written back at once so
     /// that the upgrade and its note happen once).
     pub fn save_now(&mut self) {

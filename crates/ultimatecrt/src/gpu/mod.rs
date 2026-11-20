@@ -156,6 +156,7 @@ pub unsafe fn wait_fences(d: &ash::Device, fences: &[vk::Fence], during: &'stati
 }
 
 mod context;
+mod external;
 mod headless;
 mod pipeline;
 mod present;
@@ -178,6 +179,17 @@ pub use stages::{Domain, AMP_K};
 
 use pipeline::{Pipeline, Target};
 
+use crate::capture::SharedFrame;
+use crate::zerocopy::{HandleKind, InFlight};
+
+/// A new source frame for [`Renderer::render_source`].
+pub enum Upload<'a> {
+    /// A captured BGRA8 frame in CPU memory (CPU path, patterns, images): width, height, pixels.
+    Cpu(u32, u32, &'a [u8]),
+    /// A frame in a shared texture of the zero-copy capture path (A29): sampled in place, never copied.
+    Shared(SharedFrame),
+}
+
 /// Renders the captured frame into one output window.
 ///
 /// Every Vulkan handle starts null and is filled in by `new`, so `Drop` releases whatever was
@@ -196,6 +208,12 @@ pub struct Renderer {
     clip: ClipCounts,
     /// Set by the first device loss: every later call returns it without touching the device.
     lost: Option<GpuError>,
+    /// Zero-copy (A29): the shared slots the renderer holds (the source, and those read by frames in flight).
+    shared: InFlight<SharedFrame, FRAMES_IN_FLIGHT>,
+    /// Why a shared frame could not be used (import or staging failed), until [`Renderer::take_external_failure`].
+    external_failure: Option<String>,
+    /// The device offers `VK_KHR_external_memory_win32` (queried once).
+    zero_copy_offered: bool,
     /// Destroyed last: `Drop for Renderer` releases every child object above first, then the
     /// field drop of `ctx` destroys the device and the instance.
     ctx: Context,
@@ -203,13 +221,22 @@ pub struct Renderer {
 
 impl Renderer {
     /// Creates the Vulkan context on a device that can present to `hwnd` (the requested one, see
-    /// [`DeviceRequest`]; the chosen device is [`Context::gpu`]), its presenter and the pipeline.
-    pub fn new(hwnd: isize, hinstance: isize, gpu: DeviceRequest, validation: bool, integer_scale: bool) -> Res<Self> {
+    /// [`DeviceRequest`]; the chosen device is [`Context::gpu`]), its presenter and the pipeline. With
+    /// `zero_copy` (the zero-copy capture path is asked for, A29) the device gets `VK_KHR_external_memory_win32`
+    /// when it offers it ([`Renderer::zero_copy_support`]).
+    pub fn new(
+        hwnd: isize,
+        hinstance: isize,
+        gpu: DeviceRequest,
+        validation: bool,
+        integer_scale: bool,
+        zero_copy: bool,
+    ) -> Res<Self> {
         // SAFETY: `hwnd` is the live output window of `hinstance`, owned by the application, which
         // drops the renderer before destroying the window. The presenter and pipeline are destroyed
         // by `Drop for Renderer` before `ctx`.
         unsafe {
-            let (ctx, surface) = Context::with_window(hwnd, hinstance, gpu, validation)?;
+            let (ctx, surface) = Context::with_window(hwnd, hinstance, gpu, validation, zero_copy)?;
             let presenter = Presenter::from_surface(&ctx, surface, Some((hwnd, hinstance)), hwnd_client_size(hwnd))?;
             let mut r = Self {
                 gpu_name: ctx.gpu.name.clone(),
@@ -224,6 +251,9 @@ impl Renderer {
                 quality_drop: 0,
                 clip: ClipCounts::default(),
                 lost: None,
+                shared: InFlight::default(),
+                external_failure: None,
+                zero_copy_offered: ctx.external_memory_offered(),
                 ctx,
             };
             for s in &mut r.image_available {
@@ -294,6 +324,20 @@ impl Renderer {
         client: (u32, u32),
         ui: Option<&mut dyn UiPass>,
     ) -> Res<FrameStatus> {
+        self.render_source(frame.map(|(w, h, d)| Upload::Cpu(w, h, d)), view, client, ui)
+    }
+
+    /// [`Renderer::render_with_ui`] with a source frame of either path ([`Upload`]). A shared frame that cannot be
+    /// used (the device cannot import, the import fails) is not an error: it is dropped, the previous source stays,
+    /// and the reason waits in [`Renderer::take_external_failure`] (the application falls back to the CPU copy). A
+    /// lost device stays an error.
+    pub fn render_source(
+        &mut self,
+        frame: Option<Upload<'_>>,
+        view: View,
+        client: (u32, u32),
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<FrameStatus> {
         if let Some(e) = &self.lost {
             return Err(Box::new(e.clone()));
         }
@@ -310,7 +354,7 @@ impl Renderer {
     /// Body of [`Renderer::render_with_ui`].
     fn render_frame(
         &mut self,
-        frame: Option<(u32, u32, &[u8])>,
+        frame: Option<Upload<'_>>,
         view: View,
         client: (u32, u32),
         ui: Option<&mut dyn UiPass>,
@@ -321,9 +365,18 @@ impl Renderer {
         // image-available semaphore are free.
         unsafe {
             pipeline.wait_slot(&self.ctx)?;
+            // The frame this slot submitted last is done: the shared slot it read, if any, may go back.
+            self.shared.frame_done(pipeline.slot());
             self.clip = pipeline.clip_counts();
-            if let Some((w, h, data)) = frame {
-                pipeline.stage_source(&self.ctx, w, h, data)?;
+            match frame {
+                Some(Upload::Cpu(w, h, data)) => {
+                    pipeline.stage_source(&self.ctx, w, h, data)?;
+                    self.shared.clear_current();
+                }
+                Some(Upload::Shared(f)) => {
+                    stage_shared(&self.ctx, pipeline, &mut self.shared, f, &mut self.external_failure)?
+                }
+                None => {}
             }
             // Minimised, or the surface has no extent now (the old swapchain is kept): nothing to draw into.
             if !self.presenter.ensure(&self.ctx, client)? {
@@ -380,13 +433,51 @@ impl Renderer {
             vk::PipelineStageFlags2::NONE,
             vk::AccessFlags2::NONE,
         );
+        let slot = pipeline.slot();
         pipeline.submit(
             &self.ctx,
             &[acquired],
             &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
             &[self.presenter.render_done(index)],
         )?;
+        // Zero-copy: the shared slot this frame read stays held until its fence (`frame_done` in `render_frame`).
+        self.shared.submitted(slot, pipeline.submitted_external());
         self.presenter.present(&self.ctx, index)
+    }
+
+    /// The handle kind of the shared textures the device imports, when the zero-copy path was asked for at start and
+    /// the device supports it (A29); `None` otherwise.
+    pub fn zero_copy_support(&self) -> Option<HandleKind> {
+        self.ctx.external_memory()
+    }
+
+    /// Whether the device was created for the zero-copy path (the setting was on at start).
+    pub fn zero_copy_requested(&self) -> bool {
+        self.ctx.external_memory_requested()
+    }
+
+    /// What the zero-copy decision needs from the renderer (`zerocopy::decide`): the extension offered, the handle kind
+    /// imported (when enabled at start), and whether `capture` (the capture device's adapter) is the renderer's.
+    pub fn zero_copy_check(&self, capture: Option<crate::adapters::Luid>) -> crate::zerocopy::Support {
+        let render = self.ctx.gpu.luid.map(crate::adapters::Luid::from_vulkan);
+        crate::zerocopy::Support {
+            extension: self.zero_copy_offered,
+            handle: self.ctx.external_memory(),
+            same_adapter: match (capture, render) {
+                (Some(c), Some(r)) => Some(c == r),
+                _ => None,
+            },
+        }
+    }
+
+    /// Why the last shared frames could not be used (once), `None` when they could.
+    pub fn take_external_failure(&mut self) -> Option<String> {
+        self.external_failure.take()
+    }
+
+    /// The source is a shared texture (the zero-copy path runs end to end).
+    pub fn source_is_shared(&self) -> bool {
+        self.pipeline.as_ref().is_some_and(Pipeline::source_is_external)
     }
 
     /// Error path after a successful acquire: the image is acquired and will not be presented, and its
@@ -582,6 +673,44 @@ impl crate::tube_state::WearHost for Headless {
         let (p, ctx) = self.parts();
         // SAFETY: as above; every headless call records and submits within the call.
         unsafe { wear_host::read(p, ctx) }
+    }
+}
+
+/// Stages a shared frame (zero-copy, A29) as the pipeline's source and makes it the current hold. A new pool
+/// generation is imported after a device idle (inside `stage_external`), so every earlier hold can go. A failure other
+/// than a lost device is kept in `failure` (the first one) and the frame is dropped: the pipeline keeps drawing
+/// `src` if it holds a frame.
+///
+/// # Safety
+/// As [`Pipeline::stage_external`].
+unsafe fn stage_shared(
+    ctx: &Context,
+    pipeline: &mut Pipeline,
+    holds: &mut InFlight<SharedFrame, FRAMES_IN_FLIGHT>,
+    frame: SharedFrame,
+    failure: &mut Option<String>,
+) -> Res<()> {
+    match pipeline.stage_external(ctx, frame.pool(), frame.slot()) {
+        Ok(imported) => {
+            if imported {
+                // Device idle when the generation changed: nothing reads the old pool any more.
+                holds.drain();
+            }
+            holds.set_current(frame);
+            Ok(())
+        }
+        Err(e) => {
+            let e = lift(e, "importing a shared capture texture");
+            if e.downcast_ref::<GpuError>().is_some_and(GpuError::is_device_lost) {
+                return Err(e);
+            }
+            pipeline.drop_external_source();
+            holds.clear_current();
+            if failure.is_none() {
+                *failure = Some(e.to_string());
+            }
+            Ok(())
+        }
     }
 }
 
