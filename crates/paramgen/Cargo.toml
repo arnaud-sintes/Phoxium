@@ -3,6 +3,7 @@ name = "paramgen"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Reads the declarative parameter table (params/*.toml) and generates Rust and GLSL (build-time tool)"
 
 [dependencies]

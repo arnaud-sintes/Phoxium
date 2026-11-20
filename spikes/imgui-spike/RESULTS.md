@@ -163,7 +163,7 @@ over `dear-imgui-sys`, then set B.
 
 ## 9. Live run 2026-11-19
 
-Branch `task/T-08live`, dev machine (Windows 11 build 26300, RTX A2000 Laptop, Dell P2418D 2560x1440), owner away,
+Branch `task/T-08live`, dev machine (Windows 11 build 26300, RTX A2000 Laptop, Dell P2418D 2560x1440), unattended run,
 hands-off desktop (idle log below). Source window: `pixel-demo` 256x240 at 3x. Every run: 2 F11 toggles with the
 source focused, then N cycles of menu key (open), `t08` typed with SendInput, menu key (close). Validation layer
 and synchronization validation on in every run: 0 messages. No pixel-demo/live/poll process left after any run.
@@ -216,7 +216,7 @@ tray/command), and a real game as the source. The Alt trick is not needed, so th
 input for the focus hand-off.
 
 Typed text: "t08" sent with SendInput (`KEYEVENTF_UNICODE`) reached the ImGui text field in every cycle (48 of 48).
-Real typing by a person, dragging and clicking were not tested (nobody present).
+Real typing by a person, dragging and clicking were not tested (unattended run).
 
 ### 9.4 Long run and the external activation at about 25 s
 

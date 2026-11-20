@@ -1,16 +1,43 @@
 # Third-party notices
 
 Upstream licence notices of third-party code built into ultimateCRT that the crate packages do not carry
-themselves. `scripts/package.ps1` appends this file to the generated `THIRD-PARTY.md` of the release zip (after
-the table of every crate and its declared licence, from `cargo metadata`). The licence policy (permissive only,
-no GPL) is checked by `cargo deny check licenses` with `deny.toml`.
+themselves. `scripts/gen-third-party.ps1` (called by `scripts/package.ps1`) writes the THIRD-PARTY.md of the
+release zip: the licence texts of every crate, copied from the crate packages, followed by this file. The licence
+policy (permissive only, no GPL, LGPL or AGPL) is checked by `cargo deny check licenses` with `deny.toml` and by
+`scripts/licence-policy.ps1`.
 
-## Dear ImGui (through `dear-imgui-sys`, `dear-imgui-rs`, `dear-imgui-ash` 0.22.0)
+## Dear ImGui crates (`dear-imgui-sys`, `dear-imgui-rs`, `dear-imgui-ash`, `dear-imgui-build-support` 0.22.0)
+
+The four crates, by Mingzhen Zhuang (the author named in their manifests, repository <https://github.com/Latias94/dear-imgui-rs>), declare `MIT OR Apache-2.0` and ship no licence file (checked at T-08 and again for 0.22.0). ultimateCRT uses them under the MIT terms, which are the terms of the notice below (the standard MIT text; the copyright holder is the author named in the manifests, the year is not stated by the packages).
+
+```
+MIT License
+
+Copyright (c) the authors of dear-imgui-rs (Mingzhen Zhuang)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## Dear ImGui and cimgui (the C and C++ sources the crates vendor)
 
 The settings menu and the stats overlay (T-52a) use Dear ImGui 1.93.1 WIP (docking branch) through cimgui,
-vendored and compiled from source by `dear-imgui-sys` (C++ with MSVC). The three `dear-imgui-*` crates declare
-`MIT OR Apache-2.0` in their manifests but their packages ship no LICENSE file (checked at T-08); their
-repository is <https://github.com/Latias94/dear-imgui-rs>. The vendored C and C++ sources carry the notices
+vendored and compiled from source by `dear-imgui-sys` (C++ with MSVC). The vendored C and C++ sources carry the notices
 below (copied from the `dear-imgui-sys` 0.22.0 package). The stack-layout shim of `dear-imgui-sys`
 (`THIRD_PARTY_NOTICES.md` of that package, MIT) is compiled only with its `stack-layout` feature, which
 ultimateCRT does not enable.
@@ -65,6 +92,85 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+```
+
+## ProggyClean (default font data inside Dear ImGui)
+
+`imgui_draw.cpp` of the vendored Dear ImGui embeds the data of the bitmap font ProggyClean.ttf (`[SECTION] Default
+font data (ProggyClean.ttf)`), so it is part of the executable although the menu draws with Inter. The notice in
+that file reads "MIT License / Copyright (c) 2004, 2005 Tristan Grimmer" (<https://github.com/bluescan/proggyfonts>).
+The MIT text is the one of Dear ImGui above, with this copyright line:
+
+```
+MIT License
+
+Copyright (c) 2004, 2005 Tristan Grimmer
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
+
+## stb libraries inside Dear ImGui (`imstb_truetype.h`, `imstb_rectpack.h`, `imstb_textedit.h`)
+
+Dear ImGui includes slightly modified copies of stb_truetype.h 1.26, stb_rect_pack.h 1.01 and stb_textedit.h 1.14 by
+Sean Barrett (<https://github.com/nothings/stb>), which are in the public domain and also offered under the MIT
+licence. The notice at the end of each of the three files (identical in all three) is:
+
+```
+------------------------------------------------------------------------------
+This software is available under 2 licenses -- choose whichever you prefer.
+------------------------------------------------------------------------------
+ALTERNATIVE A - MIT License
+Copyright (c) 2017 Sean Barrett
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies
+of the Software, and to permit persons to whom the Software is furnished to do
+so, subject to the following conditions:
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+------------------------------------------------------------------------------
+ALTERNATIVE B - Public Domain (www.unlicense.org)
+This is free and unencumbered software released into the public domain.
+Anyone is free to copy, modify, publish, use, compile, sell, or distribute this
+software, either in source code form or as a compiled binary, for any purpose,
+commercial or non-commercial, and by any means.
+In jurisdictions that recognize copyright laws, the author or authors of this
+software dedicate any and all copyright interest in the software to the public
+domain. We make this dedication for the benefit of the public at large and to
+the detriment of our heirs and successors. We intend this dedication to be an
+overt act of relinquishment in perpetuity of all present and future rights to
+this software under copyright law.
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
+ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION
+WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
+------------------------------------------------------------------------------
 ```
 
 ## Inter 4.1 (font of the settings menu and the overlay)

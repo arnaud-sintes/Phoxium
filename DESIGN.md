@@ -49,7 +49,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 - Every barrier names its source and destination stage and access. Image layouts are tracked explicitly (`Texture.layout`).
 - Run with `--validation` before committing any change to `gpu/` or the shaders. The layer must stay silent. **(manual)**
 - Shaders are GLSL 450 compiled by `build.rs` with `glslc -O --target-env=vulkan1.3`. A shader error fails the build.
-- A push-constant block must be declared identically in every stage that uses it, and its size must match the pipeline layout range (24 bytes for `decode`, 8 for `encode`; the minimum guaranteed limit is 128). Each stage mirrors its block in a `#[repr(C)]` struct with a size test.
+- A push-constant block must be declared identically in every stage that uses it, and its size must match the pipeline layout range (24 bytes for `decode`, 72 for `encode`; the minimum guaranteed limit is 128). Each stage mirrors its block in a `#[repr(C)]` struct with a size test.
 - Sampling a captured frame uses `texelFetch` on exact texels. Filtering is a modelled stage, never an accident of the sampler.
 
 ## 8. Physical model rules (apply from the first CRT shader)
@@ -59,7 +59,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 - The order of stages follows "Suggested physical pipeline order" in `CRT.md` (listed in `ARCHITECTURE.md` section 5): voltage-domain stages before the gun law, linear-light stages after it.
 - Each physical constant carries a confidence tag (`[S]` sourced, `[D]` derived, `[K]` standard knowledge, `[E]` estimate) and a source in a comment or in the parameter table. An `[E]` value stays an exposed parameter, not a hidden constant.
 - No hidden compensation for the look. Anything non-physical (bloom to recover brightness, enlarged triads) sits in a separate, labelled stage that is off in reference presets.
-- Parameters are defined once (planned declarative table) and generated or shared with Rust, GLSL and the UI. Never copy a default into two places.
+- Parameters are defined once (the declarative table `params/*.toml`, turned into Rust and GLSL by `paramgen`) and shared with Rust, GLSL and the UI. Never copy a default into two places.
 - No randomness without a seed.
 
 ## 9. Patterns in use
@@ -71,7 +71,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 | State machine | `scaling::Detector` | `Default` then `feed` until locked. `reset` on any change of frame size or crop. |
 | Plain data handed across modules | `Frame`, `View`, `Rect` | Copyable or swappable, no behaviour. |
 | Builder style | `ash` create-info structs | Fill every field you rely on, do not rely on defaults you have not checked. |
-| Data-driven configuration (planned) | Presets and profiles | Files, not code. |
+| Data-driven configuration | Presets (`presets/tubes/*.toml`), the parameter table (`params/*.toml`), source profiles | Files, not code. |
 
 Avoid adding abstraction before a second implementation exists. Introduce an interface (trait) when the second capture or present backend is real.
 
@@ -79,8 +79,8 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 
 - Pure logic has unit tests with synthetic data, named after the behaviour (`tolerates_rounded_window_corners`). Run `cargo test`.
 - Which tests to run for a change: `scripts\impact.ps1` selects them from the files changed (modules, stages, shaders, parameters, presets); the full gate (`scripts\check.ps1 -Full`) is for a merge to main, a push, a release, or when unsure. See `ENV.md`, Test policy.
-- Physics gets analytic tests derived from `CRT.md` (for example 57 % scanline modulation at Ïƒ/P = 0.25) before the matching shader is trusted. **(planned, SCP-3)**
-- GPU passes are tested headless (`gpu::Headless`, no window): integration tests in `crates/ultimatecrt/tests/gpu_*.rs` get a renderer from `common::gpu_or_skip`, which enables the validation layer when installed, and end with `common::assert_no_validation_messages` after dropping the renderer. Without a Vulkan 1.3 device they print "skipped" and pass; `UCRT_REQUIRE_GPU=1` turns a missing device or validation layer into a failure (use it on the dev machine).
+- Physics gets analytic tests derived from `CRT.md` (for example 57 % scanline modulation at σ/P = 0.25) before the matching shader is trusted. **(done per stage: the `stage_*` integration tests compare the GPU with the `crt-model` oracle)**
+- GPU passes are tested headless (`gpu::Headless`, no window): integration tests in `crates/ultimatecrt/tests/gpu_*.rs` get a renderer from `common::gpu_or_skip`, which enables the validation layer when installed, and end with `common::assert_no_validation_messages` after dropping the renderer. Without a Vulkan 1.3 device they print "skipped" and pass; `UCRT_REQUIRE_GPU=1` turns a missing device or validation layer into a failure; `scripts/package.ps1`, `scripts/check.ps1 -Full` and `scripts/impact.ps1` set it, so a release gate cannot pass by skipping the GPU suite.
 - Capture and presentation are checked by hand with `pixel-demo` and `ultimatecrt --stats --validation` (see `ENV.md`). A hosted CI runner (none is set up yet) has no GPU, so it could cover build, format, lint and unit tests only (GPU tests skip).
 - Every bug found by hand that can be expressed on pure logic gets a regression test.
 - Screenshots used to check output must show only the output monitor or window, never the whole desktop, and are deleted afterwards (they can contain private content).
@@ -88,9 +88,9 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 ## 11. Interface, dependencies, privacy, process
 
 - **Command line:** long flags in `--kebab-case`, `--help` and `--version` on every program, every option listed in the `USAGE` text printed by `--help` (`main.rs`) and in `README.md`, sensible defaults, unknown flags are errors, a bad value names the flag.
-- **Dependencies:** `std`, `windows`, `ash`, `png` today. New dependencies need a permissive licence (MIT, Apache-2.0, BSD). No GPL. `deny.toml` holds the licence allow list (GPL denied); `scripts/check.ps1` runs `cargo deny check licenses` when cargo-deny is installed. Prefer std over a small crate.
-- **Privacy and safety:** offline, no telemetry, no network. Capture only the chosen window. No injection, no hooks, no input synthesis, no low-level keyboard hooks (only `RegisterHotKey`).
-- **Commits:** imperative subject up to 72 characters, a body that says why, a `Co-Authored-By` trailer when an AI assisted. Small, buildable commits on `main`. No force pushes to `main`.
+- **Dependencies:** `std`, `windows`, `ash`, `png`, `serde` and `toml` (the parameter table, settings and presets), and Dear ImGui through `dear-imgui-rs`, `dear-imgui-sys` and `dear-imgui-ash` (pinned exactly; the C++ part builds from source with MSVC). New dependencies need a permissive licence (MIT, Apache-2.0, BSD, ISC, Zlib, OFL for fonts). No GPL, LGPL or AGPL: `deny.toml` holds the licence allow list (anything else is denied; an exception would need a named `[[licenses.exceptions]]` entry and a written justification here), `scripts/licence-policy.ps1` applies the same rule to the declared licences (`package.ps1` and `check.ps1` run it, and `cargo deny check licenses` when cargo-deny is installed). `scripts/gen-third-party.ps1` copies the licence texts of every shipped dependency into the release zip and fails when a package has none. Prefer std over a small crate.
+- **Privacy and safety:** the product is offline, no telemetry, no network. Capture only the chosen window. The product does no injection, installs no hooks, synthesises no input and uses no low-level keyboard hook (only `RegisterHotKey`). The title of the last captured window is kept in `settings.toml` (the reattach tie-breaker, local only, documented in the README) and `--log` records no window titles. The live-check scripts under `scripts/` are not the product and are not in the release zip: `check-hotkeys.ps1`, `check-menu.ps1` and `check-focus.ps1` send key chords with `SendInput` to whatever has the foreground, and `check-capture.ps1`, `check-pixel-demo.ps1`, `check-hotkeys.ps1`, `check-menu.ps1` and `check-focus.ps1` stop the `ultimatecrt` and `pixel-demo` processes (the spike script `spikes/imgui-spike/scripts/run-t08-live.ps1` does both too). Run them only on a hands-off desktop with no unsaved work in those programs.
+- **Commits:** imperative subject up to 72 characters, a body that says why, a `Co-Authored-By` trailer when an AI assisted. Small, buildable commits on `main`. No force pushes to `main`, with one recorded exception: the one-time history rewrite before the public v0.2.0 (it removes the author e-mail from every commit; see the CHANGELOG).
 - **Documentation:** a behaviour change updates `README.md` and `ARCHITECTURE.md` in the same commit, adds a line under `## [Unreleased]` in `CHANGELOG.md`, and updates `QUESTIONS.md` if it settles a question.
 - **Performance:** measure with `--stats` before optimising. No new CPU readback or per-frame allocation in the render loop without a reason.
 
@@ -99,6 +99,13 @@ Avoid adding abstraction before a second implementation exists. Introduce an int
 - The frame path is GPU, CPU, GPU (decision A3).
 - `pixel-demo` uses `unwrap` and `expect` on window-system calls at start-up.
 - `capture.rs` unwraps the out-parameters of `D3D11CreateDevice` and the texture creation after the call returned success. The invariant holds but is not commented.
-- There is no continuous integration, and the `cargo-deny` licence check is local only (`scripts/check.ps1`, skipped with a warning when cargo-deny is missing; `package.ps1` only checks the declared licences).
+- There is no continuous integration, and the `cargo-deny` licence check is local only (`scripts/check.ps1` and `scripts/package.ps1` run it, skipped with a warning when cargo-deny is missing; the declared-licence filter of `scripts/licence-policy.ps1` always runs).
 - There is no automated test of `capture` or `output`; `gpu` has headless tests of device creation, the validation messenger and the pipeline (decode and encode, frames in flight), but none of presentation.
 - Synchronization validation is enabled for headless contexts only; the window path (`--validation`) has not been run against it yet.
+- **Non-physical headroom by default (against section 8, "no hidden compensation").** ``output_headroom_mode`` defaults to ``auto``, which resolves to ``mask_depth`` where the host resolves the mask (the mask contrast is limited inside the ``screen`` slot, not in a separate stage) and to ``shoulder`` where only the scanlines peak (a soft roll-off above the knee); both are labelled non-physical, and the reference presets 03, 05, 06 and 08 set ``mask_depth = 0.25``. This is an owner decision (T-84b, PLAN D-16), labelled non-physical in the parameter description (``params/output.toml``). The physical choice is ``physical``. Kept on purpose; no code change.
+- **Saturation depends on the mask tier.** Phosphor saturation acts on mask-normalised, area-averaged light (``mask.glsl`` divides by the cell width and fill), so its strength depends on the mask tier and on the host resolution, not only on the tube. The approximation is stated in ``phosphor.rs``; the feature is off by default and no preset enables it.
+- **Burn-in map aliasing.** The wear map is a box mean of the masked light over a fixed 640 x 480 grid (``wear_accumulate.comp``), so it aliases against a resolved mask and against the scanlines. Burn-in is opt-in.
+- **Per-frame time base of the optional modules.** The composite frame phase and the interlace field advance per output frame, not in real time (see ``composite_frame_advance_deg``). Phosphor persistence follows the real frame period (automatic rate) once the review-pass change of ``phosphor_frame_rate_hz`` is in; see the CHANGELOG.
+- **Global hotkeys.** The bare F10 (menu) and F11 (fullscreen) chords are registered system-wide (``RegisterHotKey``) while the app runs, so no other program, the captured game included, receives them (both are rebindable, ``[global.hotkeys]``). Owner decision, documented in the README and ``RUNNING.txt``.
+- **Toolchain not pinned for shaders.** The ``glslc`` version is whatever ``VULKAN_SDK`` provides; ``scripts/package.ps1`` records it, with ``rustc -vV``, in ``BUILD-INFO.txt`` of the zip, and ``ENV.md`` lists the version used for a release. A shader whose source was deleted keeps a stale ``.spv`` in ``OUT_DIR`` until a clean build.
+- **Planning material in the public tree.** ``PLAN.md``, the spike ``RESULTS.md`` files and the ``QUESTIONS.md`` run logs stay in the repository as provenance of the decisions (scrubbed of narration and personal paths). The ``Co-Authored-By`` trailers of the AI-assisted commits are required by section 11.

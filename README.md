@@ -1,25 +1,105 @@
 # ultimateCRT
 
-A physically based CRT shader for Windows. It captures a window, runs it through a virtual CRT tube on the GPU and shows the result in a separate output window. See `CLAUDE.md` for the vision, `CRT.md` for the physics and `QUESTIONS.md` for decisions and open questions.
+A physically based CRT shader for Windows. It captures the window of a game or a program, runs it through a virtual CRT tube on the GPU (electron beams, phosphor mask, scanlines, glow, curvature, ...) and shows the result in a second window that can go fullscreen over the source. It runs beside the captured program: nothing is injected into it and nothing in it is changed. The output is SDR.
 
-Current state: the physical chain runs on the GPU in linear light (FP16): source decode, video amplifier, gun law and white balance, automatic beam limiting, scanline beam with spot growth, geometry and convergence, aperture grille, slot mask or delta dot mask, phosphor saturation and persistence, faceplate optics (diffusion, halation ring, veiling glare, vignette, glass tint, room-light reflection; off by default, `optics_*` parameters), and an output transform (tube colour to sRGB, shoulder, dither), with 10 tube presets, a settings file, and an ImGui settings menu and stats overlay inside the output window (preset selector, headroom and output parameters, readouts; not yet checked live). Not there yet: the full parameter panels of the menu and its hotkeys (T-53, T-54; until then most parameters are changed through `--preset`, `--set` of `render`, and the settings file), the optional composite, interlace, ageing and burn-in modules, and any validation on a real game. See `ARCHITECTURE.md` for the stage table and `CHANGELOG.md` for the detail.
+This README starts with a short user guide. The rest of the file is the detailed reference. Related documents: `CLAUDE.md` (vision and requirements), `CRT.md` (the physics), `ARCHITECTURE.md`, `DESIGN.md`, `ENV.md` (build, test, package, publish), `QUESTIONS.md` (decisions and open questions), `CHANGELOG.md`.
+
+## What it is, and where it stands
+
+The 0.x versions are early releases. What exists: window capture with source scaling and a list to pick the window from, a test pattern and an image source, the physical chain on the GPU in linear light (FP16: source decode, video amplifier, gun law and white balance, automatic beam limiting, scanline beam with spot growth, geometry and convergence, aperture grille, slot mask or delta dot mask, phosphor saturation and persistence, faceplate optics, output transform), ten tube presets, the optional composite, interlace, ageing and burn-in modules (all off by default), a settings menu with every parameter, and a stats overlay. What is not proven yet: the chain has been checked live mostly with the bundled `pixel-demo` source and a few windows, not with a wide range of real games and PCs (see "Known limits").
 
 ## Requirements
 
-- Windows 11 x64, a Vulkan 1.3 GPU (developed on an NVIDIA RTX A2000 Laptop)
+- Windows 11 x64.
+- A GPU and a driver with Vulkan 1.3 (developed on an NVIDIA RTX A2000 Laptop GPU; on a PC with several GPUs the adapter is chosen automatically, see "GPU choice").
+- No installation and no extra runtime: the release zip holds two plain executables.
+
+## Download and run (no command line)
+
+1. Download `ultimatecrt-vX.Y.Z-windows-x64.zip` from the Releases page of the GitHub repository `arnaud-sintes/ultimateCRT`, and `ultimatecrt-vX.Y.Z-windows-x64.zip.sha256` next to it.
+2. The executables are **not code-signed** (see "Unsigned binaries"): check the download against the hash file before the first run.
+3. Unzip it anywhere (a folder you own; do not run it from inside the zip).
+4. Start the program you want to capture (any window; `pixel-demo.exe` from the zip is a demo source with a pixel-art scene and test cards).
+5. Double-click `ultimatecrt.exe`. It opens one window with a "Choose a window to capture" card: type to search, Up and Down to choose, Enter or a double-click to capture. The chosen window is captured and shown through the CRT tube.
+6. **F11** puts the output fullscreen over the source (same monitor, the source keeps the keyboard focus); **F10** opens the settings menu. **Ctrl+Alt+Q** (or the close button of the framed window) quits.
+
+`RUNNING.txt` in the zip repeats these steps. `ultimatecrt.exe --help` (from a terminal) lists the developer and diagnostic options; the program does not need any of them.
+
+### The source picker
+
+At start (and from **Change source** in the menu) the output window lists the windows that can be captured, each with its program icon, title, program, size and monitor, most recently used first. Type to filter (every word must appear in the title, the program or the class). The last choice is remembered. By default the list is shown at every start; with `[global.source] ask_at_start = false` (also a checkbox of the card and of the menu) the app attaches straight to a running window of the last program and class. If the captured window closes, the app waits for a new window of the same program and class. The detail is in "Choosing the window to capture".
+
+### Hotkeys
+
+| Action | Default |
+|---|---|
+| Quit | `Ctrl+Alt+Q` (fixed) |
+| Fullscreen / framed window | `F11` |
+| Settings menu | `F10` |
+| Stats overlay | `Ctrl+Alt+O` |
+| A/B: bypass the whole CRT chain | `Ctrl+Alt+B` |
+| Next / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` |
+
+**These are global hotkeys.** They are registered system-wide (`RegisterHotKey`, no keyboard hook) while ultimateCRT runs: the plain keys F10 and F11 do not reach any other program during that time, the captured game included. That is why the two bare chords are function keys and the others use Ctrl+Alt. All of them except Quit can be rebound in `settings.toml` (`[global.hotkeys]`; the detail and the fallback chords are in "Hotkeys and output modes"). If another program already owns a chord, the app tells you and uses a fallback. The hotkeys are released when the app quits.
+
+### The settings menu
+
+F10 opens the menu inside the output window (it takes the focus while open and gives it back to the source when closed). Every CRT parameter is in it, in panels by topic: Output and headroom, Source and placement, Signal and amplifier, Gun and white, Beam and scanlines, Mask, Geometry, Phosphor, Ageing and burn-in, Optics, Performance and diagnostics, GPU and system. Pick a tube preset (ten ship with the app: PVM and BVM monitors, Trinitron TV, GDM-F520, slot-mask TV, consumer TV, CromaClear, arcade, VGA and delta-dot monitors), then change anything; changes apply at once and are kept. The **Source** section at the top shows what was detected (native size, integer scale, picture area) and has **Change source**, **Detach** and the Auto or Manual picture area.
+
+### Settings, files and privacy
+
+Everything the app keeps is under `%APPDATA%\ultimateCRT\`: `settings.toml` (your overrides, hotkeys, output window rectangle, GPU choice, the last source), `presets\` (your own presets, `.toml` files), `tubes\` (the burn-in wear map per preset, only when burn-in is on). Delete the folder to start from the defaults. The program has no network code and sends nothing anywhere.
+
+- **Window titles are stored locally.** `settings.toml` keeps the program, window class and **title** of the last captured window (`[global.source] last`), because the title helps to find the same window again after a restart. A title can contain private content (a document name, a chat contact). The file never leaves your PC unless you share it, so look at it before you attach it to a bug report.
+- **Diagnostics.** `--log file.csv` (developer option, off by default) writes one row per second with the process id of the foreground window and whether it is the captured one, and no window titles. `scripts\poll-foreground.ps1` (a developer script, not part of the zip) does write titles into its CSV; delete that file after use.
+
+### Known limits
+
+- Frames go from the GPU to the CPU and back to the GPU (the capture copy path, CAP-2, kept by decision). A zero-copy shared-handle path is a later spike.
+- SDR output only; HDR output and HDR colour are out of scope for now.
+- One GPU runs the whole chain. On a hybrid laptop or with monitors on different GPUs, Windows copies frames between adapters; that cost is not measured (HW-3 in `QUESTIONS.md`).
+- Only simple integer nearest-neighbour upscales are recognised as native pixels; a smoothed or non-integer upscale is treated as x1 (an advisory warning is printed).
+- The output window is not click-through: clicks land on the output, not on the source. The source keeps the keyboard focus except while the settings menu is open.
+- Opening the menu deactivates the captured game for the moment (some games pause).
+- The bare F10 and F11 hotkeys are global while the app runs (see above).
+- The physical model is documented and tested against a reference implementation, but the presets are starting points built from published data, not measurements of a particular unit.
+
+### Unsigned binaries and checking the download
+
+The executables are **not code-signed** (a code-signing certificate costs money and this is a personal project). Windows SmartScreen may show "Windows protected your PC" the first time you run them: choose "More info", then "Run anyway", only after you have checked the hash. Antivirus tools may also warn about an unsigned program that captures windows and registers hotkeys.
+
+Every release publishes the SHA-256 of the zip twice, in the release notes and in the `.sha256` file attached to it. Check yours:
+
+```
+PowerShell:  (Get-FileHash .\ultimatecrt-vX.Y.Z-windows-x64.zip -Algorithm SHA256).Hash
+cmd:         certutil -hashfile ultimatecrt-vX.Y.Z-windows-x64.zip SHA256
+```
+
+The value must be identical to the one on the release page (upper or lower case does not matter). The hash proves that your copy is the file that was published; it does not replace trust in the project. The source is public and the executables can be rebuilt from it ("Building from source").
+
+### Licence
+
+ultimateCRT is released under the MIT licence: see `LICENSE` (Copyright (c) 2026 Arnaud Sintès). The release zip also carries `THIRD-PARTY.md`: the licence texts of every third-party crate built into the executables and the notices of the bundled C++ sources (Dear ImGui, cimgui, ProggyClean, the stb libraries) and of the Inter font (SIL Open Font License 1.1). The policy is permissive licences only (no GPL, LGPL or AGPL), checked by `cargo deny` and by `scripts\package.ps1`.
+
+## Building from source
+
+Requirements:
+
 - Rust 1.98.1 (pinned in `rust-toolchain.toml`, MSVC toolchain)
-- Vulkan SDK with `glslc` (`VULKAN_SDK` set, or `glslc` on `PATH`)
+- The Vulkan SDK with `glslc` (`VULKAN_SDK` set, or `glslc` on `PATH`); the version used for a release is recorded in `BUILD-INFO.txt` of the zip
 - The MSVC C++ compiler (Visual Studio Build Tools): `dear-imgui-sys` compiles Dear ImGui from source (about 16 s once)
-
-Setup, tests, packaging and releases are in `ENV.md`. Architecture is in `ARCHITECTURE.md`, coding rules in `DESIGN.md`.
-
-## Build
 
 ```
 cargo build --release
 ```
 
-## How to run
+The executables are `target\release\ultimatecrt.exe` and `target\release\pixel-demo.exe` (or in `CARGO_TARGET_DIR` when it is set). Setup, tests, packaging and releases are in `ENV.md`, architecture in `ARCHITECTURE.md`, coding rules in `DESIGN.md`.
+
+# Reference
+
+The sections below are the detailed reference: command-line options, the picker, the GPU choice, hotkeys, presets and parameters, the menu, quality tiers, the optional modules, source scaling and adjustment, the target lifecycle, and the developer scripts.
+
+## How to run (command line, developer use)
 
 1. Start the demo source: `target\release\pixel-demo.exe`
    - Keys (window focused; the title shows the state and lists the keys, so a live agent can drive it with `SendInput`): 1 to 9 and 0 set the integer scale 1 to 10, M cycles the presentation (1to1, integer, autofit, fit, stretch), F the filter, B the bar colour, P the bar pattern, C (or Space) the content, N the native preset (an exact-size window follows), K toggles the frame counter, X the corner markers, A the alignment, Alt+Enter toggles fullscreen (F11 belongs to ultimatecrt), Esc quits. The window is resizable and re-lays out the picture on every size change; it handles `WM_DPICHANGED` (an exact-size window stays exact on a monitor with another scaling).
@@ -46,7 +126,7 @@ cargo build --release
    - `--divisor N` (or `NxM`) tells it the source is an integer upscale by N, `1` meaning native. `--crop x,y,w,h` selects the part of the client area that is the source. Without `--divisor` the factor is detected automatically.
    - `--no-crop` captures the whole window instead of its client area.
    - `--stats` prints capture and render rates once per second, followed by a GPU line: the mean whole-frame GPU time and one value per timed segment (`upload`, `decode`, every chain slot, `encode`, `ui` for the settings menu and overlay) in ms, from Vulkan timestamp queries (`gpu 3.4 ms | upload 0.097 | decode 0.023 | signal - | amp 0.061 (bypass) | ...`). `-` is a segment that did not run in the second (an off or placeholder slot that keeps its domain, an upload without a new frame); `(bypass)` is an off slot that changes the domain (`amp`, `screen`) and runs the cheap resample copy, so its value is that copy's cost. The numbers are read when a frame slot is reused, so they lag the CPU by at most two frames and never stall it. A device without timestamp support prints `gpu timings unavailable: <reason>` once. `--save-capture out.png` saves the first captured frame and exits, `--exit-after SECS` quits by itself, `--integer` restricts to integer scales, `--validation` enables the Vulkan validation layer.
-   - `--log file.csv` writes a diagnostics CSV with one row per second: capture fps, min/max/p99 capture interval, render fps and interval stats, gaps over 50 ms (strictly greater, capture and render counted separately), the number of foreground-window changes in that second, the pid and title of the last foreground window when it changed, and `fg_is_source` (1 when the foreground window is the captured one). The GPU timings are appended after those 15 columns (the earlier columns keep their position): `gpu_frame_ms`, then `gpu_<segment>_ms` for `upload`, `decode`, every chain slot, `encode` and `ui` (the new chain slots add columns at their place in the chain, so read columns by name), each the mean over the second in ms, empty when the segment did not run or the device has no timestamps. The foreground is polled with `GetForegroundWindow` once per loop (no hooks); the first poll is the baseline, not a change. A summary line is printed at exit. Capture intervals are observed from the main loop (a counter jump of k frames over d ms counts as k intervals of d/k), so their resolution is the render cadence; exact capture timestamps come with T-59. The foreground title can contain private content: delete the log when done.
+   - `--log file.csv` writes a diagnostics CSV with one row per second: capture fps, min/max/p99 capture interval, render fps and interval stats, gaps over 50 ms (strictly greater, capture and render counted separately), the number of foreground-window changes in that second, the pid of the last foreground window when it changed (no window title is recorded), and `fg_is_source` (1 when the foreground window is the captured one). The GPU timings are appended after those 15 columns (the earlier columns keep their position): `gpu_frame_ms`, then `gpu_<segment>_ms` for `upload`, `decode`, every chain slot, `encode` and `ui` (the new chain slots add columns at their place in the chain, so read columns by name), each the mean over the second in ms, empty when the segment did not run or the device has no timestamps. The foreground is polled with `GetForegroundWindow` once per loop (no hooks); the first poll is the baseline, not a change. A summary line is printed at exit. Capture intervals are observed from the main loop (a counter jump of k frames over d ms counts as k intervals of d/k), so their resolution is the render cadence; exact capture timestamps come with T-59. The log holds no window titles.
    - `--pattern name[:args]` shows a generated test pattern instead of capturing a window (no capture target needed, divisor 1): `flat[:level]`, `ramp`, `vline[:N]`, `hline[:N]`, `grating[:N]`, `checker[:N]`, `crosshatch[:N]`, `point`, `window[:APL]` (10, 25, 50, 100 % area on black), `bar[:width[:px-per-frame]]` (moving), `pluge`, `moire[:N]`. `--pattern-size WxH` sets its size (default 320x240). Values are 8-bit sRGB codes.
    - `--image file.png` shows a still PNG (any colour type, alpha flattened over black, divisor 1) instead of capturing. It is exclusive with `--pattern`.
    - `--detect-bars capture.png` (developer diagnostic, offline, opens no window) runs the picture-area detector on a saved capture (a `--save-capture` PNG) with the thresholds of the settings file and prints the picture found (`detected: picture 256 x 224 at 422, 288 (x 422..677, y 288..511); bars left 422, top 288, right 422, bottom 288`), or why nothing was cropped, and per edge the dark rows or columns, the largest lit-pixel count among them and the threshold, plus what the first single-pixel rule would have found. To debug a detection: `ultimatecrt --window "game" --save-capture frame.png`, then `ultimatecrt --detect-bars frame.png`.
@@ -100,7 +180,7 @@ Global hotkeys are registered with `RegisterHotKey` on the output window (no key
 
 - **Chord text:** `Mod+Mod+Key`, case-insensitive. Modifiers `Ctrl`, `Alt`, `Shift`, `Win`; keys `F1` to `F24`, `A` to `Z`, `0` to `9`, `PageUp`, `PageDown` (`PgUp`, `PgDn`), `Home`, `End`, `Insert`, `Delete`, the arrows, `Space`, `Pause`, `ScrollLock`, `PrintScreen`. Only function keys may go without Ctrl, Alt or Win. Example: `toggle_menu = "Ctrl+Alt+F12"`.
 - **Invalid or colliding entries:** an unparsable chord, an unknown action, a chord used by two actions, or a rebound `quit` prints a `warning:` line naming the entry and the default is used instead (a collision keeps the first action in the table order above and gives the other its default).
-- **Registration failure:** when another program owns a chord, the console prints `warning: hotkey toggle_menu: cannot register F12 (hot key is already registered by another program, Win32 error 1409); using F10 instead`. Each action has a short fallback list tried in order (menu: `F10`, `Ctrl+Alt+F10`, `Ctrl+Alt+F12`; fullscreen: `Ctrl+Alt+F11`; the others add Shift: `Ctrl+Alt+Shift+O`, `...+B`, `...+PageDown`, `...+PageUp`). If none registers the action is unavailable and the line says so. On the dev machine F12 is owned by another program (error 1409), which is why the menu key is F10. The line `hotkeys: ...` at start lists the chord in force per action. `Ctrl+Alt+Q` has no fallback: a fullscreen output refuses to start without it, a windowed one warns (Esc still works).
+- **Registration failure:** when another program owns a chord, the console prints `warning: hotkey toggle_menu: cannot register F12 (hot key is already registered by another program, Win32 error 1409); using F10 instead`. Each action has a short fallback list tried in order (menu: `F10`, `Ctrl+Alt+F10`, `Ctrl+Alt+F12`; fullscreen: `Ctrl+Alt+F11`; the others add Shift: `Ctrl+Alt+Shift+O`, `...+B`, `...+PageDown`, `...+PageUp`). If none registers the action is unavailable and the line says so. F12, the usual debugger key, was already registered by another program on the development PC (error 1409), which is why the default menu key is F10. The line `hotkeys: ...` at start lists the chord in force per action. `Ctrl+Alt+Q` has no fallback: a fullscreen output refuses to start without it, a windowed one warns (Esc still works).
 - **F11 and the output modes:** F11 toggles between the borderless fullscreen output (topmost, non-activating, covering the monitor the window is on) and a framed, resizable window (taskbar button, not topmost). The window rectangle (position, size, so the monitor) is remembered in `settings.toml` (`[global.output] windowed = [left, top, right, bottom]`, written on F11 and at exit) and used again at the next start when it is still on a monitor, else the window is centred on the monitor it came from. The swapchain follows every size change; the picture keeps its tube-based placement (letterboxed, see Source adjustment). Both modes are non-activating, except while the settings menu is open (the menu takes the focus; F11 works in both states): in the framed window Esc cannot reach it, quit with `Ctrl+Alt+Q` or the close button. When the monitors change (`WM_DISPLAYCHANGE`: resolution, a monitor plugged or unplugged) a fullscreen output re-covers the monitor that holds most of it, and a framed window that is mostly off screen is moved back onto a monitor. The framed window follows its own DPI when moved to a monitor with another scaling.
 - **Cursor:** the host cursor is hidden over the picture while the settings menu is closed (the source's own cursor is not captured, so no cursor shows; over the frame and title bar it stays). The output is not click-through: clicks land on the output, not on the source. A click-through option (`WS_EX_LAYERED | WS_EX_TRANSPARENT`, off by default, PLAN D-8) is not implemented yet: it needs a command-line flag and a test that a layered window keeps independent flip (QUESTIONS OUT-2, OUT-4).
 - **Presets:** next and previous step through the presets in menu order (the ten shipped ones, then the user ones in `%APPDATA%\ultimateCRT\presets\`), wrap around, print `preset next: <name> (<id>)`, and replace the tube parameters at once. The `source` group (scale mode, PAR, crop, surround) is kept; the parameter overrides of `settings.toml` belong to the preset they were made on and are not carried over. The choice is not written to the settings.
@@ -120,7 +200,7 @@ Only the client area of the target window is captured, so a 256×240 source at 3
 - The menu key (default F10, `toggle_menu` in `[global.hotkeys]`, with the fallbacks of the hotkey table) opens the settings menu inside the output window, windowed or fullscreen. While it is open the output window takes the keyboard focus, the mouse cursor shows over it, and mouse, wheel and keyboard go to the menu; the captured game sees a deactivation and may pause (accepted, D-7). The same key, or Esc, closes the menu and gives the foreground back to the window that had it (else to the captured window); Esc never closes the output while the menu is open. Switching to another window yourself (Alt+Tab, a click elsewhere) also closes the menu, and that window keeps the foreground. F11 still toggles fullscreen and the framed window while the menu is open, and the menu stays usable; after the menu closes the output is non-activating again in either mode. Ctrl+Alt+Q quits at any time (an open menu gives the foreground back first).
 - When a hotkey could not be registered (a chord owned by another program, a fallback in force, an action left without a key), the menu shows the same message as the console under its key hint, and the hint names the chord actually in force.
 - The menu window can be moved, resized and collapsed, and has an opacity slider, so it can be moved off the picture while tuning; its place, size, opacity and collapsed state are kept in `settings.toml` (`[global.ui]`) when it closes.
-- **Every parameter is in the menu** (T-53), in panels by topic: Output and headroom (open; the SDR headroom readout, the mode in effect, exposure, knee, mask depth...), Source and placement (with the placement readout of `--stats`), Signal and amplifier, Gun and white, Beam and scanlines, Mask, Geometry, Phosphor, Ageing and burn-in, Optics (not implemented yet), Performance and diagnostics (fps, GPU ms per stage), GPU and system. Click a header to open or close a panel; the body scrolls with the wheel.
+- **Every parameter is in the menu** (T-53), in panels by topic: Output and headroom (open; the SDR headroom readout, the mode in effect, exposure, knee, mask depth...), Source and placement (with the placement readout of `--stats`), Signal and amplifier, Gun and white, Beam and scanlines, Mask, Geometry, Phosphor, Ageing and burn-in, Optics, Performance and diagnostics (fps, GPU ms per stage), GPU and system. Click a header to open or close a panel; the body scrolls with the wheel.
   - Drag a slider, or Ctrl+click it (or focus it and press Enter) to type a value; values outside the slider range are accepted. Wide ranges (exposure, bandwidth, curvature radius...) use a logarithmic slider. Check boxes, lists and a colour swatch (the surround colour) work as usual. Hover a label for what the parameter does, its range, and its preset and default values.
   - A parameter that differs from the preset in force (with the source profile and command-line options) shows an amber dot and a brighter label, and its panel header counts the changes. Double-click a label to reset it to the preset value; right-click it to choose the preset value or the table default. "Reset N changed" at the bottom of a panel resets the whole panel.
   - "Search parameters" at the top finds parameters in every panel by name, id or group (every word must match). "Advanced" shows the fine-tuning parameters (model internals such as the mask tier or the BT.1886 constants); a search always shows them.
@@ -225,8 +305,10 @@ version, copyright), nothing to ship beside the `.exe`. The build writes the `.r
 so no `rc.exe` is needed. To change the artwork, edit `crates/appres/examples/gen_icon/draw.rs` and run
 `cargo run -p appres --example gen_icon --release` (details in `assets/icon/README.md`).
 
-## Known limits of the scaffold
+## Known limits (detail)
+
+The short list is in the user guide above. Technical detail:
 
 - Frames go GPU to CPU to GPU (CAP-2, CPU copy path). A shared-handle path is a later spike.
 - Capture and render run on one chosen adapter (see GPU choice), but the captured game and the monitor the output covers may sit on other GPUs (hybrid-graphics laptops, monitors split across GPUs); Windows then copies across adapters. That cost is not measured (see HW-3 in `QUESTIONS.md`).
-- The window is found by title, not by executable or class.
+- A capture session lost without the window closing (Direct3D 11 device loss, monitor hot-plug) is not handled as a lost target (T-80b).

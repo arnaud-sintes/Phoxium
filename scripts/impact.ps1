@@ -13,7 +13,14 @@
       - shaders: the #include graph, the stage that owns a shader (`<shader>.spv` in the stage Rust file)
         and the tests that name that stage;
       - parameters: ids of params/*.toml against the tests that name them;
-      - data files embedded with include_str!/include_bytes! (presets, fonts, shaders read by unit tests).
+      - data files embedded with include_str!/include_bytes! (presets, fonts, shaders read by unit tests) and the
+        test data files of crates/ultimatecrt/tests/data;
+      - the appres crate (icon and resource tool): its tests, the packages and tests that use it, and a workspace check
+        (the build scripts of ultimatecrt and pixel-demo depend on it).
+    Parameter ids match quoted ids, the generated constants and field uses (`.gun_gamma`); a crt-model change selects the
+    unit tests and integration tests of the ultimatecrt modules that reference the changed crt-model module.
+    A failed git command (a mistyped -Base) stops the script with the git message and exit code 2: it is never read
+    as "no change". The filtered unit tests run with UCRT_REQUIRE_GPU=1 like the integration tests.
     Anything the model cannot place falls back to FULL (fmt, clippy workspace, all tests, licence check).
 
     The test policy (when the plan is enough, when FULL is required) is in ENV.md, "Test policy".
@@ -44,7 +51,9 @@
 .PARAMETER Root
     Repository root (default: the parent of scripts/). Used by the self test.
 .PARAMETER TargetDir
-    Shared cargo target directory used when CARGO_TARGET_DIR is not set.
+    Shared cargo target directory used when CARGO_TARGET_DIR is not set. Default: <worktree root>\target-shared when
+    the repository has a <name>-wt worktree folder next to it (scripts\shared-paths.ps1), else cargo's own target
+    folder.
 #>
 param(
     [string]$Base,
@@ -61,13 +70,14 @@ param(
     [switch]$KeepFixture,
     [switch]$PassThru,
     [string]$Root,
-    [string]$TargetDir = 'C:\projects\personal\ultimateCRT-wt\target-shared'
+    [string]$TargetDir
 )
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 if (-not $Root) { $Root = Split-Path $PSScriptRoot -Parent }
 $Root = (Resolve-Path $Root).Path.TrimEnd('\', '/')
+. (Join-Path $PSScriptRoot 'shared-paths.ps1')
 
 # The packages and the stage layout the model relies on (documented in ENV.md, Test policy).
 $MainPackageDir = 'ultimatecrt'
@@ -476,6 +486,16 @@ function Add-Node($M, $S, [string]$node, [string]$reason) {
     }
 }
 
+# A module of the main package that is affected by a change elsewhere (here: by a crt-model module it references):
+# the same selection as a change of the module itself (a stage: its tests and the whole-chain tests).
+function Add-ModuleImpact($M, $S, [string]$node, [string]$reason) {
+    if ((Test-StageNode $node) -and $node -match ('^' + [regex]::Escape($StagePrefix) + '[^:]+$')) {
+        Add-Stage $M $S $node.Substring($StagePrefix.Length) $reason
+    } else {
+        Add-Node $M $S $node $reason
+    }
+}
+
 function Add-ClippyFor($M, $S, [string]$dir, [string]$reason) {
     if ($M.Dependants.ContainsKey($dir)) {
         foreach ($p in $M.Dependants[$dir]) { Add-Reason $S.Clippy $p $reason }
@@ -502,11 +522,13 @@ function Get-ChangedParamIds($M, [string]$file, [string]$diffBase, [string]$rev)
     $all = @()
     if ($text) { foreach ($mm in [regex]::Matches($text, '(?m)^\s*id\s*=\s*"([^"]+)"')) { $all += $mm.Groups[1].Value } }
     if (-not $diffBase) { return $all }
-    $args2 = @('-C', $M.Root, 'diff', '-U0', '--no-renames')
+    $args2 = @('diff', '-U0', '--no-renames')
     if ($rev) { $args2 += @($diffBase, $rev) } else { $args2 += $diffBase }
     $args2 += @('--', $file)
-    $d = & git @args2 2>$null
-    if ($LASTEXITCODE -ne 0 -or -not $d) { return $all }
+    # Invoke-Git relaxes the error preference around git (a warning on stderr is not a failure). When the diff is
+    # not available the answer is every id of the file: the conservative side.
+    $d = Invoke-Git $M.Root $args2
+    if ($null -eq $d -or @($d).Count -eq 0) { return $all }
     $ids = New-Object System.Collections.Generic.HashSet[string]
     $lines = @($text -split "`r?`n")
     $blockOf = @{}
@@ -1096,7 +1118,7 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
                     }
                     foreach ($n in $M.Uc.Nodes.Values) {
                         $refs = Get-ExternalRefs $n.Text $M.CmCrateIdent $M.Cm.Nodes
-                        if ($refs.Contains($k) -or $refs.Contains('')) { Add-Lib $M $S $n.Name "$tag; ultimatecrt::$($n.Name) references crt_model::$k" }
+                        if ($refs.Contains($k) -or $refs.Contains('')) { Add-ModuleImpact $M $S $n.Name "$tag; ultimatecrt::$($n.Name) references crt_model::$k" }
                     }
                 }
                 $S.Files.Add("$p -> crt-model::$node, tests referencing crt_model::$node and its dependants")
@@ -1104,6 +1126,20 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
             }
             Add-Reason $S.Pkg $pkg "crt-model changed ($p)"
             $S.Files.Add("$p -> crt-model tests"); return
+        }
+        if ($dir -eq 'appres') {
+            # Icon and resource tool: the build scripts of ultimatecrt and pixel-demo use it (a compile error breaks
+            # both), and their tests read the resources of the built executables.
+            Add-Reason $S.Pkg $pkg "appres changed ($p)"
+            Add-ClippyFor $M $S $dir "$p changed"
+            $S.CheckWs = $true
+            foreach ($dep in @($M.Dependants[$dir])) {
+                if ($dep -ne $pkg -and $dep -ne $M.PkgByDir[$MainPackageDir].Name) { Add-Reason $S.Pkg $dep "depends on appres ($p changed)" }
+            }
+            $crateIdent = $pkg -replace '-', '_'
+            foreach ($t in $M.Tests.Values) { if ($t.Text -match ('(?<![A-Za-z0-9_])' + [regex]::Escape($crateIdent) + '::')) { Add-Reason $S.Tests $t.Name "appres changed ($p); the test uses appres" } }
+            foreach ($n in $M.Uc.Nodes.Values) { if ($n.Text -match ('(?<![A-Za-z0-9_])' + [regex]::Escape($crateIdent) + '::')) { Add-Lib $M $S $n.Name "appres changed ($p); the module uses appres" } }
+            $S.Files.Add("$p -> appres tests, cargo check workspace (build scripts), tests and packages that use appres"); return
         }
         if ($dir -eq 'paramgen') {
             Add-Reason $S.Pkg $pkg "paramgen changed ($p)"
@@ -1145,6 +1181,15 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
                 foreach ($t in $M.Tests.Values) { if ($t.UsesCommon) { Add-Reason $S.Tests $t.Name "tests/common changed; the test uses it" } }
                 Add-Reason $S.Clippy $pkg "$p changed"
                 $S.Files.Add("$p -> every test using common"); return
+            }
+            if ($rest -match '^tests/data/') {
+                # Data files read by tests or embedded with include_bytes!: their consumers; none found means FULL.
+                $c = Get-Consumers $M $p
+                if ($c.Nodes.Count -eq 0 -and $c.Tests.Count -eq 0) { $S.Full.Add("$p is a test data file no Rust file references"); $S.Files.Add("$p -> FULL (test data with no consumer)"); return }
+                foreach ($n in $c.Nodes) { Add-Node $M $S $n "test data $p embedded by $n" }
+                foreach ($t in $c.Tests) { Add-Reason $S.Tests $t "references test data $p" }
+                Add-Reason $S.Clippy $pkg "$p changed"
+                $S.Files.Add("$p -> consumers: " + (($c.Nodes + $c.Tests) -join ', ')); return
             }
             if ($rest -match '^tests/([^/]+)\.rs$') {
                 $name = $Matches[1]
@@ -1211,11 +1256,12 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
         foreach ($id in $ids) {
             $upper = $id.ToUpperInvariant()
             foreach ($t in $M.Tests.Values) {
-                if ($t.Text -match ('"' + [regex]::Escape($id) + '"') -or $t.Text -cmatch ('\b' + [regex]::Escape($upper))) { Add-Reason $S.Tests $t.Name "references parameter $id ($p)" }
+                # A quoted id ("gun_gamma"), the generated constant (GUN_GAMMA) or the field of the parameter struct (.gun_gamma).
+                if ($t.Text -match ('"' + [regex]::Escape($id) + '"') -or $t.Text -cmatch ('\b' + [regex]::Escape($upper)) -or $t.Text -cmatch ('\.' + [regex]::Escape($id) + '\b')) { Add-Reason $S.Tests $t.Name "references parameter $id ($p)" }
             }
             foreach ($n in $M.Uc.Nodes.Values) {
                 if ($ParamModules -contains $n.Name) { continue }
-                if ($n.Text -match ('"' + [regex]::Escape($id) + '"')) { Add-Lib $M $S $n.Name "references parameter $id ($p)" }
+                if ($n.Text -match ('"' + [regex]::Escape($id) + '"') -or $n.Text -cmatch ('\.' + [regex]::Escape($id) + '\b')) { Add-Lib $M $S $n.Name "references parameter $id ($p)" }
             }
         }
         if ($M.Tests.ContainsKey('presets')) { Add-Reason $S.Tests 'presets' "parameter table changed ($p): presets are checked against it" }
@@ -1230,7 +1276,6 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
         foreach ($n in $nodes) { Add-Node $M $S $n "preset file $p embedded by $n" }
         foreach ($t in $c.Tests) { Add-Reason $S.Tests $t "references $p" }
         foreach ($t in $M.Tests.Values) { if ($t.Text -match 'presets/tubes|all_presets') { Add-Reason $S.Tests $t.Name "iterates the presets" } }
-        $S.CheckWs = $false
         $S.Files.Add("$p -> consumers: " + ($nodes -join ', ') + ', tests iterating the presets'); return
     }
     # 7. Anything else
@@ -1316,7 +1361,10 @@ function Get-ImpactPlan([string]$Root, [string[]]$ChangedFiles, [switch]$ForceFu
             $a += '--'
             foreach ($k in ($S.Lib.Keys | Sort-Object)) { $a += $k; $reasons += "$k : " + $S.Lib[$k][0] }
         }
-        $cmds.Add((New-Command 'cargo' $a 'cheap' "unit tests of $ucName (filtered by module)" $reasons @($S.Lib.Keys | Sort-Object)))
+        $u = New-Command 'cargo' $a 'cheap' "unit tests of $ucName (filtered by module)" $reasons @($S.Lib.Keys | Sort-Object)
+        # Unit tests that use the GPU must fail, not skip, on a machine without a usable Vulkan device.
+        $u.Env['UCRT_REQUIRE_GPU'] = '1'
+        $cmds.Add($u)
         $plan.Selected.Add("unit:$ucName")
     }
     # Integration tests by cost class
@@ -1477,20 +1525,30 @@ function Invoke-Plan($plan, [switch]$KeepGoing, [switch]$DryRun) {
 # Git
 # ---------------------------------------------------------------------------------------------------
 
-function Get-GitLines([string[]]$gitArgs) {
+# Output lines of a git command in the repository. A non-zero exit code THROWS with the git message: a failed
+# `git diff` (a mistyped base, a damaged repository) must never be read as "no change". A caller that can live
+# with a missing ref says so with -Tolerate and then gets $null.
+function Get-GitLines([string[]]$gitArgs, [switch]$Tolerate, [string]$Repo) {
+    if (-not $Repo) { $Repo = $Root }
     $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
-    try { $out = & git -C $Root @gitArgs 2>$null; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
-    if ($code -ne 0) { return $null }
-    return , @($out | Where-Object { $_ })
+    try { $all = @(& git -C $Repo @gitArgs 2>&1); $code = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($code -ne 0) {
+        if ($Tolerate) { return $null }
+        $msg = @($all | ForEach-Object { "$_" } | Where-Object { $_ }) -join ' '
+        throw "git $($gitArgs -join ' ') failed with exit code ${code}: $msg"
+    }
+    $out = @($all | Where-Object { $_ -isnot [System.Management.Automation.ErrorRecord] } | ForEach-Object { "$_" } | Where-Object { $_ })
+    return , $out
 }
 
 function Get-DefaultBase {
     $head = Get-GitLines @('rev-parse', 'HEAD')
     $dirty = Get-GitLines @('status', '--porcelain')
-    $mb = Get-GitLines @('merge-base', 'HEAD', 'exec/integration')
+    # Tolerated: the integration branch may not exist in this clone, and a root commit has no parent.
+    $mb = Get-GitLines @('merge-base', 'HEAD', 'exec/integration') -Tolerate
     if ($mb -and $head -and $mb[0] -ne $head[0]) { return $mb[0] }
     if ($dirty -and $dirty.Count -gt 0) { return 'HEAD' }
-    $p = Get-GitLines @('rev-parse', 'HEAD~1')
+    $p = Get-GitLines @('rev-parse', 'HEAD~1') -Tolerate
     if ($p) { return $p[0] }
     return 'HEAD'
 }
@@ -1519,7 +1577,7 @@ function Get-MissCheck($plan, [string]$rev) {
         # Tests can only reference the items of ultimatecrt and crt-model, shaders and parameters.
         if ($f -notmatch '^(crates/(ultimatecrt|crt-model)/|shaders/|params/)') { continue }
         $d = Get-GitLines @('diff', '-U0', '--no-renames', $parent, $rev, '--', $f)
-        if (-not $d) { continue }
+        if (-not $d) { continue }   # an empty diff of a successful command: nothing changed in this file
         foreach ($l in $d) {
             if ($f -match '\.rs$' -and $l -match '^[+-]\s*pub(\([a-z]+\))?\s+(?:const\s+|unsafe\s+)?(?:fn|struct|enum|const|static|type|trait)\s+([A-Za-z_][A-Za-z0-9_]*)') {
                 # Only distinctive identifiers (snake_case with an underscore, CamelCase, long): plain words such as "apply" are noise.
@@ -1542,12 +1600,13 @@ function Get-MissCheck($plan, [string]$rev) {
 
 function Invoke-Validate([int]$count, [bool]$noMerges, [bool]$quiet) {
     $ref = 'exec/integration'
-    if (-not (Get-GitLines @('rev-parse', '--verify', $ref))) { $ref = 'HEAD' }
+    if (-not (Get-GitLines @('rev-parse', '--verify', $ref) -Tolerate)) { $ref = 'HEAD' }
     if ($noMerges) { $revs = Get-GitLines @('log', '--no-merges', '--format=%H', '-n', $count, $ref) }
     else { $revs = Get-GitLines @('log', '--first-parent', '--format=%H', '-n', $count, $ref) }
     $summary = @()
     foreach ($r in $revs) {
         $subject = (Get-GitLines @('log', '-1', '--format=%h %s', $r))[0]
+        if (-not (Get-GitLines @('rev-parse', '--verify', '--quiet', "$r^1") -Tolerate)) { Write-Host "$subject : root commit, no parent to diff against"; continue }
         $files = Get-GitLines @('-c', 'core.quotepath=false', 'diff', '--name-only', '--no-renames', "$r^1", $r)
         if (-not $files) { Write-Host "$subject : no changed files"; continue }
         $plan = Get-ImpactPlan -Root $Root -ChangedFiles $files -DiffBase "$r^1" -DiffRev $r
@@ -1575,20 +1634,26 @@ function Invoke-SelfTest {
         [IO.File]::WriteAllText($p, $content)
     }
     try {
-        W 'Cargo.toml' "[workspace]`nmembers = [`"crates/crt-model`", `"crates/paramgen`", `"crates/pixel-demo`", `"crates/ultimatecrt`"]`n"
+        W 'Cargo.toml' "[workspace]`nmembers = [`"crates/appres`", `"crates/crt-model`", `"crates/paramgen`", `"crates/pixel-demo`", `"crates/ultimatecrt`"]`n"
+        W 'crates/appres/Cargo.toml' "[package]`nname = `"appres`"`n"
+        W 'crates/appres/src/lib.rs' "pub mod pe;`npub fn embed() {}`n"
+        W 'crates/appres/src/pe.rs' "pub fn check_executable() {}`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/crt-model/Cargo.toml' "[package]`nname = `"crt-model`"`n"
-        W 'crates/crt-model/src/lib.rs' "pub mod abl;`npub mod beam;`npub mod units;`n"
+        W 'crates/crt-model/src/lib.rs' "pub mod abl;`npub mod beam;`npub mod mask;`npub mod units;`n"
+        W 'crates/crt-model/src/mask.rs' "pub fn mask() {}`n"
         W 'crates/crt-model/src/abl.rs' "use crate::beam::spot;`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/crt-model/src/beam.rs' "use crate::units::mm;`npub fn spot() {}`n"
         W 'crates/crt-model/src/units.rs' "pub fn mm() {}`n"
         W 'crates/paramgen/Cargo.toml' "[package]`nname = `"paramgen`"`n"
         W 'crates/paramgen/src/lib.rs' "pub fn load() {}`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/pixel-demo/Cargo.toml' "[package]`nname = `"pixel-demo`"`n"
+        W 'crates/pixel-demo/Cargo.toml' "[package]`nname = `"pixel-demo`"`n[dependencies]`nappres = { path = `"../appres`" }`n"
         W 'crates/pixel-demo/src/main.rs' "fn main() {}`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/pixel-demo/src/options.rs' "pub struct Options;`n"
-        W 'crates/ultimatecrt/Cargo.toml' "[package]`nname = `"ultimatecrt`"`n[dependencies]`ncrt-model = { path = `"../crt-model`" }`n[build-dependencies]`nparamgen = { path = `"../paramgen`" }`n"
+        W 'crates/ultimatecrt/Cargo.toml' "[package]`nname = `"ultimatecrt`"`n[dependencies]`ncrt-model = { path = `"../crt-model`" }`nappres = { path = `"../appres`" }`n[build-dependencies]`nparamgen = { path = `"../paramgen`" }`n"
         W 'crates/ultimatecrt/build.rs' "fn main() {}`n"
-        W 'crates/ultimatecrt/src/lib.rs' "pub mod app;`npub mod cli;`npub mod gpu;`npub mod output;`npub mod params;`npub mod placement;`npub mod presets;`npub mod scaling;`npub mod ui;`n"
+        W 'crates/ultimatecrt/src/lib.rs' "pub mod app;`npub mod bars;`npub mod cli;`npub mod gpu;`npub mod output;`npub mod params;`npub mod placement;`npub mod presets;`npub mod scaling;`npub mod ui;`n"
+        W 'crates/ultimatecrt/src/bars.rs' "const FRAME: &[u8] = include_bytes!(`"../tests/data/frame.png`");`npub fn frame() -> usize { FRAME.len() }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/ultimatecrt/tests/data/frame.png' "x"
         W 'crates/ultimatecrt/src/main.rs' "fn main() { ultimatecrt::app::run(); }`n"
         W 'crates/ultimatecrt/src/app.rs' "use crate::output;`npub fn run() { let _ = output::create(); }`n"
         W 'crates/ultimatecrt/src/output.rs' "pub struct Options { pub fullscreen: bool }`npub enum OnActivate { Default }`npub const TITLE_H: u32 = 4;`npub fn create() -> Options { wndproc(); Options { fullscreen: false } }`npub fn self_drag_hit(h: u32) -> bool { h == 2 }`nfn wndproc() { helper(); }`nfn helper() {}`n#[cfg(test)]`nmod tests {`n    fn t() {}`n}`n"
@@ -1596,7 +1661,7 @@ function Invoke-SelfTest {
         W 'crates/ultimatecrt/src/params.rs' "pub struct Params;`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/scaling.rs' "pub struct View;`npub fn fit() -> u32 { inner() }`nfn inner() -> u32 { 1 }`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/placement.rs' "use crate::scaling::View;`nuse crate::params::Params;`npub fn place() -> u32 { crate::scaling::fit() }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/presets.rs' "use crate::params::Params;`nconst P: &str = include_str!(`"../../../presets/tubes/01-a.toml`");`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/ultimatecrt/src/presets.rs' "use crate::params::Params;`nuse crt_model::mask::mask;`nconst P: &str = include_str!(`"../../../presets/tubes/01-a.toml`");`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/ui/mod.rs' "pub mod menu;`n"
         W 'crates/ultimatecrt/src/ui/menu.rs' "use crate::params::Params;`nuse crate::presets::Library;`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/gpu/mod.rs' "pub mod stages;`npub mod pipeline;`npub struct Headless;`npub fn client_size() -> u32 { if crate::output::self_drag_hit(1) { 1 } else { crate::output::TITLE_H } }`nfn secret() -> u32 { 7 }`n"
@@ -1616,6 +1681,9 @@ function Invoke-SelfTest {
         W 'crates/ultimatecrt/tests/presets.rs' "mod common;`nuse ultimatecrt::presets::Library;`nfn t() { render_source(); let _ = `"preset`"; }`n"
         W 'crates/ultimatecrt/tests/smoke.rs' "use ultimatecrt::{cli, scaling, params};`nfn t() { let _ = cli::USAGE; }`n"
         W 'crates/ultimatecrt/tests/units_only.rs' "use crt_model::units::mm;`nfn t() {}`n"
+        W 'crates/ultimatecrt/tests/exe_resources.rs' "fn t() { let _ = appres::pe::check_executable(); }`n"
+        W 'crates/ultimatecrt/tests/render_cmd.rs' "use ultimatecrt::params::Params;`nfn t() { let p = Params::default(); let _ = p.gun_gamma; }`n"
+        W 'params/gun.toml' "[[param]]`nid = `"gun_gamma`"`nstage = `"gun`"`ndefault = 2.4`n"
         W 'shaders/abl.comp' "#include `"abl.glsl`"`nvoid main() {}`n"
         W 'shaders/screen.comp' "#include `"beam.glsl`"`nvoid main() {}`n"
         W 'shaders/resample.comp' "void main() {}`n"
@@ -1655,6 +1723,12 @@ function Invoke-SelfTest {
             @{ Name = 'build.rs'; Files = @('crates/ultimatecrt/build.rs'); Full = $true }
             @{ Name = 'unknown file kind'; Files = @('weird.bin'); Full = $true }
             @{ Name = 'mixed doc and unknown'; Files = @('ENV.md', 'weird.bin'); Full = $true }
+            @{ Name = 'crt-model module referenced by an ultimatecrt module (mask -> presets)'; Files = @('crates/crt-model/src/mask.rs'); Tests = @('presets', 'ui_menu'); NotTests = @('smoke', 'units_only', 'binary_run', 'stage_screen'); Lib = @('presets::'); Pkg = @('crt-model'); Full = $false }
+            @{ Name = 'params + presets in one plan keep cargo check --workspace'; Files = @('params/beam.toml', 'presets/tubes/01-a.toml'); Tests = @('presets'); NotTests = @('smoke', 'units_only'); CheckWs = $true; Full = $false }
+            @{ Name = 'appres source'; Files = @('crates/appres/src/pe.rs'); Tests = @('exe_resources'); NotTests = @('smoke', 'stage_abl', 'units_only'); Pkg = @('appres', 'pixel-demo'); CheckWs = $true; Full = $false }
+            @{ Name = 'appres Cargo.toml (build configuration)'; Files = @('crates/appres/Cargo.toml'); Full = $true }
+            @{ Name = 'test data file embedded by a module'; Files = @('crates/ultimatecrt/tests/data/frame.png'); Tests = @(); NotTests = @('stage_abl', 'stage_screen', 'units_only'); Lib = @('bars::'); Full = $false }
+            @{ Name = 'test data file nobody references'; Files = @('crates/ultimatecrt/tests/data/orphan.png'); Full = $true }
             @{ Name = 'pixel-demo only (main.rs)'; Files = @('crates/pixel-demo/src/main.rs', 'crates/pixel-demo/src/options.rs'); Tests = @(); NotTests = '*'; Pkg = @('pixel-demo'); NotLib = @('output::', 'cli::', 'gpu::stages::abl::'); Full = $false }
             # Item level (a git fixture: the diff of the working tree against HEAD).
             @{ Name = 'item: output.rs private fn only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn helper() {}'; Replace = 'fn helper() { let _ = 1; }' })
@@ -1675,6 +1749,8 @@ function Invoke-SelfTest {
                Tests = @('smoke', 'binary_run'); NotTests = @('stage_abl', 'stage_screen', 'ui_menu', 'presets', 'pipeline_skip', 'output_win'); Lib = @('cli::'); Full = $false }
             @{ Name = 'item: scaling.rs private fn (not OS glue)'; Edits = @(@{ File = 'crates/ultimatecrt/src/scaling.rs'; Find = 'fn inner() -> u32 { 1 }'; Replace = 'fn inner() -> u32 { 2 }' })
                Tests = @('placement_modes'); NotTests = @('smoke', 'stage_abl', 'units_only', 'output_win'); Lib = @('scaling::', 'placement::'); Full = $false }
+            @{ Name = 'item: params default change selects a test that uses the field (gun_gamma)'; Edits = @(@{ File = 'params/gun.toml'; Find = 'default = 2.4'; Replace = 'default = 2.2' })
+               Tests = @('render_cmd'); NotTests = @('smoke', 'units_only', 'stage_screen'); CheckWs = $true; Full = $false }
             @{ Name = 'item: gpu/mod.rs private fn seen by a child module'; Edits = @(@{ File = 'crates/ultimatecrt/src/gpu/mod.rs'; Find = '{ 7 }'; Replace = '{ 8 }' })
                Tests = @('pipe_p'); NotTests = @('smoke', 'output_win', 'units_only', 'placement_modes'); Full = $false }
         )
@@ -1726,7 +1802,22 @@ function Invoke-SelfTest {
             if ($problems.Count -eq 0) { Write-Host ("  ok   {0,2}. {1}" -f $n, $c.Name) }
             else { $fail++; Write-Host ("  FAIL {0,2}. {1}: {2}" -f $n, $c.Name, ($problems -join '; ')) -ForegroundColor Red }
         }
-        Write-Host ("self test: {0} case(s), {1} failure(s)" -f $cases.Count, $fail)
+        # R-18: a failed git command must fail (never read as "no change"); -Tolerate is the explicit opt-out.
+        if ($gitOk) {
+            $n++
+            $threw = $false; $msg = ''
+            try { [void](Get-GitLines @('diff', '--name-only', 'orgin/main') -Repo $fx) } catch { $threw = $true; $msg = $_.Exception.Message }
+            if ($threw -and $msg -match 'orgin/main') { Write-Host ("  ok   {0,2}. a failed git diff throws with the git message" -f $n) }
+            else { $fail++; Write-Host ("  FAIL {0,2}. a failed git diff did not throw (got: '{1}')" -f $n, $msg) -ForegroundColor Red }
+            $n++
+            if ($null -eq (Get-GitLines @('rev-parse', '--verify', 'orgin/main') -Repo $fx -Tolerate)) { Write-Host ("  ok   {0,2}. -Tolerate returns null for a missing ref" -f $n) }
+            else { $fail++; Write-Host ("  FAIL {0,2}. -Tolerate did not return null" -f $n) -ForegroundColor Red }
+            $n++
+            $ok = Get-GitLines @('diff', '--name-only', 'HEAD') -Repo $fx
+            if ($null -ne $ok -and @($ok).Count -eq 0) { Write-Host ("  ok   {0,2}. an empty diff of a successful git command is an empty list" -f $n) }
+            else { $fail++; Write-Host ("  FAIL {0,2}. an empty successful diff did not return an empty list" -f $n) -ForegroundColor Red }
+        }
+        Write-Host ("self test: {0} case(s), {1} failure(s)" -f $n, $fail)
         return $fail
     } finally {
         if ($KeepFixture) { Write-Host "fixture kept: $fx" } else { Remove-Item -Recurse -Force $fx -ErrorAction SilentlyContinue }
@@ -1746,9 +1837,14 @@ if ($SelfTest) {
     exit ([int]($f -gt 0))
 }
 
-if (-not $env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = $TargetDir }
+if (-not $env:CARGO_TARGET_DIR) {
+    if (-not $TargetDir) { $TargetDir = Get-SharedTargetDir $Root }
+    if ($TargetDir) { $env:CARGO_TARGET_DIR = $TargetDir }
+}
 if (-not $env:CARGO_INCREMENTAL) { $env:CARGO_INCREMENTAL = '0' }
-$script:TimingsFile = Join-Path $env:CARGO_TARGET_DIR 'impact-timings.json'
+$timingsDir = $env:CARGO_TARGET_DIR
+if (-not $timingsDir) { $timingsDir = Join-Path $Root 'target' }
+$script:TimingsFile = Join-Path $timingsDir 'impact-timings.json'
 Set-Location $Root
 
 if ($Validate -gt 0) { Invoke-Validate $Validate ([bool]$NoMerges) (-not $Explain); exit 0 }
@@ -1759,18 +1855,22 @@ if ($Files -and $Files.Count -gt 0) {
     $header = "== impact plan for an explicit list of $($changed.Count) file(s)"
 } elseif ($Rev) {
     $diffBase = "$Rev^1"; $diffRev = $Rev
-    $changed = Get-GitLines @('-c', 'core.quotepath=false', 'diff', '--name-only', '--no-renames', $diffBase, $diffRev)
+    try { $changed = Get-GitLines @('-c', 'core.quotepath=false', 'diff', '--name-only', '--no-renames', $diffBase, $diffRev) }
+    catch { [Console]::Error.WriteLine("impact.ps1: $($_.Exception.Message)"); exit 2 }
     if (-not $changed) { $changed = @() }
     $header = "== impact plan for commit $Rev (diff against $diffBase)"
 } else {
-    if (-not $Base) { $Base = Get-DefaultBase }
-    $diffBase = $Base
-    $changed = @(Get-ChangedFiles $Base)
+    # A git failure (a mistyped -Base, a damaged repository) stops here with the git message and a non-zero exit code.
+    try {
+        if (-not $Base) { $Base = Get-DefaultBase }
+        $diffBase = $Base
+        $changed = @(Get-ChangedFiles $Base)
+    } catch { [Console]::Error.WriteLine("impact.ps1: $($_.Exception.Message)"); exit 2 }
     $header = "== impact plan (base $Base, committed, uncommitted and untracked changes)"
 }
 $plan = Get-ImpactPlan -Root $Root -ChangedFiles $changed -ForceFull:$Full -DiffBase $diffBase -DiffRev $diffRev
 Write-Plan $plan -Explain:$Explain -Header $header
-Write-Host "cargo target dir: $env:CARGO_TARGET_DIR (CARGO_INCREMENTAL=$env:CARGO_INCREMENTAL)"
+Write-Host "cargo target dir: $timingsDir (CARGO_INCREMENTAL=$env:CARGO_INCREMENTAL)"
 
 if ($Run -or $DryRun) {
     $result = Invoke-Plan $plan -KeepGoing:$KeepGoing -DryRun:$DryRun

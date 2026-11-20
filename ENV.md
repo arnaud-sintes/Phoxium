@@ -9,7 +9,7 @@ How to set up, build, test, package, deploy and publish ultimateCRT. Windows 11 
 | Windows | 11 | Developed on an Insider build (10.0.26300). Windows.Graphics.Capture features depend on the build. |
 | Rust | 1.98.1 | Pinned in `rust-toolchain.toml` (MSVC host, with rustfmt and clippy). `rustup` installs it on first use. |
 | MSVC build tools | Visual Studio 2022 with "Desktop development with C++" | Needed by the MSVC Rust target, and its C++ compiler (`cl.exe`) by `dear-imgui-sys`, which compiles Dear ImGui and cimgui from source for the settings menu (T-52a; about 16 s in release, once per target folder). |
-| Vulkan SDK | 1.4.x | Provides `glslc` and the validation layer. Set `VULKAN_SDK` (the installer does), or put `glslc` on `PATH`. |
+| Vulkan SDK | 1.4.x | Provides `glslc` and the validation layer. Set `VULKAN_SDK` (the installer does), or put `glslc` on `PATH`. The release build uses whatever version is installed: 1.4.363.0 (glslc `shaderc v2026.4`) at the time of this writing. `scripts/package.ps1` writes the exact `glslc --version` and `rustc -vV` of each release into `BUILD-INFO.txt` of the zip, and this row is updated when the SDK changes. |
 | GPU driver | Vulkan 1.3 capable | Developed on NVIDIA driver 596.71. |
 | GitHub CLI `gh` | recent | Logged in (`gh auth status`) with the `repo` scope, only needed to publish. |
 | PowerShell | Windows PowerShell 5.1 or later | Runs the scripts in `scripts/`. |
@@ -56,7 +56,7 @@ $env:UCRT_REQUIRE_GPU = '1'; cargo test
 - `gpu_identity` (T-20a) runs decode then encode with the same transfer on both sides (pure 2.4, pure 2.2, sRGB, identity): every code comes back exact on an RGBA16F and a BGRA8 target, the native raster matches the `crt-model` oracle within FP16 precision, and the FP16 subnormals of the dark codes (1 to 4 at gamma 2.4) are not flushed to zero. It also changes the native size (256x240, 320x240, back), decodes a 2x upscale at block centres, checks the black surround, and submits a burst of frames that overlap on the GPU (two frames in flight) so synchronization validation sees the cross-frame accesses.
 - Software Vulkan for a future CI (report only, unverified on Windows): Mesa lavapipe (llvmpipe Vulkan driver, Vulkan 1.3; Windows builds exist from third parties such as mesa-dist-win) and Google SwiftShader are candidates. Installing either as an ICD (`VK_DRIVER_FILES` pointing at its JSON manifest) would let a GPU-less runner run these tests with `UCRT_REQUIRE_GPU=1`. Neither has been tried here; check its Vulkan 1.3, dynamic rendering and synchronization2 support and its licence first.
 
-`scripts/check.ps1 -Full` runs all of the above in one go (fmt, clippy `-D warnings`, tests with `UCRT_REQUIRE_GPU=1`, licence check) and exits non-zero on the first failure. `-Smoke` adds a 10 s live run (`--pattern ramp --exit-after 10 --validation`, opens a window) that fails on any validation line on stderr. The licence check runs `cargo deny check licenses` against `deny.toml` when cargo-deny is installed (`cargo install cargo-deny --locked`), else warns, and always runs the declared-licence check shared in policy with `package.ps1`.
+`scripts/check.ps1 -Full` runs all of the above in one go (the self tests of `impact.ps1` and `licence-policy.ps1`, fmt, clippy `-D warnings`, tests with `UCRT_REQUIRE_GPU=1`, licence check) and exits non-zero on the first failure. `-Smoke` adds a 10 s live run (`--pattern ramp --exit-after 10 --validation`, opens a window) that fails on any validation line on stderr. The licence check runs `cargo deny check licenses` against `deny.toml` when cargo-deny is installed (`cargo install cargo-deny --locked`), else warns, and always runs the declared-licence filter of `scripts/licence-policy.ps1`, shared with `package.ps1`: a licence field is required, and GPL, LGPL and AGPL (also inside an `OR` expression) are refused unless `deny.toml` allows that licence.
 
 There is no automated test of capture or output, and no CI yet: a hosted runner has no GPU and cannot capture windows.
 
@@ -82,7 +82,7 @@ How to use it:
 .\scripts\impact.ps1 -Validate 5        # plans of the last 5 first-parent commits plus a miss check
 ```
 
-The changed files are the committed changes since the merge base with `exec/integration` (else `HEAD~1`; on a clean `exec/integration` that is the last commit), plus uncommitted and untracked files. `-Base <ref>` overrides the base.
+The changed files are the committed changes since the merge base with `exec/integration` (else `HEAD~1`; on a clean `exec/integration` that is the last commit), plus uncommitted and untracked files. `-Base <ref>` overrides the base. A failed git command (a mistyped base, a damaged repository) stops the script with the git message and exit code 2: it is never read as "no change".
 
 What the model decides (derived from the repository at every run, nothing hard-coded except the package names and the `gpu/stages` layout):
 
@@ -91,14 +91,15 @@ What the model decides (derived from the repository at every run, nothing hard-c
 | Docs (`*.md`, `*.txt`), `.gitignore`, an asset recipe | Format check only. |
 | `scripts\*.ps1` | Format check and a PowerShell parse of the changed scripts. No cargo tests. |
 | `crates/pixel-demo/**` | `cargo test -p pixel-demo` and clippy on it. Integration tests of `ultimatecrt` only when `options.rs` changed and a test references pixel-demo; the live `scripts\check-*.ps1` are never run by the plan. |
-| `crates/crt-model/src/<module>` | `cargo test -p crt-model`, every `ultimatecrt` test file referencing `crt_model::<module>` (or a crt-model module that uses it, depth 2), and the unit tests of the `ultimatecrt` modules that do. |
+| `crates/crt-model/src/<module>` | `cargo test -p crt-model`, every `ultimatecrt` test file referencing `crt_model::<module>` (or a crt-model module that uses it, depth 2), and, for each `ultimatecrt` module that references it, what a change of that module selects: its unit tests, the integration tests that reference the module and its dependants (depth 2). |
+| `crates/appres/**` | `cargo test -p appres`, `cargo check --workspace` (the build scripts of `ultimatecrt` and `pixel-demo` use it), `cargo test` of the packages that depend on it, and the `ultimatecrt` tests and modules that name `appres`. Its `Cargo.toml` is FULL. |
 | `crates/ultimatecrt/src/<module>` | By items, from `git diff -U0` (see "Item-level model" below): the module's own unit tests (`cargo test -p ultimatecrt --lib -- <module>::`), then only the tests and modules that use an item the change reaches. Without a usable diff, or when a changed line is outside every item: the module level (every integration test referencing `ultimatecrt::<module>` and the dependants of the `use crate::` graph, depth 2, marked "transitive" in the reasons). |
 | `crates/ultimatecrt/src/gpu/stages/<stage>.rs` | The stage's unit tests, the tests naming the stage (`"<stage>"` in `enable_only`/`stage(...)`; an `after: "<stage>"` input injection does not count) and the whole-chain tests (those that render without a stage filter). |
 | `shaders/*.comp, *.vert, *.frag` | The same as the owning stage (the stage Rust file holding `<shader>.spv`). |
 | `shaders/include/*.glsl` | Every shader that `#include`s it, transitively, then as above, plus the unit tests that read shader sources. |
-| `params/*.toml` | `cargo check --workspace --all-targets` (the table is regenerated), the `params`, `settings` and `presets` unit tests, `tests/presets.rs`, and the tests naming a changed parameter id (from the diff: only the changed blocks). |
+| `params/*.toml` | `cargo check --workspace --all-targets` (the table is regenerated), the `params`, `settings` and `presets` unit tests, `tests/presets.rs`, and the tests naming a changed parameter id (from the diff: only the changed blocks), as a quoted id, as the generated constant or as a field (`.gun_gamma`). A presets change in the same plan does not drop the workspace check. |
 | `crates/paramgen/**` | `cargo test -p paramgen`, `cargo check --workspace`, the params-related tests. |
-| `presets/tubes/*.toml`, assets (fonts) | The module that embeds the file (`include_str!`/`include_bytes!`), the tests referencing it, the tests iterating over the presets. |
+| `presets/tubes/*.toml`, assets (fonts), `crates/ultimatecrt/tests/data/*` | The module that embeds the file (`include_str!`/`include_bytes!`), the tests referencing it, the tests iterating over the presets (presets only). A test data file or an asset that nothing references is FULL. |
 | `Cargo.toml`, `Cargo.lock`, `build.rs`, `rust-toolchain.toml`, `rustfmt.toml`, `deny.toml`, `src/lib.rs` | FULL (all of `ultimatecrt` for `lib.rs`). |
 | A file kind the model cannot place | FULL, with the reason printed. |
 
@@ -111,7 +112,7 @@ Item-level model (the `crates/ultimatecrt/src` modules other than stage files; t
 - OS glue (`output`, `hotkeys`, `capture`, `cli`; `$GlueModules` in the script) is a leaf unless a public interface changed (a public signature, constant, struct, enum, type alias or re-export): then only the names that changed are followed. A body-only change runs the module's unit tests and the tests that name the items it reaches.
 - Tests that run the binary (`CARGO_BIN_EXE`) are selected when a glue module changed (not for a comment, test or import change), or when a module that `main.rs` names (the entry point, `app`) is reached.
 
-Always: `cargo fmt --all -- --check`. Clippy (`--all-targets -- -D warnings`) runs only on the packages that own a changed Rust file plus the workspace crates that depend on them. The GPU tests it selects run with `UCRT_REQUIRE_GPU=1`.
+Always: `cargo fmt --all -- --check`. Clippy (`--all-targets -- -D warnings`) runs only on the packages that own a changed Rust file plus the workspace crates that depend on them. The GPU tests it selects, and the filtered unit tests (`--lib`), run with `UCRT_REQUIRE_GPU=1`, so a machine without a usable Vulkan device fails instead of skipping.
 
 Reading the plan: each line is `[cost] command`. Cost classes: `cheap` (no GPU), `GPU` (headless Vulkan test), `slow` (clippy, full-chain renders, tests that spawn the binary or render the presets, tests over 900 lines, and any GPU test measured above 20 s). `-Run` records the run time of every integration test it executes in `impact-timings.json` next to the shared target folder; the plan then classifies by the measurement and prints the measured seconds (on 2026-11-19 `ui_menu` took 160 s of the 6 min 43 s full run). The last lines give "Test programs selected: N of M" and the list of programs not run ("skipped by impact analysis"). M counts the integration test files plus one unit-test target per package. `-Explain` lists the reasons per program. The selection is deliberately conservative: a test that merely names a stage or module is included, and a widely used module (`params`, `gpu`) pulls in most tests, as it should.
 
@@ -119,17 +120,17 @@ Precision check (2026-11-20): the last three merges of the Win32 window work (`o
 
 Limits: the model is textual (module paths, quoted stage names, shader names, parameter ids, item names), not a type analysis. It cannot see a test that reaches a module only through a re-export from another crate item it does not name, or behaviour shared through a data file it does not know. When a change is risky, or the plan looks too small, run `-Full`.
 
-Shared build cache: `impact.ps1` and `check.ps1` set `CARGO_TARGET_DIR` to `C:\projects\personal\ultimateCRT-wt\target-shared` when it is not already set, and `CARGO_INCREMENTAL=0`. Every agent and worktree then reuses the compiled external dependencies (`windows`, `ash`, and the Dear ImGui C++ sources built by `dear-imgui-sys`, about 16 s in release) instead of building them cold. The workspace crates themselves rebuild once per worktree path, which is expected. Cargo takes a file lock on the target folder, so parallel cargo runs on it wait for each other (the "Blocking waiting for file lock" line) instead of corrupting it. Do not delete the shared folder after a task; `scripts\clean-targets.ps1` prints the sizes of the shared and per-worktree `target` folders and deletes the shared one only when the free disk space is under 30 GB (or with `-Force`, and never while cargo runs). An `.exe` in the shared folder cannot be replaced while it runs, as with any target folder.
+Shared build cache: `impact.ps1` and `check.ps1` set `CARGO_TARGET_DIR` when it is not already set, and `CARGO_INCREMENTAL=0`. The folder is `<worktree root>\target-shared`, where the worktree root is the folder `<repository name>-wt` next to the repository (or the parent folder when the repository itself is a worktree inside such a folder), see `scripts\shared-paths.ps1`; without such a folder cargo's own `target` in the repository is used and nothing is set. Every agent and worktree then reuses the compiled external dependencies (`windows`, `ash`, and the Dear ImGui C++ sources built by `dear-imgui-sys`, about 16 s in release) instead of building them cold. The workspace crates themselves rebuild once per worktree path, which is expected. Cargo takes a file lock on the target folder, so parallel cargo runs on it wait for each other (the "Blocking waiting for file lock" line) instead of corrupting it. Do not delete the shared folder after a task; `scripts\clean-targets.ps1` prints the sizes of the shared and per-worktree `target` folders and deletes the shared one only when the free disk space is under 30 GB (or with `-Force`, and never while cargo runs). It deletes only a folder that holds `CACHEDIR.TAG` or `.rustc_info.json` under the worktree root, the main checkout or next to the repository, asks for confirmation (unless `-Force`), and never deletes a drive root, the repository, the worktree root or a folder that contains one of them, so a mistaken `CARGO_TARGET_DIR` cannot cost files. An `.exe` in the shared folder cannot be replaced while it runs, as with any target folder.
 
 #### Test cost: normal tier and slow tier
 
-Tiers. The normal tier is every test `cargo test` runs: the gate. The slow tier is the `#[ignore = "..."]` tests, run on purpose with a documented command, never silently dropped. A test goes to the slow tier only when it is redundant with a normal-tier test or a pure long-run measurement or stress run. Today the slow tier is the three GPU-time profiles (print a table, assert at most a cost ratio), unchanged by the 2026-11-20 work:
+Tiers. The normal tier is every test `cargo test` runs: the gate. The slow tier is the `#[ignore = "..."]` tests, run on purpose with a documented command, never silently dropped. A test goes to the slow tier only when it is redundant with a normal-tier test or a pure long-run measurement or stress run. Today the slow tier is five `#[ignore]` tests that no script runs: the GPU-time profiles (print a table, assert at most a cost ratio) and a cost study, unchanged by the 2026-11-20 work:
 
 ```
-cargo test -p ultimatecrt -- --ignored --nocapture        # the whole slow tier (UCRT_REQUIRE_GPU=1 on the dev machine)
+cargo test -p ultimatecrt -- --ignored --nocapture        # the whole slow tier (set UCRT_REQUIRE_GPU=1 so a missing GPU fails)
 ```
 
-(`stage_beam_fast::screen_profile`, `stage_beam_fast::screen_profile_geometry`, `stage_beam_warp::screen_profile_warp`; `UCRT_PROFILE_FRAMES` sets their frame count.) No test was moved to the slow tier by the speed-up, and `presets::all_ten_presets_render_finite_images` left it (about 1 s now).
+(`stage_beam_fast::screen_profile`, `stage_beam_fast::screen_profile_geometry`, `stage_beam_warp::screen_profile_warp`, `perf_profile::chain_profile` and `stage_optics::optics_cost_study`; `UCRT_PROFILE_FRAMES` sets the frame count of the profiles.) No test was moved to the slow tier by the speed-up, and `presets::all_ten_presets_render_finite_images` left it (about 1 s now).
 
 Budget: the whole normal tier at most about 3 minutes alone, `ui_menu` at most about 40 s, no single normal-tier test above about 20 s. A new test above that budget either gets cheaper (below) or argues its case for the slow tier in its `ignore` reason.
 
@@ -170,21 +171,25 @@ Before, `ui_menu` alone was about 160 s on an idle GPU and 950 s under contentio
 |---|---|
 | `check.ps1` | The local gate. By default it runs the impact plan of `impact.ps1` (Test policy above); `-Full` runs everything below (the previous behaviour). `-Smoke` adds the 10 s live run, `-SkipTests` skips `cargo test` (full gate). |
 | `impact.ps1` | Impact analysis: prints or runs the checks and tests a change needs (Test policy above). `-Full`, `-Explain`, `-Run`, `-DryRun`, `-KeepGoing`, `-Files`, `-Rev`, `-Validate`, `-SelfTest`. |
-| `clean-targets.ps1` | Sizes of the shared and per-worktree `target` folders; deletes the shared one only when free disk < 30 GB or with `-Force`. |
+| `clean-targets.ps1` | Sizes of the shared and per-worktree `target` folders; deletes the shared one only when free disk < 30 GB or with `-Force`, only when it is a cargo target folder in an expected place (see the shared build cache above), after a confirmation. `-DryRun` reports what it would delete or refuse; `-SelfTest` tests the safety checks. |
+| `shared-paths.ps1` | Dot-sourced helper: the worktree root and the shared target folder, derived from the repository location (no machine path in any script). |
+| `licence-policy.ps1` | Dot-sourced helper: the GPL, LGPL and AGPL filter of the declared licences, shared by `package.ps1` and `check.ps1`; `-SelfTest` tests it. |
+| `gen-third-party.ps1` | Writes the `THIRD-PARTY.md` of the release zip: the licence texts of every dependency built for `x86_64-pc-windows-msvc` (copied from the crate packages; a package with no licence file fails the script, except the Dear ImGui crates whose notice `THIRD-PARTY.md` of the repository carries) followed by that file. Called by `package.ps1`; prints a count check against `Cargo.lock`. |
 | `check-capture.ps1` | Capture fidelity (T-12, CAP-3): runs `pixel-demo --image` at several integer scales, saves a capture with `ultimatecrt --save-capture` and compares it with the known pixels. Parameters `-TargetDir` (default `..\target`, needs release builds of both programs), `-Scales`, `-Occlude`, `-MoveTo "x,y"`, `-KeepFiles`. Opens windows: hands off the keyboard and mouse. |
 | `poll-foreground.ps1` | Foreground-window poll for focus checks, see "Foreground poll" below. |
 | `package.ps1`, `release.ps1` | Release, sections 5 and 6. |
-| `spikes\imgui-spike\scripts\run-t08-live.ps1` | Live run of the T-08 ImGui spike (F12 menu focus hand-off, F11 toggle) in windowed then fullscreen mode, unattended: it synthesises key presses and moves the foreground window, so it needs a hands-off desktop (about 2 minutes) and must not run with another live task. The spike is its own workspace (own `target`, see the disk-space note). |
+| `spikes\imgui-spike\scripts\run-t08-live.ps1` | Live run of the T-08 ImGui spike (the spike's own F12 menu key and F11 toggle; the product's menu key is F10) in windowed then fullscreen mode, unattended: it synthesises key presses and moves the foreground window, so it needs a hands-off desktop (about 2 minutes) and must not run with another live task. The spike is its own workspace (own `target`, see the disk-space note). |
 
 ### Manual end-to-end test
 
-1. Start the source: `target\release\pixel-demo.exe` (`--scale 3`, `--res 160x144`, `--scene card`, `--image file.png`; Space cycles content, 1 to 9 sets the scale, Esc quits).
+1. Start the source: `target\release\pixel-demo.exe` (`--scale 3`, `--res 160x144`, `--scene card`, `--image file.png`; Space cycles content, 1 to 9 sets the scale, Esc quits pixel-demo, not ultimatecrt).
 2. Start the CRT app: `target\release\ultimatecrt.exe --stats --validation`.
 3. Expect: a second window duplicating the demo, `render` near the display refresh rate, a line `source scaling: detected x3/x3, native 256x240` (or `native (x1)` at scale 1), and no validation messages.
+4. Press F10: the settings menu opens and takes the focus. Press F10 or Esc to close it: the focus goes back to the source. Esc never quits the output (in the framed window or fullscreen); quit with `Ctrl+Alt+Q` or the close button of the framed window. F11 toggles fullscreen and the framed window.
 
 Useful variants:
 - `--fullscreen` covers the source's monitor and never takes focus. Quit with `Ctrl+Alt+Q`. Use `--exit-after 10` on the first tries so it ends by itself.
-- `--save-capture out.png` saves the first captured frame (check that the client area is exact, for example 768Ã—720 for a 256Ã—240 source at 3Ã—).
+- `--save-capture out.png` saves the first captured frame (check that the client area is exact, for example 768×720 for a 256×240 source at 3×).
 - `--list-windows`, `--list-gpus`, `--gpu N`, `--window "text"`, `--divisor N`, `--crop x,y,w,h`, `--integer`.
 
 Tips: launch the demo and the CRT app from the same kind of shell. When a program is started with `Start-Process` from PowerShell, the console window it opens can carry the exe path in its title and be picked as the target. The target match prefers titles that start with the text, so `pixel-demo |` wins. Do not take full-desktop screenshots when checking output (see `DESIGN.md`, testing).
@@ -201,23 +206,23 @@ Tips: launch the demo and the CRT app from the same kind of shell. When a progra
 .\scripts\package.ps1
 ```
 
-Run it on a committed (clean) tree. It reads the version from `[workspace.package]`, runs `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, `cargo build --release --locked` and `cargo test --release --locked`, checks the declared licences of the dependencies (a missing licence or a GPL one fails), then creates in `dist\` (ignored by git):
-- `ultimatecrt-vX.Y.Z-windows-x64.zip` with one top-level folder `ultimatecrt-vX.Y.Z-windows-x64\` containing `ultimatecrt.exe`, `pixel-demo.exe`, `README.md`, `CHANGELOG.md`, `THIRD-PARTY.md` (dependency licences) and `RUNNING.txt` (how to start);
-- `ultimatecrt-vX.Y.Z-windows-x64.zip.sha256` (`<hash>  <file>`, ASCII, LF);
-- `ultimatecrt-vX.Y.Z-windows-x64.commit`, the commit the zip was built from, so `release.ps1` can refuse a stale zip.
+Run it on a committed (clean) tree. It reads the version from `[workspace.package]`, runs `cargo fmt --all --check`, `cargo clippy --all-targets --locked -- -D warnings`, the self tests of `licence-policy.ps1` and `impact.ps1`, `cargo build --release --locked` and `cargo test --release --locked` **with `UCRT_REQUIRE_GPU=1`** (a machine without a usable Vulkan device fails here instead of skipping the GPU suite), checks the declared licences of the dependencies (a missing licence, or a GPL, LGPL or AGPL one that `deny.toml` does not allow, fails) and runs `cargo deny check licenses` when cargo-deny is installed. The executables are taken from the target directory that `cargo metadata` reports, so a `CARGO_TARGET_DIR` set for the session (as `check.ps1` does) is honoured; the script prints it. It refuses to package a dirty tree, or an executable that is older than the sources it was built from (a stale build), with an error that says which; `-Force` overrides both, for a local trial. It then creates in `dist\` (ignored by git):
+- `ultimatecrt-vX.Y.Z-windows-x64.zip` with one top-level folder `ultimatecrt-vX.Y.Z-windows-x64\` containing `ultimatecrt.exe`, `pixel-demo.exe`, `LICENSE` (MIT), `README.md`, `CHANGELOG.md`, `THIRD-PARTY.md` (the licence texts of every dependency and the notices of the bundled C++ code and fonts, from `gen-third-party.ps1`), `BUILD-INFO.txt` (commit, `rustc -vV`, `glslc --version`) and `RUNNING.txt` (how to start, the unsigned-binary note and how to check the SHA-256);
+- `ultimatecrt-vX.Y.Z-windows-x64.zip.sha256` (`<hash>  <file>`, ASCII, LF), published with the release so that users can verify their download;
+- `ultimatecrt-vX.Y.Z-windows-x64.commit`, the commit the zip was built from (with a `-dirty` and/or `-untested` suffix for a local trial), so `release.ps1` can refuse a stale, dirty or untested zip.
 
-`-SkipTests` (skips fmt, clippy and tests) and `-AllowDirty` exist for local trials only, never for a publish. A zip built with `-AllowDirty` is recorded as `<hash>-dirty` and `release.ps1` refuses it.
+`-SkipTests` (skips fmt, clippy, the self tests and the tests) and `-AllowDirty` exist for local trials only, never for a publish. A zip built with `-AllowDirty` is recorded as `<hash>-dirty` and one built with `-SkipTests` as `<hash>-untested`; `release.ps1` refuses both.
 
 ## 6. Deploy
 
-Deployment is a GitHub release of the zip on the private repository `arnaud-sintes/ultimateCRT`. There is no installer: unzip and run. The executables are not code-signed, so Windows SmartScreen and antivirus tools may warn on first run.
+Deployment is a GitHub release of the zip on the repository `arnaud-sintes/ultimateCRT` (public from v0.2.0; it was private before). There is no installer: unzip and run. The executables are **not code-signed** (decision: no certificate), so Windows SmartScreen and antivirus tools may warn on first run; the README and `RUNNING.txt` say so and tell users to compare the SHA-256 of the zip with the `.sha256` file attached to the release (`Get-FileHash`, or `certutil -hashfile <zip> SHA256`).
 
 ```
 .\scripts\release.ps1 -DryRun   # runs every check and prints the notes
 .\scripts\release.ps1           # creates tag vX.Y.Z and the release with the zip and checksum
 ```
 
-`release.ps1` refuses to run when `gh` is not logged in, off the `main` branch, on a dirty tree, with a HEAD that is not pushed, with a zip built from another commit than HEAD (or one that does not match its checksum), when the tag exists locally or on `origin`, when the release exists, or without a changelog section with at least one entry for the version. The notes of the release are that changelog section. Any native command that fails stops the script.
+`release.ps1` refuses to run when `gh` is not logged in, off the `main` branch, on a dirty tree, with a HEAD that is not pushed, with a zip built from another commit than HEAD (or one that does not match its checksum), with a zip built from a dirty tree or with `-SkipTests` (the `-dirty` and `-untested` records), with a zip that lacks `LICENSE`, `THIRD-PARTY.md`, `BUILD-INFO.txt`, `RUNNING.txt` or an executable, when the tag, the workspace version and the changelog disagree (`Cargo.lock` at another version, no `## [X.Y.Z] - YYYY-MM-DD` heading, entries left under `[Unreleased]`, `RUNNING.txt` of another version), when the tag exists locally or on `origin`, when the release exists, or without a changelog section with at least one entry for the version. The notes of the release are that changelog section followed by the SHA-256 of the zip and the unsigned-binary note; the `.sha256` file is attached to the release. Any native command that fails stops the script.
 
 ### Recovery
 
@@ -229,14 +234,14 @@ Deployment is a GitHub release of the zip on the private repository `arnaud-sint
 
 ## 7. Publish
 
-"Publish" is the full release procedure, in this order:
+"Publish" is the full release procedure, in this order. **The first public release (v0.2.0)** has two extra steps around it, decided with the public switch: before step 5, the one-time history rewrite that removes the author e-mail from every commit (choose the public identity and set it as the repository-local `user.email`, delete the stale `exec/*` and `task/*` branches, run `git filter-repo --mailmap` over all remaining branches and tags, check `git log --all --format="%ae%n%ce" | sort -u`, check that GitHub holds no `refs/pull/*`, re-point or delete any existing tag or release, force-push all refs once: the one exception to "no force pushes to `main`", recorded in the CHANGELOG; then search the docs for commit hashes the rewrite made stale), and after step 7, switching the repository to public and downloading the zip once to check `LICENSE`, `THIRD-PARTY.md`, `RUNNING.txt` and the hash.
 
 1. **Version update:** bump `[workspace.package] version` in `Cargo.toml` (not needed if the current version was never released), then `cargo build` to refresh `Cargo.lock`.
 2. **Changelog update:** rename `## [Unreleased]` to `## [X.Y.Z] - YYYY-MM-DD`, add a new empty `## [Unreleased]` above it, and check that the entries cover every user-visible change since the last release (`git log`). Update `README.md` and `ARCHITECTURE.md` if behaviour changed.
 3. **Build:** `cargo build --release`.
 4. **Test:** `cargo fmt --all --check`, `cargo clippy --all-targets -- -D warnings`, `cargo test` (the packaging step repeats them), plus the manual end-to-end test of section 3 if the capture, output or Vulkan code changed.
 5. **Commit and push:** commit as `Release vX.Y.Z` on `main` and push it. The package must be built from this commit.
-6. **Package:** `.\scripts\package.ps1`.
+6. **Package:** `.\scripts\package.ps1` (no `-SkipTests`, no `-AllowDirty`, no `-Force`). Its output names the target directory the executables came from and the toolchain is written into `BUILD-INFO.txt`; keep the Vulkan SDK row of section 1 in step with it.
 7. **Release:** `.\scripts\release.ps1 -DryRun`, then `.\scripts\release.ps1`.
 
 If a step fails, stop and fix it. A fix after step 5 needs a new commit, a push and a new package.
@@ -253,7 +258,7 @@ Check the result with `gh release view vX.Y.Z`.
 | `no frame captured within 5 seconds` | The window is not drawing, is protected content, or capture is blocked for it. Moving or redrawing the window often helps. |
 | `no Vulkan 1.3 device can present to the output window` | Update the GPU driver, or pick a device with `--gpu` (see `--list-gpus`). |
 | Output window does not respond to the keyboard | By design in fullscreen: quit with `Ctrl+Alt+Q`. |
-| `cannot register the Ctrl+Alt+Q quit hotkey` | Another program owns that shortcut. Close it, or use a windowed output (Esc quits). |
+| `cannot register the Ctrl+Alt+Q quit hotkey` | Another program owns that shortcut. Close it, or use a windowed output and close it with its close button. |
 | `no such monitor` | `--monitor` index out of range: see the monitor lines of `--list-windows`. |
 | `cargo clippy` or `fmt` fails during packaging | Fix the warning or run `cargo fmt --all`, commit, package again. |
 | Capture reports few frames per second on a static window | Windows.Graphics.Capture only delivers a frame when the window content changes. |
@@ -267,4 +272,4 @@ Check the result with `gh release view vX.Y.Z`.
 .\scripts\poll-foreground.ps1 -SelfTest                                                               # 3 s, prints PASS or FAIL
 ```
 
-`-SourceTitle` is a case-insensitive title substring, `-IntervalMs` defaults to 100. Window titles can hold private content (documents, chats): delete the CSV after the run.
+`-SourceTitle` is a case-insensitive title substring, `-IntervalMs` defaults to 100. Window titles can hold private content (documents, chats): delete the CSV after the run. The default file name `poll-foreground.csv` (and `poll.csv`) is in `.gitignore`.
