@@ -3,6 +3,7 @@ name = "crt-model"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Pure f64 reference model of the CRT physics (the oracle for GPU tests)"
 
 [dependencies]

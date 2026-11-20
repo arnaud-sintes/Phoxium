@@ -3,6 +3,7 @@ name = "appres"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Application icon and Windows resources: ICO writer and reader, .res writer (icon group, VERSIONINFO), PE resource reader (build-time and test tool)"
 
 # No dependency: the build scripts of ultimatecrt and pixel-demo use it to turn assets/icon/*.ico into a .res

@@ -3,6 +3,7 @@ name = "ultimatecrt"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 description = "Captures a window, runs it through a virtual CRT tube and presents it in a separate output window"
 
 [dependencies]
