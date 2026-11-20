@@ -11,8 +11,15 @@
 
     The executables are taken from the target directory that cargo reports (`cargo metadata`), so a CARGO_TARGET_DIR
     set for the session (scripts/check.ps1 does that) is honoured. The script refuses to package when the
-    working tree is dirty or when an executable is older than the sources it was built from (a stale build);
-    -Force overrides both, for a local trial only.
+    working tree is dirty or when an executable is older than the sources it was built from (a stale build: only
+    the files that can change the executables count, scripts/build-checks.ps1 Test-BinaryInput, so a commit of
+    tests or documentation does not trip it); -Force overrides both, for a local trial only.
+
+    The release build (and the release tests, which reuse it) runs with --remap-path-prefix flags for the user
+    profile, the repository, CARGO_HOME and the target folder (CARGO_ENCODED_RUSTFLAGS, this script's process
+    only; ordinary builds are not affected), so that dependency panic locations do not embed local paths. The
+    staged executables are then scanned for the user profile path, the repository path, the user name and the
+    machine name (ASCII and UTF-16): any hit fails the packaging, -Force included.
 
     The tests run with UCRT_REQUIRE_GPU=1: a machine without a usable Vulkan device fails the gate instead of
     skipping the whole GPU suite. cargo-deny (deny.toml) runs when installed; the declared-licence filter of
@@ -32,6 +39,7 @@ $ProgressPreference = 'SilentlyContinue' # progress bars break non-interactive h
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
 . (Join-Path $PSScriptRoot 'licence-policy.ps1')
+. (Join-Path $PSScriptRoot 'build-checks.ps1')
 
 # Windows PowerShell 5.1 turns anything a native tool writes to stderr (cargo progress) into an error
 # under 'Stop', so the exit code is checked instead. Output is returned to the caller.
@@ -51,20 +59,6 @@ function Get-WorkspaceVersion {
     throw 'No version in [workspace.package] of Cargo.toml.'
 }
 
-# The newest write time among the tracked files a build depends on (sources, shaders, parameter table, presets,
-# assets, manifests), and the file it is. Documentation and scripts do not enter the executables.
-function Get-NewestBuildInput {
-    $listing = Invoke-Checked 'git ls-files' { git -c core.quotepath=false ls-files -- crates shaders params presets assets Cargo.toml Cargo.lock rust-toolchain.toml }
-    $newest = $null
-    foreach ($f in @($listing | Where-Object { $_ })) {
-        $p = Join-Path $root $f
-        if (-not (Test-Path -LiteralPath $p)) { continue }
-        $t = (Get-Item -LiteralPath $p).LastWriteTimeUtc
-        if (-not $newest -or $t -gt $newest.Time) { $newest = @{ Time = $t; File = $f } }
-    }
-    return $newest
-}
-
 $version = Get-WorkspaceVersion
 $dirty = [bool](git status --porcelain)
 if ($dirty -and -not ($AllowDirty -or $Force)) {
@@ -81,15 +75,20 @@ if (-not $SkipTests) {
     # Cheap self tests of the tooling the gate relies on.
     Invoke-Checked 'licence policy self test' { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'licence-policy.ps1') -SelfTest }
     Invoke-Checked 'impact self test' { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'impact.ps1') -SelfTest }
+    Invoke-Checked 'build checks self test' { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'build-checks.ps1') -SelfTest }
 }
-Invoke-Checked 'cargo build' { cargo build --release --locked }
-if (-not $SkipTests) {
-    # A machine without a usable Vulkan device must fail here, not skip the GPU suite.
-    $oldGpu = $env:UCRT_REQUIRE_GPU
-    $env:UCRT_REQUIRE_GPU = '1'
-    try { Invoke-Checked 'cargo test' { cargo test --release --locked } }
-    finally { $env:UCRT_REQUIRE_GPU = $oldGpu }
-}
+# D-04: the release build and the release tests (same flags, so the tests reuse the build) remap local paths.
+$savedFlags = Set-RemapRustFlags $root (Get-BinaryTargetDir $root)
+try {
+    Invoke-Checked 'cargo build' { cargo build --release --locked }
+    if (-not $SkipTests) {
+        # A machine without a usable Vulkan device must fail here, not skip the GPU suite.
+        $oldGpu = $env:UCRT_REQUIRE_GPU
+        $env:UCRT_REQUIRE_GPU = '1'
+        try { Invoke-Checked 'cargo test' { cargo test --release --locked } }
+        finally { $env:UCRT_REQUIRE_GPU = $oldGpu }
+    }
+} finally { Restore-RustFlags $savedFlags }
 
 # The licences of everything that is built into or with the binaries (workspace crates excluded).
 $meta = (Invoke-Checked 'cargo metadata' { cargo metadata --format-version 1 --locked --filter-platform x86_64-pc-windows-msvc } | Out-String) | ConvertFrom-Json
@@ -100,6 +99,9 @@ $rows = @($meta.packages | Where-Object { $used.ContainsKey($_.id) -and ($member
 Assert-DeclaredLicences $rows (Join-Path $root 'deny.toml')
 if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
     Invoke-Checked 'cargo deny' { cargo deny --locked check licenses }
+    # D-15: the RustSec advisories, with a freshly fetched database (a network failure stops the packaging too:
+    # run it again online, or check by hand with `cargo deny --offline check advisories` for a local trial).
+    Invoke-Checked 'cargo deny advisories' { cargo deny --locked check advisories }
 } else {
     Write-Warning 'cargo-deny is not installed (cargo install cargo-deny --locked): only the declared-licence filter ran.'
 }
@@ -109,13 +111,9 @@ $targetDir = $meta.target_directory
 $exes = @('ultimatecrt.exe', 'pixel-demo.exe') | ForEach-Object { Join-Path $targetDir "release\$_" }
 foreach ($e in $exes) { if (-not (Test-Path -LiteralPath $e)) { throw "Missing $e after the build." } }
 Write-Host "Executables from $targetDir\release"
-$newest = Get-NewestBuildInput
-foreach ($e in $exes) {
-    $built = (Get-Item -LiteralPath $e).LastWriteTimeUtc
-    if ($newest -and $built -lt $newest.Time) {
-        $msg = "$e (built $($built.ToString('s'))Z) is older than the source $($newest.File) (changed $($newest.Time.ToString('s'))Z): the build is stale, so the zip would not match the commit."
-        if ($Force) { Write-Warning "$msg Continuing because of -Force." } else { throw "$msg Rebuild (cargo build --release --locked) or use -Force for a local trial." }
-    }
+foreach ($stale in @(Get-StaleBinaries $root $exes)) {
+    $msg = "${stale}: the build is stale, so the zip would not match the commit."
+    if ($Force) { Write-Warning "$msg Continuing because of -Force." } else { throw "$msg Rebuild (cargo build --release --locked) or use -Force for a local trial." }
 }
 
 $name = "ultimatecrt-v$version-windows-x64"
@@ -130,6 +128,8 @@ foreach ($e in $exes) {
     $b = (Get-FileHash -LiteralPath (Join-Path $stage (Split-Path $e -Leaf)) -Algorithm SHA256).Hash
     if ($a -ne $b) { throw "The staged copy of $e differs from the original." }
 }
+# D-04: no local path, user or machine name in the published executables (no -Force bypass).
+Assert-NoPrivateStrings $root @($exes | ForEach-Object { Join-Path $stage (Split-Path $_ -Leaf) }) $targetDir
 
 # Licence texts of every dependency, then the repository notices (C/C++ sources, fonts).
 Invoke-Checked 'gen-third-party' { & (Join-Path $PSScriptRoot 'gen-third-party.ps1') -OutFile (Join-Path $stage 'THIRD-PARTY.md') }
