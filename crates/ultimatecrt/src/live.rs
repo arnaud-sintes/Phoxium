@@ -466,6 +466,7 @@ mod tests {
             tolerance: 16,
             min_bar: 4,
             max_crop: 0.4,
+            ..crate::bars::Config::default()
         };
         live.set_bars_prefs(cfg);
         assert!(live.flush_settings(true));

@@ -4,12 +4,23 @@
 //!
 //! # Detection
 //!
-//! The analysis runs over a window of recent frames. Per frame it keeps, for every row and every column of the
-//! frame, the running maximum of the brightest channel (max of red, green, blue: the 4-byte layout may be BGRA or
-//! RGBA, alpha is ignored). A row or column is part of a bar when that maximum stays within
-//! [`Config::tolerance`] codes of black in every frame of the window, so a dark game scene does not look like a
-//! bar as long as one frame of the window lights the row up, and near-black noise, dithering or compression does
-//! not hide a bar.
+//! The analysis runs over a window of recent frames. A pixel is lit when its brightest channel (max of red,
+//! green, blue: the 4-byte layout may be BGRA or RGBA, alpha is ignored) is above [`Config::tolerance`]. Per frame
+//! the detector counts the lit pixels of every row and every column, and keeps, per row and per column, the
+//! largest count of any frame of the window. A row or column is part of the picture when that count reaches
+//! [`min_count`] of its length (at least [`MIN_COUNT`] pixels, [`COUNT_SHARE`] of the line): an isolated bright
+//! pixel (a hot pixel, a 1 px cursor, anti-aliasing) cannot make a whole row or column "picture", while a real
+//! line of game content, which spans many pixels, still counts. Keeping the largest count over the window means a
+//! dark game scene does not look like a bar as long as one frame of the window lights the row up, and near-black
+//! noise, dithering or compression does not hide a bar.
+//!
+//! The four corner zones of the frame ([`corner_zone`]: [`Config::corner`] px, at most [`CORNER_MAX_SHARE`] of
+//! the axis) are left out of the counts and of the black and uniform tests. Windows 11 rounds the window corners
+//! and Windows.Graphics.Capture delivers the anti-aliased rounding with the client area: grey pixels in the last
+//! rows and the outermost columns at the bottom corners (radius about 8 px at 100 %, the capture-fidelity check
+//! excludes 36 px, 54 at 125 %). With the first rule (a row or column was picture as soon as one pixel was lit)
+//! they made the bottom row and the outermost columns "picture", so three of the four bars measured 0 (the
+//! second live failure, QUESTIONS CAP-7, reproduced on a real capture in the tests).
 //!
 //! From the four bar thicknesses (leading and trailing dark rows and columns, each side independently, so
 //! symmetric and asymmetric bars both work):
@@ -87,9 +98,32 @@ pub struct Config {
     pub min_bar: u32,
     /// Largest fraction of an axis the bars of that axis may remove (0 to 1).
     pub max_crop: f64,
+    /// Size of the square left out at each of the four frame corners (px; the window corner rounding), limited
+    /// to [`CORNER_MAX_SHARE`] of each axis ([`corner_zone`]). 0 counts every pixel.
+    pub corner: u32,
 }
 
 pub const DEFAULT_TOLERANCE: u8 = 8;
+/// Default corner zone: 48 px covers the Windows 11 rounding up to 300 % scaling (radius 8 px at 100 %, the
+/// capture-fidelity check's 36 px zone at 100 % and 45 to 54 px at 125 % included in practice).
+pub const DEFAULT_CORNER: u32 = 48;
+/// The corner zone never takes more than this share of an axis (a small window keeps most of its edges).
+pub const CORNER_MAX_SHARE: f64 = 0.15;
+/// A row or column is picture only with at least this many lit pixels...
+pub const MIN_COUNT: u32 = 2;
+/// ...and at least this share of its length (0.5 %: 5 px of a 1100 px row, 9 of a 1920 px one).
+pub const COUNT_SHARE: f64 = 0.005;
+
+/// The corner zone along an axis of `len` px: `corner` px, at most [`CORNER_MAX_SHARE`] of the axis.
+pub fn corner_zone(corner: u32, len: u32) -> u32 {
+    corner.min((f64::from(len) * CORNER_MAX_SHARE) as u32)
+}
+
+/// The lit pixels a row (or column) of `len` px needs to be picture: [`MIN_COUNT`], or [`COUNT_SHARE`] of `len`
+/// when that is more.
+pub fn min_count(len: u32) -> u32 {
+    MIN_COUNT.max((f64::from(len) * COUNT_SHARE) as u32)
+}
 pub const DEFAULT_MIN_BAR: u32 = 2;
 /// Default of the "Largest crop" guard: the bars may remove up to 97 % of an axis (a 256 px game in a 3840 px
 /// wide window loses 93 %).
@@ -103,6 +137,7 @@ impl Default for Config {
             tolerance: DEFAULT_TOLERANCE,
             min_bar: DEFAULT_MIN_BAR,
             max_crop: DEFAULT_MAX_CROP,
+            corner: DEFAULT_CORNER,
         }
     }
 }
@@ -397,20 +432,63 @@ fn within(a: Rect, b: Rect) -> bool {
     a.x >= b.x && a.y >= b.y && a.x + a.w <= b.x + b.w && a.y + a.h <= b.y + b.h
 }
 
-/// Per-row and per-column running maxima of the brightest channel over the frames fed so far.
-#[derive(Clone, Debug, Default)]
+/// Per-row and per-column lit-pixel counts (the largest of any frame) over the frames fed so far, with the
+/// corner zones left out.
+#[derive(Clone, Debug)]
 pub struct Accumulator {
     w: u32,
     h: u32,
-    rows: Vec<u8>,
-    cols: Vec<u8>,
-    /// Darkest and brightest value seen anywhere (the uniform-frame test).
+    /// The tolerance and the corner size the counts were made with (fixed at creation).
+    tol: u8,
+    corner: u32,
+    /// Largest lit-pixel count of each row and each column in any frame.
+    rows: Vec<u32>,
+    cols: Vec<u32>,
+    /// Per-frame column counts (reused).
+    scratch: Vec<u32>,
+    /// Darkest and brightest value seen outside the corner zones (the black and uniform tests).
     lo: u8,
     hi: u8,
     frames: u32,
 }
 
+impl Default for Accumulator {
+    fn default() -> Self {
+        Accumulator::new(&Config::default())
+    }
+}
+
+/// The detector's statistics of one edge (the `--detect-bars` report).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct EdgeStat {
+    pub side: Side,
+    /// Dark lines from this edge inwards, before the minimum bar and the guard rails.
+    pub run: u32,
+    /// Lit pixels of the first picture line (0 when every line is dark).
+    pub first_count: u32,
+    /// The largest lit-pixel count among the dark lines (noise that stayed under the threshold).
+    pub noise: u32,
+    /// The lit pixels a line along this edge needs to be picture.
+    pub need: u32,
+}
+
 impl Accumulator {
+    /// An empty accumulator counting with the tolerance and the corner zone of `cfg`.
+    pub fn new(cfg: &Config) -> Accumulator {
+        Accumulator {
+            w: 0,
+            h: 0,
+            tol: cfg.tolerance,
+            corner: cfg.corner,
+            rows: Vec::new(),
+            cols: Vec::new(),
+            scratch: Vec::new(),
+            lo: u8::MAX,
+            hi: 0,
+            frames: 0,
+        }
+    }
+
     /// Frames accumulated since the start (or since the last size change).
     pub fn frames(&self) -> u32 {
         self.frames
@@ -419,6 +497,11 @@ impl Accumulator {
     /// The frame size of the frames accumulated.
     pub fn size(&self) -> (u32, u32) {
         (self.w, self.h)
+    }
+
+    /// The corner zone in force for the frame size accumulated (horizontal, vertical px).
+    pub fn corner_zones(&self) -> (u32, u32) {
+        (corner_zone(self.corner, self.w), corner_zone(self.corner, self.h))
     }
 
     /// Adds one `w` x `h` frame of 4-byte pixels (BGRA or RGBA). A frame of another size restarts the
@@ -434,30 +517,81 @@ impl Accumulator {
                 h,
                 rows: vec![0; h as usize],
                 cols: vec![0; w as usize],
-                lo: u8::MAX,
-                hi: 0,
-                frames: 0,
+                ..Accumulator::new(&Config {
+                    tolerance: self.tol,
+                    corner: self.corner,
+                    ..Config::default()
+                })
             };
         }
+        let (zx, zy) = self.corner_zones();
+        let (wu, zxu) = (w as usize, zx as usize);
+        self.scratch.clear();
+        self.scratch.resize(wu, 0);
+        let tol = self.tol;
         let (mut lo, mut hi) = (self.lo, self.hi);
-        for (y, row) in data[..n * 4].chunks_exact(w as usize * 4).enumerate() {
-            let mut row_max = 0u8;
-            let mut row_min = u8::MAX;
-            for (c, px) in self.cols.iter_mut().zip(row.as_chunks::<4>().0) {
-                let v = px[0].max(px[1]).max(px[2]);
-                row_max = row_max.max(v);
+        for (y, row) in data[..n * 4].chunks_exact(wu * 4).enumerate() {
+            let px = row.as_chunks::<4>().0;
+            // Rows inside a corner zone count only the pixels between the two corners.
+            let y32 = y as u32;
+            let span = if y32 < zy || y32 >= h - zy {
+                zxu..wu - zxu
+            } else {
+                0..wu
+            };
+            let (mut count, mut row_min, mut row_max) = (0u32, u8::MAX, 0u8);
+            for (c, p) in self.scratch[span.clone()].iter_mut().zip(&px[span]) {
+                let v = p[0].max(p[1]).max(p[2]);
                 row_min = row_min.min(v);
-                *c = (*c).max(v);
+                row_max = row_max.max(v);
+                let lit = u32::from(v > tol);
+                count += lit;
+                *c += lit;
             }
-            self.rows[y] = self.rows[y].max(row_max);
+            self.rows[y] = self.rows[y].max(count);
             lo = lo.min(row_min);
             hi = hi.max(row_max);
+        }
+        for (a, b) in self.cols.iter_mut().zip(&self.scratch) {
+            *a = (*a).max(*b);
         }
         (self.lo, self.hi) = (lo, hi);
         self.frames += 1;
     }
 
-    /// Adds the maxima of `other` (same frame size; another size or an empty one is ignored).
+    /// The per-edge statistics of the counts (`None` before the first frame): left, top, right, bottom.
+    pub fn edges(&self) -> Option<[EdgeStat; 4]> {
+        if self.frames == 0 {
+            return None;
+        }
+        let stat = |side: Side, lines: &mut dyn Iterator<Item = u32>, need: u32| {
+            let (mut run, mut noise, mut first) = (0, 0, 0);
+            for c in lines {
+                if c >= need {
+                    first = c;
+                    break;
+                }
+                run += 1;
+                noise = noise.max(c);
+            }
+            EdgeStat {
+                side,
+                run,
+                first_count: first,
+                noise,
+                need,
+            }
+        };
+        let (nr, nc) = (min_count(self.w), min_count(self.h));
+        Some([
+            stat(Side::Left, &mut self.cols.iter().copied(), nc),
+            stat(Side::Top, &mut self.rows.iter().copied(), nr),
+            stat(Side::Right, &mut self.cols.iter().rev().copied(), nc),
+            stat(Side::Bottom, &mut self.rows.iter().rev().copied(), nr),
+        ])
+    }
+
+    /// Adds the counts of `other` (same frame size; another size or an empty one is ignored).
     pub fn merge(&mut self, other: &Accumulator) {
         if other.frames == 0 {
             return;
@@ -481,26 +615,31 @@ impl Accumulator {
     }
 
     /// The bars found in the frames fed so far, the picture snapped to `divisor` (horizontal, vertical; 1 =
-    /// no snapping).
+    /// no snapping). The tolerance and the corner zone are the ones the accumulator was made with
+    /// ([`Accumulator::new`]); `cfg` gives the minimum bar and the Largest crop guard.
     pub fn outcome(&self, cfg: &Config, divisor: (u32, u32)) -> Outcome {
         if self.frames == 0 {
             return Outcome::NoFrames;
         }
-        let tol = cfg.tolerance;
+        let tol = self.tol;
         if self.hi <= tol {
             return Outcome::AllBlack;
         }
         if self.hi - self.lo <= tol {
             return Outcome::Uniform;
         }
+        let Some([l, t, r, b]) = self.edges() else {
+            return Outcome::NoFrames;
+        };
+        // Only isolated lit pixels (no row or no column reaches its count): as good as black.
+        if t.run == self.h || l.run == self.w {
+            return Outcome::AllBlack;
+        }
         let min_bar = cfg.min_bar.max(1);
-        let dark = |v: &&u8| **v <= tol;
-        let lead = |v: &[u8]| v.iter().take_while(dark).count() as u32;
-        let trail = |v: &[u8]| v.iter().rev().take_while(dark).count() as u32;
         let keep = |t: u32| if t >= min_bar { t } else { 0 };
-        // Not every row is dark (hi > tol), so the leading and trailing runs never overlap.
-        let (mut top, mut bottom) = (keep(lead(&self.rows)), keep(trail(&self.rows)));
-        let (mut left, mut right) = (keep(lead(&self.cols)), keep(trail(&self.cols)));
+        // Some row and some column are picture, so the leading and trailing runs never overlap.
+        let (mut top, mut bottom) = (keep(t.run), keep(b.run));
+        let (mut left, mut right) = (keep(l.run), keep(r.run));
         let max_crop = if cfg.max_crop.is_finite() {
             cfg.max_crop.clamp(0.0, 1.0)
         } else {
@@ -568,6 +707,94 @@ impl Accumulator {
     }
 }
 
+/// The first detection rule (2026-11-20, before the second live failure): a row or column is picture as soon as
+/// one of its pixels is above `tol`, corners included; the dark runs from each edge, before the minimum bar and
+/// the guard rails. Kept for the `--detect-bars` comparison and the regression tests only.
+pub fn single_pixel_bars(data: &[u8], w: u32, h: u32, tol: u8) -> Bars {
+    let n = w as usize * h as usize;
+    if n == 0 || data.len() < n * 4 {
+        return Bars::default();
+    }
+    let (mut rows, mut cols) = (vec![0u8; h as usize], vec![0u8; w as usize]);
+    for (y, row) in data[..n * 4].chunks_exact(w as usize * 4).enumerate() {
+        for (c, p) in cols.iter_mut().zip(row.as_chunks::<4>().0) {
+            let v = p[0].max(p[1]).max(p[2]);
+            *c = (*c).max(v);
+            rows[y] = rows[y].max(v);
+        }
+    }
+    let run = |it: &mut dyn Iterator<Item = &u8>| it.take_while(|v| **v <= tol).count() as u32;
+    Bars {
+        left: run(&mut cols.iter()),
+        top: run(&mut rows.iter()),
+        right: run(&mut cols.iter().rev()),
+        bottom: run(&mut rows.iter().rev()),
+    }
+}
+
+/// The `--detect-bars` report of one `w` x `h` 4-byte frame (a `--save-capture` PNG): the thresholds, the
+/// per-edge statistics, the outcome (the picture and the bars, or why nothing was cropped) and, for comparison,
+/// what the first single-pixel rule found.
+pub fn report(data: &[u8], w: u32, h: u32, cfg: &Config) -> String {
+    let mut acc = Accumulator::new(cfg);
+    acc.feed(data, w, h);
+    let mut out = Vec::new();
+    let (zx, zy) = acc.corner_zones();
+    out.push(format!(
+        "frame {w} x {h}: tolerance {}, minimum bar {} px, largest crop {:.0} %, corner zone {zx} x {zy} px",
+        cfg.tolerance,
+        cfg.min_bar,
+        cfg.max_crop * 100.0
+    ));
+    out.push(format!(
+        "a row is picture with at least {} lit px, a column with at least {} (lit: brightest channel above {})",
+        min_count(w),
+        min_count(h),
+        cfg.tolerance
+    ));
+    if let Some(edges) = acc.edges() {
+        for e in edges {
+            let line = if e.side.horizontal() { "column" } else { "row" };
+            out.push(format!(
+                "{:<6} dark {} {line}s (largest lit count in them {}, needs {}); first picture {line}: {} lit px",
+                e.side.name().to_lowercase(),
+                e.run,
+                e.noise,
+                e.need,
+                e.first_count
+            ));
+        }
+    }
+    let outcome = acc.outcome(cfg, (1, 1));
+    match outcome {
+        Outcome::Found(f) => out.push(format!(
+            "detected: picture {} x {} at {}, {} (x {}..{}, y {}..{}); bars left {}, top {}, right {}, bottom {}{}",
+            f.picture.w,
+            f.picture.h,
+            f.picture.x,
+            f.picture.y,
+            f.picture.x,
+            f.picture.x + f.picture.w - 1,
+            f.picture.y,
+            f.picture.y + f.picture.h - 1,
+            f.bars.left,
+            f.bars.top,
+            f.bars.right,
+            f.bars.bottom,
+            f.limited
+                .map(|b| format!("; one axis left uncropped: {}", b.text()))
+                .unwrap_or_default()
+        )),
+        other => out.push(format!("nothing cropped: {}", other.message().1)),
+    }
+    let old = single_pixel_bars(data, w, h, cfg.tolerance);
+    out.push(format!(
+        "first single-pixel rule (before the corner fix): dark runs left {}, top {}, right {}, bottom {}",
+        old.left, old.top, old.right, old.bottom
+    ));
+    out.join("\n")
+}
+
 /// One running detection: the accumulator and when it started. The app feeds the captured frames while it
 /// runs ([`Session::feed`]) and asks every loop whether it is over ([`Session::done`]).
 #[derive(Clone, Debug)]
@@ -582,7 +809,7 @@ impl Session {
         Session {
             start: now,
             config,
-            acc: Accumulator::default(),
+            acc: Accumulator::new(&config),
         }
     }
 
@@ -670,7 +897,7 @@ impl Auto {
             config,
             size: (0, 0),
             session: None,
-            bucket: Accumulator::default(),
+            bucket: Accumulator::new(&config),
             bucket_start: None,
             ring: VecDeque::new(),
             current: None,
@@ -682,7 +909,14 @@ impl Auto {
     }
 
     pub fn set_config(&mut self, config: Config) {
+        // The counts depend on the tolerance and the corner zone: windows counted otherwise are dropped.
+        let recount = (config.tolerance, config.corner) != (self.config.tolerance, self.config.corner);
         self.config = config;
+        if recount {
+            self.bucket = Accumulator::new(&config);
+            self.ring.clear();
+            self.pending = 0;
+        }
     }
 
     /// The picture area in force, `None` = the whole client area.
@@ -721,7 +955,7 @@ impl Auto {
     }
 
     fn restart_check(&mut self, now: f64) {
-        self.bucket = Accumulator::default();
+        self.bucket = Accumulator::new(&self.config);
         self.bucket_start = Some(now);
         self.ring.clear();
         self.pending = 0;
@@ -788,7 +1022,7 @@ impl Auto {
             return None;
         }
         self.bucket_start = Some(now);
-        let bucket = std::mem::take(&mut self.bucket);
+        let bucket = std::mem::replace(&mut self.bucket, Accumulator::new(&self.config));
         if bucket.frames() == 0 || bucket.size() != self.size {
             return None;
         }
@@ -804,7 +1038,7 @@ impl Auto {
             self.ring.pop_front();
         }
         let merged = |n: usize| {
-            let mut acc = Accumulator::default();
+            let mut acc = Accumulator::new(&self.config);
             for b in self.ring.iter().rev().take(n) {
                 acc.merge(b);
             }
@@ -896,6 +1130,47 @@ impl AreaMode {
             _ => AreaMode::Auto,
         }
     }
+}
+
+/// Stored manual limits that do not fit the captured window: Manual from the source profile (not `--crop`), set
+/// for a client size (`crop_client`) other than `client`. Returns that stored size. The app then does not apply
+/// the stored rectangle (a crop made for a 1920 x 1027 window means nothing in a 1100 x 800 one): the picture
+/// area is detected as in Auto ([`detects`]), the profile keeps its Manual choice until the user changes it,
+/// and the Source section shows "Manual (stored)", the stored size, and Back to Auto. Limits stored without
+/// their client size (older profiles) cannot be checked and apply as before.
+pub fn stale_manual(
+    params: &Params,
+    profile: &SourceProfile,
+    override_crop: Option<Rect>,
+    client: (u32, u32),
+) -> Option<(u32, u32)> {
+    if AreaMode::of(params, profile) != AreaMode::Manual || override_crop.is_some() || client.0 == 0 || client.1 == 0 {
+        return None;
+    }
+    let [w, h] = profile.crop_client?;
+    ((w, h) != client).then_some((w, h))
+}
+
+/// The app detects the picture area in a `client` frame: Auto, or Manual with stale stored limits
+/// ([`stale_manual`]).
+pub fn detects(params: &Params, profile: &SourceProfile, override_crop: Option<Rect>, client: (u32, u32)) -> bool {
+    AreaMode::of(params, profile) == AreaMode::Auto || stale_manual(params, profile, override_crop, client).is_some()
+}
+
+/// The crop in force in a `client` frame: the manual crop `manual` (the resolved source map's) unless it is
+/// stale, else the `detected` picture area when the app detects it ([`detects`]); `None` = the whole client area.
+pub fn crop_in_force(
+    params: &Params,
+    profile: &SourceProfile,
+    override_crop: Option<Rect>,
+    client: (u32, u32),
+    manual: Option<Rect>,
+    detected: Option<Rect>,
+) -> Option<Rect> {
+    if stale_manual(params, profile, override_crop, client).is_some() {
+        return detected;
+    }
+    manual.or(detected.filter(|_| AreaMode::of(params, profile) == AreaMode::Auto))
 }
 
 /// The crop as the parameters, the source profile and the command line hold it: what [`CropState::restore`]
@@ -1020,7 +1295,7 @@ mod tests {
     }
 
     fn detect(frames: &[Vec<u8>], w: u32, h: u32, cfg: Config, div: (u32, u32)) -> Outcome {
-        let mut a = Accumulator::default();
+        let mut a = Accumulator::new(&cfg);
         for f in frames {
             a.feed(f, w, h);
         }
@@ -1032,6 +1307,314 @@ mod tests {
             Outcome::Found(f) => f,
             other => panic!("expected bars, got {other:?}"),
         }
+    }
+
+    // ---- The real capture of the second live failure (2026-11-20) ----
+
+    /// `ultimatecrt --window pixel-demo --save-capture`: the demo's 256 x 224 picture at x1 centred in a
+    /// 1100 x 800 client area, pure black bars, and the rounded bottom corners of the Windows 11 window frame
+    /// captured with it (grey anti-aliased pixels in the last 6 rows and the outermost 6 columns).
+    const REAL_CAPTURE: &[u8] = include_bytes!("../tests/data/capture-1to1-1100x800.png");
+
+    /// The real capture in the capture's BGRA layout (as `--detect-bars` and the live app see it).
+    fn real_capture() -> (Vec<u8>, u32, u32) {
+        let f = crate::source::decode_png(REAL_CAPTURE).expect("the fixture decodes");
+        (f.data, f.width, f.height)
+    }
+
+    /// The picture of the real capture: x 422..677, y 288..511.
+    const REAL_PICTURE: Rect = Rect {
+        x: 422,
+        y: 288,
+        w: 256,
+        h: 224,
+    };
+
+    #[test]
+    fn real_capture_with_rounded_window_corners() {
+        let (d, w, h) = real_capture();
+        assert_eq!((w, h), (1100, 800));
+        println!("{}", report(&d, w, h, &Config::default()));
+        // The failure: with the single-pixel rule the corner pixels light the bottom row and the outermost
+        // columns, so only the top bar is found.
+        let old = single_pixel_bars(&d, w, h, DEFAULT_TOLERANCE);
+        assert_eq!((old.left, old.top, old.right, old.bottom), (0, 288, 0, 0), "{old:?}");
+        // The fix: the exact picture, at x1 and with the divisor known.
+        for div in [(1, 1), (2, 2)] {
+            let f = found(detect(std::slice::from_ref(&d), w, h, Config::default(), div));
+            assert_eq!(f.picture, REAL_PICTURE, "{div:?}");
+            assert_eq!(f.bars, bars(422, 288, 422, 288));
+            assert_eq!(f.limited, None);
+        }
+        // The count rule alone is not enough here: the rounding lights 4 px of the outermost columns and 8 px of
+        // the bottom row, above the 0.5 % threshold. The corner zones are what fixes it.
+        let no_corner = Config {
+            corner: 0,
+            ..Config::default()
+        };
+        let f = found(detect(std::slice::from_ref(&d), w, h, no_corner, (1, 1)));
+        assert_eq!(f.bars, bars(0, 288, 0, 0));
+        // The report says so.
+        let text = report(&d, w, h, &Config::default());
+        assert!(
+            text.contains("detected: picture 256 x 224 at 422, 288 (x 422..677, y 288..511)"),
+            "{text}"
+        );
+        assert!(text.contains("dark runs left 0, top 288, right 0, bottom 0"), "{text}");
+    }
+
+    /// The same frame through the Auto mode as the live app drives it (attach with the first frame, then 30 fps).
+    #[test]
+    fn real_capture_through_the_auto_mode() {
+        let (d, w, h) = real_capture();
+        let mut a = Auto::new(Config::default());
+        a.start(0.0, Trigger::Attach, Some((&d, w, h)));
+        let mut events = Vec::new();
+        for i in 1..45 {
+            let t = f64::from(i) / 30.0;
+            a.feed(t, &d, w, h);
+            events.extend(a.tick(t, (1, 1)));
+        }
+        assert!(
+            matches!(events[..], [AutoEvent::Detected(Trigger::Attach, Outcome::Found(_))]),
+            "{events:?}"
+        );
+        assert_eq!(a.rect(), Some(REAL_PICTURE));
+        // And it stays there while the game runs (the periodic check sees the same picture).
+        for i in 45..(30 * 20) {
+            let t = f64::from(i) / 30.0;
+            a.feed(t, &d, w, h);
+            assert_eq!(a.tick(t, (1, 1)), None);
+        }
+        assert_eq!(a.rect(), Some(REAL_PICTURE));
+    }
+
+    // ---- Window-corner artefacts and sparse noise (synthetic) ----
+
+    /// How a window corner is drawn into a frame.
+    #[derive(Clone, Copy, Debug)]
+    enum Corner {
+        /// The anti-aliased edge of a rounded corner of radius `r` px (as Windows 11 draws it).
+        Arc(u32),
+        /// A whole `n` x `n` square of grey (the worst case, the 125 % zone of 45 px for instance).
+        Block(u32),
+    }
+
+    fn put(f: &mut [u8], w: u32, x: u32, y: u32, v: [u8; 3]) {
+        let i = ((y * w + x) * 4) as usize;
+        f[i..i + 3].copy_from_slice(&[v[2], v[1], v[0]]);
+    }
+
+    /// Draws the corner artefact `c` of strength `s` (code value) at the four corners of a `w` x `h` frame.
+    fn with_corners(mut f: Vec<u8>, w: u32, h: u32, c: Corner, s: u8) -> Vec<u8> {
+        let n = match c {
+            Corner::Arc(r) => r,
+            Corner::Block(n) => n,
+        };
+        for dy in 0..n {
+            for dx in 0..n {
+                let v = match c {
+                    Corner::Arc(r) => {
+                        // Distance from the circle centre (r, r) of the rounding; the edge band is lit.
+                        let (ex, ey) = (f64::from(r) - f64::from(dx) - 0.5, f64::from(r) - f64::from(dy) - 0.5);
+                        let d = (ex * ex + ey * ey).sqrt();
+                        if (f64::from(r) - 1.5..=f64::from(r) + 0.5).contains(&d) {
+                            Some(s)
+                        } else {
+                            None
+                        }
+                    }
+                    Corner::Block(_) => Some(s.saturating_sub(((dx + dy) % 5) as u8)),
+                };
+                if let Some(v) = v {
+                    for (x, y) in [(dx, dy), (w - 1 - dx, dy), (dx, h - 1 - dy), (w - 1 - dx, h - 1 - dy)] {
+                        put(&mut f, w, x, y, [v, v, v]);
+                    }
+                }
+            }
+        }
+        f
+    }
+
+    #[test]
+    fn corner_artefacts_of_any_strength_are_ignored() {
+        for (w, h) in [(1100, 800), (914, 754)] {
+            let b = centred(w, h, 256, 224);
+            for c in [
+                Corner::Arc(8),
+                Corner::Arc(10),
+                Corner::Arc(16),
+                Corner::Block(36),
+                Corner::Block(45),
+            ] {
+                for s in [14, 30, 60] {
+                    let f = with_corners(framed(w, h, b, busy), w, h, c, s);
+                    let got = found(detect(&[f], w, h, Config::default(), (1, 1)));
+                    assert_eq!(got.bars, b, "{w}x{h} {c:?} strength {s}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_cursor_pixel_or_a_hot_pixel_in_a_bar_is_ignored() {
+        let (w, h) = (1100, 800);
+        let b = centred(w, h, 256, 224);
+        let mut f = framed(w, h, b, busy);
+        put(&mut f, w, 100, 400, [255, 255, 255]); // a 1 px cursor in the left bar
+        put(&mut f, w, 600, 700, [255, 0, 0]); // a hot pixel in the bottom bar
+        put(&mut f, w, 1050, 20, [0, 90, 0]); // and one in the top right
+        let got = found(detect(std::slice::from_ref(&f), w, h, Config::default(), (1, 1)));
+        assert_eq!(got.bars, b);
+        // Two isolated pixels on the same column are still under the 0.5 % of a column (4 px of 800).
+        put(&mut f, w, 100, 100, [255, 255, 255]);
+        assert_eq!(found(detect(&[f], w, h, Config::default(), (1, 1))).bars, b);
+    }
+
+    /// One edge line of each bar carries sparse noise above the tolerance (about one pixel in 400, as dithering
+    /// or compression leaves) on top of near-black noise: every bar is still found.
+    #[test]
+    fn a_noisy_edge_line_does_not_hide_its_bar() {
+        let (w, h) = (1100, 800);
+        let b = centred(w, h, 256, 224);
+        let mut f = framed(w, h, b, busy);
+        for i in 0..w {
+            let faint = (i % 9) as u8; // within the tolerance
+            for y in [0, h - 1] {
+                put(&mut f, w, i, y, [faint, faint, faint]);
+            }
+            if i % 400 == 7 {
+                put(&mut f, w, i, 0, [40, 40, 40]);
+                put(&mut f, w, i, h - 1, [40, 40, 40]);
+            }
+        }
+        for i in 0..h {
+            let faint = (i % 7) as u8;
+            for x in [0, w - 1] {
+                put(&mut f, w, x, i, [faint, faint, faint]);
+            }
+            if i % 400 == 13 {
+                put(&mut f, w, 0, i, [40, 40, 40]);
+                put(&mut f, w, w - 1, i, [40, 40, 40]);
+            }
+        }
+        let f = with_corners(f, w, h, Corner::Arc(8), 40);
+        assert_eq!(found(detect(&[f], w, h, Config::default(), (1, 1))).bars, b);
+    }
+
+    #[test]
+    fn the_demo_at_x3_with_corners() {
+        let (w, h) = (1100, 800);
+        let b = centred(w, h, 768, 672);
+        let f = with_corners(framed(w, h, b, |x, y| busy(x / 3, y / 3)), w, h, Corner::Arc(10), 60);
+        for div in [(1, 1), (3, 3)] {
+            let got = found(detect(std::slice::from_ref(&f), w, h, Config::default(), div));
+            assert_eq!(got.picture, rect(166, 64, 768, 672), "{div:?}");
+        }
+    }
+
+    /// A picture against one window edge (and one in a corner): the corner zones do not eat its edges.
+    #[test]
+    fn a_picture_touching_the_window_edges() {
+        let (w, h) = (1100, 800);
+        for b in [
+            bars(0, 288, 844, 288),
+            bars(422, 0, 422, 576),
+            bars(844, 288, 0, 288),
+            bars(0, 576, 844, 0),
+        ] {
+            let f = with_corners(framed(w, h, b, busy), w, h, Corner::Arc(8), 60);
+            let got = detect(&[f], w, h, Config::default(), (1, 1));
+            assert_eq!(found(got).bars, b, "{b:?}");
+        }
+    }
+
+    #[test]
+    fn a_dark_scene_with_one_bright_frame_and_corners() {
+        let (w, h) = (1100, 800);
+        let b = centred(w, h, 256, 224);
+        let corners = |f: Vec<u8>| with_corners(f, w, h, Corner::Block(45), 30);
+        let dark = corners(framed(w, h, b, |x, y| {
+            if (100..150).contains(&x) && (90..130).contains(&y) {
+                [180, 180, 180]
+            } else {
+                [0, 0, 0]
+            }
+        }));
+        let alone = found(detect(std::slice::from_ref(&dark), w, h, Config::default(), (1, 1)));
+        assert!(alone.picture.w < 256);
+        let bright = corners(framed(w, h, b, |_, _| [60, 60, 60]));
+        let frames = vec![dark.clone(), bright, dark];
+        assert_eq!(
+            found(detect(&frames, w, h, Config::default(), (1, 1))).picture,
+            REAL_PICTURE
+        );
+    }
+
+    #[test]
+    fn a_black_frame_with_corners_is_nothing_to_detect() {
+        let (w, h) = (1100, 800);
+        for c in [Corner::Arc(8), Corner::Block(45)] {
+            let f = with_corners(vec![0u8; (w * h * 4) as usize], w, h, c, 60);
+            assert_eq!(
+                detect(&[f], w, h, Config::default(), (1, 1)),
+                Outcome::AllBlack,
+                "{c:?}"
+            );
+        }
+        // Black with only a few isolated lit pixels: nothing to detect either (no row or column is picture).
+        let mut f = vec![0u8; (w * h * 4) as usize];
+        put(&mut f, w, 500, 400, [255, 255, 255]);
+        put(&mut f, w, 20, 600, [255, 255, 255]);
+        assert_eq!(detect(&[f], w, h, Config::default(), (1, 1)), Outcome::AllBlack);
+    }
+
+    /// A 1 px wide vertical line of game content, the full picture height, as the only content of the left part of
+    /// the picture: it stays in the picture (a column needs 0.5 % of its length, the line has 224 px).
+    #[test]
+    fn a_thin_line_of_content_is_not_cropped() {
+        let (w, h) = (1100, 800);
+        let b = centred(w, h, 256, 224);
+        let pic = |x: u32, y: u32| {
+            if x == 0 {
+                [200, 200, 200]
+            } else if x >= 100 {
+                busy(x, y)
+            } else {
+                [0, 0, 0]
+            }
+        };
+        let f = with_corners(framed(w, h, b, pic), w, h, Corner::Arc(8), 60);
+        assert_eq!(
+            found(detect(&[f], w, h, Config::default(), (1, 1))).picture,
+            REAL_PICTURE
+        );
+        // The same with a 1 px high horizontal line as the only content of the top part.
+        let pic = |x: u32, y: u32| {
+            if y == 0 {
+                [0, 0, 220]
+            } else if y >= 80 {
+                busy(x, y)
+            } else {
+                [0, 0, 0]
+            }
+        };
+        let f = with_corners(framed(w, h, b, pic), w, h, Corner::Arc(8), 60);
+        assert_eq!(
+            found(detect(&[f], w, h, Config::default(), (1, 1))).picture,
+            REAL_PICTURE
+        );
+    }
+
+    #[test]
+    fn corner_zone_and_count_thresholds() {
+        assert_eq!(corner_zone(48, 1100), 48);
+        assert_eq!(corner_zone(48, 240), 36, "at most 15 % of the axis");
+        assert_eq!(corner_zone(0, 1100), 0);
+        assert_eq!(min_count(1100), 5);
+        assert_eq!(min_count(1920), 9);
+        assert_eq!(min_count(100), 2, "at least two pixels");
+        assert_eq!(Config::default().corner, DEFAULT_CORNER);
     }
 
     #[test]
@@ -1341,7 +1924,12 @@ mod tests {
             "{o:?}"
         );
         // A nearly black capture with one bright pixel column never collapses to a sliver.
+        // (A single lit pixel per row is below the row count now: as good as black, nothing cropped.)
         let sliver = framed(914, 754, bars(500, 0, 413, 0), busy);
+        let o = detect(&[sliver], 914, 754, Config::default(), (1, 1));
+        assert!(matches!(o, Outcome::AllBlack), "{o:?}");
+        // A 6 px wide column (every row lit enough): the guard rail blocks it.
+        let sliver = framed(914, 754, bars(500, 0, 408, 0), busy);
         assert!(matches!(
             detect(&[sliver], 914, 754, Config::default(), (1, 1)),
             Outcome::Blocked(_)
@@ -1613,6 +2201,81 @@ mod tests {
         let e = edit_limit(l, Side::Left, 5000, client, (3, 3));
         let w = e.picture(client).unwrap().w;
         assert!(w >= MIN_MANUAL_PX && w.is_multiple_of(3), "{w}");
+    }
+
+    /// The owner's stored profile for pixel-demo (an earlier session): Manual, a crop made in a 1920 x 1027
+    /// client area, divisor none. Attached now to a 1100 x 800 client area, the stored rectangle is not applied
+    /// and the picture area is detected; at the size it was made for it applies as before.
+    #[test]
+    fn a_stale_stored_manual_profile_does_not_disable_auto() {
+        let profile = SourceProfile {
+            exe: "pixel-demo.exe".into(),
+            class: "PixelDemo".into(),
+            crop_mode: Some("manual".into()),
+            picture_area: Some("manual".into()),
+            crop: Some([809, 407, 1143, 633]),
+            crop_client: Some([1920, 1027]),
+            divisor_mode: Some("none".into()),
+            ..SourceProfile::default()
+        };
+        let mut params = Params::default();
+        assert!(profile.apply_to(&mut params).is_empty());
+        assert_eq!(AreaMode::of(&params, &profile), AreaMode::Manual);
+        let (map, warnings) = crate::scaling::SourceMap::resolve(&params, profile.crop_rect(), profile.divisor_pair());
+        assert!(warnings.is_empty());
+        assert_eq!(map.crop, Some(rect(809, 407, 334, 226)));
+        assert_eq!(map.divisor, Some((1, 1)));
+        let client = (1100, 800);
+        assert_eq!(stale_manual(&params, &profile, None, client), Some((1920, 1027)));
+        assert!(detects(&params, &profile, None, client));
+        // Before any detection: the whole client area, never the foreign rectangle.
+        assert_eq!(crop_in_force(&params, &profile, None, client, map.crop, None), None);
+        // The live path on the real capture: fed while `detects`, the detected picture is the crop in force.
+        let (d, w, h) = real_capture();
+        let mut a = Auto::new(Config::default());
+        for i in 0..40 {
+            let t = f64::from(i) / 30.0;
+            if detects(&params, &profile, None, (w, h)) {
+                a.feed(t, &d, w, h);
+            }
+            a.tick(t, map.divisor.unwrap_or((1, 1)));
+        }
+        assert_eq!(
+            crop_in_force(&params, &profile, None, (w, h), map.crop, a.rect()),
+            Some(REAL_PICTURE)
+        );
+        // At the client size the limits were made for: they apply, nothing is detected.
+        assert_eq!(stale_manual(&params, &profile, None, (1920, 1027)), None);
+        assert!(!detects(&params, &profile, None, (1920, 1027)));
+        assert_eq!(
+            crop_in_force(&params, &profile, None, (1920, 1027), map.crop, Some(REAL_PICTURE)),
+            map.crop
+        );
+        // A command-line crop is the user's explicit choice: never stale.
+        let cli = Some(rect(10, 10, 100, 100));
+        assert_eq!(stale_manual(&params, &profile, cli, client), None);
+        assert_eq!(
+            crop_in_force(&params, &profile, cli, client, cli, Some(REAL_PICTURE)),
+            cli
+        );
+        // An older profile without the client size cannot be checked: it applies as before.
+        let old = SourceProfile {
+            crop_client: None,
+            ..profile.clone()
+        };
+        assert_eq!(stale_manual(&params, &old, None, client), None);
+        // No frame yet (0 x 0): no verdict.
+        assert_eq!(stale_manual(&params, &profile, None, (0, 0)), None);
+        // Back to Auto clears the stored rectangle: Auto from then on, at any size.
+        let (mut p, mut prof, mut o) = (params, profile.clone(), None);
+        set_area_mode(&mut p, &mut prof, &mut o, AreaMode::Auto);
+        assert_eq!(AreaMode::of(&p, &prof), AreaMode::Auto);
+        assert_eq!((prof.crop, prof.crop_client), (None, None));
+        assert!(detects(&p, &prof, None, (1920, 1027)));
+        // Auto and Client modes are never stale.
+        set_area_mode(&mut p, &mut prof, &mut o, AreaMode::Client);
+        assert!(!detects(&p, &prof, None, client));
+        assert_eq!(crop_in_force(&p, &prof, None, client, None, Some(REAL_PICTURE)), None);
     }
 
     #[test]

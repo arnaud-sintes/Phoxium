@@ -58,6 +58,9 @@ Usage: ultimatecrt [options]
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
+  --detect-bars <png>  offline: run the black-bar (picture area) detector on a saved capture (a --save-capture
+                       PNG) with the settings' thresholds, print the picture found, the bars, the reason when
+                       nothing is cropped and the per-edge statistics, then exit; opens no window
   --wait-source <secs> when the captured window closes: reattach to a new window of the same program and
                        class for this many seconds, then show the window list again (a fullscreen output
                        becomes a normal window). Default: [global.source] wait_s of the settings (30);
@@ -93,6 +96,8 @@ pub struct Args {
     pub validation: bool,
     pub stats: bool,
     pub save_capture: Option<String>,
+    /// `--detect-bars <png>`: the offline picture-area diagnostic.
+    pub detect_bars: Option<String>,
     pub exit_after: Option<f64>,
     /// `--reset-burnin`: the burn-in wear map starts as a new tube (T-43).
     pub reset_burnin: bool,
@@ -227,6 +232,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             "--stats" => a.stats = true,
             "--reset-burnin" => a.reset_burnin = true,
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
+            "--detect-bars" => a.detect_bars = Some(value("--detect-bars")?),
             "--wait-source" => {
                 let secs: f64 = number("--wait-source", &value("--wait-source")?)?;
                 if !secs.is_finite() || secs < 0.0 {
@@ -322,6 +328,16 @@ mod tests {
         assert!(parse("--list-adapters").unwrap().list_adapters);
         assert!(parse("--adapters").unwrap().list_adapters);
         assert!(!parse("--list-gpus").unwrap().list_adapters);
+    }
+
+    #[test]
+    fn detect_bars_takes_a_png() {
+        assert_eq!(
+            parse("--detect-bars frame.png").unwrap().detect_bars.as_deref(),
+            Some("frame.png")
+        );
+        assert!(parse("--detect-bars").is_err());
+        assert!(USAGE.contains("--detect-bars <png>"));
     }
 
     /// T-96: the source options parse and override the parameters; --crop and --divisor imply manual.

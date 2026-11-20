@@ -161,6 +161,7 @@ impl SourceSettings {
             } else {
                 crate::bars::DEFAULT_MAX_CROP
             },
+            corner: crate::bars::DEFAULT_CORNER,
         }
     }
 }

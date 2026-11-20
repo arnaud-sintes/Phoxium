@@ -145,7 +145,9 @@ pub struct AreaView {
     pub client: (u32, u32),
     /// The source scaling multiplier known (forced or detected), for "Snap to source pixels"; 1 x 1 unknown.
     pub divisor: (u32, u32),
-    /// Manual limits set for another client size: that size (the window was resized since).
+    /// Stored manual limits set for another client size: that size (the window was resized since). They are not
+    /// applied: the picture area is detected as in Auto and `limits` are the detected ones
+    /// (`bars::stale_manual`).
     pub set_for: Option<(u32, u32)>,
 }
 
