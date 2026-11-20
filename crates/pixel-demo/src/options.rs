@@ -135,6 +135,8 @@ pub struct Options {
     pub window_size: Option<(u32, u32)>,
     pub exit_after: Option<f64>,
     pub stats: bool,
+    /// No on-screen toast after a presentation key (it is on by default).
+    pub no_toast: bool,
     /// Offline decode of the frame counter from a PNG capture of the client area.
     pub decode: Option<String>,
 }
@@ -164,6 +166,7 @@ impl Default for Options {
             window_size: None,
             exit_after: None,
             stats: false,
+            no_toast: false,
             decode: None,
         }
     }
@@ -229,19 +232,27 @@ content
 run
   --exit-after SECS   quit by itself
   --stats             print the achieved update rate every second
+  --no-toast          no on-screen toast (bottom centre, 1.5 s) after a presentation key
   --decode file.png   offline: print the frame counter of a client-area capture, using the
                       layout options above (present/mode, scale, native, par, align); exit code 1
                       if absent
   --version, -h/--help
 
-keys (when the window has the focus; the title lists the state and the keys)
+keys (when the window has the focus; the title lists the state, then the keys)
   1-9, 0   integer scale x1..x9, x10      M  cycle presentation 1to1, integer, autofit, fit,
-  F        cycle filter                      stretch
-  B        cycle bar colour               P  cycle bar pattern
+  + = Up   multiplier up by 1 (to x10)       stretch
+  - Down   multiplier down by 1 (to x1)   Z  cycle the fit family: autofit, fit, stretch
+  PgUp     multiplier up by 2             T, Tab  toggle autofit <-> the last explicit mode
+  PgDn     multiplier down by 2           Home  x1      End  autofit
+  (+ - also on the numpad; from another mode they switch to integer, starting from the scale shown;
+   a multiplier that does not fit the window shows 'integer xN (clamped to xM)')
+  F        cycle filter                   B  cycle bar colour       P  cycle bar pattern
   C, Space cycle content                  N  cycle native preset (resizes an exact window)
   K        frame counter on/off           X  corner markers on/off
   A        alignment                      Alt+Enter fullscreen (F11 is ultimatecrt's)
-  Esc      quit";
+  Esc      quit
+A toast with the new state (for example 'integer x4', 'autofit -> x3') shows for 1.5 s at the
+bottom centre after a presentation key, so that a capture shows what changed (--no-toast).";
 
 fn parse_wxh(flag: &str, v: &str, min: u32, max: u32) -> Result<(u32, u32), String> {
     let (a, b) = v
@@ -422,6 +433,7 @@ pub fn parse(args: &[String]) -> Result<Parsed, String> {
                 );
             }
             "--stats" => o.stats = true,
+            "--no-toast" => o.no_toast = true,
             "--decode" => o.decode = Some(value()?),
             "--version" => return Ok(Parsed::Version),
             "-h" | "--help" => return Ok(Parsed::Help),
@@ -634,6 +646,9 @@ mod tests {
         assert_eq!(opts("--no-markers").markers, Some(false));
         assert_eq!(opts("").markers, None);
         assert!(!opts("").fixed_size);
+        assert!(!opts("").no_toast);
+        assert!(opts("--no-toast").no_toast);
+        assert!(HELP.contains("--no-toast") && HELP.contains("PgUp") && HELP.contains("Home"));
     }
 
     #[test]
