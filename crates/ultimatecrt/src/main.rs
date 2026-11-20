@@ -5,7 +5,7 @@
 //! Release builds are GUI programs (`windows_subsystem = "windows"`): no console window opens with the output
 //! window. Started from a terminal with options (`--help`, `--list-windows`, `--stats`...), the process attaches
 //! to that terminal's console so its text still prints there. A fatal error is shown in a message box when no
-//! console shows it.
+//! console shows it; so is a panic, which also writes a crash report (`ultimatecrt::crash`, review D-05).
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -50,6 +50,8 @@ fn harden_dll_search() {
 }
 
 fn main() {
+    // D-05: first of all, so that any panic writes its crash report (`ultimatecrt::crash`).
+    ultimatecrt::crash::install_hook();
     harden_dll_search();
     // Options are developer and diagnostic tools: their text goes to the terminal they came from.
     let has_args = std::env::args_os().len() > 1;
@@ -60,7 +62,14 @@ fn main() {
     } else {
         stdout_connected()
     };
-    if let Err(e) = ultimatecrt::app::run() {
+    // A panic in the session loop comes back as an error (after the shutdown); one before or after it (start-up)
+    // is caught here, so that it too gets the message box with the crash report's path.
+    let result = std::panic::catch_unwind(ultimatecrt::app::run).unwrap_or_else(|payload| {
+        let report = ultimatecrt::crash::last_report();
+        let message = ultimatecrt::crash::panic_message(&*payload);
+        Err(ultimatecrt::crash::panic_text(&message, report.as_deref()).into())
+    });
+    if let Err(e) = result {
         eprintln!("error: {e}");
         if !console {
             show_error(&e.to_string());
