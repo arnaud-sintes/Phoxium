@@ -619,6 +619,9 @@ impl Optics {
         }
         // A frame in flight may read the buffer.
         ctx.device.device_wait_idle()?;
+        if self.buffer.mapped.is_null() {
+            return Err("optics: the weight buffer is missing".into());
+        }
         std::ptr::copy_nonoverlapping(buf.as_ptr().cast::<u8>(), self.buffer.mapped, BUFFER_FLOATS * 4);
         self.weight_key = Some(key);
         Ok(())
@@ -748,14 +751,21 @@ impl Stage for Optics {
             }
             return Ok(());
         };
-        if self.dummy.image == vk::Image::null() {
-            self.dummy = GpuImage::create(
-                ctx,
-                vk::Extent2D { width: 1, height: 1 },
-                FORMAT,
-                vk::ImageUsageFlags::STORAGE,
-            )?;
-            self.buffer = HostBuffer::create(ctx, BUFFER_FLOATS * 4, vk::BufferUsageFlags::STORAGE_BUFFER)?;
+        // R-27: each object is made when it is missing, so a failure between the two (the buffer after the dummy)
+        // is retried by the next frame instead of leaving a null mapping that `update_weights` would write to.
+        if self.dummy.image == vk::Image::null() || self.buffer.mapped.is_null() {
+            if self.dummy.image == vk::Image::null() {
+                self.dummy = GpuImage::create(
+                    ctx,
+                    vk::Extent2D { width: 1, height: 1 },
+                    FORMAT,
+                    vk::ImageUsageFlags::STORAGE,
+                )?;
+            }
+            if self.buffer.mapped.is_null() {
+                self.buffer = HostBuffer::create(ctx, BUFFER_FLOATS * 4, vk::BufferUsageFlags::STORAGE_BUFFER)?;
+                self.weight_key = None;
+            }
             self.fresh = true;
             self.alloc_key = None;
         }

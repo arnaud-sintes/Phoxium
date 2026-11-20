@@ -11,7 +11,8 @@ use std::sync::Arc;
 
 use ash::{ext, khr, vk, Device, Entry, Instance};
 
-use super::Res;
+use super::{GpuError, Res};
+use crate::quality::ImageLimits;
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
@@ -159,7 +160,8 @@ pub struct ExternalMemoryProbe {
 pub struct VulkanReport {
     /// Every physical device, in enumeration order, with its external-memory probe.
     pub gpus: Vec<(GpuInfo, ExternalMemoryProbe)>,
-    /// `GpuInfo::index` of the candidates (Vulkan 1.3 with a graphics queue), in enumeration order.
+    /// `GpuInfo::index` of the candidates (Vulkan 1.3, a graphics and compute queue, the features and limits of
+    /// [`device_meets`]), in enumeration order.
     pub usable: Vec<usize>,
     /// `GpuInfo::index` of the device [`DeviceRequest::Default`] picks (a window context).
     pub picked: Option<usize>,
@@ -177,12 +179,13 @@ pub fn vulkan_report() -> Res<VulkanReport> {
             .enumerate()
             .map(|(i, &pd)| (gpu_info(&instance, pd, i), external_memory_probe(&instance, pd)))
             .collect();
-        // Same candidates as `create_device` without a surface: Vulkan 1.3 and a graphics queue (a window
-        // context additionally needs presentation support, which cannot be asked without a window).
+        // Same candidates as `create_device` without a surface: Vulkan 1.3, a graphics and compute queue, the
+        // features and limits of `device_meets` (a window context additionally needs presentation support, which
+        // cannot be asked without a window).
         let usable: Vec<GpuInfo> = gpus
             .iter()
             .zip(&devices)
-            .filter(|((g, _), &pd)| unsafe { usable_family(&instance, pd, g.api_version, None) }.is_some())
+            .filter(|((g, _), &pd)| unsafe { candidate(&instance, pd, g.api_version, None) }.is_ok())
             .map(|((g, _), _)| g.clone())
             .collect();
         let picked = choose_device(&usable, DeviceRequest::Default).map(|p| usable[p].index);
@@ -300,9 +303,18 @@ pub struct Context {
     sync_validation: bool,
     /// True when the `syncval_shader_accesses_heuristic` layer setting was passed to the layer.
     shader_accesses: bool,
+    /// What one chain image may be on this device (R-02): `maxImageDimension2D` and the memory budget.
+    image_limits: ImageLimits,
 }
 
 impl Context {
+    /// The largest image side (`maxImageDimension2D`) and the memory budget of one chain image on this device
+    /// ([`crate::quality::image_budget`] of its largest device-local heap): the pipeline limits the amplifier K and
+    /// the other image sizes to them (R-02).
+    pub fn image_limits(&self) -> ImageLimits {
+        self.image_limits
+    }
+
     /// Shared count of validation messages (always 0 when validation is off).
     pub fn validation_counter(&self) -> ValidationCounter {
         self.validation.clone()
@@ -332,7 +344,8 @@ impl Context {
     }
 
     /// Creates a surface-less context (no window, no swapchain extension): NVIDIA discrete, else
-    /// any discrete, else the first Vulkan 1.3 device with a graphics queue.
+    /// any discrete, else the first supported device ([`device_meets`]: Vulkan 1.3, a graphics and compute
+    /// queue, the features and compute limits the shaders need).
     ///
     /// With `validation`, the Khronos validation layer must be installed (else an error), every
     /// message is printed to stderr and counted (see [`Context::validation_counter`]), and
@@ -431,6 +444,7 @@ impl Context {
         match create_device(&instance, &surface_fn, surface, gpu) {
             Ok((gpu, physical, queue_family, device)) => {
                 let queue = device.get_device_queue(queue_family, 0);
+                let image_limits = image_limits_of(&instance, physical);
                 let ctx = Self {
                     entry,
                     instance,
@@ -445,6 +459,7 @@ impl Context {
                     validation: counter,
                     sync_validation,
                     shader_accesses,
+                    image_limits,
                 };
                 Ok((ctx, surface))
             }
@@ -536,38 +551,177 @@ pub(super) unsafe fn create_win32_surface(
     )?)
 }
 
-/// Graphics queue family of a candidate device, or `None` when the device is not a candidate: it must be
-/// Vulkan 1.3 and, with a surface, the family must present to it.
+/// Workgroup invocations the shaders use at most (`reduce*.comp`: 256 x 1; `screen.comp`: the 8 x 32 beam tile).
+/// The Vulkan minimum is 128.
+pub const NEEDED_INVOCATIONS: u32 = 256;
+/// Workgroup size per axis the shaders use at most (`reduce*.comp`: x 256; `screen.comp`: y 32). The Vulkan
+/// minimum is (128, 128, 64).
+pub const NEEDED_GROUP_SIZE: [u32; 3] = [256, 32, 1];
+/// Shared memory per workgroup the shaders use at most, bytes: `composite.comp`, 7 arrays of 1024 floats (28 KiB);
+/// the beam tile of `beam.glsl` takes 5 x 256 `vec3` (20 KiB with 16-byte padding), `optics_kernel.comp` 9.4 KiB.
+/// The Vulkan minimum is 16384 (a test checks these figures against the shader sources).
+pub const NEEDED_SHARED_MEMORY: u32 = 7 * 1024 * 4;
+
+/// What device selection checks on a device (R-29), from queries only ([`device_meets`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DeviceCaps {
+    pub api_version: u32,
+    /// A queue family does graphics and compute (and presents to the window when one is asked).
+    pub queue_family: bool,
+    /// A window is asked, so the device needs `VK_KHR_swapchain`.
+    pub needs_swapchain: bool,
+    /// The device offers `VK_KHR_swapchain`.
+    pub swapchain: bool,
+    pub fragment_stores_and_atomics: bool,
+    pub dynamic_rendering: bool,
+    pub synchronization2: bool,
+    pub max_compute_shared_memory_size: u32,
+    pub max_compute_work_group_invocations: u32,
+    pub max_compute_work_group_size: [u32; 3],
+}
+
+/// Whether a device can run the renderer (R-29): Vulkan 1.3; a queue family with graphics and compute (that
+/// presents, with a window); `VK_KHR_swapchain` with a window; the features `dynamicRendering`, `synchronization2`
+/// and `fragmentStoresAndAtomics` (`encode`'s clip counters); and the compute limits the shaders need
+/// ([`NEEDED_INVOCATIONS`], [`NEEDED_GROUP_SIZE`], [`NEEDED_SHARED_MEMORY`]). The error names what is missing.
+pub fn device_meets(c: &DeviceCaps) -> Result<(), String> {
+    if c.api_version < vk::API_VERSION_1_3 {
+        return Err(format!(
+            "Vulkan {}.{} only, Vulkan 1.3 is needed (update the graphics driver)",
+            vk::api_version_major(c.api_version),
+            vk::api_version_minor(c.api_version)
+        ));
+    }
+    if !c.queue_family {
+        return Err(if c.needs_swapchain {
+            "no queue family does graphics and compute and presents to the output window".into()
+        } else {
+            "no queue family does graphics and compute".into()
+        });
+    }
+    if c.needs_swapchain && !c.swapchain {
+        return Err("the device does not offer VK_KHR_swapchain".into());
+    }
+    for (have, name) in [
+        (c.dynamic_rendering, "dynamicRendering"),
+        (c.synchronization2, "synchronization2"),
+        (c.fragment_stores_and_atomics, "fragmentStoresAndAtomics"),
+    ] {
+        if !have {
+            return Err(format!("the feature {name} is not supported"));
+        }
+    }
+    if c.max_compute_work_group_invocations < NEEDED_INVOCATIONS {
+        return Err(format!(
+            "maxComputeWorkGroupInvocations is {}, the shaders need {NEEDED_INVOCATIONS}",
+            c.max_compute_work_group_invocations
+        ));
+    }
+    for (axis, (&have, &need)) in ["x", "y", "z"]
+        .iter()
+        .zip(c.max_compute_work_group_size.iter().zip(&NEEDED_GROUP_SIZE))
+    {
+        if have < need {
+            return Err(format!(
+                "maxComputeWorkGroupSize.{axis} is {have}, the shaders need {need}"
+            ));
+        }
+    }
+    if c.max_compute_shared_memory_size < NEEDED_SHARED_MEMORY {
+        return Err(format!(
+            "maxComputeSharedMemorySize is {} bytes, the shaders need {NEEDED_SHARED_MEMORY}",
+            c.max_compute_shared_memory_size
+        ));
+    }
+    Ok(())
+}
+
+/// The queue family of a candidate device, or why the device is not one ([`device_meets`]). With a surface, the
+/// family must also present to it.
 ///
 /// # Safety
-/// `pd` belongs to `instance`; the surface, if any, is live and made by that instance.
-unsafe fn usable_family(
+/// `pd` belongs to `instance` (Vulkan 1.3); the surface, if any, is live and made by that instance.
+unsafe fn candidate(
     instance: &Instance,
     pd: vk::PhysicalDevice,
     api_version: u32,
     surface: Option<(&khr::surface::Instance, vk::SurfaceKHR)>,
-) -> Option<u32> {
+) -> Result<u32, String> {
+    let mut caps = DeviceCaps {
+        api_version,
+        queue_family: false,
+        needs_swapchain: surface.is_some(),
+        swapchain: false,
+        fragment_stores_and_atomics: false,
+        dynamic_rendering: false,
+        synchronization2: false,
+        max_compute_shared_memory_size: 0,
+        max_compute_work_group_invocations: 0,
+        max_compute_work_group_size: [0; 3],
+    };
     if api_version < vk::API_VERSION_1_3 {
-        return None;
+        return device_meets(&caps).map(|()| 0);
     }
-    instance
+    let family = instance
         .get_physical_device_queue_family_properties(pd)
         .iter()
         .enumerate()
         .position(|(qi, q)| {
-            q.queue_flags.contains(vk::QueueFlags::GRAPHICS)
+            q.queue_flags
+                .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
                 && surface.is_none_or(|(surface_fn, s)| {
                     surface_fn
                         .get_physical_device_surface_support(pd, qi as u32, s)
                         .unwrap_or(false)
                 })
-        })
-        .map(|f| f as u32)
+        });
+    caps.queue_family = family.is_some();
+    caps.swapchain = instance
+        .enumerate_device_extension_properties(pd)
+        .unwrap_or_default()
+        .iter()
+        .any(|e| e.extension_name_as_c_str() == Ok(khr::swapchain::NAME));
+    let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
+    let mut f2 = vk::PhysicalDeviceFeatures2::default().push_next(&mut f13);
+    instance.get_physical_device_features2(pd, &mut f2);
+    caps.fragment_stores_and_atomics = f2.features.fragment_stores_and_atomics == vk::TRUE;
+    caps.dynamic_rendering = f13.dynamic_rendering == vk::TRUE;
+    caps.synchronization2 = f13.synchronization2 == vk::TRUE;
+    let l = instance.get_physical_device_properties(pd).limits;
+    caps.max_compute_shared_memory_size = l.max_compute_shared_memory_size;
+    caps.max_compute_work_group_invocations = l.max_compute_work_group_invocations;
+    caps.max_compute_work_group_size = l.max_compute_work_group_size;
+    device_meets(&caps)?;
+    Ok(family.unwrap_or_default() as u32)
 }
 
-/// Chooses the physical device and creates the logical device. With a surface, only devices
-/// with a queue family that does graphics and presents to it are candidates, and the device gets
-/// `VK_KHR_swapchain`.
+/// The image limits of a device ([`Context::image_limits`]).
+///
+/// # Safety
+/// `pd` belongs to the live `instance`.
+unsafe fn image_limits_of(instance: &Instance, pd: vk::PhysicalDevice) -> ImageLimits {
+    let max_dim = instance
+        .get_physical_device_properties(pd)
+        .limits
+        .max_image_dimension2_d;
+    let mem = instance.get_physical_device_memory_properties(pd);
+    let heap = mem.memory_heaps[..mem.memory_heap_count as usize]
+        .iter()
+        .filter(|h| h.flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
+        .map(|h| h.size)
+        .max()
+        .unwrap_or(0);
+    ImageLimits {
+        max_dim,
+        budget_bytes: crate::quality::image_budget(heap),
+    }
+}
+
+/// Chooses the physical device and creates the logical device. Only devices that meet
+/// [`device_meets`] are candidates (with a surface: a queue family that does graphics and compute and
+/// presents to it, and `VK_KHR_swapchain`, which the device then gets). A requested device that is not
+/// supported is reported with the reason and the default choice is used; with no candidate at all the
+/// error ([`GpuError::Unsupported`]) names every device and why.
 ///
 /// # Safety
 /// `surface`, if any, must be a live surface of `instance`.
@@ -579,36 +733,71 @@ unsafe fn create_device(
 ) -> Res<(GpuInfo, vk::PhysicalDevice, u32, Device)> {
     let mut infos = Vec::new();
     let mut handles = Vec::new();
+    let mut rejected: Vec<(GpuInfo, String)> = Vec::new();
     for (i, pd) in instance.enumerate_physical_devices()?.into_iter().enumerate() {
         let g = gpu_info(instance, pd, i);
-        if let Some(f) = usable_family(instance, pd, g.api_version, surface.map(|s| (surface_fn, s))) {
-            infos.push(g);
-            handles.push((pd, f));
+        match candidate(instance, pd, g.api_version, surface.map(|s| (surface_fn, s))) {
+            Ok(f) => {
+                infos.push(g);
+                handles.push((pd, f));
+            }
+            Err(reason) => rejected.push((g, reason)),
         }
     }
     // A LUID comes from the adapter selection (`adapters::select`); when that device cannot present to the
-    // window (or vanished), the default choice is used and the caller sees it in `Context::gpu`.
-    let chosen = choose_device(&infos, gpu)
-        .or_else(|| match gpu {
+    // window, is not supported (or vanished), the default choice is used and the caller sees it in `Context::gpu`.
+    let chosen = choose_device(&infos, gpu).or_else(|| {
+        let why = |g: &GpuInfo| {
+            rejected
+                .iter()
+                .find(|(r, _)| r.index == g.index)
+                .map(|(r, reason)| format!("{} is not supported ({reason})", r.name))
+        };
+        match gpu {
             DeviceRequest::Luid(l) => {
-                eprintln!(
-                    "warning: no usable Vulkan device with LUID {}{}; using the default device",
-                    crate::adapters::Luid::from_vulkan(l),
-                    if surface.is_some() {
-                        " can present to the output window"
-                    } else {
-                        ""
-                    }
-                );
+                let reason = rejected
+                    .iter()
+                    .find(|(r, _)| r.luid == Some(l))
+                    .and_then(|(r, _)| why(r))
+                    .unwrap_or_else(|| {
+                        format!(
+                            "no usable Vulkan device with LUID {}{}",
+                            crate::adapters::Luid::from_vulkan(l),
+                            if surface.is_some() {
+                                " can present to the output window"
+                            } else {
+                                ""
+                            }
+                        )
+                    });
+                eprintln!("warning: {reason}; using the default device");
                 choose_device(&infos, DeviceRequest::Default)
             }
-            _ => None,
-        })
-        .ok_or(if surface.is_some() {
-            "no Vulkan 1.3 device can present to the output window (see --list-gpus)"
-        } else {
-            "no usable Vulkan 1.3 device with a graphics queue (see --list-gpus)"
-        })?;
+            DeviceRequest::Index(i) => {
+                // An existing but unsupported device falls back with a warning; an unknown index stays an error.
+                let reason = rejected.iter().find(|(r, _)| r.index == i).and_then(|(r, _)| why(r))?;
+                eprintln!("warning: {reason}; using the default device");
+                choose_device(&infos, DeviceRequest::Default)
+            }
+            DeviceRequest::Default => None,
+        }
+    });
+    let chosen = match chosen {
+        Some(c) => c,
+        None if !rejected.is_empty() && infos.is_empty() => {
+            let list: Vec<String> = rejected.iter().map(|(g, r)| format!("{}: {r}", g.name)).collect();
+            return Err(Box::new(GpuError::Unsupported {
+                reason: format!("{} (see --list-gpus)", list.join("; ")),
+            }));
+        }
+        None => {
+            return Err(if surface.is_some() {
+                "no Vulkan 1.3 device can present to the output window (see --list-gpus)".into()
+            } else {
+                "no usable Vulkan 1.3 device with a graphics queue (see --list-gpus)".into()
+            })
+        }
+    };
     let (physical, queue_family) = handles[chosen];
     let g = infos.swap_remove(chosen);
 
@@ -621,7 +810,8 @@ unsafe fn create_device(
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
         .dynamic_rendering(true)
         .synchronization2(true);
-    // `encode` counts clipped pixels with atomics in a storage buffer (T-46); universal on desktop GPUs.
+    // `encode` counts clipped pixels with atomics in a storage buffer (T-46); every candidate supports it
+    // (`device_meets`, R-29), as it does dynamic rendering and synchronization2.
     let features = vk::PhysicalDeviceFeatures::default().fragment_stores_and_atomics(true);
     let device = instance.create_device(
         physical,
@@ -707,6 +897,214 @@ mod tests {
             Some(1)
         );
         assert_eq!(choose_device(&c, DeviceRequest::Luid([9; 8])), None);
+    }
+
+    /// A device with everything the renderer needs, at the values of an RTX A2000 Laptop (NVIDIA 5xx driver).
+    fn rtx_a2000() -> DeviceCaps {
+        DeviceCaps {
+            api_version: vk::make_api_version(0, 1, 4, 312),
+            queue_family: true,
+            needs_swapchain: true,
+            swapchain: true,
+            fragment_stores_and_atomics: true,
+            dynamic_rendering: true,
+            synchronization2: true,
+            max_compute_shared_memory_size: 49152,
+            max_compute_work_group_invocations: 1024,
+            max_compute_work_group_size: [1024, 1024, 64],
+        }
+    }
+
+    /// R-29: the device check names what is missing; the dev machine's GPUs and the usual desktop values pass,
+    /// the Vulkan minimum-spec values do not.
+    #[test]
+    fn device_check_names_the_missing_limit_or_feature() {
+        assert_eq!(device_meets(&rtx_a2000()), Ok(()));
+        // Intel UHD (Gen 9 to 12) and AMD RDNA: 32 KiB and 64 KiB of shared memory.
+        let intel = DeviceCaps {
+            max_compute_shared_memory_size: 32768,
+            ..rtx_a2000()
+        };
+        assert_eq!(device_meets(&intel), Ok(()));
+        let headless = DeviceCaps {
+            needs_swapchain: false,
+            swapchain: false,
+            ..rtx_a2000()
+        };
+        assert_eq!(device_meets(&headless), Ok(()), "no window: no swapchain needed");
+
+        let minimum = DeviceCaps {
+            max_compute_shared_memory_size: 16384,
+            max_compute_work_group_invocations: 128,
+            max_compute_work_group_size: [128, 128, 64],
+            ..rtx_a2000()
+        };
+        let e = device_meets(&minimum).unwrap_err();
+        assert!(e.contains("maxComputeWorkGroupInvocations is 128"), "{e}");
+        let e = device_meets(&DeviceCaps {
+            max_compute_work_group_invocations: 256,
+            ..minimum
+        })
+        .unwrap_err();
+        assert!(
+            e.contains("maxComputeWorkGroupSize.x is 128, the shaders need 256"),
+            "{e}"
+        );
+        let e = device_meets(&DeviceCaps {
+            max_compute_work_group_invocations: 256,
+            max_compute_work_group_size: [256, 16, 1],
+            ..minimum
+        })
+        .unwrap_err();
+        assert!(e.contains("maxComputeWorkGroupSize.y is 16"), "{e}");
+        let e = device_meets(&DeviceCaps {
+            max_compute_shared_memory_size: 16384,
+            ..rtx_a2000()
+        })
+        .unwrap_err();
+        assert!(e.contains("maxComputeSharedMemorySize is 16384 bytes"), "{e}");
+
+        let cases: [(DeviceCaps, &str); 6] = [
+            (
+                DeviceCaps {
+                    api_version: vk::API_VERSION_1_2,
+                    ..rtx_a2000()
+                },
+                "Vulkan 1.2 only",
+            ),
+            (
+                DeviceCaps {
+                    queue_family: false,
+                    ..rtx_a2000()
+                },
+                "graphics and compute and presents",
+            ),
+            (
+                DeviceCaps {
+                    swapchain: false,
+                    ..rtx_a2000()
+                },
+                "VK_KHR_swapchain",
+            ),
+            (
+                DeviceCaps {
+                    fragment_stores_and_atomics: false,
+                    ..rtx_a2000()
+                },
+                "fragmentStoresAndAtomics",
+            ),
+            (
+                DeviceCaps {
+                    dynamic_rendering: false,
+                    ..rtx_a2000()
+                },
+                "dynamicRendering",
+            ),
+            (
+                DeviceCaps {
+                    synchronization2: false,
+                    ..rtx_a2000()
+                },
+                "synchronization2",
+            ),
+        ];
+        for (caps, want) in cases {
+            let e = device_meets(&caps).unwrap_err();
+            assert!(e.contains(want), "{want}: {e}");
+        }
+    }
+
+    /// The limits the device check asks for cover every compute shader: workgroup sizes read from the sources
+    /// (literal values, `#define` and `const int` names), and the shared memory of the three shaders that use the
+    /// most, recomputed from their constants.
+    #[test]
+    fn needed_limits_cover_the_shaders() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../shaders");
+        let read = |name: &str| {
+            std::fs::read_to_string(dir.join(name))
+                .expect("shader")
+                .replace("\r\n", "\n")
+        };
+        let beam = read("include/beam.glsl");
+        // The value of a name: `#define NAME v` or `const int NAME = v;` in `src` or beam.glsl.
+        let value = |src: &str, name: &str| -> Option<u32> {
+            for text in [src, beam.as_str()] {
+                for line in text.lines() {
+                    let line = line.trim();
+                    let rest = line
+                        .strip_prefix("#define ")
+                        .and_then(|r| r.strip_prefix(name))
+                        .filter(|r| r.starts_with(' '))
+                        .or_else(|| {
+                            line.strip_prefix("const int ")
+                                .and_then(|r| r.strip_prefix(name))
+                                .and_then(|r| r.trim_start().strip_prefix('='))
+                        });
+                    if let Some(v) = rest.and_then(|r| r.split(['u', ';', '/']).next()?.trim().parse().ok()) {
+                        return Some(v);
+                    }
+                }
+            }
+            None
+        };
+        let size = |src: &str, key: &str| -> u32 {
+            let Some(at) = src.find(key) else { return 1 };
+            let token = src[at + key.len()..]
+                .trim_start()
+                .split([',', ')'])
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            token
+                .parse()
+                .ok()
+                .or_else(|| value(src, &token))
+                .unwrap_or_else(|| panic!("workgroup size `{token}` not resolved"))
+        };
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("shaders folder") {
+            let path = entry.expect("entry").path();
+            if path.extension().is_none_or(|e| e != "comp") {
+                continue;
+            }
+            let src = std::fs::read_to_string(&path).expect("shader").replace("\r\n", "\n");
+            let (x, y) = (size(&src, "local_size_x ="), size(&src, "local_size_y ="));
+            let name = path.display();
+            assert!(x * y <= NEEDED_INVOCATIONS, "{name}: {x} x {y} invocations");
+            assert!(
+                x <= NEEDED_GROUP_SIZE[0] && y <= NEEDED_GROUP_SIZE[1],
+                "{name}: {x} x {y}"
+            );
+            checked += 1;
+        }
+        assert!(checked >= 20, "only {checked} compute shaders found");
+
+        // composite.comp: 3 arrays of 2 N floats and one of N, N = (TILE + 2 HALO) S.
+        let comp = read("composite.comp");
+        for decl in [
+            "shared float sh_sig[2 * N];",
+            "shared float sh_flt[2 * N];",
+            "shared float sh_b[2 * N];",
+            "shared float sh_luma[N];",
+        ] {
+            assert!(comp.contains(decl), "composite.comp changed its shared arrays: {decl}");
+        }
+        assert_eq!(comp.matches("\nshared ").count(), 4, "composite.comp shared arrays");
+        let n = (value(&comp, "TILE").unwrap() + 2 * value(&comp, "HALO").unwrap()) * value(&comp, "S").unwrap();
+        assert!(7 * n * 4 <= NEEDED_SHARED_MEMORY, "composite.comp: {} bytes", 7 * n * 4);
+        // beam.glsl: 5 vec3 arrays of BEAM_TILE_W x BEAM_TILE_H entries, 16 bytes each at worst.
+        assert_eq!(
+            beam.matches("\nshared vec3 beam_sh_").count(),
+            5,
+            "beam.glsl shared arrays"
+        );
+        let entries = value(&beam, "BEAM_TILE_W").unwrap() * value(&beam, "BEAM_TILE_H").unwrap();
+        assert!(5 * entries * 16 <= NEEDED_SHARED_MEMORY, "beam tile");
+        // optics_kernel.comp: (OPT_TAPS_MAX + 1)^2 floats.
+        let k = read("optics_kernel.comp");
+        let taps = value(&k, "OPT_TAPS_MAX").unwrap() + 1;
+        assert!(taps * taps * 4 <= NEEDED_SHARED_MEMORY, "optics kernel");
     }
 
     /// The messenger counts validation and performance warnings and errors, not general ones.

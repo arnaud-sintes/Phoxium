@@ -323,6 +323,18 @@ struct Screen {
     /// The line images are new (layout `UNDEFINED`): the next recorded warp frame transitions them.
     fresh: bool,
     transition: bool,
+    /// The warp path was refused for the frame last prepared because its line images would exceed the device's
+    /// image limits (R-02): `screen.comp` ran instead. The notice text.
+    limited: Option<String>,
+}
+
+/// Whether the line images of `plan` fit the device (R-02): each side within the largest image side, and the
+/// five images within the per-image budget each. `screen.comp` (the per-pixel reference form) replaces the warp
+/// path otherwise.
+fn lines_fit(plan: &WarpPlan, limits: quality::ImageLimits) -> bool {
+    let (w, h) = plan.size;
+    let bytes = u64::from(w) * u64::from(h) * quality::CHAIN_TEXEL_BYTES;
+    w <= limits.max_dim && h <= limits.max_dim && bytes <= limits.budget_bytes
 }
 
 impl Screen {
@@ -585,6 +597,17 @@ impl Stage for Screen {
         } else {
             None
         };
+        // R-02: line images beyond the device's limits (a huge spot reach or a wide tube with ox 4): the
+        // single pass, which computes the same light per pixel without them.
+        self.limited = None;
+        if let Some(plan) = self.warp.filter(|p| !lines_fit(p, ctx.image_limits())) {
+            self.limited = Some(format!(
+                "the beam's line images would be {} x {} px, beyond this GPU's image limits: the slower per-pixel \
+                 beam is used",
+                plan.size.0, plan.size.1
+            ));
+            self.warp = None;
+        }
         match self.warp {
             None => {
                 if self.lines_size != (0, 0) {
@@ -608,6 +631,10 @@ impl Stage for Screen {
         // The abandoned frame did not transition the new line images: the next warp frame does it.
         self.fresh |= self.transition;
         self.transition = false;
+    }
+
+    fn notice(&self) -> Option<String> {
+        self.limited.clone()
     }
 
     unsafe fn record(&self, d: &ash::Device, cb: vk::CommandBuffer, set: vk::DescriptorSet, size: (u32, u32)) {
@@ -668,6 +695,38 @@ mod tests {
             // Independent of the checkout's line endings (a CRLF checkout of the shader sources).
             let glsl = glsl.replace("\r\n", "\n");
             assert!(glsl.contains("uint abl_runs;\n    uint ox;\n    int pad;"));
+        }
+    }
+
+    /// R-02: the warp path's line images are checked against the device's image limits.
+    #[test]
+    fn line_images_must_fit_the_device() {
+        let lim = |max_dim| quality::ImageLimits {
+            max_dim,
+            budget_bytes: quality::IMAGE_BUDGET_BYTES,
+        };
+        let plan = |w, h| WarpPlan {
+            ox: 1,
+            pad: 3,
+            size: (w, h),
+        };
+        assert!(lines_fit(&plan(2600, 1440), lim(16384)));
+        assert!(lines_fit(&plan(16384, 1440), lim(16384)));
+        assert!(!lines_fit(&plan(16385, 1440), lim(16384)));
+        assert!(lines_fit(&plan(16385, 1440), lim(32768)));
+        assert!(!lines_fit(&plan(2600, 5000), lim(4096)));
+        // 32768 x 2160 x 8 bytes is 566 MB: over the 256 MiB budget.
+        assert!(!lines_fit(&plan(32768, 2160), lim(32768)));
+        // The plan of a curved tube on a 2560 x 1440 output with the default spot fits the smallest usual limit.
+        let p = Params {
+            geometry_curvature: GEOMETRY_CURVATURE_SPHERICAL,
+            geometry_radius_mm: 500.0,
+            ..Params::default()
+        };
+        let mut fc = FrameConstants::placed((320, 240), (2560, 1440), false, &p);
+        fc.amp_k = 4;
+        if let Some(w) = warp_plan(&fc, &p) {
+            assert!(lines_fit(&w, lim(16384)), "a normal plan fits: {w:?}");
         }
     }
 

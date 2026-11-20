@@ -13,12 +13,19 @@
 //! The images are shared by the frames: every image tracks its last recorded access (layout, stages,
 //! write access), and every barrier is derived from that state, so a frame's barriers order it after
 //! the previous frames' use of the same image (one queue, submission order = recording order). Stages
-//! never record barriers.
+//! never record barriers on the chain images; a stage that owns other objects (history images, state
+//! buffers, line images, several passes: `abl`, `screen`, `wear`, `phosphor`, `optics`) records the
+//! barriers on those itself.
 //!
 //! Images are (re)allocated when their size changes: `src` with the captured frame size, `native` with
 //! the native raster, each slot output with its domain size. Reallocation idles the device first. A
 //! reallocated image starts `UNDEFINED`, so any history it held is cleared (SRC-8: history cleared on
 //! mode change; the history images of later stages follow the same rule).
+//!
+//! Limits (R-02, R-01): the amplifier K of a live frame is limited to what the device allows for one image
+//! ([`crate::quality::clamp_amp_k`], [`Context::image_limits`]); a frame whose tube area is empty or whose
+//! images would exceed the device's largest image side is not an error: only the surround is drawn. Both
+//! raise a notice ([`Pipeline::notice`]), printed once.
 //!
 //! Per-frame use: [`Pipeline::wait_slot`], optionally [`Pipeline::stage_source`] with a new frame,
 //! [`Pipeline::record`] (returns the slot's command buffer, still recording, with the target in
@@ -36,9 +43,74 @@ use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
 use super::ui_render::{self, UiPass};
 use crate::headroom::{effective_mode, headroom, OutputTransform};
 use crate::params::{Params, PARAMS_STD140_SIZE};
+use crate::quality::{self, ImageLimits};
 use crate::scaling::View;
 use crate::Res;
 use crt_model::output::Headroom;
+
+/// GPU-side notices (R-02, R-01): one message per kind, printed once (`notice: ...`) when it appears or changes,
+/// queued for [`Notices::take_fresh`], and readable as the notice in force ([`Notices::current`]).
+#[derive(Default)]
+pub(super) struct Notices {
+    active: Vec<(&'static str, String)>,
+    fresh: Vec<String>,
+}
+
+impl Notices {
+    /// Sets the message of `kind` (`None` clears it). Kinds: a chain slot name for a stage's notice
+    /// ([`Stage::notice`]), `limit: ...` for the pipeline's own (never a slot name).
+    pub(super) fn set(&mut self, kind: &'static str, msg: Option<String>) {
+        let i = self.active.iter().position(|(k, _)| *k == kind);
+        match (i, msg) {
+            (Some(i), None) => {
+                self.active.remove(i);
+            }
+            (Some(i), Some(m)) if self.active[i].1 == m => {}
+            (i, Some(m)) => {
+                println!("notice: {m}");
+                self.fresh.push(m.clone());
+                match i {
+                    Some(i) => self.active[i].1 = m,
+                    None => self.active.push((kind, m)),
+                }
+            }
+            (None, None) => {}
+        }
+    }
+
+    /// The notices in force, joined, `None` when there is none.
+    pub(super) fn current(&self) -> Option<String> {
+        (!self.active.is_empty()).then(|| {
+            self.active
+                .iter()
+                .map(|(_, m)| m.as_str())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+    }
+
+    /// The messages that appeared or changed since the last call.
+    pub(super) fn take_fresh(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.fresh)
+    }
+}
+
+/// Replaces the fence of a failed submission (reset, so nothing would ever signal it) by a new signalled one from
+/// `create`, destroying `old` (R-28). `None` when no fence could be made: `old` is kept (never a null fence), and
+/// the caller must not wait on it.
+fn replace_fence(
+    old: vk::Fence,
+    create: impl FnOnce() -> ash::prelude::VkResult<vk::Fence>,
+    destroy: impl FnOnce(vk::Fence),
+) -> Option<vk::Fence> {
+    match create() {
+        Ok(f) if f != vk::Fence::null() => {
+            destroy(old);
+            Some(f)
+        }
+        _ => None,
+    }
+}
 
 /// Frames the CPU may record ahead of the GPU.
 pub const FRAMES_IN_FLIGHT: usize = 2;
@@ -199,12 +271,13 @@ impl FrameConstants {
         }
     }
 
-    /// Size of the images of `domain` (image contract).
+    /// Size of the images of `domain` (image contract). Saturating: an absurd K gives a width the pipeline
+    /// refuses as too large for the device, never an overflow.
     pub fn domain_size(&self, domain: Domain) -> (u32, u32) {
         let n = (self.native_size[0].max(0) as u32, self.native_size[1].max(0) as u32);
         match domain {
             Domain::Native => n,
-            Domain::Amp => (n.0 * self.amp_k.max(0) as u32, n.1),
+            Domain::Amp => (n.0.saturating_mul(self.amp_k.max(0) as u32), n.1),
             Domain::Tube => (self.tube_size[0].max(0) as u32, self.tube_size[1].max(0) as u32),
         }
     }
@@ -497,6 +570,15 @@ pub struct Pipeline {
     /// SDR headroom readout of the last recorded frame and the inputs it was computed from (T-84): computed
     /// again only when the parameters, the placement or the `screen` routing change.
     headroom: Option<(HeadroomKey, Headroom)>,
+    /// What one image may be on the device (R-02).
+    limits: ImageLimits,
+    /// What the pipeline limited or left out (R-02, R-01).
+    notices: Notices,
+    /// Set when a failed submission left a slot without a usable fence (R-28): every later frame fails with it.
+    broken: Option<String>,
+    /// Test fault: the staging buffer of this frame slot fails to allocate in `reallocate_src` (R-27).
+    #[cfg(test)]
+    pub(super) fail_staging_alloc: Option<usize>,
 }
 
 /// The inputs of the headroom readout: parameters, px per mm, line pitch (bits) and whether `screen` runs.
@@ -584,6 +666,11 @@ impl Pipeline {
             timings: None,
             average: TimingAverager::default(),
             headroom: None,
+            limits: ctx.image_limits(),
+            notices: Notices::default(),
+            broken: None,
+            #[cfg(test)]
+            fail_staging_alloc: None,
         };
         match p.create(ctx) {
             Ok(()) => Ok(p),
@@ -637,7 +724,10 @@ impl Pipeline {
                 layouts.push(self.resample.set_layout);
             }
         }
-        // Every set has 2 uniform buffers and at most one sampled and one storage image.
+        // Every set of this pool has 2 uniform buffers and at most one combined image sampler, one storage image
+        // and one storage buffer (checked against each layout: decode = sampler + storage image, encode = sampler +
+        // the clip counters' storage buffer, chain passes and resample = the standard layout of sampler + storage
+        // image). Stage-owned sets (`abl`, `screen`, `optics`, `phosphor`, `wear`) come from their own pools.
         let n = (FRAMES_IN_FLIGHT * layouts.len()) as u32;
         let sizes = [
             vk::DescriptorPoolSize::default()
@@ -676,6 +766,9 @@ impl Pipeline {
                     HostBuffer::create(ctx, size_of::<FrameConstants>(), vk::BufferUsageFlags::UNIFORM_BUFFER)?;
                 s.params_ubo = HostBuffer::create(ctx, PARAMS_STD140_SIZE, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
                 s.clip_buf = HostBuffer::create(ctx, encode::CLIP_BYTES, vk::BufferUsageFlags::TRANSFER_DST)?;
+                // R-50: read before the slot's first frame finished (`clip_counts`): zero, not whatever the
+                // allocation held. Mapped, host coherent, `CLIP_BYTES` long, not in use yet.
+                std::ptr::write_bytes(s.clip_buf.mapped, 0, encode::CLIP_BYTES);
                 s.clip_dev = DeviceBuffer::create(
                     ctx,
                     encode::CLIP_BYTES,
@@ -791,6 +884,35 @@ impl Pipeline {
         self.headroom.map(|(_, h)| h)
     }
 
+    /// The notices in force (R-02, R-01), joined; `None` when nothing is limited.
+    pub(super) fn notice(&self) -> Option<String> {
+        self.notices.current()
+    }
+
+    /// The notices that appeared since the previous call.
+    pub(super) fn take_notices(&mut self) -> Vec<String> {
+        self.notices.take_fresh()
+    }
+
+    /// The image limits the pipeline applies (the device's, [`Context::image_limits`]).
+    pub(super) fn image_limits(&self) -> ImageLimits {
+        self.limits
+    }
+
+    /// The size of `src` and how many frame slots have a staging buffer (tests of R-27).
+    #[cfg(test)]
+    pub(super) fn source_allocation(&self) -> ((u32, u32), usize) {
+        (
+            self.src.size,
+            self.slots.iter().filter(|s| !s.staging.mapped.is_null()).count(),
+        )
+    }
+
+    /// Replaces the image limits (tests: a small device without one).
+    pub(super) fn set_image_limits(&mut self, limits: ImageLimits) {
+        self.limits = limits;
+    }
+
     /// Names of the chain slots, in order.
     pub(super) fn stage_names(&self) -> Vec<&'static str> {
         self.chain.iter().map(|l| l.reg.name).collect()
@@ -826,13 +948,17 @@ impl Pipeline {
     }
 
     /// Waits until the current frame slot is free (its previous submission finished). The CPU may then
-    /// write the slot's buffers.
+    /// write the slot's buffers. The wait is bounded ([`super::FENCE_TIMEOUT`]): a GPU that does not finish
+    /// the frame in time is reported as lost ([`super::GpuError::DeviceLost`]), never waited for ever.
     ///
     /// # Safety
     /// `ctx` is the pipeline's context.
     pub(super) unsafe fn wait_slot(&mut self, ctx: &Context) -> Res<()> {
+        if let Some(b) = &self.broken {
+            return Err(b.clone().into());
+        }
         let fence = self.slots[self.current].fence;
-        ctx.device.wait_for_fences(&[fence], true, u64::MAX)?;
+        super::wait_fences(&ctx.device, &[fence], "a frame")?;
         // The slot's previous frame finished: read its timestamps (no extra wait).
         self.collect(ctx, self.current);
         Ok(())
@@ -899,10 +1025,21 @@ impl Pipeline {
             )
             .into());
         }
+        let max = self.limits.max_dim;
+        if width > max || height > max {
+            return Err(format!(
+                "pipeline: the captured frame is {width}x{height}, larger than this GPU's {max} px image limit"
+            )
+            .into());
+        }
         if (width, height) != self.src.size {
             self.reallocate_src(ctx, width, height)?;
         }
         let s = &mut self.slots[self.current];
+        // R-27: `reallocate_src` never leaves a size without its buffers; checked anyway before writing.
+        if s.staging.mapped.is_null() {
+            return Err("pipeline: the source staging buffer is missing".into());
+        }
         // Host writes before vkQueueSubmit are visible to the device (implicit host write ordering).
         std::ptr::copy_nonoverlapping(bgra.as_ptr(), s.staging.mapped, bytes);
         s.upload = true;
@@ -959,6 +1096,11 @@ impl Pipeline {
         }
     }
 
+    /// Reallocates `src` and every slot's staging buffer for a captured frame of `width` x `height`. All or
+    /// nothing (R-27): the staging buffers and the image are made first and committed together; on any failure
+    /// `src` is left empty (size 0 x 0) and no slot has a staging buffer, so the next frame of any size
+    /// reallocates again instead of writing through a null mapping.
+    ///
     /// # Safety
     /// `ctx` is the pipeline's context.
     unsafe fn reallocate_src(&mut self, ctx: &Context, width: u32, height: u32) -> Res<()> {
@@ -969,18 +1111,41 @@ impl Pipeline {
             s.staging.destroy(d);
             s.upload = false;
         }
-        self.src.alloc(
-            ctx,
-            (width, height),
-            SOURCE_FORMAT,
-            vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
-        )?;
-        for s in &mut self.slots {
-            s.staging = HostBuffer::create(
+        self.src.gpu.destroy(d);
+        self.src = Img::default();
+        let mut staging: Vec<HostBuffer> = Vec::with_capacity(self.slots.len());
+        let made = (|| -> Res<()> {
+            for _i in 0..self.slots.len() {
+                #[cfg(test)]
+                if self.fail_staging_alloc == Some(_i) {
+                    return Err("pipeline: staging allocation failed (test fault)".into());
+                }
+                staging.push(HostBuffer::create(
+                    ctx,
+                    width as usize * height as usize * 4,
+                    vk::BufferUsageFlags::TRANSFER_SRC,
+                )?);
+            }
+            Ok(())
+        })();
+        let made = made.and_then(|()| {
+            self.src.alloc(
                 ctx,
-                width as usize * height as usize * 4,
-                vk::BufferUsageFlags::TRANSFER_SRC,
-            )?;
+                (width, height),
+                SOURCE_FORMAT,
+                vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::SAMPLED,
+            )
+        });
+        if let Err(e) = made {
+            for mut b in staging {
+                b.destroy(d);
+            }
+            self.src.gpu.destroy(d);
+            self.src = Img::default();
+            return Err(e);
+        }
+        for (s, b) in self.slots.iter_mut().zip(staging) {
+            s.staging = b;
         }
         let info = [vk::DescriptorImageInfo::default()
             .sampler(self.sampler)
@@ -1037,8 +1202,10 @@ impl Pipeline {
 
     /// Records the frame into the current slot's command buffer and returns it, still recording: upload
     /// of a staged frame, `decode`, the chain, then `encode` into `target`, which ends in
-    /// `COLOR_ATTACHMENT_OPTIMAL` (whole target written: tube rectangle plus black surround). Without
-    /// any source frame yet, the target is only cleared to black. The `FrameConstants` are computed
+    /// `COLOR_ATTACHMENT_OPTIMAL` (whole target written: tube rectangle plus the surround, the clear colour
+    /// `source_surround_color`). Without any source frame yet, or when the frame cannot run the chain (an empty
+    /// tube area, an image too large for the device), the target is only cleared to the surround colour. The
+    /// `FrameConstants` are computed
     /// from `view`, `settings` and the target ([`FrameConstants::new`], frame index and time).
     ///
     /// # Safety
@@ -1114,12 +1281,37 @@ impl Pipeline {
     /// bypassed by the nearest-neighbour resample, which would stretch the raster over the margin, so the tube
     /// image stays the raster rectangle. `with_skirt_margin` itself leaves unplaced constants unchanged
     /// (beam_eval's nearest-sample fallback has no skirt either).
-    fn live_constants(&self, view: View, settings: &Settings, params: &Params, extent: vk::Extent2D) -> FrameConstants {
-        let fc = FrameConstants::placed(
+    ///
+    /// R-02: the amplifier K is limited to what the device allows for one amp-domain image, in every quality
+    /// tier ([`quality::clamp_amp_k`]), with a notice while it is.
+    fn live_constants(
+        &mut self,
+        view: View,
+        settings: &Settings,
+        params: &Params,
+        extent: vk::Extent2D,
+    ) -> FrameConstants {
+        let mut fc = FrameConstants::placed(
             view.native,
             (extent.width, extent.height),
             settings.integer_scale,
             params,
+        );
+        let asked = fc.amp_k;
+        let (k, clamped) = quality::clamp_amp_k(asked, view.native, self.limits);
+        fc.amp_k = k;
+        let l = self.limits;
+        self.notices.set(
+            "limit: amp K",
+            clamped.then(|| {
+                format!(
+                    "amplifier samples limited to {k} (asked {asked}): a {} px wide source would exceed this GPU's \
+                     image limit ({} px, {} MiB per image)",
+                    view.native.0,
+                    l.max_dim,
+                    l.budget_bytes >> 20
+                )
+            }),
         );
         let inject_at = self.slots.get(self.current).and_then(|s| s.inject_at);
         let screen_runs = self.chain.iter().enumerate().any(|(i, l)| {
@@ -1189,6 +1381,8 @@ impl Pipeline {
             self.chain[i].stage.set_abl_runs(abl_runs);
             self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
             abl_runs |= runs && self.chain[i].stage.abl_state().is_some();
+            let (name, notice) = (self.chain[i].reg.name, self.chain[i].stage.notice());
+            self.notices.set(name, notice);
         }
         // T-37: `screen` reads `raster_scale` from the ABL state only when `abl` updates it in this frame.
         for l in &self.chain {
@@ -1232,12 +1426,22 @@ impl Pipeline {
         let inject_at = self.slots[cur].inject_at;
         let staged = self.slots[cur].upload;
         let native = fc.domain_size(Domain::Native);
-        let have_source = inject_at.is_some() || ((self.src_valid || staged) && native.0 > 0 && native.1 > 0);
+        let mut have_source = inject_at.is_some() || ((self.src_valid || staged) && native.0 > 0 && native.1 > 0);
         if inject_at.is_none() && have_source && native != view.native {
             return Err("pipeline: FrameConstants native size differs from the view".into());
         }
         if fc.amp_k < 1 {
             return Err("pipeline: amp_k (K) must be at least 1".into());
+        }
+        // R-01, R-02: an empty tube area (tube parameters at 0) or an image larger than the device allows is
+        // not an error: the frame draws the surround only, with a notice, until the parameters or the source
+        // change. The staged frame stays staged.
+        if have_source {
+            let blocked = self.blocked(fc, inject_at);
+            self.notices.set("limit: frame", blocked.clone());
+            if blocked.is_some() {
+                have_source = false;
+            }
         }
         let encode_pipeline = self.encode.pipeline(&ctx.device, target_format)?;
 
@@ -1344,6 +1548,40 @@ impl Pipeline {
             encode_pipeline,
             last: input,
         })
+    }
+
+    /// Why a frame with a source cannot run the chain, `None` when it can: an image it needs (the native
+    /// raster unless injected, then the output of every slot from the injection point on) is empty or larger
+    /// than the device's largest image side.
+    fn blocked(&self, fc: &FrameConstants, inject_at: Option<usize>) -> Option<String> {
+        let mut domains = Vec::with_capacity(3);
+        if inject_at.is_none() {
+            domains.push(Domain::Native);
+        }
+        for l in &self.chain[inject_at.unwrap_or(0).min(self.chain.len())..] {
+            if !domains.contains(&l.reg.output) {
+                domains.push(l.reg.output);
+            }
+        }
+        let max = self.limits.max_dim;
+        for d in domains {
+            let (w, h) = fc.domain_size(d);
+            if w == 0 || h == 0 {
+                return Some(match d {
+                    Domain::Tube => "the tube area is empty (a tube size, aspect or height parameter at 0?): only \
+                                     the surround is drawn"
+                        .to_string(),
+                    _ => format!("the {d:?} image is empty: only the surround is drawn"),
+                });
+            }
+            if w > max || h > max {
+                return Some(format!(
+                    "the {d:?} image would be {w} x {h} px, more than this GPU's {max} px limit: only the surround \
+                     is drawn"
+                ));
+            }
+        }
+        None
     }
 
     /// Writes the constants and records the commands of a planned frame.
@@ -1649,14 +1887,27 @@ impl Pipeline {
             fence,
         ) {
             // The fence was reset and nothing will signal it: replace it by a signalled one, or the next
-            // `wait_slot` of this slot would never return.
-            d.destroy_fence(fence, None);
-            self.slots[cur].fence = d
-                .create_fence(
-                    &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
-                    None,
-                )
-                .unwrap_or_default();
+            // `wait_slot` of this slot would never return. Never a null fence (R-28): when none can be made,
+            // the old one stays (destroyed with the pipeline) and the pipeline is broken, so `wait_slot` fails
+            // instead of waiting on it.
+            let fresh = replace_fence(
+                fence,
+                || {
+                    d.create_fence(
+                        &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
+                        None,
+                    )
+                },
+                |f| d.destroy_fence(f, None),
+            );
+            match fresh {
+                Some(f) => self.slots[cur].fence = f,
+                None => {
+                    self.broken = Some(format!(
+                        "pipeline: a frame submission failed ({e}) and its fence could not be replaced"
+                    ))
+                }
+            }
             self.abandon();
             return Err(e.into());
         }
@@ -1907,6 +2158,54 @@ mod tests {
         assert_eq!(fc.domain_size(Domain::Amp), (1024, 240));
         assert_eq!(fc.tube_size, [1152, 1080]);
         assert_eq!(fc.domain_size(Domain::Tube), (1152, 1080));
+        // R-02: no overflow for an absurd K (the pipeline then refuses the size as too large).
+        let huge = FrameConstants {
+            amp_k: i32::MAX,
+            ..FrameConstants::new((4096, 240), (1920, 1080), false)
+        };
+        assert_eq!(huge.domain_size(Domain::Amp), (u32::MAX, 240));
+    }
+
+    /// R-28: a failed fence creation keeps the old fence (never a null one) and destroys nothing; a successful
+    /// one replaces and destroys the old.
+    #[test]
+    fn a_fence_is_replaced_only_by_a_real_one() {
+        use vk::Handle;
+        let old = vk::Fence::from_raw(7);
+        let mut destroyed = Vec::new();
+        assert_eq!(
+            replace_fence(old, || Err(vk::Result::ERROR_OUT_OF_HOST_MEMORY), |f| destroyed.push(f)),
+            None
+        );
+        assert_eq!(
+            replace_fence(old, || Ok(vk::Fence::null()), |f| destroyed.push(f)),
+            None
+        );
+        assert!(destroyed.is_empty(), "the old fence is kept");
+        let new = vk::Fence::from_raw(9);
+        assert_eq!(replace_fence(old, || Ok(new), |f| destroyed.push(f)), Some(new));
+        assert_eq!(destroyed, [old]);
+    }
+
+    /// GPU notices are printed and queued once per change, and cleared per kind.
+    #[test]
+    fn notices_fire_once_per_change() {
+        let mut n = Notices::default();
+        assert_eq!(n.current(), None);
+        n.set("amp", Some("K limited to 6".into()));
+        n.set("amp", Some("K limited to 6".into()));
+        n.set("frame", None);
+        assert_eq!(n.take_fresh(), ["K limited to 6"]);
+        assert!(n.take_fresh().is_empty(), "taken once");
+        n.set("frame", Some("tube empty".into()));
+        assert_eq!(n.current().as_deref(), Some("K limited to 6; tube empty"));
+        n.set("amp", Some("K limited to 4".into()));
+        assert_eq!(n.take_fresh(), ["tube empty", "K limited to 4"]);
+        n.set("amp", None);
+        assert_eq!(n.current().as_deref(), Some("tube empty"));
+        n.set("frame", None);
+        assert_eq!(n.current(), None);
+        assert!(n.take_fresh().is_empty(), "clearing raises nothing");
     }
 
     #[test]

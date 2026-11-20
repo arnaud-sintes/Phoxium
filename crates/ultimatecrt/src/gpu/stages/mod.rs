@@ -23,8 +23,10 @@
 //! A slot is a [`Registration`]: a name, the [`Domain`] of the image it reads and of the image it
 //! writes, and a constructor of its [`Stage`]. A chain stage is a compute pass with the standard
 //! bindings 0 `Params`, 1 `FrameConstants`, 2 its input (combined image sampler, `texelFetch`), 3 its
-//! output (storage image `rgba16f`, the size of its output domain). The pipeline owns the images, the
-//! descriptor sets, the routing and every barrier; a stage only records its dispatch.
+//! output (storage image `rgba16f`, the size of its output domain). The pipeline owns the chain images, the
+//! descriptor sets, the routing and every barrier on the chain images; a stage records its dispatch, and a
+//! stage that owns more (history images, a state buffer, line images, several passes: `abl`, `screen`, `wear`,
+//! `phosphor`, `optics`) also records the barriers on what it owns and between its own passes.
 //!
 //! A slot is bypassed when its enable flag is off or when its stage is a placeholder (no pass yet).
 //! A bypassed slot is an exact identity: a slot whose input and output domains are equal is skipped
@@ -187,6 +189,13 @@ pub(super) trait Stage {
     /// The burn-in wear map of the `wear` slot (T-43), for the CPU operations on it (load, reset, save).
     /// Default: none.
     fn wear(&mut self) -> Option<&mut wear::Wear> {
+        None
+    }
+
+    /// What the stage limited in the frame last prepared because of the device (R-02: `screen` falls back to
+    /// its single pass when the warp path's line images would be too large), for the renderer's notices.
+    /// Default: none.
+    fn notice(&self) -> Option<String> {
         None
     }
 }

@@ -3,11 +3,38 @@
 //! One [`Presenter`] per output window, all sharing one [`Context`]. A presenter has no `Drop`:
 //! it does not own the device, so its owner destroys it with [`Presenter::destroy`] before the
 //! context, as `Renderer` does for its `Texture`.
+//!
+//! Recovery (R-01, R-36, R-43): the swapchain is recreated at the start of a frame ([`Presenter::ensure`]) when the
+//! window size changed, when acquire or present said it is out of date or suboptimal, or after a failure left it
+//! inconsistent; a lost surface (`ERROR_SURFACE_LOST_KHR`) is recreated from the window it was made for. A surface
+//! whose current extent has a 0 side (a minimise race) keeps the old swapchain and the frame is not drawn. The
+//! per-image `render_done` semaphores of a replaced swapchain may still be waited by a present the presentation
+//! engine has not finished (`device_wait_idle` does not cover it, VUID-vkDestroySemaphore-semaphore-05149): they are
+//! retired, and destroyed once every image of the new swapchain was acquired again, or in [`Presenter::destroy`].
 
 use ash::{khr, vk};
 
 use super::context::{create_win32_surface, Context};
-use super::{color_range, Res};
+use super::{color_range, GpuError, Res};
+
+/// What [`Presenter::acquire`] got.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Acquired {
+    /// Image `index`, its semaphore will be signalled. With `suboptimal` the swapchain still works but is recreated
+    /// before the next frame.
+    Image { index: u32, suboptimal: bool },
+    /// No image this time (out of date, surface lost, or none available within the timeout): the semaphore is not
+    /// signalled, the frame is skipped, and the swapchain is recreated before the next one when needed.
+    Skip,
+}
+
+/// How long an acquire may wait for a free image: with FIFO an image frees at the next vertical blank, so a longer
+/// wait means the window cannot present now (hidden, being recreated); the frame is then skipped.
+const ACQUIRE_TIMEOUT_NS: u64 = 1_000_000_000;
+
+/// Retired semaphores kept at most; older ones are destroyed when a newer one is retired (the device was idled by
+/// every recreation that retired them).
+const RETIRED_MAX: usize = 64;
 
 pub struct Presenter {
     swapchain_fn: khr::swapchain::Device,
@@ -22,6 +49,40 @@ pub struct Presenter {
     views: Vec<vk::ImageView>,
     /// Signalled by the frame submission, waited by the present of the same image.
     render_done: Vec<vk::Semaphore>,
+    /// The window (`hwnd`, `hinstance`) the surface was made for: a lost surface is recreated from it.
+    window: Option<(isize, isize)>,
+    /// The window size the swapchain was last made for.
+    requested: (u32, u32),
+    /// The swapchain must be recreated before the next acquire (out of date, suboptimal, a failed recreation, an
+    /// acquired image given up).
+    stale: bool,
+    /// The surface was lost: it is recreated (then the swapchain) before the next acquire.
+    surface_lost: bool,
+    /// Successful acquires so far, the clock of the retired semaphores.
+    acquires: u64,
+    /// Semaphores of replaced swapchains and the acquire count from which they may be destroyed.
+    retired: Vec<(vk::Semaphore, u64)>,
+}
+
+/// The swapchain extent for a window client of `size`: the surface's current extent when it has one, else `size`
+/// clamped to the surface's limits; `None` when it has a 0 side (minimised, or a minimise race): no swapchain can be
+/// made then.
+pub fn extent_for(caps: &vk::SurfaceCapabilitiesKHR, size: (u32, u32)) -> Option<vk::Extent2D> {
+    let e = if caps.current_extent.width != u32::MAX {
+        caps.current_extent
+    } else {
+        vk::Extent2D {
+            width: size.0.clamp(
+                caps.min_image_extent.width,
+                caps.max_image_extent.width.max(caps.min_image_extent.width),
+            ),
+            height: size.1.clamp(
+                caps.min_image_extent.height,
+                caps.max_image_extent.height.max(caps.min_image_extent.height),
+            ),
+        }
+    };
+    (e.width > 0 && e.height > 0 && size.0 > 0 && size.1 > 0).then_some(e)
 }
 
 impl Presenter {
@@ -36,16 +97,23 @@ impl Presenter {
             return Err("this Vulkan context was created without presentation support".into());
         }
         let surface = create_win32_surface(&ctx.entry, &ctx.instance, hwnd, hinstance)?;
-        Self::from_surface(ctx, surface, size)
+        Self::from_surface(ctx, surface, Some((hwnd, hinstance)), size)
     }
 
-    /// Creates a presenter on `surface` and takes ownership of it (it is destroyed on error too).
+    /// Creates a presenter on `surface` and takes ownership of it (it is destroyed on error too). `window` is the
+    /// window (`hwnd`, `hinstance`) the surface was made for, from which a lost surface is recreated (`None`: a lost
+    /// surface is an error).
     ///
     /// # Safety
     /// `surface` must be a live surface of `ctx.instance` whose window stays alive until
     /// [`Presenter::destroy`]; `ctx` must be a window context. The presenter must be destroyed with
     /// [`Presenter::destroy`] before `ctx` is dropped.
-    pub unsafe fn from_surface(ctx: &Context, surface: vk::SurfaceKHR, size: (u32, u32)) -> Res<Self> {
+    pub unsafe fn from_surface(
+        ctx: &Context,
+        surface: vk::SurfaceKHR,
+        window: Option<(isize, isize)>,
+        size: (u32, u32),
+    ) -> Res<Self> {
         let mut p = Self {
             swapchain_fn: khr::swapchain::Device::new(&ctx.instance, &ctx.device),
             surface,
@@ -56,15 +124,17 @@ impl Presenter {
             images: Vec::new(),
             views: Vec::new(),
             render_done: Vec::new(),
+            window,
+            requested: (0, 0),
+            stale: true,
+            surface_lost: false,
+            acquires: 0,
+            retired: Vec::new(),
         };
         let result = (|| -> Res<()> {
-            let supported =
-                ctx.surface_fn
-                    .get_physical_device_surface_support(ctx.physical, ctx.queue_family, surface)?;
-            if !supported {
-                return Err(format!("{} cannot present to this window", ctx.gpu.name).into());
-            }
-            p.resize(ctx, size)
+            p.check_support(ctx)?;
+            // A window created minimised has no extent yet: the swapchain is made by the first frame it has one.
+            p.resize(ctx, size).map(|_| ())
         })();
         match result {
             Ok(()) => Ok(p),
@@ -73,6 +143,18 @@ impl Presenter {
                 Err(e)
             }
         }
+    }
+
+    /// # Safety
+    /// `ctx` is the presenter's context and the surface is live.
+    unsafe fn check_support(&self, ctx: &Context) -> Res<()> {
+        let supported =
+            ctx.surface_fn
+                .get_physical_device_surface_support(ctx.physical, ctx.queue_family, self.surface)?;
+        if !supported {
+            return Err(format!("{} cannot present to this window", ctx.gpu.name).into());
+        }
+        Ok(())
     }
 
     pub fn format(&self) -> vk::Format {
@@ -89,6 +171,14 @@ impl Presenter {
         self.extent
     }
 
+    /// True when a swapchain with its views and semaphores exists for every image (the images can be drawn).
+    pub fn ready(&self) -> bool {
+        self.swapchain != vk::SwapchainKHR::null()
+            && !self.images.is_empty()
+            && self.views.len() == self.images.len()
+            && self.render_done.len() == self.images.len()
+    }
+
     pub fn image(&self, index: u32) -> vk::Image {
         self.images[index as usize]
     }
@@ -102,48 +192,72 @@ impl Presenter {
         self.render_done[index as usize]
     }
 
-    /// (Re)creates the swapchain, its image views and per-image semaphores for `size`.
+    /// Asks for a new swapchain before the next acquire (an acquired image was given up, or the caller knows the
+    /// swapchain no longer fits).
+    pub fn mark_stale(&mut self) {
+        self.stale = true;
+    }
+
+    /// Makes the swapchain fit a window client of `size` before a frame: recreates the lost surface, then the
+    /// swapchain when the size changed, when it is stale, or when it is incomplete. Returns false when there is
+    /// nothing to draw into (a 0 side: the old swapchain is kept and the frame is skipped).
     ///
     /// # Safety
-    /// `ctx` is the presenter's context and the GPU no longer uses the old swapchain images, views
-    /// or semaphores (device idle).
-    pub unsafe fn resize(&mut self, ctx: &Context, size: (u32, u32)) -> Res<()> {
+    /// `ctx` is the presenter's context; no frame of this presenter is recorded and not yet submitted.
+    pub unsafe fn ensure(&mut self, ctx: &Context, size: (u32, u32)) -> Res<bool> {
+        if size.0 == 0 || size.1 == 0 {
+            return Ok(false);
+        }
+        if self.surface_lost {
+            ctx.device.device_wait_idle()?;
+            self.recreate_surface(ctx)?;
+        }
+        if self.stale || self.requested != size || !self.ready() {
+            ctx.device.device_wait_idle()?;
+            return match self.resize(ctx, size) {
+                // Lost while the swapchain was being made: recreated by the next frame.
+                Err(e) if e.downcast_ref::<vk::Result>() == Some(&vk::Result::ERROR_SURFACE_LOST_KHR) => {
+                    self.surface_lost = true;
+                    Ok(false)
+                }
+                r => r,
+            };
+        }
+        Ok(true)
+    }
+
+    /// (Re)creates the swapchain, its image views and per-image semaphores for `size`. Returns false, keeping the
+    /// old swapchain (still stale), when the surface has a 0 extent now (minimised). On an error the presenter
+    /// stays consistent: no views, no images, stale, so [`Presenter::ensure`] tries again before the next frame.
+    ///
+    /// # Safety
+    /// `ctx` is the presenter's context and the GPU no longer uses the old swapchain images or views
+    /// (device idle); the old `render_done` semaphores are retired, not destroyed.
+    pub unsafe fn resize(&mut self, ctx: &Context, size: (u32, u32)) -> Res<bool> {
+        self.stale = true;
         let caps = ctx
             .surface_fn
             .get_physical_device_surface_capabilities(ctx.physical, self.surface)?;
+        let Some(extent) = extent_for(&caps, size) else {
+            return Ok(false);
+        };
         let formats = ctx
             .surface_fn
             .get_physical_device_surface_formats(ctx.physical, self.surface)?;
         let offered: Vec<(vk::Format, vk::ColorSpaceKHR)> = formats.iter().map(|f| (f.format, f.color_space)).collect();
         let (format, color_space) = choose_format(&offered)?;
-        let chosen = &vk::SurfaceFormatKHR { format, color_space };
-        self.format = chosen.format;
-        self.ten_bit_offered = formats.iter().any(|f| {
-            matches!(
-                f.format,
-                vk::Format::A2B10G10R10_UNORM_PACK32 | vk::Format::A2R10G10B10_UNORM_PACK32
-            ) && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
-        });
-        self.extent = if caps.current_extent.width != u32::MAX {
-            caps.current_extent
-        } else {
-            vk::Extent2D {
-                width: size.0.clamp(caps.min_image_extent.width, caps.max_image_extent.width),
-                height: size.1.clamp(caps.min_image_extent.height, caps.max_image_extent.height),
-            }
-        };
         let mut count = caps.min_image_count + 1;
         if caps.max_image_count > 0 {
             count = count.min(caps.max_image_count);
         }
         let old = self.swapchain;
-        self.swapchain = self.swapchain_fn.create_swapchain(
+        let new = self.swapchain_fn.create_swapchain(
             &vk::SwapchainCreateInfoKHR::default()
                 .surface(self.surface)
                 .min_image_count(count)
-                .image_format(chosen.format)
-                .image_color_space(chosen.color_space)
-                .image_extent(self.extent)
+                .image_format(format)
+                .image_color_space(color_space)
+                .image_extent(extent)
                 .image_array_layers(1)
                 .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
@@ -154,81 +268,169 @@ impl Presenter {
                 .old_swapchain(old),
             None,
         )?;
-        self.destroy_views(ctx);
+        // From here the old swapchain is retired (even on an error below): its views go, its semaphores wait.
+        self.retire_views(ctx);
+        self.images.clear();
         if old != vk::SwapchainKHR::null() {
             self.swapchain_fn.destroy_swapchain(old, None);
         }
-        self.images = self.swapchain_fn.get_swapchain_images(self.swapchain)?;
-        for &image in &self.images {
-            let view = ctx.device.create_image_view(
-                &vk::ImageViewCreateInfo::default()
-                    .image(image)
-                    .view_type(vk::ImageViewType::TYPE_2D)
-                    .format(self.format)
-                    .subresource_range(color_range()),
-                None,
-            )?;
-            self.views.push(view);
-            self.render_done
-                .push(ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None)?);
+        self.swapchain = new;
+        self.format = format;
+        self.extent = extent;
+        self.ten_bit_offered = formats.iter().any(|f| {
+            matches!(
+                f.format,
+                vk::Format::A2B10G10R10_UNORM_PACK32 | vk::Format::A2R10G10B10_UNORM_PACK32
+            ) && f.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
+        });
+        let images = self.swapchain_fn.get_swapchain_images(self.swapchain)?;
+        for &image in &images {
+            let made = (|| -> Res<(vk::ImageView, vk::Semaphore)> {
+                let view = ctx.device.create_image_view(
+                    &vk::ImageViewCreateInfo::default()
+                        .image(image)
+                        .view_type(vk::ImageViewType::TYPE_2D)
+                        .format(self.format)
+                        .subresource_range(color_range()),
+                    None,
+                )?;
+                match ctx.device.create_semaphore(&vk::SemaphoreCreateInfo::default(), None) {
+                    Ok(s) => Ok((view, s)),
+                    Err(e) => {
+                        ctx.device.destroy_image_view(view, None);
+                        Err(e.into())
+                    }
+                }
+            })();
+            match made {
+                Ok((view, sem)) => {
+                    self.views.push(view);
+                    self.render_done.push(sem);
+                }
+                Err(e) => {
+                    // Nothing was submitted with these yet: they can go at once.
+                    self.destroy_views_now(ctx);
+                    return Err(e);
+                }
+            }
         }
+        self.images = images;
+        self.requested = size;
+        self.stale = false;
+        Ok(true)
+    }
+
+    /// Recreates the surface (and drops the swapchain) after `ERROR_SURFACE_LOST_KHR`.
+    ///
+    /// # Safety
+    /// `ctx` is the presenter's context and the device is idle.
+    unsafe fn recreate_surface(&mut self, ctx: &Context) -> Res<()> {
+        let Some((hwnd, hinstance)) = self.window else {
+            return Err(GpuError::SurfaceLost {
+                detail: "the presenter does not know its window".into(),
+            }
+            .into());
+        };
+        self.retire_views(ctx);
+        self.images.clear();
+        if self.swapchain != vk::SwapchainKHR::null() {
+            self.swapchain_fn.destroy_swapchain(self.swapchain, None);
+            self.swapchain = vk::SwapchainKHR::null();
+        }
+        if self.surface != vk::SurfaceKHR::null() {
+            ctx.surface_fn.destroy_surface(self.surface, None);
+            self.surface = vk::SurfaceKHR::null();
+        }
+        let lost = |e: &dyn std::fmt::Display| GpuError::SurfaceLost {
+            detail: format!("recreating the surface failed: {e}"),
+        };
+        self.surface = create_win32_surface(&ctx.entry, &ctx.instance, hwnd, hinstance).map_err(|e| lost(&*e))?;
+        self.check_support(ctx).map_err(|e| lost(&*e))?;
+        self.surface_lost = false;
+        self.stale = true;
+        println!("notice: the output surface was lost and has been recreated");
         Ok(())
     }
 
-    /// Acquires the next image, signalling `signal` (one semaphore per frame in flight, owned by the
-    /// caller). Returns `None` when the swapchain was out of date: it has been recreated for `size`
-    /// and the frame is skipped (`signal` is not signalled).
+    /// Acquires the next image, signalling `signal` (one semaphore per frame in flight, owned by the caller). See
+    /// [`Acquired`]: out of date, surface lost and a timeout skip the frame (recreated before the next one).
     ///
     /// # Safety
-    /// `ctx` is the presenter's context and `signal` is a live binary semaphore with no pending
-    /// signal or wait (the submission that last waited on it has completed: its fence was waited).
-    pub unsafe fn acquire(&mut self, ctx: &Context, size: (u32, u32), signal: vk::Semaphore) -> Res<Option<u32>> {
-        match self
+    /// `ctx` is the presenter's context, [`Presenter::ensure`] returned true for this frame, and `signal` is a live
+    /// binary semaphore with no pending signal or wait (the submission that last waited on it has completed: its
+    /// fence was waited).
+    pub unsafe fn acquire(&mut self, ctx: &Context, signal: vk::Semaphore) -> Res<Acquired> {
+        let r = self
             .swapchain_fn
-            .acquire_next_image(self.swapchain, u64::MAX, signal, vk::Fence::null())
-        {
-            Ok((index, _)) => Ok(Some(index)),
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                ctx.device.device_wait_idle()?;
-                self.resize(ctx, size)?;
-                Ok(None)
+            .acquire_next_image(self.swapchain, ACQUIRE_TIMEOUT_NS, signal, vk::Fence::null());
+        match r {
+            Ok((index, suboptimal)) => {
+                self.stale |= suboptimal;
+                self.acquires += 1;
+                self.destroy_due_retired(ctx);
+                Ok(Acquired::Image { index, suboptimal })
             }
-            Err(e) => Err(e.into()),
+            Err(e) => match super::classify(e) {
+                super::VkClass::OutOfDate => {
+                    self.stale = true;
+                    Ok(Acquired::Skip)
+                }
+                super::VkClass::SurfaceLost => {
+                    self.surface_lost = true;
+                    Ok(Acquired::Skip)
+                }
+                super::VkClass::Timeout => Ok(Acquired::Skip),
+                _ => Err(e.into()),
+            },
         }
     }
 
-    /// Presents image `index` on `ctx.queue` after [`Presenter::render_done`]`(index)`; recreates
-    /// the swapchain for `size` if it is out of date.
+    /// Presents image `index` on `ctx.queue` after [`Presenter::render_done`]`(index)`. Out of date, suboptimal and
+    /// a lost surface are not errors: the swapchain (or surface) is recreated before the next frame. The wait on the
+    /// semaphore happens in every one of those cases (Vulkan: the present is still enqueued).
     ///
     /// # Safety
     /// `ctx` is the presenter's context and `index` was acquired by [`Presenter::acquire`] and
     /// submitted with a signal of `render_done(index)`.
-    pub unsafe fn present(&mut self, ctx: &Context, index: u32, size: (u32, u32)) -> Res<()> {
+    pub unsafe fn present(&mut self, ctx: &Context, index: u32) -> Res<()> {
         let wait = [self.render_done(index)];
         let swapchains = [self.swapchain];
         let indices = [index];
-        match self.swapchain_fn.queue_present(
+        let r = self.swapchain_fn.queue_present(
             ctx.queue,
             &vk::PresentInfoKHR::default()
                 .wait_semaphores(&wait)
                 .swapchains(&swapchains)
                 .image_indices(&indices),
-        ) {
-            Ok(_) | Err(vk::Result::SUBOPTIMAL_KHR) => Ok(()),
-            Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => {
-                ctx.device.device_wait_idle()?;
-                self.resize(ctx, size)
+        );
+        match r {
+            Ok(suboptimal) => {
+                self.stale |= suboptimal;
+                Ok(())
             }
-            Err(e) => Err(e.into()),
+            Err(e) => match super::classify(e) {
+                super::VkClass::OutOfDate | super::VkClass::Suboptimal => {
+                    self.stale = true;
+                    Ok(())
+                }
+                super::VkClass::SurfaceLost => {
+                    self.surface_lost = true;
+                    Ok(())
+                }
+                _ => Err(e.into()),
+            },
         }
     }
 
-    /// Destroys the swapchain, its views and semaphores, then the surface. Idempotent.
+    /// Destroys the swapchain, its views and semaphores (retired ones too), then the surface. Idempotent.
     ///
     /// # Safety
     /// `ctx` is the presenter's context and the GPU has finished every use of them (device idle).
     pub unsafe fn destroy(&mut self, ctx: &Context) {
-        self.destroy_views(ctx);
+        self.destroy_views_now(ctx);
+        for (s, _) in self.retired.drain(..) {
+            ctx.device.destroy_semaphore(s, None);
+        }
         self.images.clear();
         if self.swapchain != vk::SwapchainKHR::null() {
             self.swapchain_fn.destroy_swapchain(self.swapchain, None);
@@ -240,15 +442,62 @@ impl Presenter {
         }
     }
 
+    /// Destroys the views and moves the semaphores to the retired list: they may be destroyed once every image of
+    /// the next swapchain was acquired once more (its presents, and so the old ones before them, are done).
+    ///
     /// # Safety
-    /// The GPU has finished every use of the views and semaphores (device idle).
-    unsafe fn destroy_views(&mut self, ctx: &Context) {
+    /// The GPU has finished every use of the views (device idle).
+    unsafe fn retire_views(&mut self, ctx: &Context) {
+        for v in self.views.drain(..) {
+            ctx.device.destroy_image_view(v, None);
+        }
+        // The next swapchain has about as many images as this one (at least 2): wait for that many acquires, plus one.
+        let due = self.acquires + self.render_done.len().max(2) as u64 + 1;
+        for s in self.render_done.drain(..) {
+            self.retired.push((s, due));
+        }
+        while self.retired.len() > RETIRED_MAX {
+            let (s, _) = self.retired.remove(0);
+            ctx.device.destroy_semaphore(s, None);
+        }
+    }
+
+    /// Destroys the retired semaphores whose time came ([`Presenter::retire_views`]).
+    ///
+    /// # Safety
+    /// `ctx` is the presenter's context; called after a successful acquire.
+    unsafe fn destroy_due_retired(&mut self, ctx: &Context) {
+        let now = self.acquires;
+        let mut i = 0;
+        while i < self.retired.len() {
+            if self.retired[i].1 <= now {
+                let (s, _) = self.retired.swap_remove(i);
+                // Every image of the swapchain that replaced the semaphore's was acquired again since, so the
+                // presents queued before the replacement (the only ones that waited on it) completed.
+                ctx.device.destroy_semaphore(s, None);
+            } else {
+                i += 1;
+            }
+        }
+    }
+
+    /// Destroys the views and the semaphores at once (nothing was ever submitted with them, or the device is idle
+    /// and no present is pending).
+    ///
+    /// # Safety
+    /// The GPU has finished every use of them.
+    unsafe fn destroy_views_now(&mut self, ctx: &Context) {
         for v in self.views.drain(..) {
             ctx.device.destroy_image_view(v, None);
         }
         for s in self.render_done.drain(..) {
             ctx.device.destroy_semaphore(s, None);
         }
+    }
+
+    /// Semaphores retired and not yet destroyed (tests and diagnostics).
+    pub fn retired_semaphores(&self) -> usize {
+        self.retired.len()
     }
 }
 
@@ -284,6 +533,50 @@ mod tests {
         ];
         assert_eq!(choose_format(&all).unwrap().0, vk::Format::B8G8R8A8_UNORM);
         assert_eq!(choose_format(&all[..2]).unwrap().0, vk::Format::R8G8B8A8_UNORM);
+    }
+
+    fn caps(current: (u32, u32), min: (u32, u32), max: (u32, u32)) -> vk::SurfaceCapabilitiesKHR {
+        let e = |(width, height)| vk::Extent2D { width, height };
+        vk::SurfaceCapabilitiesKHR {
+            current_extent: e(current),
+            min_image_extent: e(min),
+            max_image_extent: e(max),
+            ..Default::default()
+        }
+    }
+
+    /// R-36: a 0 side (minimised, or the minimise race between the client size and the surface query) gives no
+    /// swapchain extent, so the old swapchain is kept and the frame skipped.
+    #[test]
+    fn extent_for_refuses_a_zero_side() {
+        let fixed = caps((1920, 1080), (1, 1), (16384, 16384));
+        assert_eq!(
+            extent_for(&fixed, (1920, 1080)),
+            Some(vk::Extent2D {
+                width: 1920,
+                height: 1080
+            })
+        );
+        // The surface's extent wins over the client size (they differ for a frame during a resize).
+        assert_eq!(extent_for(&fixed, (800, 600)).map(|e| e.width), Some(1920));
+        // Minimised: Windows reports a 0 x 0 current extent.
+        assert_eq!(extent_for(&caps((0, 0), (0, 0), (16384, 16384)), (1920, 1080)), None);
+        assert_eq!(extent_for(&caps((1920, 0), (0, 0), (16384, 16384)), (1920, 1080)), None);
+        // A 0 client with a stale extent: nothing to draw either.
+        assert_eq!(extent_for(&fixed, (0, 600)), None);
+        // No current extent (u32::MAX): the client size, clamped to the surface's limits.
+        let free = caps((u32::MAX, u32::MAX), (64, 64), (4096, 4096));
+        assert_eq!(
+            extent_for(&free, (8000, 10)),
+            Some(vk::Extent2D {
+                width: 4096,
+                height: 64
+            })
+        );
+        assert_eq!(extent_for(&free, (0, 10)), None);
+        // Inverted limits from a broken driver do not panic.
+        let odd = caps((u32::MAX, u32::MAX), (100, 100), (50, 50));
+        assert_eq!(extent_for(&odd, (10, 10)).map(|e| e.width), Some(100));
     }
 
     #[test]
