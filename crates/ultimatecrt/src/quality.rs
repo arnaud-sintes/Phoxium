@@ -254,6 +254,17 @@ impl AutoQuality {
         self.drop
     }
 
+    /// The output moved onto another monitor (another refresh rate): the streaks measured against the old period
+    /// start again, and so does the wait before a raise (a relapse on the old monitor says nothing about this
+    /// one). The tiers dropped so far stay until the new monitor's own seconds raise them. Each second is still
+    /// compared with the refresh period of the monitor the output is on at that second.
+    pub fn monitor_changed(&mut self) {
+        self.over = 0;
+        self.under = 0;
+        self.wait = Self::RAISE_SECS;
+        self.raised_at = None;
+    }
+
     /// The tier in force for the selected tier `user`.
     pub fn effective(&self, user: Tier) -> Tier {
         user.lower(self.drop)
@@ -432,6 +443,36 @@ mod tests {
 
     fn run(a: &mut AutoQuality, user: Tier, secs: u32, gpu: f64) -> Vec<Change> {
         (0..secs).filter_map(|_| a.feed(true, user, gpu, 16.7)).collect()
+    }
+
+    /// A move from a 60 Hz monitor to a 144 Hz one: two seconds over the 60 Hz period then the move do not add up
+    /// to a drop with one second at 144 Hz; the new monitor's own three seconds over its 6.9 ms period drop one
+    /// tier. Each second is judged against the period of its own monitor.
+    #[test]
+    fn a_monitor_change_restarts_the_streaks_against_the_new_period() {
+        let mut a = AutoQuality::default();
+        let user = Tier::Standard;
+        // 17 ms at 60 Hz: over, twice.
+        assert_eq!(a.feed(true, user, 17.0, 16.7), None);
+        assert_eq!(a.feed(true, user, 17.0, 16.7), None);
+        a.monitor_changed();
+        // 8 ms at 144 Hz: over; one second only since the move.
+        assert_eq!(a.feed(true, user, 8.0, 6.94), None);
+        assert_eq!(a.feed(true, user, 8.0, 6.94), None);
+        assert!(matches!(
+            a.feed(true, user, 8.0, 6.94),
+            Some(Change::Dropped { period_ms, .. }) if (period_ms - 6.94).abs() < 1e-9
+        ));
+        assert_eq!(a.drop(), 1);
+        // Without the reset the old monitor's seconds would have counted: a drop one second earlier.
+        let mut b = AutoQuality::default();
+        b.feed(true, user, 17.0, 16.7);
+        b.feed(true, user, 17.0, 16.7);
+        assert!(b.feed(true, user, 8.0, 6.94).is_some());
+        // The relapse back-off of the old monitor is forgotten too; the drop stays.
+        a.wait = AutoQuality::MAX_WAIT_SECS;
+        a.monitor_changed();
+        assert_eq!((a.wait, a.drop()), (AutoQuality::RAISE_SECS, 1));
     }
 
     #[test]

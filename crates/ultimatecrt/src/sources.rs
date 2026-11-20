@@ -175,6 +175,24 @@ unsafe extern "system" fn collect_all(hwnd: HWND, lparam: LPARAM) -> BOOL {
     true.into()
 }
 
+/// Whether the attached window `hwnd` can deliver frames now: minimised (`IsIconic`) or cloaked by the compositor
+/// (`DWMWA_CLOAKED`: another virtual desktop). Two cheap queries, made about once a second.
+pub fn visibility(hwnd: HWND) -> crate::lifecycle::SourceVisibility {
+    use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
+    // SAFETY: plain queries on a window handle; a destroyed window makes them fail, which reads as visible (the
+    // lost-source path handles a closed window).
+    unsafe {
+        let mut cloaked = 0u32;
+        let _ = DwmGetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAKED,
+            (&mut cloaked as *mut u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+        crate::lifecycle::SourceVisibility::of(IsIconic(hwnd).as_bool(), cloaked != 0)
+    }
+}
+
 /// The facts of one top-level window for [`crate::picker::exclusion`]. Cheap queries only; the process is opened
 /// only for windows that are visible and titled (the others are excluded anyway).
 fn raw_window(hwnd: HWND, own_pid: u32, monitors: &[crate::modes::IRect]) -> crate::picker::RawWindow {

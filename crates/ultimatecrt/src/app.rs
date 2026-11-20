@@ -467,6 +467,9 @@ pub fn run() -> Res<()> {
     // An earlier build's LUID setting that still names an adapter is stored as its stable identity (below).
     let upgraded_gpu = selection.upgraded_setting.clone().filter(|_| args.gpu.is_none());
     let capture_luid = selection.capture_luid();
+    // HW-3, monitor changes: the adapter the chain runs on and the owner of the monitor covered at start.
+    let renderer_luid = renderer.context().gpu.luid.map(adapters::Luid::from_vulkan);
+    let start_owner = selection.owner.as_ref().map(|o| o.luid);
     adapters::publish(adapters::Current {
         selection,
         adapters: topology.entries(),
@@ -505,6 +508,9 @@ pub fn run() -> Res<()> {
     let mut smoothing = lifecycle::SmoothingWatch::default();
     let mut size_watch = lifecycle::SizeWatch::default();
     let mut notice: Option<String> = None;
+    // The output's monitor and DPI, followed once a second; the notice of a move onto another GPU's monitor.
+    let mut monitor_watch = lifecycle::MonitorWatch::default();
+    let mut monitor_notice: Option<String> = None;
     // T-48, OUT-6: the automatic quality drop on sustained overrun (only with `quality_auto`, off by default).
     let mut auto_quality = crate::quality::AutoQuality::default();
     // Lost source (T-56, A23): reminders, reattach during the wait, then the picker (or an exit).
@@ -1615,6 +1621,47 @@ pub fn run() -> Res<()> {
                     );
                 }
                 let captured = captured_base + capture.as_ref().map_or(0, |c| c.frames_captured());
+                // The attached window minimised or on another virtual desktop delivers no frames (lifecycle).
+                let source_visibility = match (&capture, &reattach) {
+                    (Some(_), Some(r)) if r.is_attached() => sources::visibility(hwnd_of(r.hwnd())),
+                    _ => lifecycle::SourceVisibility::Visible,
+                };
+                // The output's monitor and DPI (HW-3, OUT-6): a move onto another monitor re-evaluates the GPU choice
+                // (a notice, never a device swap), restarts the automatic quality's streaks, and a DPI change that
+                // `WM_DPICHANGED` did not bring still reaches the UI scale.
+                // SAFETY: plain query on our own window.
+                let dpi = unsafe { windows::Win32::UI::HiDpi::GetDpiForWindow(win.hwnd) };
+                let change = monitor_watch.observe(output::monitor_of(win.hwnd), dpi);
+                if let Some(d) = change.dpi {
+                    ui.set_ui_scale(crate::ui::input::dpi_scale(d));
+                }
+                if change.moved {
+                    auto_quality.monitor_changed();
+                    let cover = output::outer_rect(win.hwnd);
+                    // The monitor layout may have changed since the start: the adapters' outputs are read again.
+                    let dxgi = adapters::dxgi_adapters().unwrap_or_else(|_| topology.dxgi.clone());
+                    let now_choice = adapters::select(
+                        args.gpu,
+                        &gpu_spec,
+                        &dxgi,
+                        &topology.vulkan,
+                        topology.default,
+                        Some((cover.left, cover.top, cover.right, cover.bottom)),
+                    );
+                    let n = adapters::moved_notice(renderer_luid, start_owner, &now_choice);
+                    if n != monitor_notice {
+                        match &n {
+                            Some(m) => println!("notice: {m}"),
+                            None => println!("output: back on a monitor of the GPU in use"),
+                        }
+                        monitor_notice = n;
+                    }
+                }
+                ui_state.notices = monitor_notice
+                    .iter()
+                    .cloned()
+                    .chain(source_visibility.notice().map(str::to_string))
+                    .collect();
                 // The one message to show: target lost, black or silent frames, smoothed source.
                 let now_notice = if reattach.as_ref().is_some_and(|r| !r.is_attached()) {
                     reattach
@@ -1622,7 +1669,8 @@ pub fn run() -> Res<()> {
                         .map(|r| format!("waiting for {}", r.target().describe()))
                 } else if capture.is_none() {
                     None
-                } else if let Some(m) = health.status(now).message() {
+                } else if let Some(m) = lifecycle::source_notice(source_visibility, health.status(now)) {
+                    // A minimised source (or one on another desktop) says why no frames come (WGC sends none).
                     Some(m)
                 } else if smoothing.warning() {
                     Some("smoothed source?".to_string())
@@ -1640,7 +1688,8 @@ pub fn run() -> Res<()> {
                 // R-02, R-01: what the renderer limited (amplifier samples, an empty tube area, ...). The renderer
                 // prints each one once when it appears; the queue is drained here so it stays bounded.
                 let _ = renderer.take_gpu_notices();
-                let machine_notice = title_notice(adapter_notice.as_deref(), capture_notice.as_deref());
+                let gpu_choice_notice = title_notice(adapter_notice.as_deref(), monitor_notice.as_deref());
+                let machine_notice = title_notice(gpu_choice_notice.as_deref(), capture_notice.as_deref());
                 let gpu_notice = title_notice(machine_notice.as_deref(), renderer.gpu_notice().as_deref());
                 let shown_notice = title_notice(notice.as_deref(), gpu_notice.as_deref());
                 let secs = stat_time.elapsed().as_secs_f64();
