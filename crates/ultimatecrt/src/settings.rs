@@ -95,6 +95,47 @@ impl Default for GpuSettings {
     }
 }
 
+/// The window the user attached to last (source selection, A23): the source-profile key (executable and class)
+/// and the title as a hint. Written on every attach; used at start when `ask_at_start` is off.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct LastSource {
+    /// Executable file name (`Game.exe`); empty when it could not be queried (then the title must match).
+    pub exe: String,
+    /// Window class.
+    pub class: String,
+    /// Window title when it was chosen (a tie-breaker between windows of the same program and class).
+    pub title: String,
+}
+
+/// Default of `[global.source] wait_s`: seconds a lost source is waited for (reattach to the same program and
+/// class) before the "Choose a window" screen comes back (`--wait-source` wins).
+pub const DEFAULT_WAIT_S: f64 = crate::lifecycle::DEFAULT_WAIT_SOURCE_S;
+
+/// Source selection (`[global.source]`, A23): the product has no command line; the window to capture is chosen in
+/// the output window.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct SourceSettings {
+    /// Show the window picker at every start (default). Off: attach at once to the last program and class when
+    /// one of its windows is running, else show the picker.
+    pub ask_at_start: bool,
+    /// Seconds a lost source is waited for before the picker comes back; 0 waits forever.
+    pub wait_s: f64,
+    /// The last window chosen.
+    pub last: Option<LastSource>,
+}
+
+impl Default for SourceSettings {
+    fn default() -> Self {
+        Self {
+            ask_at_start: true,
+            wait_s: DEFAULT_WAIT_S,
+            last: None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Global {
@@ -109,6 +150,8 @@ pub struct Global {
     pub output: OutputState,
     /// The adapter that runs the chain (`[global.gpu] adapter`, HW-3).
     pub gpu: GpuSettings,
+    /// Source selection: ask at start, lost-source wait, last choice (`[global.source]`, A23).
+    pub source: SourceSettings,
 }
 
 impl Default for Global {
@@ -120,6 +163,7 @@ impl Default for Global {
             ui: UiState::default(),
             output: OutputState::default(),
             gpu: GpuSettings::default(),
+            source: SourceSettings::default(),
         }
     }
 }
@@ -206,6 +250,21 @@ pub struct SourceProfile {
     pub raster_aspect: Option<String>,
 }
 
+/// The parameters a [`SourceProfile`] can set ([`SourceProfile::apply_to`]).
+pub const PROFILE_PARAM_IDS: &[&str] = &[
+    "source_eotf",
+    "source_crop_mode",
+    "source_divisor_mode",
+    "source_scale_mode",
+    "raster_aspect",
+    "source_par",
+    "line_multiplier",
+    "source_scale",
+    "source_center",
+    "source_surround_color",
+    "source_display_aspect",
+];
+
 /// Sets the enum parameter `id` to the value called `name` (its `values` entry, `-` read as `_`). False
 /// when the id is not an enum or the name is not one of its values.
 pub fn set_enum_by_name(params: &mut Params, id: &str, name: &str) -> bool {
@@ -276,6 +335,19 @@ impl SourceProfile {
             );
         }
         warnings
+    }
+
+    /// Switches the parameters from the profile of one source to the profile of another (attach to another
+    /// window, A23): every parameter a profile can set ([`PROFILE_PARAM_IDS`]) goes back to `base` (the preset in
+    /// force with the global overrides, without any profile), then `self` applies on top. The other parameters
+    /// (the tube, the user's edits of the session) are untouched. Returns the warnings of [`Self::apply_to`].
+    pub fn switch_to(&self, params: &mut Params, base: &Params) -> Vec<String> {
+        for id in PROFILE_PARAM_IDS {
+            if let Some(v) = base.get(id) {
+                params.set(id, v);
+            }
+        }
+        self.apply_to(params)
     }
 
     /// The manual crop rectangle (`crop`), `None` when unset or empty.
@@ -832,6 +904,71 @@ mod tests {
         let p = s.find_source("a.exe", "b").unwrap();
         assert_eq!(p.divisor_pair(), Some((3, 3)));
         assert_eq!((p.scale_mode.as_deref(), p.crop_mode.as_deref()), (None, None));
+    }
+
+    /// A23: `[global.source]` defaults to asking at start with a 30 s wait and no last choice, round-trips, and
+    /// a file without the table keeps working.
+    #[test]
+    fn source_selection_settings_round_trip() {
+        let d = Settings::default().global.source;
+        assert!(d.ask_at_start);
+        assert_eq!(d.wait_s, 30.0);
+        assert_eq!(d.last, None);
+        let s = Settings::from_toml("version = 1\n").unwrap();
+        assert_eq!(s.global.source, SourceSettings::default());
+        let mut s = Settings::default();
+        s.global.source = SourceSettings {
+            ask_at_start: false,
+            wait_s: 12.5,
+            last: Some(LastSource {
+                exe: "Mina.exe".into(),
+                class: "UnityWndClass".into(),
+                title: "Mina the Hollower".into(),
+            }),
+        };
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("[global.source]"), "{text}");
+        let back = Settings::from_toml(&text).unwrap();
+        assert_eq!(back.global.source, s.global.source);
+        // A partial table fills the rest with the defaults.
+        let s = Settings::from_toml("version = 1\n[global.source]\nask_at_start = false\n").unwrap();
+        assert!(!s.global.source.ask_at_start);
+        assert_eq!(s.global.source.wait_s, DEFAULT_WAIT_S);
+    }
+
+    /// A23: attaching to another program swaps the profile values and keeps everything else.
+    #[test]
+    fn switching_profiles_resets_the_old_profile_values_only() {
+        use crate::params::SOURCE_SCALE_MODE_INTEGER;
+        let base = Params {
+            mask_pitch_mm: 0.4,
+            ..Params::default()
+        };
+        let a = SourceProfile {
+            par: Some(8.0 / 7.0),
+            scale_mode: Some("integer".into()),
+            ..Default::default()
+        };
+        let b = SourceProfile {
+            center: Some(false),
+            ..Default::default()
+        };
+        let mut p = base;
+        assert!(a.switch_to(&mut p, &base).is_empty());
+        assert_eq!(
+            (p.source_par, p.source_scale_mode),
+            (8.0 / 7.0, SOURCE_SCALE_MODE_INTEGER)
+        );
+        p.exposure = 1.7; // an edit of the session
+        assert!(b.switch_to(&mut p, &base).is_empty());
+        assert_eq!(p.source_par, base.source_par, "the old profile's PAR is gone");
+        assert_eq!(p.source_scale_mode, base.source_scale_mode);
+        assert!(!p.source_center);
+        assert_eq!((p.exposure, p.mask_pitch_mm), (1.7, 0.4), "the rest is untouched");
+        // Every id of the list is a real parameter.
+        for id in PROFILE_PARAM_IDS {
+            assert!(Params::default().get(id).is_some(), "{id}");
+        }
     }
 
     #[test]

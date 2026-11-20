@@ -6,9 +6,13 @@ use crate::{lifecycle, params::Params, patterns, scaling, Res};
 
 pub const USAGE: &str = "ultimatecrt: captures a window and shows it in a second window through a GPU pipeline.
 
+Without options the output window opens and lists the windows to capture: choose one there (Enter or
+double-click). Change source and Detach are in the settings menu (F10). The options below are developer and
+diagnostic conveniences.
+
 Usage: ultimatecrt [options]
-  --window <text>      capture the window whose title starts with <text>, else contains it
-                       (default \"pixel-demo\")
+  --window <text>      capture the window whose title starts with <text>, else contains it, at once
+                       (no picker; an error when there is none)
   --list-windows       list capturable windows and monitors, then exit
   --list-gpus          list Vulkan devices, then exit
   --list-adapters      adapter topology (DXGI adapters and monitors, Vulkan devices, LUIDs, the chosen adapter,
@@ -52,9 +56,10 @@ Usage: ultimatecrt [options]
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
-  --wait-source <secs> when the captured window closes: a fullscreen output drops to a normal window after
-                       this many seconds (default 30; 0 = wait forever). Reattaches to a new window of the
-                       same program and class meanwhile
+  --wait-source <secs> when the captured window closes: reattach to a new window of the same program and
+                       class for this many seconds, then show the window list again (a fullscreen output
+                       becomes a normal window). Default: [global.source] wait_s of the settings (30);
+                       0 = wait forever
   --exit-on-lost       exit when the captured window closes instead of waiting for it
   --exit-after <secs>  quit after some seconds (for automated tests)
   --reset-burnin       start the burn-in wear map of the tube preset as a new tube (the saved wear is replaced
@@ -63,8 +68,7 @@ Usage: ultimatecrt [options]
   --version            print the version and exit
   --help               print this text
 
-Quit: Ctrl+Alt+Q (the output cannot take keyboard focus in fullscreen), or Esc in an activating
-windowed output.
+Quit: Ctrl+Alt+Q (the output does not take the keyboard focus), or the close button of the framed window.
 Hotkeys (global, configurable in settings.toml [global.hotkeys]): F11 fullscreen or framed window, F10
 settings menu, Ctrl+Alt+O overlay, Ctrl+Alt+B A/B bypass of the CRT chain, Ctrl+Alt+PageDown and
 Ctrl+Alt+PageUp next and previous preset. A chord another program owns falls back and is reported.";
@@ -91,6 +95,8 @@ pub struct Args {
     /// `--reset-burnin`: the burn-in wear map starts as a new tube (T-43).
     pub reset_burnin: bool,
     pub lost: lifecycle::LostPolicy,
+    /// `--wait-source` was given: it wins over `[global.source] wait_s` (A23).
+    pub wait_source_set: bool,
     pub log: Option<String>,
     pub pattern: Option<String>,
     pub pattern_size: Option<(u32, u32)>,
@@ -225,6 +231,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                     return Err("--wait-source expects a number of seconds >= 0".into());
                 }
                 a.lost.wait_s = secs;
+                a.wait_source_set = true;
             }
             "--exit-on-lost" => a.lost.exit_on_lost = true,
             "--exit-after" => a.exit_after = Some(number("--exit-after", &value("--exit-after")?)?),
@@ -293,6 +300,19 @@ mod tests {
 
     fn parse(s: &str) -> Res<Args> {
         parse_from(s.split_whitespace().map(String::from))
+    }
+
+    /// A23: `--wait-source` wins over the settings only when given; `--window` stays a developer option.
+    #[test]
+    fn wait_source_is_marked_when_given() {
+        let a = parse("").unwrap();
+        assert!(!a.wait_source_set);
+        assert_eq!(a.window, None);
+        let a = parse("--wait-source 5 --window pixel").unwrap();
+        assert!(a.wait_source_set);
+        assert_eq!(a.lost.wait_s, 5.0);
+        assert_eq!(a.window.as_deref(), Some("pixel"));
+        assert!(USAGE.contains("Without options"));
     }
 
     #[test]

@@ -270,8 +270,12 @@ pub enum LostAction {
     None,
     /// Print [`LOST_REMINDER`].
     Remind,
-    /// Replace the fullscreen output by a normal window (once).
+    /// The wait is over and the output is fullscreen: give the source up (the app shows the window picker,
+    /// A23) and replace the fullscreen output by a normal window (once per lost period).
     GoWindowed,
+    /// The wait is over and the output is a window: give the source up (the app shows the window picker, A23),
+    /// once per lost period.
+    GiveUp,
     /// Leave the main loop.
     Exit,
 }
@@ -285,6 +289,8 @@ pub struct LostWatch {
     fullscreen: bool,
     lost_since: Option<f64>,
     next_remind: f64,
+    /// The wait of this lost period is over (`GoWindowed` or `GiveUp` returned).
+    gave_up: bool,
 }
 
 impl LostWatch {
@@ -295,7 +301,18 @@ impl LostWatch {
             fullscreen,
             lost_since: None,
             next_remind: 0.0,
+            gave_up: false,
         }
+    }
+
+    /// The policy in force.
+    pub fn policy(&self) -> LostPolicy {
+        self.policy
+    }
+
+    /// Changes the wait (the menu's setting, A23); applies to the current lost period too.
+    pub fn set_wait(&mut self, wait_s: f64) {
+        self.policy.wait_s = wait_s.max(0.0);
     }
 
     /// True while the output is still the fullscreen one.
@@ -311,11 +328,13 @@ impl LostWatch {
 
     /// Called every loop iteration with `attached` from [`Reattacher::is_attached`]. The first call
     /// with `attached == false` starts the lost period: reminder at once, then every
-    /// [`LOST_REMIND_S`]; a fullscreen output drops to a window after `wait_s` (never back to
-    /// fullscreen, and no further timeout once windowed). Becoming attached again ends the period.
+    /// [`LOST_REMIND_S`]; after `wait_s` the source is given up once: [`LostAction::GoWindowed`] for a
+    /// fullscreen output (it also drops to a window), [`LostAction::GiveUp`] for a window. Becoming
+    /// attached again ends the period.
     pub fn update(&mut self, now: f64, attached: bool) -> LostAction {
         if attached {
             self.lost_since = None;
+            self.gave_up = false;
             return LostAction::None;
         }
         let since = match self.lost_since {
@@ -329,10 +348,14 @@ impl LostWatch {
                 now
             }
         };
-        if self.fullscreen && self.policy.wait_s > 0.0 && now - since >= self.policy.wait_s {
-            self.fullscreen = false;
+        if !self.gave_up && self.policy.wait_s > 0.0 && now - since >= self.policy.wait_s {
+            self.gave_up = true;
             self.next_remind = now + LOST_REMIND_S;
-            return LostAction::GoWindowed;
+            if self.fullscreen {
+                self.fullscreen = false;
+                return LostAction::GoWindowed;
+            }
+            return LostAction::GiveUp;
         }
         if now >= self.next_remind {
             self.next_remind = now + LOST_REMIND_S;
@@ -1113,7 +1136,11 @@ mod tests {
         assert_eq!(w.update(5.5, false), LostAction::None);
         assert_eq!(w.update(14.9, false), LostAction::None);
         assert_eq!(w.update(15.0, false), LostAction::Remind);
-        // A windowed output never drops to anything, however long it waits.
+        assert_eq!(w.update(25.0, false), LostAction::Remind);
+        assert_eq!(w.update(34.9, false), LostAction::None);
+        // A23: a windowed output gives the source up after the wait (the picker comes back), once.
+        assert_eq!(w.update(35.0, false), LostAction::GiveUp);
+        assert_eq!(w.update(45.0, false), LostAction::Remind);
         assert_eq!(w.update(500.0, false), LostAction::Remind);
         assert!(!w.is_fullscreen());
     }
@@ -1134,13 +1161,28 @@ mod tests {
     }
 
     #[test]
-    fn a_user_switch_to_a_window_cancels_the_drop_and_back_to_fullscreen_re_arms_it() {
+    fn a_user_switch_to_a_window_gives_up_without_a_drop() {
         let mut w = LostWatch::new(LostPolicy::default(), true);
         assert_eq!(w.update(100.0, false), LostAction::Remind);
         w.set_fullscreen(false); // F11 to a window
-        assert_eq!(w.update(200.0, false), LostAction::Remind, "no drop for a window");
-        w.set_fullscreen(true); // F11 back, the source is still lost for longer than the wait
-        assert_eq!(w.update(210.0, false), LostAction::GoWindowed);
+        assert_eq!(w.update(200.0, false), LostAction::GiveUp, "no drop for a window");
+        w.set_fullscreen(true); // F11 back: the source was already given up in this lost period
+        assert_eq!(w.update(210.0, false), LostAction::Remind);
+        // A new lost period with the output fullscreen drops again.
+        assert_eq!(w.update(220.0, true), LostAction::None);
+        assert_eq!(w.update(230.0, false), LostAction::Remind);
+        assert_eq!(w.update(260.0, false), LostAction::GoWindowed);
+    }
+
+    #[test]
+    fn the_wait_can_change_during_a_lost_period() {
+        let mut w = LostWatch::new(LostPolicy::default(), false);
+        assert_eq!(w.update(0.0, false), LostAction::Remind);
+        w.set_wait(5.0);
+        assert_eq!(w.policy().wait_s, 5.0);
+        assert_eq!(w.update(5.0, false), LostAction::GiveUp);
+        w.set_wait(-3.0);
+        assert_eq!(w.policy().wait_s, 0.0);
     }
 
     #[test]

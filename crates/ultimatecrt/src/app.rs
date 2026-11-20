@@ -1,15 +1,24 @@
-//! The application: window lookup, capture, output window and the render loop.
+//! The application: source selection, capture, output window and the render loop.
+//!
+//! The product needs no command line (A23): started without options, the output window opens with the window
+//! picker ("Choose a window to capture", `ui::picker`) and the user attaches to a window there. The source
+//! state machine is `picker::Phase` (NoSource -> Picking -> Attached -> Lost -> NoSource). `--window`, a
+//! pattern or an image start with a source at once (developer and diagnostic paths, unchanged).
 
 use std::time::{Duration, Instant};
 
 use windows::Win32::{
+    Foundation::HWND,
     System::WinRT::{RoInitialize, RO_INIT_MULTITHREADED},
     UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2},
 };
 
 use crate::{
-    adapters, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output, placement, presets, scaling, settings,
-    source, sources, Res,
+    adapters, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output,
+    picker::{self, Event, Phase},
+    placement, presets, scaling, settings, source, sources,
+    ui::{AttachedView, SourceAction, SourcePrefs, SourceView},
+    Res,
 };
 
 /// The rectangle the output window will cover, as far as it is known before the window exists (HW-3): in
@@ -18,7 +27,7 @@ use crate::{
 fn predicted_cover(
     fullscreen: bool,
     monitor: Option<usize>,
-    follow: Option<windows::Win32::Foundation::HWND>,
+    follow: Option<HWND>,
     saved: Option<[i32; 4]>,
 ) -> Option<adapters::Rect> {
     let monitors = output::monitor_irects();
@@ -37,6 +46,81 @@ fn predicted_cover(
 
 const NO_FRAME: &str =
     "no frame captured within 5 seconds (the window must be visible and redrawing: try moving or resizing it)";
+
+/// The frame shown without a source (behind the picker): black, the tube's own size scale.
+const IDLE_SIZE: (u32, u32) = (320, 240);
+
+fn idle_frame() -> capture::Frame {
+    capture::Frame {
+        width: IDLE_SIZE.0,
+        height: IDLE_SIZE.1,
+        data: [0u8, 0, 0, 255].repeat((IDLE_SIZE.0 * IDLE_SIZE.1) as usize),
+        seq: 0,
+    }
+}
+
+fn hwnd_of(h: isize) -> HWND {
+    HWND(h as *mut std::ffi::c_void)
+}
+
+/// The window list entry (title, executable, class, size) of a window: from the picker's rows when it is
+/// listed there, else queried.
+fn entry_of(h: isize, rows: &[picker::Row]) -> sources::WindowEntry {
+    if let Some(r) = rows.iter().find(|r| r.hwnd == h) {
+        return sources::WindowEntry {
+            hwnd: h,
+            title: r.title.clone(),
+            exe: r.exe.clone(),
+            class: r.class.clone(),
+            width: r.width,
+            height: r.height,
+        };
+    }
+    sources::list_entries()
+        .into_iter()
+        .find(|e| e.hwnd == h)
+        .unwrap_or_else(|| sources::WindowEntry {
+            hwnd: h,
+            title: String::new(),
+            exe: sources::executable_name(hwnd_of(h)),
+            class: String::new(),
+            width: 0,
+            height: 0,
+        })
+}
+
+/// The source profile of a window (`[[source]]` by executable and class), if any.
+fn profile_for(settings: &settings::Settings, target: &lifecycle::TargetKey) -> Option<settings::SourceProfile> {
+    let (exe, class) = target.profile_key()?;
+    settings.find_source(exe, class).cloned()
+}
+
+/// The picker's rows now: candidates of the enumeration, recent windows first.
+fn picker_rows(recent: &picker::Recent) -> Vec<picker::Row> {
+    let mut rows = picker::candidates(&sources::enumerate());
+    picker::sort_rows(&mut rows, recent.as_slice());
+    rows
+}
+
+/// The window title: the program attached and the rates, or the invitation to choose one.
+fn window_title(name: Option<&str>, rates: Option<String>) -> String {
+    match (name, rates) {
+        (Some(n), Some(r)) => format!("ultimateCRT | {n} | {r}"),
+        (Some(n), None) => format!("ultimateCRT | {n}"),
+        (None, Some(r)) => format!("ultimateCRT | {r}"),
+        (None, None) => "ultimateCRT | choose a window to capture".to_string(),
+    }
+}
+
+/// The program name of a target for the title: `pixel-demo.exe - pixel-demo`.
+fn target_name(t: &lifecycle::TargetKey) -> String {
+    let exe = t.exe.as_deref().unwrap_or("unknown program");
+    if t.title.is_empty() {
+        exe.to_string()
+    } else {
+        format!("{exe} - {}", t.title)
+    }
+}
 
 pub fn run() -> Res<()> {
     // `render` is an offline sub-command: no window, no capture, no COM setup.
@@ -93,50 +177,75 @@ pub fn run() -> Res<()> {
     let kind = source::Source::choose(args.pattern.as_deref(), args.pattern_size, args.image.as_deref())?;
     // T-50: --preset (else the settings preset), then the settings overrides; an unknown preset stops here.
     let mut params = crate::render_cmd::live_params(args.preset.as_deref())?;
-    let synthetic = !matches!(kind, source::Source::Capture);
+    // A23: the parameters without any source profile; a profile is swapped on every attach on top of the preset
+    // in force (`SourceProfile::switch_to`).
+    let start_base = params;
+    let mut synthetic = !matches!(kind, source::Source::Capture);
     let mut synthetic_n = 0u64;
-    // T-96: the source profile of the target (executable and class) applies on top of the preset and the
-    // global overrides, the command-line options on top of the profile.
-    let mut profile = settings::SourceProfile::default();
-    let found = if synthetic {
-        None
-    } else {
-        let needle = args.window.clone().unwrap_or_else(|| "pixel-demo".into());
-        let source = sources::find_by_title(&needle)
-            .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
-        println!(
-            "source: \"{}\" ({}x{}, class {})",
-            source.title, source.width, source.height, source.class
-        );
-        // Follows the target across closes and relaunches (T-56): same executable and class.
-        let target = lifecycle::TargetKey::of(&sources::WindowEntry::from_info(&source));
-        if let (Some((exe, class)), Some(dir)) = (target.profile_key(), settings::default_dir()) {
-            if let Some(p) = settings::load(&dir).settings.find_source(exe, class) {
-                println!("source profile: {exe} ({class})");
-                profile = p.clone();
-                for w in profile.apply_to(&mut params) {
-                    eprintln!("warning: {w}");
-                }
-            }
-        }
-        Some((source, target))
-    };
-    args.apply_source(&mut params)?;
-    let (map, warnings) = scaling::SourceMap::resolve(
-        &params,
-        args.crop.or(profile.crop_rect()),
-        args.divisor.or(profile.divisor_pair()),
-    );
-    for w in &warnings {
-        eprintln!("warning: {w}");
-    }
-    // T-54, T-57, HW-3: the hotkey chords, the remembered window rectangle and the GPU choice come from the
-    // settings file.
+    // T-54, T-57, HW-3, A23: the hotkey chords, the remembered window rectangle, the GPU choice and the source
+    // selection come from the settings file.
     let settings_dir = settings::default_dir();
     let stored = settings_dir
         .as_deref()
         .map(|d| settings::load(d).settings)
         .unwrap_or_default();
+    // A23: the windows recently in the foreground come first in the picker (the z-order seeds the list).
+    let mut recent = picker::Recent::default();
+    let mut start_message: Option<(bool, String)> = None;
+    // The source at start: --window (developer path, an error when not found), else the last program when
+    // `ask_at_start` is off and it runs, else none (the picker).
+    let initial: Option<sources::WindowEntry> = if synthetic {
+        None
+    } else if let Some(needle) = args.window.as_deref() {
+        let source = sources::find_by_title(needle)
+            .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
+        Some(sources::WindowEntry::from_info(&source))
+    } else {
+        let rows = picker_rows(&recent);
+        recent.seed(rows.iter().take(5).map(|r| r.hwnd));
+        match picker::start_choice(
+            stored.global.source.ask_at_start,
+            stored.global.source.last.as_ref(),
+            &rows,
+        ) {
+            picker::StartChoice::Attach(h) => Some(entry_of(h, &rows)),
+            picker::StartChoice::Picker => None,
+        }
+    };
+    if args.save_capture.is_some() && initial.is_none() && !synthetic {
+        return Err("--save-capture needs --window (or --pattern, --image)".into());
+    }
+    // T-96: the source profile of the target (executable and class) applies on top of the preset and the
+    // global overrides, the command-line options on top of the profile.
+    let mut profile = settings::SourceProfile::default();
+    let mut target: Option<lifecycle::TargetKey> = None;
+    if let Some(entry) = &initial {
+        println!(
+            "source: \"{}\" ({}x{}, class {})",
+            entry.title, entry.width, entry.height, entry.class
+        );
+        let t = lifecycle::TargetKey::of(entry);
+        if let Some(p) = profile_for(&stored, &t) {
+            println!("source profile: {}", t.describe());
+            profile = p;
+            for w in profile.apply_to(&mut params) {
+                eprintln!("warning: {w}");
+            }
+        }
+        target = Some(t);
+    }
+    args.apply_source(&mut params)?;
+    let resolve_map = |params: &crate::params::Params, profile: &settings::SourceProfile| {
+        scaling::SourceMap::resolve(
+            params,
+            args.crop.or(profile.crop_rect()),
+            args.divisor.or(profile.divisor_pair()),
+        )
+    };
+    let (mut map, warnings) = resolve_map(&params, &profile);
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
     // HW-3: the adapter that runs the chain. A first guess from where the output will go starts the capture; the
     // real choice is made once the output window exists (below), and the capture follows it if it differs.
     let topology = adapters::Topology::read()?;
@@ -147,39 +256,47 @@ pub fn run() -> Res<()> {
         predicted_cover(
             args.fullscreen,
             args.monitor,
-            found.as_ref().map(|(s, _)| s.hwnd),
+            initial.as_ref().map(|e| hwnd_of(e.hwnd)),
             stored.global.output.windowed,
         ),
     );
-    let (mut capture, follow, mut reattach) = match found {
-        None => (None, windows::Win32::Foundation::HWND::default(), None),
-        Some((source, target)) => {
-            let capture = capture::Capture::start(source.hwnd, map.client_area, guess.capture_luid())?;
-            println!("capture: Windows.Graphics.Capture on {} (CPU copy)", capture.adapter);
-            let reattach = lifecycle::Reattacher::new(target, source.hwnd.0 as isize);
-            (Some(capture), source.hwnd, Some(reattach))
-        }
-    };
-    // Next frame of the source: the capture, or a pattern or image (static ones only once).
-    let mut poll = |capture: Option<&capture::Capture>, frame: &mut capture::Frame| -> Res<bool> {
-        match capture {
-            Some(c) => Ok(c.take_frame(frame)),
-            None if !synthetic => Ok(false), // target lost, waiting for a relaunch
-            None if synthetic_n == 0 || kind.is_animated() => {
-                if let Some(f) = kind.frame(synthetic_n)? {
-                    *frame = f;
-                }
-                synthetic_n += 1;
-                Ok(true)
+    let mut capture = match &initial {
+        None => None,
+        Some(entry) => match capture::Capture::start(hwnd_of(entry.hwnd), map.client_area, guess.capture_luid()) {
+            Ok(c) => {
+                println!("capture: Windows.Graphics.Capture on {} (CPU copy)", c.adapter);
+                Some(c)
             }
-            None => Ok(false),
-        }
+            // The developer path stops on the error, as before; the last choice falls back to the picker.
+            Err(e) if args.window.is_some() => return Err(e.into()),
+            Err(e) => {
+                start_message = Some((false, format!("The last window could not be captured: {e}")));
+                None
+            }
+        },
     };
     let mut frame = capture::Frame::default();
+    let synthetic_frame = |frame: &mut capture::Frame, n: &mut u64| -> Res<bool> {
+        if *n == 0 || kind.is_animated() {
+            if let Some(f) = kind.frame(*n)? {
+                *frame = f;
+            }
+            *n += 1;
+            return Ok(true);
+        }
+        Ok(false)
+    };
 
     if let Some(path) = &args.save_capture {
         let deadline = Instant::now() + Duration::from_secs(5);
-        while !poll(capture.as_ref(), &mut frame)? {
+        loop {
+            let got = match &capture {
+                Some(c) => c.take_frame(&mut frame),
+                None => synthetic_frame(&mut frame, &mut synthetic_n)?,
+            };
+            if got {
+                break;
+            }
             if Instant::now() > deadline {
                 return Err(NO_FRAME.into());
             }
@@ -190,32 +307,66 @@ pub fn run() -> Res<()> {
         return Ok(());
     }
 
-    // Wait for the first frame to size the window.
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while !poll(capture.as_ref(), &mut frame)? {
-        if Instant::now() > deadline {
-            return Err(NO_FRAME.into());
+    // Wait for the first frame to size the window. Without a source: the idle frame and the picker.
+    if capture.is_some() || synthetic {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let got = match &capture {
+                Some(c) => c.take_frame(&mut frame),
+                None => synthetic_frame(&mut frame, &mut synthetic_n)?,
+            };
+            if got {
+                break;
+            }
+            if Instant::now() > deadline {
+                if args.window.is_some() || synthetic {
+                    return Err(NO_FRAME.into());
+                }
+                // The last choice does not draw: the picker instead.
+                start_message = Some((false, format!("The last window did not draw: {NO_FRAME}.")));
+                capture = None;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
         }
-        std::thread::sleep(Duration::from_millis(5));
+    }
+    if capture.is_none() && !synthetic {
+        target = None;
+        frame = idle_frame();
+        // No profile without a source: the parameters of the preset in force.
+        profile = settings::SourceProfile::default();
+        profile.switch_to(&mut params, &start_base);
+        args.apply_source(&mut params)?;
+        map = resolve_map(&params, &profile).0;
     }
     // Initial windowed size (D-18: no assumed host resolution): the largest whole multiple of the frame
-    // within 5/6 of the height and the width of the chosen (else the first) monitor.
+    // within 5/6 of the height and the width of the chosen (else the first) monitor. Without a source, two
+    // thirds of the monitor.
     let monitors = output::monitor_rects();
     let screen = monitors
         .get(args.monitor.unwrap_or(0))
         .or(monitors.first())
         .map_or((1280, 720), |r| (r.right - r.left, r.bottom - r.top));
     let fit = |avail: i32, size: u32| (avail.max(1) as u32 * 5 / 6) / size.max(1);
-    let scale = fit(screen.1, frame.height).min(fit(screen.0, frame.width)).max(1) as i32;
+    let windowed_size = if capture.is_some() || synthetic {
+        let scale = fit(screen.1, frame.height).min(fit(screen.0, frame.width)).max(1) as i32;
+        (frame.width as i32 * scale, frame.height as i32 * scale)
+    } else {
+        ((screen.0 * 2 / 3).max(960), (screen.1 * 2 / 3).max(640))
+    };
     let (bindings, hotkey_warnings) = hotkeys::Bindings::from_settings(&stored.global.hotkeys);
     for w in &hotkey_warnings {
         eprintln!("warning: {w}");
     }
+    let follow = initial
+        .as_ref()
+        .filter(|_| capture.is_some())
+        .map_or(HWND::default(), |e| hwnd_of(e.hwnd));
     let win = output::create(&output::Options {
         fullscreen: args.fullscreen,
         monitor: args.monitor,
         follow,
-        client_size: (frame.width as i32 * scale, frame.height as i32 * scale),
+        client_size: windowed_size,
         hotkeys: bindings,
         saved_rect: stored.global.output.windowed.map(modes::IRect::from_array),
     })?;
@@ -265,7 +416,7 @@ pub fn run() -> Res<()> {
         adapters: topology.entries(),
         setting: stored.global.gpu.adapter.clone(),
     });
-    // The output never takes the keyboard (OUT-2), so Esc cannot reach it; only the quit hotkey works.
+    // The output never takes the keyboard (OUT-2), except while the menu or the picker is shown.
     println!("quit: Ctrl+Alt+Q");
     println!("hotkeys: {}", win.hotkeys.summary());
 
@@ -291,9 +442,17 @@ pub fn run() -> Res<()> {
     let mut smoothing = lifecycle::SmoothingWatch::default();
     let mut size_watch = lifecycle::SizeWatch::default();
     let mut notice: Option<String> = None;
-    // Lost source (T-56): reminders, then a fullscreen output drops to a window, or the app exits.
-    let mut lost_watch = lifecycle::LostWatch::new(args.lost, args.fullscreen);
-    let windowed_size = (frame.width as i32 * scale, frame.height as i32 * scale);
+    // Lost source (T-56, A23): reminders, reattach during the wait, then the picker (or an exit).
+    let policy = lifecycle::LostPolicy {
+        wait_s: if args.wait_source_set {
+            args.lost.wait_s
+        } else {
+            stored.global.source.wait_s
+        },
+        exit_on_lost: args.lost.exit_on_lost,
+    };
+    let mut lost_watch = lifecycle::LostWatch::new(policy, args.fullscreen);
+    let mut lost_at: Option<f64> = None;
     let mut readout_key = ((0u32, 0u32), (0u32, 0u32));
     // Hotkey actions and output modes (T-54, T-57). `live` owns the one settings instance of the session.
     let library = presets::Library::load(settings_dir.as_deref().map(presets::user_dir).as_deref());
@@ -305,7 +464,10 @@ pub fn run() -> Res<()> {
         .map(|p| p.id.clone());
     // T-53: what the menu compares against and resets to: the preset in force (else the table defaults) with
     // the source profile and the command-line options on top, as at start but without the settings overrides.
-    let baseline_of = |library: &presets::Library, preset: Option<&str>| -> crate::params::Params {
+    let baseline_of = |library: &presets::Library,
+                       preset: Option<&str>,
+                       profile: &settings::SourceProfile|
+     -> crate::params::Params {
         let mut p = preset
             .and_then(|id| library.find(id))
             .map(presets::Preset::params)
@@ -316,7 +478,7 @@ pub fn run() -> Res<()> {
         }
         p
     };
-    let mut baseline = baseline_of(&library, current_preset.as_deref());
+    let mut baseline = baseline_of(&library, current_preset.as_deref(), &profile);
     let ui_settings_dir = settings_dir.clone();
     // T-43: the burn-in wear map of the preset in force, loaded while burn-in is on, saved periodically and at exit.
     let mut tube = crate::tube_state::TubeState::new(settings_dir.clone(), args.reset_burnin, Instant::now());
@@ -328,6 +490,17 @@ pub fn run() -> Res<()> {
         current_preset,
         output::default_outer_size(windowed_size),
     );
+    // A23: the parameters a new source starts from: the preset in force with the global overrides, no profile.
+    let base_params = |live: &live::Live| -> crate::params::Params {
+        match live.current_preset().and_then(|id| live.library().find(id)) {
+            Some(p) => {
+                let mut b = p.params();
+                let _ = settings::apply_overrides(&mut b, &live.settings().global.overrides);
+                b
+            }
+            None => start_base,
+        }
+    };
     // T-52a: the settings menu and the stats overlay, drawn over the output, reached by the hotkeys through
     // `controls::UiHook`. Created after the renderer's device, dropped before it (declared after it, and
     // dropped explicitly at the end of `run`). Its layout, menu key and presets come from `live`.
@@ -345,6 +518,44 @@ pub fn run() -> Res<()> {
     )?;
     let mut ui_state = crate::ui::UiState::default();
     let mut stepped_preset = live.current_preset().map(str::to_string);
+
+    // A23: the source state machine and the picker's upkeep.
+    let mut phase = if capture.is_some() || synthetic {
+        Phase::Attached
+    } else {
+        Phase::NoSource
+    };
+    let mut reattach = match (&capture, &target) {
+        (Some(_), Some(t)) => Some(lifecycle::Reattacher::new(t.clone(), follow.0 as isize)),
+        _ => None,
+    };
+    if let (Some(_), Some(t)) = (&capture, &target) {
+        live.remember_source(settings::LastSource {
+            exe: t.exe.clone().unwrap_or_default(),
+            class: t.class.clone(),
+            title: t.title.clone(),
+        });
+    }
+    // The name in the title bar: the program attached (a pattern or an image: its description).
+    let mut source_name: Option<String> = match (&target, synthetic) {
+        (Some(t), _) if capture.is_some() => Some(target_name(t)),
+        (_, true) => Some(
+            args.pattern
+                .as_deref()
+                .map(|p| format!("pattern {p}"))
+                .or(args.image.as_deref().map(|i| format!("image {i}")))
+                .unwrap_or_default(),
+        ),
+        _ => None,
+    };
+    output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
+    ui.set_picker_message(start_message.take());
+    let mut source_request: Option<SourceAction> = None;
+    let mut list_due = 0.0f64; // next enumeration of the picker's list
+    let mut thumbs = picker::ThumbPlan::default();
+    let mut thumb_capture: Option<(isize, capture::Capture)> = None;
+    let own = win.hwnd.0 as isize;
+
     loop {
         if !output::pump() {
             break;
@@ -357,46 +568,200 @@ pub fn run() -> Res<()> {
             break;
         }
         let now = start.elapsed().as_secs_f64();
-        if let Some(r) = reattach.as_mut() {
-            let closed = capture.as_ref().is_some_and(|c| c.is_closed());
-            match r.update(now, closed, sources::window_exists, sources::list_entries) {
-                lifecycle::Step::Idle => {}
-                lifecycle::Step::Lost => {
-                    captured_base += capture.as_ref().map_or(0, |c| c.frames_captured());
-                    capture = None;
-                    println!("source lost: waiting for {}", r.target().describe());
+        // SAFETY: plain query.
+        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as isize;
+        if fg != own {
+            recent.note(fg);
+        }
+
+        // ---- A23: source requests of the picker and the menu ----
+        let mut attach_request = None;
+        match source_request.take() {
+            None => {}
+            Some(SourceAction::Attach(h)) => attach_request = Some(h),
+            Some(SourceAction::Cancel) => phase = picker::next(phase, Event::Cancel),
+            Some(SourceAction::ChangeSource) => {
+                phase = picker::next(phase, Event::ShowPicker);
+                if !picker::follows_target(phase) {
+                    // Change source while a lost source was waited for: the wait ends, nothing to go back to.
+                    reattach = None;
+                    lost_at = None;
+                    lost_watch.update(now, true);
+                    frame = idle_frame();
+                    fresh = true;
+                    source_name = None;
+                    ui.source_gone();
+                    ui.show_picker(false);
                 }
-                lifecycle::Step::TryAttach(hwnd) => {
-                    let h = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
-                    match capture::Capture::start(h, map.client_area, capture_luid) {
-                        Ok(c) => {
-                            capture = Some(c);
-                            r.attach_result(now, hwnd, true);
-                            ui.set_source(Some(hwnd));
-                            frame.seq = 0; // the new session counts from 1
-                            health.reset(now);
-                            size_watch.request_history_clear();
-                            println!("source reattached: {}", r.target().describe());
-                        }
-                        Err(e) => {
-                            r.attach_result(now, hwnd, false);
-                            if r.failures() == 1 {
-                                println!("reattach failed, retrying: {e}");
+                list_due = 0.0;
+            }
+            Some(SourceAction::Detach) => {
+                if let Some(c) = capture.take() {
+                    captured_base += c.frames_captured();
+                }
+                reattach = None;
+                lost_at = None;
+                lost_watch.update(now, true);
+                phase = picker::next(phase, Event::Detach);
+                synthetic = false;
+                frame = idle_frame();
+                fresh = true;
+                size_watch.request_history_clear();
+                ui.source_gone();
+                output::set_source(HWND::default());
+                source_name = None;
+                output::set_title(win.hwnd, &window_title(None, None));
+                println!("source: detached");
+            }
+            Some(SourceAction::Refresh) => list_due = 0.0,
+            Some(SourceAction::RefreshPreview) => thumbs.refresh(),
+        }
+        if let Some(h) = attach_request {
+            let entry = entry_of(h, &ui.picker().rows);
+            let t = lifecycle::TargetKey::of(&entry);
+            let new_profile = profile_for(live.settings(), &t).unwrap_or_default();
+            let mut p = params;
+            for w in new_profile.switch_to(&mut p, &base_params(&live)) {
+                eprintln!("warning: {w}");
+            }
+            if let Err(e) = args.apply_source(&mut p) {
+                eprintln!("warning: {e}");
+            }
+            let (new_map, warnings) = resolve_map(&p, &new_profile);
+            for w in &warnings {
+                eprintln!("warning: {w}");
+            }
+            match capture::Capture::start(hwnd_of(h), new_map.client_area, capture_luid) {
+                Ok(c) => {
+                    if let Some(old) = capture.replace(c) {
+                        captured_base += old.frames_captured();
+                    }
+                    frame.seq = 0; // the new session counts from 1
+                    synthetic = false;
+                    println!("source: attached \"{}\" ({})", entry.title, t.describe());
+                    if new_profile != settings::SourceProfile::default() {
+                        println!("source profile: {}", t.describe());
+                    }
+                    live.remember_source(settings::LastSource {
+                        exe: t.exe.clone().unwrap_or_default(),
+                        class: t.class.clone(),
+                        title: t.title.clone(),
+                    });
+                    source_name = Some(target_name(&t));
+                    output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
+                    reattach = Some(lifecycle::Reattacher::new(t, h));
+                    lost_at = None;
+                    lost_watch.update(now, true);
+                    profile = new_profile;
+                    map = new_map;
+                    params = p;
+                    renderer.set_params(params);
+                    baseline = baseline_of(live.library(), live.current_preset(), &profile);
+                    health.reset(now);
+                    smoothing.reset();
+                    detector.reset();
+                    detect_key = (0, 0, None);
+                    size_watch.request_history_clear();
+                    output::set_source(hwnd_of(h));
+                    phase = picker::next(phase, Event::Attached);
+                    ui.attached(h);
+                }
+                Err(e) => {
+                    phase = picker::next(phase, Event::AttachFailed);
+                    let name = if entry.title.is_empty() {
+                        "this window".to_string()
+                    } else {
+                        format!("\u{201C}{}\u{201D}", entry.title)
+                    };
+                    ui.set_picker_message(Some((false, format!("Cannot capture {name}: {e}"))));
+                    eprintln!("warning: cannot capture \"{}\": {e}", entry.title);
+                }
+            }
+        }
+        if phase == Phase::NoSource {
+            // Nothing captured: the picker (it takes the foreground, as the menu does).
+            ui.source_gone();
+            ui.show_picker(false);
+            phase = picker::next(phase, Event::ShowPicker);
+            list_due = 0.0;
+        }
+
+        // ---- Lifecycle of the attached window: reattach during the wait, then the picker ----
+        if picker::follows_target(phase) {
+            if let Some(r) = reattach.as_mut() {
+                let closed = capture.as_ref().is_some_and(|c| c.is_closed());
+                match r.update(now, closed, sources::window_exists, sources::list_entries) {
+                    lifecycle::Step::Idle => {}
+                    lifecycle::Step::Lost => {
+                        captured_base += capture.as_ref().map_or(0, |c| c.frames_captured());
+                        capture = None;
+                        lost_at = Some(now);
+                        phase = picker::next(phase, Event::SourceLost);
+                        println!("source lost: waiting for {}", r.target().describe());
+                    }
+                    lifecycle::Step::TryAttach(hwnd) => {
+                        match capture::Capture::start(hwnd_of(hwnd), map.client_area, capture_luid) {
+                            Ok(c) => {
+                                capture = Some(c);
+                                r.attach_result(now, hwnd, true);
+                                ui.set_source(Some(hwnd));
+                                output::set_source(hwnd_of(hwnd));
+                                frame.seq = 0; // the new session counts from 1
+                                health.reset(now);
+                                size_watch.request_history_clear();
+                                lost_at = None;
+                                phase = picker::next(phase, Event::Reattached);
+                                source_name = Some(target_name(r.target()));
+                                println!("source reattached: {}", r.target().describe());
+                            }
+                            Err(e) => {
+                                r.attach_result(now, hwnd, false);
+                                if r.failures() == 1 {
+                                    println!("reattach failed, retrying: {e}");
+                                }
                             }
                         }
                     }
                 }
             }
+            if !picker::follows_target(phase) {
+                // Lost while the picker was open (Change source): nothing to go back to.
+                reattach = None;
+                lost_at = None;
+                lost_watch.update(now, true);
+                output::set_source(HWND::default());
+                ui.source_gone();
+                ui.show_picker(false);
+                frame = idle_frame();
+                fresh = true;
+                source_name = None;
+            }
+        }
+        if let Some(r) = reattach.as_ref() {
             match lost_watch.update(now, r.is_attached()) {
                 lifecycle::LostAction::None => {}
                 lifecycle::LostAction::Remind => println!("{}", lifecycle::LOST_REMINDER),
-                lifecycle::LostAction::GoWindowed => {
-                    output::drop_to_windowed(win.hwnd, windowed_size);
-                    live.dropped_to_windowed();
-                    println!(
-                        "source lost for {:.0} s: the output is now a normal window (Esc closes it)",
-                        args.lost.wait_s
-                    );
+                a @ (lifecycle::LostAction::GoWindowed | lifecycle::LostAction::GiveUp) => {
+                    if a == lifecycle::LostAction::GoWindowed && live.go_windowed(win.hwnd) {
+                        lost_watch.set_fullscreen(false);
+                    }
+                    let wait = lost_watch.policy().wait_s;
+                    let what = target_name(r.target());
+                    println!("source lost for {wait:.0} s: choose a window to capture");
+                    ui.set_picker_message(Some((
+                        false,
+                        format!("{what} closed and did not come back within {wait:.0} s."),
+                    )));
+                    reattach = None;
+                    lost_at = None;
+                    lost_watch.update(now, true);
+                    phase = picker::next(phase, Event::GiveUp);
+                    frame = idle_frame();
+                    fresh = true;
+                    size_watch.request_history_clear();
+                    output::set_source(HWND::default());
+                    source_name = None;
+                    output::set_title(win.hwnd, &window_title(None, None));
                 }
                 lifecycle::LostAction::Exit => {
                     println!("source lost: exiting (--exit-on-lost)");
@@ -404,7 +769,52 @@ pub fn run() -> Res<()> {
                 }
             }
         }
-        if poll(capture.as_ref(), &mut frame)? {
+
+        // ---- The picker's list, icons and preview (only while it is shown) ----
+        if ui.picker_open() {
+            if now >= list_due {
+                list_due = now + 1.0;
+                ui.set_picker_rows(picker_rows(&recent));
+                for path in ui.missing_icons() {
+                    let icon = sources::exe_icon(&path);
+                    ui.set_icon(&path, icon);
+                }
+            }
+            if let Some(h) = thumbs.update(now, ui.picker().wanted_preview(), |h| h == own) {
+                match capture::Capture::start(hwnd_of(h), true, capture_luid) {
+                    Ok(c) => thumb_capture = Some((h, c)),
+                    Err(_) => {
+                        thumbs.finished(h, now, false);
+                        ui.set_thumbnail_failed(h);
+                    }
+                }
+            }
+            if let Some((h, c)) = &thumb_capture {
+                let h = *h;
+                let mut f = capture::Frame::default();
+                if c.take_frame(&mut f) {
+                    let (w, th, px) = picker::thumbnail(&f.data, f.width, f.height, 480, 270);
+                    ui.set_thumbnail(h, w, th, &px);
+                    thumbs.finished(h, now, true);
+                    thumb_capture = None;
+                } else if thumbs.timed_out(now) {
+                    thumbs.finished(h, now, false);
+                    ui.set_thumbnail_failed(h);
+                    thumb_capture = None;
+                }
+            }
+        } else if thumb_capture.is_some() || thumbs != picker::ThumbPlan::default() {
+            thumb_capture = None;
+            thumbs.reset();
+        }
+
+        // ---- Frames ----
+        let got = match &capture {
+            Some(c) => c.take_frame(&mut frame),
+            None if synthetic => synthetic_frame(&mut frame, &mut synthetic_n)?,
+            None => false,
+        };
+        if got {
             if size_watch.observe(frame.width, frame.height) {
                 // SRC-8: the renderer rebuilds its source-sized resources when it gets this frame
                 // and the detector restarts below; the history is cleared by the persistence stage
@@ -417,6 +827,8 @@ pub fn run() -> Res<()> {
                 health.note_frame(now, black);
             }
             fresh = true;
+        }
+        if fresh {
             let full = scaling::Rect {
                 x: 0,
                 y: 0,
@@ -429,7 +841,9 @@ pub fn run() -> Res<()> {
                 detect_key = key;
                 detector.reset();
             }
-            let div = match map.divisor.or(synthetic.then_some((1, 1))) {
+            // Patterns, images and the idle frame are native.
+            let fixed = map.divisor.or((synthetic || capture.is_none()).then_some((1, 1)));
+            let div = match fixed {
                 Some(d) => d,
                 None => {
                     let was_locked = detector.is_locked();
@@ -456,7 +870,7 @@ pub fn run() -> Res<()> {
             // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
             // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
             let eligible = capture.is_some() && map.divisor.is_none() && detector.is_locked() && div == (1, 1);
-            if smoothing.feed(&frame.data, frame.width, region, eligible) {
+            if got && smoothing.feed(&frame.data, frame.width, region, eligible) {
                 println!("warning: {}", lifecycle::SMOOTHED_WARNING);
             }
         }
@@ -473,7 +887,7 @@ pub fn run() -> Res<()> {
         // A preset hotkey stepped to another preset: it is the new reference of the menu.
         if live.current_preset() != stepped_preset.as_deref() {
             stepped_preset = live.current_preset().map(str::to_string);
-            baseline = baseline_of(live.library(), stepped_preset.as_deref());
+            baseline = baseline_of(live.library(), stepped_preset.as_deref(), &profile);
         }
         if ui.is_open() || ui.overlay_on() {
             ui_state.params = params;
@@ -482,6 +896,16 @@ pub fn run() -> Res<()> {
             ui_state.baseline = Some(baseline);
             ui_state.headroom = renderer.headroom();
             ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
+            ui_state.source = source_view(
+                capture.is_some(),
+                reattach.as_ref().map(|r| r.target()),
+                &profile,
+                &map,
+                &detector,
+                (frame.width, frame.height),
+                view,
+                lost_at.map(|t| (now - t, lost_watch.policy().wait_s)),
+            );
         }
         // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
         // (applied live, recorded in the shared settings, written debounced), the adapter for the next start.
@@ -500,7 +924,7 @@ pub fn run() -> Res<()> {
                 live.set_current_preset(changes.preset.clone());
                 live.note_preset_selected(changes.preset.as_deref());
                 stepped_preset = changes.preset.clone();
-                baseline = baseline_of(live.library(), changes.preset.as_deref());
+                baseline = baseline_of(live.library(), changes.preset.as_deref(), &profile);
                 // A saved user preset keeps the edits made before the save: recorded against the new preset.
                 live.note_params_edit(&baseline, &p, &baseline);
                 ui_state.preset = changes.preset;
@@ -509,10 +933,39 @@ pub fn run() -> Res<()> {
             }
             params = p;
             renderer.set_params(params);
+            // T-96, A23: the crop and divisor modes are live: the source map follows them (a change of the
+            // capture area restarts the session on the same window).
+            let (new_map, _) = resolve_map(&params, &profile);
+            if new_map != map {
+                if new_map.client_area != map.client_area {
+                    if let (Some(r), true) = (reattach.as_ref(), capture.is_some()) {
+                        match capture::Capture::start(hwnd_of(r.hwnd()), new_map.client_area, capture_luid) {
+                            Ok(c) => {
+                                if let Some(old) = capture.replace(c) {
+                                    captured_base += old.frames_captured();
+                                }
+                                frame.seq = 0;
+                            }
+                            Err(e) => eprintln!("warning: capture area change: {e}"),
+                        }
+                    }
+                }
+                map = new_map;
+                detect_key = (0, 0, None);
+            }
         }
         if let Some(adapter) = changes.gpu_adapter {
             println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
             live.set_gpu_adapter(adapter);
+        }
+        if let Some(SourcePrefs { ask_at_start, wait_s }) = changes.source_prefs {
+            live.set_source_prefs(ask_at_start, wait_s);
+            if !args.wait_source_set {
+                lost_watch.set_wait(wait_s);
+            }
+        }
+        if changes.source.is_some() {
+            source_request = changes.source;
         }
         // T-43: burn-in map of the preset in force (load, periodic save off the render thread), menu actions.
         tube.tick(&mut renderer, &params, live.current_preset(), Instant::now());
@@ -555,6 +1008,8 @@ pub fn run() -> Res<()> {
                 reattach
                     .as_ref()
                     .map(|r| format!("waiting for {}", r.target().describe()))
+            } else if capture.is_none() {
+                None
             } else if let Some(m) = health.status(now).message() {
                 Some(m)
             } else if smoothing.warning() {
@@ -581,10 +1036,9 @@ pub fn run() -> Res<()> {
                 (captured - last_captured) as f64 / secs,
                 renders as f64 / secs,
             );
-            output::set_title(
-                win.hwnd,
-                &format!(
-                    "ultimatecrt | capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}{}",
+            let rates = (source_name.is_some()).then(|| {
+                format!(
+                    "capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}{}",
                     (captured - last_captured) as f64 / secs,
                     renders as f64 / secs,
                     view.native.0,
@@ -593,8 +1047,9 @@ pub fn run() -> Res<()> {
                     view.div.1,
                     renderer.gpu_name,
                     notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
-                ),
-            );
+                )
+            });
+            output::set_title(win.hwnd, &window_title(source_name.as_deref(), rates));
             if args.stats {
                 println!(
                     "capture {:.0} fps | render {:.0} fps | frame {}x{} | native {}x{} (div {}x{})",
@@ -631,10 +1086,75 @@ pub fn run() -> Res<()> {
         l.summary();
     }
     // The UI first: its ImGui renderer lives on the renderer's device (T-52a).
+    drop(thumb_capture);
     drop(ui);
     drop(renderer);
     drop(capture);
     Ok(())
+}
+
+/// What the menu's Source section shows (A23).
+#[allow(clippy::too_many_arguments)]
+fn source_view(
+    capturing: bool,
+    target: Option<&lifecycle::TargetKey>,
+    profile: &settings::SourceProfile,
+    map: &scaling::SourceMap,
+    detector: &scaling::Detector,
+    frame: (u32, u32),
+    view: scaling::View,
+    lost: Option<(f64, f64)>,
+) -> SourceView {
+    let waiting = match (target, lost) {
+        (Some(t), Some((since, wait))) => Some(if wait > 0.0 {
+            format!(
+                "{} closed: waiting for it to come back ({:.0} s left), then the window list opens.",
+                t.describe(),
+                (wait - since).max(0.0)
+            )
+        } else {
+            format!("{} closed: waiting for it to come back.", t.describe())
+        }),
+        _ => None,
+    };
+    let attached = target.filter(|_| capturing).map(|t| AttachedView {
+        exe: t.exe.clone(),
+        class: t.class.clone(),
+        title: t.title.clone(),
+        frame,
+        native: view.native,
+        scale: scale_text(map, detector, view.div),
+        crop: crop_text(map),
+        profile: *profile != settings::SourceProfile::default(),
+    });
+    SourceView { attached, waiting }
+}
+
+/// The integer scale in words for the Source section.
+pub fn scale_text(map: &scaling::SourceMap, detector: &scaling::Detector, div: (u32, u32)) -> String {
+    let pair = |d: (u32, u32)| {
+        if d.0 == d.1 {
+            format!("x{}", d.0)
+        } else {
+            format!("x{} \u{00D7} {}", d.0, d.1)
+        }
+    };
+    match map.divisor {
+        Some((1, 1)) => "none (x1)".to_string(),
+        Some(d) => format!("{} (manual)", pair(d)),
+        None if !detector.is_locked() => "detecting...".to_string(),
+        None if div == (1, 1) => "x1 (native)".to_string(),
+        None => format!("{} detected", pair(div)),
+    }
+}
+
+/// The capture area in words for the Source section.
+pub fn crop_text(map: &scaling::SourceMap) -> String {
+    match (map.client_area, map.crop) {
+        (false, _) => "whole window".to_string(),
+        (true, Some(c)) => format!("crop {}, {}, {} \u{00D7} {}", c.x, c.y, c.w, c.h),
+        (true, None) => "client area".to_string(),
+    }
 }
 
 fn save_png(path: &str, frame: &capture::Frame) -> Res<()> {
@@ -649,4 +1169,68 @@ fn save_png(path: &str, frame: &capture::Frame) -> Res<()> {
     }
     writer.write_image_data(&rgba)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn titles_name_the_program_or_invite_to_choose() {
+        assert_eq!(window_title(None, None), "ultimateCRT | choose a window to capture");
+        assert_eq!(
+            window_title(Some("pixel-demo.exe - pixel-demo"), Some("capture 60 fps".into())),
+            "ultimateCRT | pixel-demo.exe - pixel-demo | capture 60 fps"
+        );
+        let t = lifecycle::TargetKey {
+            exe: Some("Mina.exe".into()),
+            class: "C".into(),
+            title: "Mina".into(),
+        };
+        assert_eq!(target_name(&t), "Mina.exe - Mina");
+        let u = lifecycle::TargetKey {
+            exe: None,
+            class: "C".into(),
+            title: String::new(),
+        };
+        assert_eq!(target_name(&u), "unknown program");
+    }
+
+    #[test]
+    fn the_source_section_words() {
+        let auto = scaling::SourceMap {
+            client_area: true,
+            crop: None,
+            divisor: None,
+        };
+        let d = scaling::Detector::default();
+        assert_eq!(scale_text(&auto, &d, (1, 1)), "detecting...");
+        let manual = scaling::SourceMap {
+            divisor: Some((2, 3)),
+            ..auto
+        };
+        assert_eq!(scale_text(&manual, &d, (2, 3)), "x2 \u{00D7} 3 (manual)");
+        let none = scaling::SourceMap {
+            divisor: Some((1, 1)),
+            ..auto
+        };
+        assert_eq!(scale_text(&none, &d, (1, 1)), "none (x1)");
+        assert_eq!(crop_text(&auto), "client area");
+        let whole = scaling::SourceMap {
+            client_area: false,
+            ..auto
+        };
+        assert_eq!(crop_text(&whole), "whole window");
+        let crop = scaling::SourceMap {
+            crop: Some(scaling::Rect {
+                x: 8,
+                y: 4,
+                w: 320,
+                h: 240,
+            }),
+            ..auto
+        };
+        assert_eq!(crop_text(&crop), "crop 8, 4, 320 \u{00D7} 240");
+        assert_eq!(idle_frame().data.len(), (IDLE_SIZE.0 * IDLE_SIZE.1 * 4) as usize);
+    }
 }
