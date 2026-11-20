@@ -253,7 +253,9 @@ vec2 geometry_inv_magnification() {
 // src/gpu/stages/screen.rs, which mirrors this test). The radial convergence term is not checked: it is not part of
 // the host -> raster map but an offset the standard path takes at the column and line centre instead of at the
 // pixel (beam.glsl); its gradient is at most rad (0.48 / rc) px per px (rad in px, rc the half diagonal in px; 2 mm
-// on a 19 in tube at 1440 lines: 0.004 px per px), an error well inside the T-48 contract.
+// on a 19 in tube at 1440 lines: 0.004 px per px), an error well inside the T-48 contract. The lateral chromatic
+// aberration term (geometry_chroma_red_mm, PHY-17) is taken the same way; its gradient at the corner is about
+// e (lat / 2) / rc px per px (e the edge exponent): 0.04 px per px at the 10 mm slider end, e = 2, on a 19 in tube.
 bool geometry_separable() {
     return (params.geometry_curvature == GEOMETRY_CURVATURE_FLAT || !(params.geometry_radius_mm > 0.0))
         && params.geometry_pincushion == 0.0 && params.geometry_trapezoid == 0.0
@@ -281,13 +283,36 @@ float geometry_separable_host_y(float ry) {
 // point solves p = s + offset(p), the source-point form p = s + offset(s) is its first-order inverse. The
 // difference is about 2 rad^2 r^3 / rc^4 (0.17 px at the slider maximum 2 mm in the corner of a 19 in tube at
 // 1440 lines); tests/stage_geometry.rs asserts the landing-point value (G6).
+// The chromatic aberration controls (geometry_chroma_*, QUESTIONS PHY-17) add a red offset and its opposite on
+// blue (green unchanged), geometry_chroma_red_mm, also at the landing point; while both of their amounts are 0
+// (the defaults) a uniform branch skips them and the result is the one above, bit for bit.
+bool geometry_chroma_on() {
+    return params.geometry_chroma_lateral_mm != 0.0 || params.geometry_chroma_axis_mm != 0.0;
+}
+
+// Red offset (mm) of the chromatic aberration controls at u (mm from the tube centre), half_mm the raster's half
+// size: half the constant separation along the angle plus half the lateral one times (r / rc)^exponent along the
+// unit radius (rc the half diagonal), crt_model::geometry::Chroma::red_offset_mm. Blue takes the opposite.
+vec2 geometry_chroma_red_mm(vec2 u, vec2 half_mm) {
+    float ang = params.geometry_chroma_angle_deg * GEOMETRY_DEG;
+    vec2 o = (0.5 * params.geometry_chroma_axis_mm) * vec2(cos(ang), sin(ang));
+    float r = length(u);
+    if (params.geometry_chroma_lateral_mm != 0.0 && r > 0.0) {
+        float k = pow(r / length(half_mm), params.geometry_chroma_edge_exponent);
+        o += u * (0.5 * params.geometry_chroma_lateral_mm * k / r);
+    }
+    return o;
+}
+
 void geometry_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
     vec3 sx = vec3(params.geometry_conv_red_dx_mm, params.geometry_conv_green_dx_mm, params.geometry_conv_blue_dx_mm);
     vec3 sy = vec3(params.geometry_conv_red_dy_mm, params.geometry_conv_green_dy_mm, params.geometry_conv_blue_dy_mm);
     vec3 rad = vec3(params.geometry_conv_red_radial_mm, params.geometry_conv_green_radial_mm,
         params.geometry_conv_blue_radial_mm);
     float ppm = frame.px_per_mm;
-    if (!(ppm > 0.0) || (all(equal(sx, vec3(0.0))) && all(equal(sy, vec3(0.0))) && all(equal(rad, vec3(0.0))))) {
+    bool chroma = geometry_chroma_on();
+    if (!(ppm > 0.0)
+        || (all(equal(sx, vec3(0.0))) && all(equal(sy, vec3(0.0))) && all(equal(rad, vec3(0.0))) && !chroma)) {
         dx = vec3(0.0);
         dy = vec3(0.0);
         return;
@@ -299,6 +324,11 @@ void geometry_convergence_px(vec2 p, out vec3 dx, out vec3 dy) {
     vec2 g = u * (length(u) / dot(half_mm, half_mm));
     dx = (sx + rad * g.x) * ppm;
     dy = (sy + rad * g.y) * ppm;
+    if (chroma) {
+        vec2 o = geometry_chroma_red_mm(u, half_mm) * ppm;
+        dx += vec3(o.x, 0.0, -o.x);
+        dy += vec3(o.y, 0.0, -o.y);
+    }
 }
 
 // Visible opening (T-37 review F1; CRT.md Visible area, overscan, corners: "a rounded rectangle defined by the

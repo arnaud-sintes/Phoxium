@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- Chromatic aberration controls (owner request 2026-11-20, QUESTIONS PHY-17, ARCHITECTURE A29): a "Chromatic aberration" group in the Geometry panel of the settings menu, with a one-line explanation, for the coloured fringes of a real tube. `geometry_chroma_lateral_mm` (red and blue apart at the picture corner along the radius, red outward by half and blue inward by half, -10 to 10 mm, files up to 20), `geometry_chroma_axis_mm` with `geometry_chroma_angle_deg` (the same separation everywhere in one direction, 0 to 5 mm, files up to 20) and `geometry_chroma_edge_exponent` (growth from the centre, 1 to 3, default 2 like the radial convergence term). They add to the per-colour convergence controls, work in every beam path and quality tier (flat tile path, line-image path, reference form, curved warp path), and the skirt margin and the warp path's line-image pad grow with them, so a shifted colour is not cut at the picture's edge. Both amounts at 0 (the defaults) give the picture of the previous build bit for bit; presets unchanged. Oracle `crt_model::geometry::Chroma`; tests `tests/stage_chroma.rs` (every path against the oracle, identity, no clipping at the hard bounds) and `tests/stage_chroma_reference.rs` (17 scenes bit-identical to a reference recorded on the previous build); README "Colour fringes". A per-colour spot size (per-gun focus) is a follow-up (PHY-17).
+
 ## [0.2.0] - 2026-11-20
 
 ultimateCRT v0.2.0 is the first public release (MIT licence, binaries not code-signed). It captures the window of a game or a program, runs it through a virtual CRT tube on the GPU and shows the result in a second window that can go fullscreen over the source without taking its keyboard focus; nothing is injected into the captured program. What is in it:

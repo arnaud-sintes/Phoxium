@@ -494,7 +494,7 @@ impl FrameConstants {
 
     /// Grows the tube image around the placed raster by the spot's reach (T-37, review of T-36b): 4 sigma
     /// of the spot at twice the peak current (`BEAM_REACH_CURRENT` and `BEAM_REACH_SIGMAS` of `beam.glsl`;
-    /// the tail's sigma when a tail is on) plus the largest misconvergence (static plus radial, mm), rounded
+    /// the tail's sigma when a tail is on) plus the largest misconvergence ([`max_misconvergence_mm`]), rounded
     /// up to whole pixels, per side and per axis, limited by the target on each axis (the raster stays
     /// centred). The beam is then evaluated over the margin, so the skirt past the raster's ends is drawn
     /// instead of cut; `raster_margin` tells the shaders where the raster is. Unplaced constants (px per mm
@@ -519,23 +519,7 @@ impl FrameConstants {
         if params.beam_tail_weight > 0.0 {
             sigma_mm *= f64::from(params.beam_tail_sigma_ratio).max(1.0);
         }
-        let conv = |s: f32, d: f32, r: f32| f64::from(s.abs().max(d.abs()) + r.abs());
-        let conv_mm = conv(
-            params.geometry_conv_red_dx_mm,
-            params.geometry_conv_red_dy_mm,
-            params.geometry_conv_red_radial_mm,
-        )
-        .max(conv(
-            params.geometry_conv_green_dx_mm,
-            params.geometry_conv_green_dy_mm,
-            params.geometry_conv_green_radial_mm,
-        ))
-        .max(conv(
-            params.geometry_conv_blue_dx_mm,
-            params.geometry_conv_blue_dy_mm,
-            params.geometry_conv_blue_radial_mm,
-        ));
-        let want = ((4.0 * sigma_mm + conv_mm) * f64::from(self.px_per_mm)).ceil();
+        let want = ((4.0 * sigma_mm + max_misconvergence_mm(params)) * f64::from(self.px_per_mm)).ceil();
         if !want.is_finite() || want <= 0.0 {
             return self;
         }
@@ -558,11 +542,87 @@ impl FrameConstants {
     }
 }
 
+/// The chromatic aberration controls of `params` (`geometry_chroma_*`, QUESTIONS PHY-17) for the oracle.
+pub fn chroma(params: &Params) -> crt_model::geometry::Chroma {
+    crt_model::geometry::Chroma {
+        lateral_mm: f64::from(params.geometry_chroma_lateral_mm),
+        axis_mm: f64::from(params.geometry_chroma_axis_mm),
+        angle_deg: f64::from(params.geometry_chroma_angle_deg),
+        edge_exponent: f64::from(params.geometry_chroma_edge_exponent),
+    }
+}
+
+/// Bound (mm) of the largest landing offset of one beam inside the picture, along x or y: per beam the larger
+/// static component plus its radial amount (the value at the picture corner), and for red and blue half of
+/// each chromatic aberration amount ([`crt_model::geometry::Chroma::max_beam_offset_mm`]); the largest over
+/// the three beams. Used for the skirt margin ([`FrameConstants::with_skirt_margin`]) and the warp path's line
+/// image pad (`gpu::stages::screen::warp_plan`). With the chromatic aberration off it is the former bound
+/// exactly (0 is added).
+pub fn max_misconvergence_mm(params: &Params) -> f64 {
+    let conv = |s: f32, d: f32, r: f32| f64::from(s.abs().max(d.abs()) + r.abs());
+    let ch = chroma(params).max_beam_offset_mm();
+    (conv(
+        params.geometry_conv_red_dx_mm,
+        params.geometry_conv_red_dy_mm,
+        params.geometry_conv_red_radial_mm,
+    ) + ch)
+        .max(conv(
+            params.geometry_conv_green_dx_mm,
+            params.geometry_conv_green_dy_mm,
+            params.geometry_conv_green_radial_mm,
+        ))
+        .max(
+            conv(
+                params.geometry_conv_blue_dx_mm,
+                params.geometry_conv_blue_dy_mm,
+                params.geometry_conv_blue_radial_mm,
+            ) + ch,
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::gpu::tube_rect_letterbox;
     use crate::params::ParamValue;
+
+    /// PHY-17: the misconvergence bound of the skirt margin and the warp pad adds half of each chromatic
+    /// aberration amount to red and blue (green is not moved by it); 0 at the defaults.
+    #[test]
+    fn misconvergence_bound_includes_the_chromatic_aberration() {
+        assert_eq!(max_misconvergence_mm(&Params::default()), 0.0);
+        let p = Params {
+            geometry_chroma_lateral_mm: -20.0,
+            geometry_chroma_axis_mm: 20.0,
+            geometry_conv_green_dx_mm: 3.0,
+            geometry_conv_blue_radial_mm: 1.0,
+            ..Params::default()
+        };
+        assert_eq!(max_misconvergence_mm(&p), 21.0);
+        let p = Params {
+            geometry_chroma_lateral_mm: 1.0,
+            geometry_conv_green_dx_mm: 3.0,
+            ..Params::default()
+        };
+        assert_eq!(max_misconvergence_mm(&p), 3.0);
+        // The margin grows by the bound: 10 mm at 5 px per mm is 50 px more per side.
+        let base = Params {
+            beam_tail_weight: 0.0,
+            ..Params::default()
+        };
+        let mut fc = FrameConstants::new((64, 48), (256, 192), false);
+        fc.px_per_mm = 5.0;
+        fc.line_pitch_mm = 0.8;
+        fc.target_size = [1024, 1024];
+        fc.tube_rect_px = [384.0, 416.0, 640.0, 608.0];
+        let m0 = fc.with_skirt_margin(&base).raster_margin;
+        let wide = Params {
+            geometry_chroma_lateral_mm: 20.0,
+            ..base
+        };
+        let m1 = fc.with_skirt_margin(&wide).raster_margin;
+        assert!(m1[0] >= m0[0] + 49 && m1[0] <= m0[0] + 51, "{m0:?} -> {m1:?}");
+    }
 
     /// T-39c: the mask footprint codes of the frame. Default parameters (PVM grille, 0.31 mm) placed on
     /// 2560 x 1440 at full height: 1440 / 290 x 0.31 = 1.5393 px per triad, prefiltered horizontally (code 0),

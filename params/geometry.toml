@@ -146,6 +146,75 @@ source = "CRT.md Visible area, overscan, corners: the visible opening is a round
 description = "Corner radius of the visible opening, the tube's visible area (tube_visible_height_mm x tube_aspect). The light is clipped to the opening: exactly 0 on host pixels whose centre is half a pixel or more outside, antialiased over one host pixel at the edge. 0 = square corners."
 group = "Geometry"
 
+# Chromatic aberration (QUESTIONS PHY-17, owner request 2026-11-20): colour fringes as on a real tube with imperfect
+# convergence, red and blue mirrored about green (oracle crt_model::geometry::Chroma). Added to the convergence
+# controls below; both amounts 0 (the defaults) is the identity, bit for bit. Each beam moves by half of an amount,
+# so the hard limit of 20 mm keeps each beam within the 10 mm of the convergence controls.
+
+[[param]]
+id = "geometry_chroma_lateral_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = -10.0
+max = 10.0
+hard_min = -20.0
+hard_max = 20.0
+hard_why = "each beam moves by half of it: 20 mm is the 10 mm limit of one beam's misconvergence; the reach of the beam sums grows with it (frame cost)"
+tag = "E"
+source = "CRT.md Convergence, purity and landing: in-line red and blue errors roughly mirror images about green, growing with the distance from the centre; 0.3 to 0.8 mm at the corners on monitors, up to 2 mm on TVs, 2 to 3 mm on cheap sets. 0 = off (the neutral identity)"
+description = "Colour fringes growing toward the edges: how far apart red and blue land at the picture corner, along the line from the centre. Red moves outward by half of it, blue inward by the other half, green stays. Negative: red inward. 0 = off. 0.5 to 1 mm looks like a good monitor, 2 to 3 mm like a cheap TV."
+group = "Chromatic aberration"
+
+[[param]]
+id = "geometry_chroma_axis_mm"
+stage = "geometry"
+type = "f32"
+unit = "mm"
+default = 0.0
+min = 0.0
+max = 5.0
+hard_min = 0.0
+hard_max = 20.0
+hard_why = "a distance is not negative (the angle gives the direction); each beam moves by half of it, at most the 10 mm limit of one beam's misconvergence"
+tag = "E"
+source = "CRT.md Convergence, purity and landing: static (centre) misconvergence 0.2 to 0.6 mm on monitors, 0.5 to 1.5 mm on TVs. 0 = off (the neutral identity)"
+description = "Colour fringes of the same size everywhere: how far apart red and blue land, in the direction set by the angle. Red moves by half of it, blue by the other half the opposite way. 0 = off."
+group = "Chromatic aberration"
+
+[[param]]
+id = "geometry_chroma_angle_deg"
+stage = "geometry"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = -180.0
+max = 180.0
+hard_min = -180.0
+hard_max = 180.0
+hard_why = "one full turn"
+tag = "E"
+source = "CRT.md Convergence, purity and landing: in-line errors mostly horizontal (0 deg). Direction convention as geometry_rotation_deg (clockwise on the screen)"
+description = "Direction in which red moves for the axis amount: 0 = red to the right, 90 = red down, 180 = red to the left, -90 = red up (blue always the opposite way). No effect while the axis amount is 0."
+group = "Chromatic aberration"
+
+[[param]]
+id = "geometry_chroma_edge_exponent"
+stage = "geometry"
+type = "f32"
+unit = "1"
+default = 2.0
+min = 1.0
+max = 3.0
+hard_min = 1.0
+hard_max = 4.0
+hard_why = "below 1 the fringe has a kink at the centre (not smooth) and the tile path's bound at the tile corners no longer holds; above 4 almost all of it sits in the last tenth of the radius"
+tag = "E"
+source = "CRT.md Convergence, purity and landing: model static centre offset plus a quadratic polynomial per channel, so 2 (the growth of the radial convergence controls) is the default; 1 = linear growth, 3 = strongly toward the corners"
+description = "How the lateral fringes grow from the centre to the corner: 1 = evenly (linear), 2 = slowly at first then faster (the usual tube), 3 = almost only near the corners. No effect while the lateral amount is 0."
+group = "Chromatic aberration"
+
 [[param]]
 id = "geometry_conv_red_dx_mm"
 stage = "geometry"

@@ -119,13 +119,98 @@ pub fn cylinder_seen_eye_mm(r_mm: f64, s: (f64, f64), eye_mm: f64) -> (f64, f64)
     (projected_from_arc_mm(r_mm, s.0, eye_mm), s.1 * k)
 }
 
+/// Radial misconvergence term of one beam at the picture position `u` (mm from the centre) of a picture of
+/// half size `half` (mm): `radial` (mm) times (r / rc)^`exponent` along the unit radius (outward for a positive
+/// `radial`), rc the half diagonal, so the term is `radial` at the picture corner and 0 at the centre. [E]
+pub fn radial_offset_mm(radial: f64, exponent: f64, u: (f64, f64), half: (f64, f64)) -> (f64, f64) {
+    let r = u.0.hypot(u.1);
+    if r == 0.0 || radial == 0.0 {
+        return (0.0, 0.0);
+    }
+    let k = radial * (r / half.0.hypot(half.1)).powf(exponent) / r;
+    (u.0 * k, u.1 * k)
+}
+
 /// Misconvergence of one beam at the picture position `u` (mm from the centre) of a picture of half size
 /// `half` (mm): the static offset `stat` (mm) plus `radial` (mm) times (r / rc)^2 along the radius, rc the
 /// half diagonal (CRT.md "Convergence": static centre offset plus a quadratic polynomial per channel [E]).
 pub fn convergence_offset_mm(stat: (f64, f64), radial: f64, u: (f64, f64), half: (f64, f64)) -> (f64, f64) {
-    let rc2 = half.0 * half.0 + half.1 * half.1;
-    let r = u.0.hypot(u.1);
-    (stat.0 + radial * u.0 * r / rc2, stat.1 + radial * u.1 * r / rc2)
+    let (x, y) = radial_offset_mm(radial, 2.0, u, half);
+    (stat.0 + x, stat.1 + y)
+}
+
+/// The chromatic aberration controls (QUESTIONS PHY-17, `params/geometry.toml` group "Chromatic aberration"):
+/// a misconvergence of red and blue mirrored about green, the dominant colour fringing of an in-line tube
+/// (CRT.md "Convergence": "red and blue errors are roughly mirror images about green, mostly horizontal,
+/// growing with distance from the centre" [E]). Red moves by half of each amount, blue by the opposite half,
+/// green stays; per-gun focus and glass dispersion are not part of it (PHY-17).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Chroma {
+    /// Separation of red and blue along the radius at the picture corner (mm; positive: red outward).
+    pub lateral_mm: f64,
+    /// Constant separation of red and blue (mm) along `angle_deg`.
+    pub axis_mm: f64,
+    /// Direction of the constant separation, from +x, clockwise on the screen (y down) (degrees).
+    pub angle_deg: f64,
+    /// Growth of the radial separation with the distance from the centre: (r / rc)^exponent.
+    pub edge_exponent: f64,
+}
+
+impl Default for Chroma {
+    /// Off: no separation, the quadratic growth of the convergence model.
+    fn default() -> Self {
+        Chroma {
+            lateral_mm: 0.0,
+            axis_mm: 0.0,
+            angle_deg: 0.0,
+            edge_exponent: 2.0,
+        }
+    }
+}
+
+impl Chroma {
+    /// True when both amounts are zero: every beam lands as without the controls (the angle and the
+    /// exponent are then inert).
+    pub fn is_off(&self) -> bool {
+        self.lateral_mm == 0.0 && self.axis_mm == 0.0
+    }
+
+    /// Offset (mm) of the red beam at the picture position `u` (mm from the centre) of a picture of half size
+    /// `half`: half the constant separation along the angle plus half the radial one,
+    /// [`radial_offset_mm`] with the edge exponent.
+    pub fn red_offset_mm(&self, u: (f64, f64), half: (f64, f64)) -> (f64, f64) {
+        let a = self.angle_deg.to_radians();
+        let (x, y) = radial_offset_mm(0.5 * self.lateral_mm, self.edge_exponent, u, half);
+        (0.5 * self.axis_mm * a.cos() + x, 0.5 * self.axis_mm * a.sin() + y)
+    }
+
+    /// Offsets (mm) of the red, green and blue beams at `u`: red, zero, minus red.
+    pub fn offsets_mm(&self, u: (f64, f64), half: (f64, f64)) -> [(f64, f64); 3] {
+        let (x, y) = self.red_offset_mm(u, half);
+        [(x, y), (0.0, 0.0), (-x, -y)]
+    }
+
+    /// Largest displacement (mm) of one beam inside the picture, along either axis or radially: half of each
+    /// amount, the radial one taken at the corner (r = rc, factor 1 for every exponent).
+    pub fn max_beam_offset_mm(&self) -> f64 {
+        0.5 * (self.lateral_mm.abs() + self.axis_mm.abs())
+    }
+}
+
+/// Total misconvergence of beam `channel` (0 red, 1 green, 2 blue) at `u`: the convergence model
+/// ([`convergence_offset_mm`] with that beam's static offset and radial amount) plus the chromatic
+/// aberration controls ([`Chroma::offsets_mm`]).
+pub fn misconvergence_mm(
+    stat: (f64, f64),
+    radial: f64,
+    chroma: &Chroma,
+    channel: usize,
+    u: (f64, f64),
+    half: (f64, f64),
+) -> (f64, f64) {
+    let (x, y) = convergence_offset_mm(stat, radial, u, half);
+    let (cx, cy) = chroma.offsets_mm(u, half)[channel];
+    (x + cx, y + cy)
 }
 
 #[cfg(test)]
@@ -270,6 +355,100 @@ mod tests {
             close(dx, 0.1 + 0.256_94, 1e-5) && close(dy, -0.2 + 0.177_88, 1e-5),
             "{dx} {dy}"
         );
+    }
+
+    /// PHY-17: on a 32 x 24 mm picture (half 16 x 12, rc 20 mm) red and blue land `lateral` apart at the
+    /// corner, each half of it, mirrored, green fixed; the separation grows as (r / rc)^exponent.
+    #[test]
+    fn chroma_lateral_at_the_corner_and_symmetry() {
+        let half = (16.0, 12.0);
+        let corner = (16.0, 12.0);
+        for e in [1.0, 2.0, 3.0] {
+            let c = Chroma {
+                lateral_mm: 3.0,
+                edge_exponent: e,
+                ..Chroma::default()
+            };
+            let [r, g, b] = c.offsets_mm(corner, half);
+            // Red outward by 1.5 mm along (0.8, 0.6), blue inward by 1.5 mm.
+            assert!(close(r.0, 1.2, 1e-12) && close(r.1, 0.9, 1e-12), "{r:?}");
+            assert_eq!(g, (0.0, 0.0));
+            assert_eq!(b, (-r.0, -r.1));
+            assert!(close((r.0 - b.0).hypot(r.1 - b.1), 3.0, 1e-12));
+            // Exponent shape: half the corner radius gives 0.5^e of the separation, the centre none.
+            let [r, _, b] = c.offsets_mm((8.0, 6.0), half);
+            assert!(
+                close((r.0 - b.0).hypot(r.1 - b.1), 3.0 * 0.5_f64.powf(e), 1e-12),
+                "e {e}"
+            );
+            assert_eq!(c.offsets_mm((0.0, 0.0), half), [(0.0, 0.0); 3]);
+        }
+        // Middle of the right edge (r = 16 = 0.8 rc), exponent 2: 0.64 of it, along +x.
+        let c = Chroma {
+            lateral_mm: -2.0,
+            ..Chroma::default()
+        };
+        let r = c.red_offset_mm((16.0, 0.0), half);
+        assert!(close(r.0, -0.64, 1e-12) && r.1 == 0.0, "{r:?}");
+        assert!(close(c.max_beam_offset_mm(), 1.0, 1e-12));
+    }
+
+    /// PHY-17: the constant separation follows the angle (clockwise on the screen, y down) everywhere.
+    #[test]
+    fn chroma_axis_by_angle() {
+        let half = (16.0, 12.0);
+        for (deg, dir) in [
+            (0.0, (1.0, 0.0)),
+            (90.0, (0.0, 1.0)),
+            (180.0, (-1.0, 0.0)),
+            (-90.0, (0.0, -1.0)),
+            (30.0, (0.866_025_403_784, 0.5)),
+        ] {
+            let c = Chroma {
+                axis_mm: 0.8,
+                angle_deg: deg,
+                ..Chroma::default()
+            };
+            for u in [(0.0, 0.0), (16.0, 12.0), (-7.0, 3.0)] {
+                let [r, g, b] = c.offsets_mm(u, half);
+                assert!(
+                    close(r.0, 0.4 * dir.0, 1e-9) && close(r.1, 0.4 * dir.1, 1e-9),
+                    "{deg}: {r:?}"
+                );
+                assert_eq!(g, (0.0, 0.0));
+                assert_eq!(b, (-r.0, -r.1));
+            }
+        }
+    }
+
+    /// PHY-17: both amounts zero is the identity (the angle and exponent are inert), and the total adds the
+    /// controls to the convergence model; with exponent 2 the lateral amount is the convergence model's
+    /// radial term split +/- between red and blue.
+    #[test]
+    fn chroma_off_is_identity_and_adds_to_convergence() {
+        let half = (16.0, 12.0);
+        let u = (13.0, 9.0);
+        let off = Chroma {
+            angle_deg: 77.0,
+            edge_exponent: 3.0,
+            ..Chroma::default()
+        };
+        assert!(off.is_off());
+        for ch in 0..3 {
+            assert_eq!(
+                misconvergence_mm((0.1, -0.2), 0.5, &off, ch, u, half),
+                convergence_offset_mm((0.1, -0.2), 0.5, u, half)
+            );
+        }
+        let c = Chroma {
+            lateral_mm: 1.0,
+            ..Chroma::default()
+        };
+        let red = misconvergence_mm((0.0, 0.0), 0.0, &c, 0, u, half);
+        let same = convergence_offset_mm((0.0, 0.0), 0.5, u, half);
+        assert!(close(red.0, same.0, 1e-12) && close(red.1, same.1, 1e-12));
+        let blue = misconvergence_mm((0.1, 0.0), 0.0, &c, 2, u, half);
+        assert!(close(blue.0, 0.1 - same.0, 1e-12) && close(blue.1, -same.1, 1e-12));
     }
 
     #[test]
