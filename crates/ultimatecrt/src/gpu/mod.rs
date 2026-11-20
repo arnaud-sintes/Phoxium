@@ -294,6 +294,117 @@ impl Renderer {
     }
 }
 
+/// Size of the burn-in wear map of the `wear` slot (T-43), texels.
+pub const WEAR_MAP_SIZE: (u32, u32) = stages::wear::MAP_SIZE;
+
+/// The wear map operations shared by the window and the headless renderer (`tube_state::WearHost`).
+mod wear_host {
+    use super::{Context, Pipeline, WEAR_MAP_SIZE};
+    use crate::tube_state::WearMap;
+    use crate::Res;
+
+    fn wear(p: &mut Pipeline) -> Res<&mut super::stages::wear::Wear> {
+        p.wear().ok_or_else(|| "the chain has no wear slot".into())
+    }
+
+    fn map(q: Vec<f32>) -> WearMap {
+        WearMap {
+            width: WEAR_MAP_SIZE.0,
+            height: WEAR_MAP_SIZE.1,
+            q,
+        }
+    }
+
+    pub(super) fn set(p: &mut Pipeline, m: &WearMap) -> Res<()> {
+        let m = m.resampled(WEAR_MAP_SIZE.0, WEAR_MAP_SIZE.1);
+        wear(p)?.set_map(m.q)
+    }
+
+    pub(super) fn reset(p: &mut Pipeline) {
+        if let Ok(w) = wear(p) {
+            w.reset();
+        }
+    }
+
+    pub(super) fn burn_in_now(p: &mut Pipeline, hours: f32) {
+        if let Ok(w) = wear(p) {
+            w.burn_in_now(f64::from(hours));
+        }
+    }
+
+    pub(super) fn request(p: &mut Pipeline) {
+        if let Ok(w) = wear(p) {
+            w.request_snapshot();
+        }
+    }
+
+    /// # Safety
+    /// `ctx` is the pipeline's context.
+    pub(super) unsafe fn take(p: &mut Pipeline, ctx: &Context) -> Res<Option<WearMap>> {
+        Ok(wear(p)?.take_snapshot(ctx)?.map(map))
+    }
+
+    /// # Safety
+    /// `ctx` is the pipeline's context; no frame is being recorded.
+    pub(super) unsafe fn read(p: &mut Pipeline, ctx: &Context) -> Res<Option<WearMap>> {
+        Ok(wear(p)?.read_now(ctx)?.map(map))
+    }
+}
+
+impl crate::tube_state::WearHost for Renderer {
+    fn wear_map_size(&self) -> (u32, u32) {
+        WEAR_MAP_SIZE
+    }
+    fn set_wear_map(&mut self, map: &crate::tube_state::WearMap) -> Res<()> {
+        wear_host::set(self.pipeline.as_mut().expect("pipeline created in new"), map)
+    }
+    fn reset_wear(&mut self) {
+        wear_host::reset(self.pipeline.as_mut().expect("pipeline created in new"));
+    }
+    fn burn_in_now(&mut self, hours: f32) {
+        wear_host::burn_in_now(self.pipeline.as_mut().expect("pipeline created in new"), hours);
+    }
+    fn request_wear_snapshot(&mut self) {
+        wear_host::request(self.pipeline.as_mut().expect("pipeline created in new"));
+    }
+    fn take_wear_snapshot(&mut self) -> Res<Option<crate::tube_state::WearMap>> {
+        // SAFETY: the pipeline was created on `self.ctx`.
+        unsafe { wear_host::take(self.pipeline.as_mut().expect("pipeline created in new"), &self.ctx) }
+    }
+    fn read_wear_map(&mut self) -> Res<Option<crate::tube_state::WearMap>> {
+        // SAFETY: as above; `render` records and submits within one call, so no frame is being recorded.
+        unsafe { wear_host::read(self.pipeline.as_mut().expect("pipeline created in new"), &self.ctx) }
+    }
+}
+
+impl crate::tube_state::WearHost for Headless {
+    fn wear_map_size(&self) -> (u32, u32) {
+        WEAR_MAP_SIZE
+    }
+    fn set_wear_map(&mut self, map: &crate::tube_state::WearMap) -> Res<()> {
+        wear_host::set(self.pipeline_mut(), map)
+    }
+    fn reset_wear(&mut self) {
+        wear_host::reset(self.pipeline_mut());
+    }
+    fn burn_in_now(&mut self, hours: f32) {
+        wear_host::burn_in_now(self.pipeline_mut(), hours);
+    }
+    fn request_wear_snapshot(&mut self) {
+        wear_host::request(self.pipeline_mut());
+    }
+    fn take_wear_snapshot(&mut self) -> Res<Option<crate::tube_state::WearMap>> {
+        let (p, ctx) = self.parts();
+        // SAFETY: the pipeline was created on `ctx`.
+        unsafe { wear_host::take(p, ctx) }
+    }
+    fn read_wear_map(&mut self) -> Res<Option<crate::tube_state::WearMap>> {
+        let (p, ctx) = self.parts();
+        // SAFETY: as above; every headless call records and submits within the call.
+        unsafe { wear_host::read(p, ctx) }
+    }
+}
+
 fn color_range() -> vk::ImageSubresourceRange {
     vk::ImageSubresourceRange::default()
         .aspect_mask(vk::ImageAspectFlags::COLOR)

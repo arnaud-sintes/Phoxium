@@ -809,6 +809,11 @@ impl Pipeline {
         }
     }
 
+    /// The burn-in wear map of the `wear` slot (T-43), `None` in a chain without it.
+    pub(super) fn wear(&mut self) -> Option<&mut stages::wear::Wear> {
+        self.chain.iter_mut().find_map(|l| l.stage.wear())
+    }
+
     /// Waits until the current frame slot is free (its previous submission finished). The CPU may then
     /// write the slot's buffers.
     ///
@@ -1057,6 +1062,8 @@ impl Pipeline {
         target: &Target,
         ui: Option<&mut dyn UiPass>,
     ) -> Res<vk::CommandBuffer> {
+        // T-42: a worn gun's grown spot, seen by every user of the spot law (crate::ageing).
+        let params = &crate::ageing::effective_params(params);
         let now = Instant::now();
         let mut fc = self.live_constants(view, settings, params, target.extent);
         fc.frame_index = self.frame_index;
@@ -1084,6 +1091,7 @@ impl Pipeline {
         format: vk::Format,
     ) -> Res<()> {
         // The same constants as `record` (image sizes included), so its plan reallocates nothing.
+        let params = &crate::ageing::effective_params(params);
         let fc = self.live_constants(view, settings, params, extent);
         self.plan_frame(ctx, view, &fc, settings, params, format).map(|_| ())
     }
@@ -1128,6 +1136,7 @@ impl Pipeline {
         params: &Params,
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
+        let params = &crate::ageing::effective_params(params);
         self.record_frame(ctx, view, fc, settings, params, target, None)
     }
 
@@ -1827,7 +1836,10 @@ mod tests {
     #[test]
     fn the_chain_is_ordered_and_consistent() {
         let names: Vec<&str> = stages::CHAIN.iter().map(|r| r.name).collect();
-        assert_eq!(names, ["signal", "amp", "gun", "abl", "screen", "phosphor", "optics"]);
+        assert_eq!(
+            names,
+            ["signal", "amp", "gun", "abl", "screen", "wear", "phosphor", "optics"]
+        );
         check_chain(stages::CHAIN).expect("valid chain");
         let domains: Vec<(Domain, Domain)> = stages::CHAIN.iter().map(|r| (r.input, r.output)).collect();
         use Domain::*;
@@ -1839,6 +1851,7 @@ mod tests {
                 (Amp, Amp),
                 (Amp, Amp),
                 (Amp, Tube),
+                (Tube, Tube),
                 (Tube, Tube),
                 (Tube, Tube)
             ]

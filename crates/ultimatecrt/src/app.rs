@@ -318,6 +318,8 @@ pub fn run() -> Res<()> {
     };
     let mut baseline = baseline_of(&library, current_preset.as_deref());
     let ui_settings_dir = settings_dir.clone();
+    // T-43: the burn-in wear map of the preset in force, loaded while burn-in is on, saved periodically and at exit.
+    let mut tube = crate::tube_state::TubeState::new(settings_dir.clone(), args.reset_burnin, Instant::now());
     let mut live = live::Live::new(
         args.fullscreen,
         stored,
@@ -512,6 +514,16 @@ pub fn run() -> Res<()> {
             println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
             live.set_gpu_adapter(adapter);
         }
+        // T-43: burn-in map of the preset in force (load, periodic save off the render thread), menu actions.
+        tube.tick(&mut renderer, &params, live.current_preset(), Instant::now());
+        match changes.wear_action {
+            Some(crate::ui::WearAction::BurnInNow(h)) if params.burnin_enable => tube.burn_in_now(&mut renderer, h),
+            Some(crate::ui::WearAction::NewTube) if params.burnin_enable => tube.reset(&mut renderer),
+            _ => {}
+        }
+        for m in tube.take_messages() {
+            println!("{m}");
+        }
         // The settings the menu changed: once the edits pause, at once when the menu is closed.
         live.flush_settings(!ui.is_open());
         // The menu layout, once the menu closed after a change: into the shared settings and the file.
@@ -608,6 +620,11 @@ pub fn run() -> Res<()> {
         live.set_ui_layout(layout);
     }
     live.finish(win.hwnd);
+    // T-43: the wear map read back once and written (when burn-in loaded one in this session).
+    tube.finish(&mut renderer);
+    for m in tube.take_messages() {
+        println!("{m}");
+    }
     if let Some(l) = log.as_mut() {
         l.summary();
     }

@@ -15,8 +15,8 @@
 //!
 //! Stages: `decode` (compute, captured frame -> native raster) and `encode` (fragment, linear light ->
 //! output target) are owned by the pipeline directly; between them runs the fixed ordered chain of
-//! slots [`CHAIN`] (T-20b, A11, TEC-6), in physical order: `signal`, `amp`, `gun`, `screen`,
-//! `phosphor`, `optics`.
+//! slots [`CHAIN`] (T-20b, A11, TEC-6), in physical order: `signal`, `amp`, `gun`, `abl`, `screen`,
+//! `wear` (ageing and burn-in, T-42, T-43), `phosphor`, `optics`.
 //!
 //! # Chain slots (T-20b)
 //!
@@ -56,6 +56,7 @@ pub(super) mod optics;
 pub(super) mod phosphor;
 pub(super) mod screen;
 pub(super) mod signal;
+pub(super) mod wear;
 
 #[cfg(test)]
 pub(super) mod dummy;
@@ -68,6 +69,7 @@ pub(super) const CHAIN: &[Registration] = &[
     gun::SLOT,
     abl::SLOT,
     screen::SLOT,
+    wear::SLOT,
     phosphor::SLOT,
     optics::SLOT,
 ];
@@ -180,6 +182,12 @@ pub(super) trait Stage {
     /// up to date for this frame), after every `prepare` (T-37 review: `screen` takes `raster_scale` 1 when
     /// it does not). Default: nothing.
     fn set_abl_runs(&self, _runs: bool) {}
+
+    /// The burn-in wear map of the `wear` slot (T-43), for the CPU operations on it (load, reset, save).
+    /// Default: none.
+    fn wear(&mut self) -> Option<&mut wear::Wear> {
+        None
+    }
 }
 
 /// A slot whose stage is not written yet: always bypassed (exact identity).

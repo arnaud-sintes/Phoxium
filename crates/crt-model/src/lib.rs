@@ -15,7 +15,9 @@
 //! oracle that panics loudly is preferred over one that returns a silent NaN.
 
 pub mod abl;
+pub mod ageing;
 pub mod beam;
+pub mod burnin;
 pub mod colour;
 pub mod geometry;
 pub mod gun;
