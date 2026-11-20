@@ -578,6 +578,52 @@ pub fn monitor_rects() -> Vec<RECT> {
     list.into_iter().filter_map(monitor_rect).collect()
 }
 
+/// Every monitor as (whole rectangle, work area without the taskbar), in virtual-screen pixels.
+pub fn monitor_work_irects() -> Vec<(IRect, IRect)> {
+    let mut list: Vec<HMONITOR> = Vec::new();
+    // SAFETY: plain enumeration and queries; `list` outlives the call.
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(monitor_proc), LPARAM(&mut list as *mut _ as isize));
+    }
+    list.into_iter()
+        .filter_map(|m| {
+            let mut info = MONITORINFO {
+                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            // SAFETY: as above.
+            unsafe { GetMonitorInfoW(m, &mut info) }
+                .as_bool()
+                .then(|| (irect(info.rcMonitor), irect(info.rcWork)))
+        })
+        .collect()
+}
+
+/// How close (px) to an outer screen edge the pointer must be released for [`snap_rect`].
+pub const SNAP_EDGE: i32 = 2;
+
+/// The self-run title-bar drag of the framed output disables Windows' snap (its modal move loop activates the
+/// window): a simple replacement. Released with the pointer at the left or right outer edge of a monitor, the
+/// window takes that half of the monitor's work area; at the top edge, the whole work area (a maximised size, the
+/// window stays a normal framed one). An edge shared with another monitor does not snap (the pointer crosses it).
+/// `monitors` lists (monitor, work area). `None`: no snap. Pure.
+pub fn snap_rect(cursor: (i32, i32), monitors: &[(IRect, IRect)]) -> Option<IRect> {
+    let inside = |r: &IRect, (x, y): (i32, i32)| x >= r.left && x < r.right && y >= r.top && y < r.bottom;
+    let (mon, work) = monitors.iter().find(|(m, _)| inside(m, cursor))?;
+    let outer = |p: (i32, i32)| !monitors.iter().any(|(m, _)| inside(m, p));
+    let (x, y) = cursor;
+    let half = work.left + work.width() / 2;
+    if y < mon.top + SNAP_EDGE && outer((x, mon.top - SNAP_EDGE)) {
+        Some(*work)
+    } else if x < mon.left + SNAP_EDGE && outer((mon.left - SNAP_EDGE, y)) {
+        Some(IRect::new(work.left, work.top, half, work.bottom))
+    } else if x >= mon.right - SNAP_EDGE && outer((mon.right - 1 + SNAP_EDGE, y)) {
+        Some(IRect::new(half, work.top, work.right, work.bottom))
+    } else {
+        None
+    }
+}
+
 /// Refresh rate (Hz) of the monitor that holds most of `hwnd` (`EnumDisplaySettingsW`, current mode), `None` when
 /// unknown or reported as the hardware default (0 or 1). The automatic quality drop compares the GPU frame time
 /// with its period (T-48, OUT-6).
@@ -929,7 +975,8 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             }
         }
         // Moving or resizing the non-activating framed output: run here, not in Windows' modal loop, which would
-        // activate the window and give it the keyboard focus (OUT-2). Aero snap and the keyboard move do not apply.
+        // activate the window and give it the keyboard focus (OUT-2). Windows' snap does not apply (a simple edge snap on
+        // release replaces it, `snap_rect`), nor does the keyboard move.
         WM_NCLBUTTONDOWN
             if NO_ACTIVATE.load(Ordering::Relaxed)
                 && !FULLSCREEN.load(Ordering::Relaxed)
@@ -964,8 +1011,25 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             LRESULT(0)
         }
         WM_LBUTTONUP if DRAG.get().is_some() => {
+            let hit = DRAG.get().map(|d| d.hit);
             DRAG.set(None);
             let _ = ReleaseCapture();
+            // A title-bar move released at an outer screen edge snaps (half or whole work area, `snap_rect`).
+            if hit == Some(HT_CAPTION) {
+                let mut p = windows::Win32::Foundation::POINT::default();
+                let _ = GetCursorPos(&mut p);
+                if let Some(r) = snap_rect((p.x, p.y), &monitor_work_irects()) {
+                    let _ = SetWindowPos(
+                        hwnd,
+                        None,
+                        r.left,
+                        r.top,
+                        r.width(),
+                        r.height(),
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+            }
             LRESULT(0)
         }
         WM_CAPTURECHANGED => {
@@ -1056,7 +1120,7 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 mod tests {
     use super::{
         behaviour, drag_rect, effective_no_activate, hand_back_target, on_activate, rebase_drag_on_dpi, self_drag_hit,
-        should_idle, styled, Behaviour, OnActivate,
+        should_idle, snap_rect, styled, Behaviour, OnActivate,
     };
     use crate::modes::IRect;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1131,6 +1195,36 @@ mod tests {
                 ex & WS_EX_LAYERED.0 as isize != 0
             );
         }
+    }
+
+    /// The edge snap of the self-run drag: left and right outer edges give the halves of the work area, the top
+    /// edge the whole work area; a shared edge between two monitors and the middle of a monitor do not snap.
+    #[test]
+    fn a_drag_released_at_an_outer_edge_snaps_to_a_half_or_the_work_area() {
+        let m0 = (IRect::new(0, 0, 2560, 1440), IRect::new(0, 0, 2560, 1400));
+        let m1 = (IRect::new(2560, 0, 5120, 1440), IRect::new(2560, 0, 5120, 1440));
+        let both = [m0, m1];
+        assert_eq!(
+            snap_rect((0, 700), &both),
+            Some(IRect::new(0, 0, 1280, 1400)),
+            "left half"
+        );
+        assert_eq!(
+            snap_rect((5119, 700), &both),
+            Some(IRect::new(3840, 0, 5120, 1440)),
+            "right half"
+        );
+        assert_eq!(snap_rect((1000, 0), &both), Some(m0.1), "top: the work area");
+        assert_eq!(snap_rect((3000, 0), &both), Some(m1.1));
+        // The shared edge: the pointer crosses it, no snap on either side.
+        assert_eq!(snap_rect((2559, 700), &both), None);
+        assert_eq!(snap_rect((2560, 700), &both), None);
+        // The middle, near but not at an edge, or off every monitor: no snap.
+        assert_eq!(snap_rect((1280, 700), &both), None);
+        assert_eq!(snap_rect((5, 700), &both), None);
+        assert_eq!(snap_rect((-50, 700), &both), None);
+        // One monitor: both sides are outer edges.
+        assert_eq!(snap_rect((2559, 700), &[m0]), Some(IRect::new(1280, 0, 2560, 1400)));
     }
 
     /// A title-bar drag that crosses onto a monitor of another DPI takes the size Windows suggests; a frame resize
