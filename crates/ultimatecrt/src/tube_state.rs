@@ -29,7 +29,10 @@
 //! changes: the old map is read back and saved first), asks every [`SAVE_PERIOD`] for an asynchronous copy of
 //! the map (no wait on the render thread, [`WearHost::take_wear_snapshot`]) and writes it on a background
 //! thread. [`TubeState::finish`] waits for that thread, reads the map back (blocking, once) and writes it at
-//! exit. `--reset-burnin` and the menu button "New tube" start from a clean map.
+//! exit. `--reset-burnin` and the menu button "New tube" start from a clean map. A snapshot asked for before a
+//! preset switch or a "New tube" is dropped when it arrives (a generation counter), so it never lands in
+//! another preset's file nor undoes the new tube. Without a settings folder no state file is read or written:
+//! the wear lasts for the session.
 
 use std::{
     fs,
@@ -268,7 +271,12 @@ pub struct TubeState {
     /// `--reset-burnin`: the first map is a new tube.
     reset_first: bool,
     last_save: Instant,
-    waiting_snapshot: bool,
+    /// The map generation: bumped when the map on the GPU stops being the one of `loaded` (another preset
+    /// loaded, a "New tube"). R-06.
+    generation: u64,
+    /// The generation a snapshot was requested in, while it is in flight. A snapshot that arrives after the
+    /// generation changed is a copy of a map that is no longer the loaded one: it is dropped, never saved.
+    waiting_snapshot: Option<u64>,
     writer: Option<JoinHandle<Result<(), String>>>,
     /// Messages for the console (load, save, warnings), taken by the app.
     messages: Vec<String>,
@@ -281,7 +289,8 @@ impl TubeState {
             loaded: None,
             reset_first,
             last_save: now,
-            waiting_snapshot: false,
+            generation: 0,
+            waiting_snapshot: None,
             writer: None,
             messages: Vec::new(),
         }
@@ -297,10 +306,11 @@ impl TubeState {
         self.loaded.as_deref()
     }
 
+    /// The state file of `preset`. Without a settings folder: a key only (`<preset>.state`, never a path in the
+    /// current directory), which is never read or written (R-54).
     fn path_for(&self, preset: Option<&str>) -> PathBuf {
         match &self.dir {
             Some(d) => state_path(d, preset),
-            // No settings folder: a name only, never written (`save_to` skips it).
             None => PathBuf::from(format!("{}.state", preset.unwrap_or("default"))),
         }
     }
@@ -308,17 +318,19 @@ impl TubeState {
     /// Once per frame: see the module documentation. `preset` is the preset in force.
     pub fn tick(&mut self, host: &mut dyn WearHost, params: &Params, preset: Option<&str>, now: Instant) {
         self.collect_writer();
-        if self.waiting_snapshot {
+        if let Some(asked_in) = self.waiting_snapshot {
             match host.take_wear_snapshot() {
                 Ok(Some(map)) => {
-                    self.waiting_snapshot = false;
-                    if let Some(path) = self.loaded.clone() {
+                    self.waiting_snapshot = None;
+                    if asked_in != self.generation {
+                        // Taken before a preset switch or a "New tube": it belongs to no file now.
+                    } else if let Some(path) = self.loaded.clone() {
                         self.spawn_save(path, map);
                     }
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    self.waiting_snapshot = false;
+                    self.waiting_snapshot = None;
                     self.messages.push(format!("warning: burn-in: snapshot failed: {e}"));
                 }
             }
@@ -332,18 +344,28 @@ impl TubeState {
                 // Another preset: the map on the GPU belongs to the old one.
                 self.save_now(host);
             }
+            self.generation += 1;
             self.load_into(host, &path);
             self.loaded = Some(path);
             self.last_save = now;
         }
-        if !self.waiting_snapshot && self.writer.is_none() && now.duration_since(self.last_save) >= SAVE_PERIOD {
+        if self.waiting_snapshot.is_none() && self.writer.is_none() && now.duration_since(self.last_save) >= SAVE_PERIOD
+        {
             host.request_wear_snapshot();
-            self.waiting_snapshot = true;
+            self.waiting_snapshot = Some(self.generation);
             self.last_save = now;
         }
     }
 
     fn load_into(&mut self, host: &mut dyn WearHost, path: &Path) {
+        if self.dir.is_none() {
+            // No settings folder: no file is read (nor kept as `.bak`) in the current directory.
+            self.reset_first = false;
+            host.reset_wear();
+            self.messages
+                .push("burn-in: new tube; no settings folder (APPDATA is not set), so the wear is not saved".into());
+            return;
+        }
         if std::mem::take(&mut self.reset_first) {
             host.reset_wear();
             self.messages.push(format!(
@@ -390,7 +412,9 @@ impl TubeState {
     /// The menu's "New tube": the map is cleared now and the file replaced at the next save (at once).
     pub fn reset(&mut self, host: &mut dyn WearHost) {
         host.reset_wear();
-        if let Some(path) = self.loaded.clone() {
+        // A snapshot in flight holds the worn map: it must not overwrite the new tube's file.
+        self.generation += 1;
+        if let Some(path) = self.loaded.clone().filter(|_| self.dir.is_some()) {
             self.join_writer();
             let (w, h) = host.wear_map_size();
             self.write(&path, &WearMap::new(w, h));
@@ -451,8 +475,11 @@ impl TubeState {
         }
     }
 
-    /// At exit: waits for a running save, then reads the map back and writes it (when one was loaded).
+    /// At exit, on every exit path (also after a render error: a failed read back is a warning): waits for a
+    /// running save, then reads the map back and writes it (when one was loaded). A snapshot still in flight
+    /// is dropped: the read back is newer.
     pub fn finish(&mut self, host: &mut dyn WearHost) {
+        self.waiting_snapshot = None;
         self.save_now(host);
     }
 }
@@ -685,5 +712,144 @@ mod tests {
         assert_eq!(host.map, Some(WearMap::new(4, 3)));
         assert!(ts.take_messages().iter().any(|m| m.contains("--reset-burnin")));
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A renderer whose snapshot is a copy of the map when it was asked for (as on the GPU), delivered one tick
+    /// late.
+    #[derive(Default)]
+    struct Late {
+        map: Option<WearMap>,
+        in_flight: Option<(WearMap, u32)>,
+    }
+
+    impl WearHost for Late {
+        fn wear_map_size(&self) -> (u32, u32) {
+            (4, 3)
+        }
+        fn set_wear_map(&mut self, map: &WearMap) -> Res<()> {
+            self.map = Some(map.clone());
+            Ok(())
+        }
+        fn reset_wear(&mut self) {
+            self.map = Some(WearMap::new(4, 3));
+        }
+        fn burn_in_now(&mut self, _: f32) {}
+        fn request_wear_snapshot(&mut self) {
+            self.in_flight = self.map.clone().map(|m| (m, 0));
+        }
+        fn take_wear_snapshot(&mut self) -> Res<Option<WearMap>> {
+            match self.in_flight.take() {
+                Some((m, age)) if age >= 1 => Ok(Some(m)),
+                Some((m, age)) => {
+                    self.in_flight = Some((m, age + 1));
+                    Ok(None)
+                }
+                None => Ok(None),
+            }
+        }
+        fn read_wear_map(&mut self) -> Res<Option<WearMap>> {
+            Ok(self.map.clone())
+        }
+    }
+
+    fn uniform(v: f32) -> WearMap {
+        WearMap {
+            q: vec![v; 36],
+            ..WearMap::new(4, 3)
+        }
+    }
+
+    fn stored(path: &Path) -> Option<f32> {
+        match load(path, (4, 3)) {
+            Loaded::Map { map, .. } => Some(map.max_charge()),
+            _ => None,
+        }
+    }
+
+    /// R-06: a snapshot asked for in preset A (tick N) that arrives after the switch to B (tick N + 2) is
+    /// dropped: B's file keeps B's map, A's file has A's map from the switch.
+    #[test]
+    fn a_snapshot_from_before_a_preset_switch_is_dropped() {
+        let dir = temp_dir("late-switch");
+        let (a, b) = (state_path(&dir, Some("a")), state_path(&dir, Some("b")));
+        save(&b, &uniform(2.0)).unwrap();
+        let t0 = Instant::now();
+        let mut ts = TubeState::new(Some(dir.clone()), false, t0);
+        let mut host = Late::default();
+        let p = Params {
+            burnin_enable: true,
+            ..Params::default()
+        };
+        ts.tick(&mut host, &p, Some("a"), t0);
+        host.map = Some(uniform(5.0));
+        let n = t0 + SAVE_PERIOD;
+        ts.tick(&mut host, &p, Some("a"), n); // N: the snapshot of A's map is asked for
+        assert!(host.in_flight.is_some());
+        ts.tick(&mut host, &p, Some("b"), n); // N + 1: switch, B's map loaded from its file
+        assert_eq!(host.map, Some(uniform(2.0)));
+        assert_eq!(stored(&a), Some(5.0), "A saved at the switch");
+        ts.tick(&mut host, &p, Some("b"), n); // N + 2: A's snapshot arrives
+        assert!(host.in_flight.is_none(), "delivered");
+        ts.join_writer();
+        assert_eq!(stored(&b), Some(2.0), "B's file still holds B's map");
+        // The next periodic save of B works as before.
+        host.map = Some(uniform(3.0));
+        let m = n + SAVE_PERIOD;
+        for _ in 0..3 {
+            ts.tick(&mut host, &p, Some("b"), m);
+        }
+        ts.join_writer();
+        assert_eq!(stored(&b), Some(3.0));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R-06: a snapshot asked for before "New tube" does not undo it: the file stays a new tube.
+    #[test]
+    fn a_snapshot_from_before_a_new_tube_is_dropped() {
+        let dir = temp_dir("late-reset");
+        let a = state_path(&dir, Some("a"));
+        let t0 = Instant::now();
+        let mut ts = TubeState::new(Some(dir.clone()), false, t0);
+        let mut host = Late::default();
+        let p = Params {
+            burnin_enable: true,
+            ..Params::default()
+        };
+        ts.tick(&mut host, &p, Some("a"), t0);
+        host.map = Some(uniform(5.0));
+        let n = t0 + SAVE_PERIOD;
+        ts.tick(&mut host, &p, Some("a"), n); // N: snapshot of the worn map asked for
+        ts.tick(&mut host, &p, Some("a"), n); // N + 1: still in flight
+        ts.reset(&mut host); // "New tube"
+        assert_eq!(stored(&a), Some(0.0));
+        ts.tick(&mut host, &p, Some("a"), n); // N + 2: the worn snapshot arrives
+        assert!(host.in_flight.is_none());
+        ts.join_writer();
+        assert_eq!(stored(&a), Some(0.0), "the new tube stays new");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// R-54: without a settings folder the controller reads and writes no file (a key is kept, not a path).
+    #[test]
+    fn no_settings_folder_means_no_file_access() {
+        let t0 = Instant::now();
+        let mut ts = TubeState::new(None, false, t0);
+        let mut host = Fake {
+            map: Some(uniform(4.0)),
+            ..Fake::default()
+        };
+        let p = Params {
+            burnin_enable: true,
+            ..Params::default()
+        };
+        ts.tick(&mut host, &p, Some("a"), t0);
+        assert_eq!((host.resets, host.map.clone()), (1, Some(WearMap::new(4, 3))));
+        assert!(ts.take_messages().iter().any(|m| m.contains("no settings folder")));
+        assert!(ts.loaded_path().is_some_and(Path::is_relative));
+        host.map = Some(uniform(4.0));
+        ts.tick(&mut host, &p, Some("b"), t0); // a switch: nothing written for a, nothing read for b
+        ts.reset(&mut host);
+        ts.finish(&mut host);
+        assert!(ts.take_messages().iter().all(|m| !m.contains("warning")));
     }
 }

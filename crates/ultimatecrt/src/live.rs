@@ -29,7 +29,11 @@ pub struct Live {
     /// The settings as loaded, the one instance of the session; `global.output.windowed` (on F11 and at exit)
     /// and `global.ui` (the menu layout, [`Live::set_ui_layout`]) are written back.
     settings: Settings,
+    /// Where the settings are written; `None`: never written (no settings folder, or a file the session must
+    /// not overwrite, [`writable_dir`]).
     settings_dir: Option<PathBuf>,
+    /// The background writer (R-31), started at the first write.
+    writer: Option<settings::Writer>,
     /// Outer size of the framed window when nothing is remembered (the initial client size plus the frame).
     default_outer: (i32, i32),
     last_follow: std::time::Instant,
@@ -65,6 +69,7 @@ impl Live {
             bypass_saved: None,
             settings,
             settings_dir,
+            writer: None,
             default_outer,
             last_follow: std::time::Instant::now(),
             dirty_since: None,
@@ -95,8 +100,8 @@ impl Live {
             }
         }
         output::set_cursor_hidden(!ui.wants_input());
-        // Follows the framed window about once a second, so the rectangle is known when the window is
-        // destroyed (Esc, Ctrl+Alt+Q, the close button) and can be written at exit.
+        // Follows the framed window about once a second, so a rectangle is known at exit even when the window
+        // cannot be read then (minimised).
         if self.mode.mode == WindowMode::Windowed && self.last_follow.elapsed() >= std::time::Duration::from_secs(1) {
             self.last_follow = std::time::Instant::now();
             self.mode.remember(output::outer_rect(hwnd), &output::monitor_irects());
@@ -235,8 +240,8 @@ impl Live {
     }
 
     /// Writes the settings when the menu changed them: once no change came for [`SAVE_DEBOUNCE`] (a slider
-    /// drag writes once, at its end), or at once with `now` (the menu closed, the app exits). A failure is a
-    /// warning, never an error. Returns whether the file was written.
+    /// drag writes once, at its end), or at once with `now` (the menu closed, the app exits). The write runs on
+    /// the background writer (R-31); a failure is a warning, never an error. Returns whether a write was queued.
     pub fn flush_settings(&mut self, now: bool) -> bool {
         let Some(since) = self.dirty_since else {
             return false;
@@ -245,16 +250,24 @@ impl Live {
             return false;
         }
         self.dirty_since = None;
+        self.write()
+    }
+
+    /// Queues the settings for the background writer. False when they are never written (`settings_dir`).
+    fn write(&mut self) -> bool {
         let Some(dir) = &self.settings_dir else {
             return false;
         };
-        match settings::save(dir, &self.settings) {
-            Ok(()) => true,
-            Err(e) => {
-                eprintln!("warning: cannot save the settings: {e}");
-                false
-            }
-        }
+        self.writer
+            .get_or_insert_with(|| settings::Writer::new(dir.clone()))
+            .save(&self.settings);
+        true
+    }
+
+    /// Waits until the queued writes are on disk (tests, and the exit through [`Live::finish`]). Returns the
+    /// error of the last failed write, if any.
+    pub fn wait_saved(&self) -> Option<String> {
+        self.writer.as_ref().and_then(settings::Writer::wait_idle)
     }
 
     /// The menu layout changed (the menu closed after a move, resize or opacity change): kept in the shared
@@ -264,16 +277,7 @@ impl Live {
             return;
         }
         self.settings.global.ui = layout;
-        if let Some(dir) = &self.settings_dir {
-            if let Err(e) = settings::save(dir, &self.settings) {
-                eprintln!("warning: cannot save the menu layout: {e}");
-            }
-        }
-    }
-
-    /// The fullscreen output dropped to a window by itself (T-56): keeps the mode in step.
-    pub fn dropped_to_windowed(&mut self) {
-        self.mode.force_windowed();
+        self.write();
     }
 
     /// A fullscreen output becomes the framed window of F11 (non-activating, at the remembered rectangle): a
@@ -312,11 +316,13 @@ impl Live {
 
     /// The menu or the picker changed `[global.source] ask_at_start` or `wait_s` (A23): written with the next
     /// [`Live::flush_settings`] (debounced).
+    /// The wait is clamped to 0 or more before the comparison; a NaN wait leaves the stored one (R-39).
     pub fn set_source_prefs(&mut self, ask_at_start: bool, wait_s: f64) {
         let s = &mut self.settings.global.source;
+        let wait_s = if wait_s.is_nan() { s.wait_s } else { wait_s.max(0.0) };
         if s.ask_at_start != ask_at_start || s.wait_s != wait_s {
             s.ask_at_start = ask_at_start;
-            s.wait_s = wait_s.max(0.0);
+            s.wait_s = wait_s;
             self.mark_dirty();
         }
     }
@@ -349,16 +355,22 @@ impl Live {
         }
     }
 
-    /// At exit: remembers where the framed window is and writes it to the settings.
+    /// At exit, on every exit path (the window still exists, hidden or not; a null `hwnd` skips the window):
+    /// remembers where the framed window is, writes the settings and waits for the writer to finish.
     pub fn finish(&mut self, hwnd: HWND) {
-        if self.mode.mode == WindowMode::Windowed {
-            // The window may be destroyed already (Esc, Ctrl+Alt+Q): then the last remembered rectangle stays.
-            if unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool() {
-                self.mode.remember(output::outer_rect(hwnd), &output::monitor_irects());
-            }
+        // SAFETY: plain query on a window handle (null or destroyed: false).
+        if self.mode.mode == WindowMode::Windowed
+            && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(hwnd)) }.as_bool()
+        {
+            // A minimised window reports an off-screen rectangle: `remember` keeps the last usable one.
+            self.mode.remember(output::outer_rect(hwnd), &output::monitor_irects());
         }
         self.save_window_rect();
         self.flush_settings(true);
+        if let Some(w) = self.writer.take() {
+            // Each failure was already reported on stderr by the writer.
+            let _ = w.finish();
+        }
     }
 
     /// Writes `global.output.windowed` when it changed. A failure is a warning, never an error.
@@ -368,12 +380,14 @@ impl Live {
             return;
         }
         self.settings.global.output.windowed = rect;
-        if let Some(dir) = &self.settings_dir {
-            if let Err(e) = settings::save(dir, &self.settings) {
-                eprintln!("warning: cannot save the window position: {e}");
-            }
-        }
+        self.write();
     }
+}
+
+/// The folder the session writes its settings to (R-15): the settings folder, unless the file found there
+/// must not be overwritten (unreadable, or a newer schema: [`settings::Loaded::writable`]).
+pub fn writable_dir(dir: Option<&std::path::Path>, loaded: &settings::Loaded) -> Option<PathBuf> {
+    dir.filter(|_| loaded.writable).map(std::path::Path::to_path_buf)
 }
 
 /// The console text of a placement: `fullscreen on monitor 1 (2560x1440 at 2560,0)` or `windowed 1296x759 at 100,80`.
@@ -427,7 +441,7 @@ mod tests {
         assert!(!live.flush_settings(false), "written before the debounce delay");
         assert!(live.flush_settings(true));
         assert!(!live.flush_settings(true), "nothing left to write");
-        let saved = settings::load(&dir).settings;
+        let saved = stored(&live, &dir);
         assert_eq!(saved.global.preset, id);
         assert_eq!(saved.global.overrides.get("exposure"), Some(&toml::Value::Float(1.5)));
         assert_eq!(
@@ -439,14 +453,14 @@ mod tests {
         let other = lib.list()[1].id.clone();
         live.note_preset_selected(Some(&other));
         live.flush_settings(true);
-        let saved = settings::load(&dir).settings;
+        let saved = stored(&live, &dir);
         assert_eq!(
             (saved.global.preset.as_str(), saved.global.overrides.len()),
             (other.as_str(), 0)
         );
         // The adapter choice is written without waiting.
         live.set_gpu_adapter("Intel".to_string());
-        assert_eq!(settings::load(&dir).settings.global.gpu.adapter, "Intel");
+        assert_eq!(stored(&live, &dir).global.gpu.adapter, "Intel");
         // A23: the last source is written at once, the source preferences debounced.
         let last = settings::LastSource {
             exe: "pixel-demo.exe".into(),
@@ -454,11 +468,11 @@ mod tests {
             title: "pixel-demo".into(),
         };
         live.remember_source(last.clone());
-        assert_eq!(settings::load(&dir).settings.global.source.last, Some(last));
+        assert_eq!(stored(&live, &dir).global.source.last, Some(last));
         live.set_source_prefs(false, 12.0);
         assert!(!live.flush_settings(false));
         assert!(live.flush_settings(true));
-        let s = settings::load(&dir).settings.global.source;
+        let s = stored(&live, &dir).global.source;
         assert_eq!((s.ask_at_start, s.wait_s), (false, 12.0));
         // Black-bar detection preferences: debounced; a source profile: written at once, keyed by program and
         // class.
@@ -470,7 +484,7 @@ mod tests {
         };
         live.set_bars_prefs(cfg);
         assert!(live.flush_settings(true));
-        let s = settings::load(&dir).settings.global.source;
+        let s = stored(&live, &dir).global.source;
         assert_eq!(s.bars_config(), cfg);
         let mut profile = settings::SourceProfile {
             exe: "snes9x.exe".into(),
@@ -491,23 +505,85 @@ mod tests {
         );
         crate::scaling::Multiplier::Manual(3, 3).apply(&mut Params::default(), &mut profile);
         live.save_source_profile(&profile, false);
-        let saved = settings::load(&dir).settings;
+        let saved = stored(&live, &dir);
         assert_eq!(saved.find_source("SNES9X.EXE", "snes9x"), Some(&profile));
         // A manual limit edit: debounced, written with the next flush.
         profile.crop = Some([2, 16, 770, 688]);
         live.save_source_profile(&profile, true);
-        assert_ne!(
-            settings::load(&dir).settings.find_source("snes9x.exe", "Snes9X"),
-            Some(&profile)
-        );
+        assert_ne!(stored(&live, &dir).find_source("snes9x.exe", "Snes9X"), Some(&profile));
         assert!(live.flush_settings(true));
-        assert_eq!(
-            settings::load(&dir).settings.find_source("snes9x.exe", "Snes9X"),
-            Some(&profile)
-        );
+        assert_eq!(stored(&live, &dir).find_source("snes9x.exe", "Snes9X"), Some(&profile));
         // Without an executable nothing is stored.
         live.save_source_profile(&settings::SourceProfile::default(), false);
-        assert_eq!(settings::load(&dir).settings.sources.len(), 1);
+        assert_eq!(stored(&live, &dir).sources.len(), 1);
+        // The exit writes what is left and stops the writer; nothing is left behind but the file.
+        live.set_source_prefs(true, 5.0);
+        live.finish(HWND::default());
+        assert_eq!(settings::load(&dir).settings.global.source.wait_s, 5.0);
+        let names: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, [settings::SETTINGS_FILE]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The settings on disk once the queued writes are done.
+    fn stored(live: &Live, dir: &std::path::Path) -> Settings {
+        assert_eq!(live.wait_saved(), None);
+        settings::load(dir).settings
+    }
+
+    /// R-39: the wait is clamped before the comparison (a repeated negative wait marks the settings dirty once);
+    /// NaN keeps the stored wait.
+    #[test]
+    fn source_prefs_are_clamped_before_the_comparison() {
+        let mut live = Live::new(false, Settings::default(), None, Library::embedded(), None, (800, 600));
+        live.set_source_prefs(true, -1.0);
+        assert!(live.dirty_since.is_some());
+        assert_eq!(live.settings().global.source.wait_s, 0.0);
+        live.dirty_since = None;
+        live.set_source_prefs(true, -1.0);
+        assert!(live.dirty_since.is_none(), "same clamped value: not dirty again");
+        live.set_source_prefs(true, f64::NAN);
+        assert!(live.dirty_since.is_none());
+        assert_eq!(live.settings().global.source.wait_s, 0.0);
+        live.set_source_prefs(false, f64::NAN);
+        assert!(live.dirty_since.is_some(), "the other preference still counts");
+        assert_eq!(live.settings().global.source.wait_s, 0.0);
+    }
+
+    /// R-15: a session that found a newer-schema (or unreadable) file never writes it, at exit included.
+    #[test]
+    fn a_newer_settings_file_is_never_written() {
+        let dir = std::env::temp_dir().join(format!("ucrt-live-newer-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let text = format!(
+            "version = {}\n[global]\npreset = \"future\"\n",
+            settings::SCHEMA_VERSION + 1
+        );
+        std::fs::write(dir.join(settings::SETTINGS_FILE), &text).unwrap();
+        let loaded = settings::load(&dir);
+        assert!(!loaded.writable);
+        let mut live = Live::new(
+            false,
+            loaded.settings.clone(),
+            writable_dir(Some(&dir), &loaded),
+            Library::embedded(),
+            None,
+            (800, 600),
+        );
+        live.set_gpu_adapter("Intel".into());
+        live.set_source_prefs(false, 3.0);
+        live.finish(HWND::default());
+        assert_eq!(
+            std::fs::read_to_string(dir.join(settings::SETTINGS_FILE)).unwrap(),
+            text
+        );
+        // A valid file stays writable.
+        std::fs::write(dir.join(settings::SETTINGS_FILE), "version = 1\n").unwrap();
+        assert_eq!(writable_dir(Some(&dir), &settings::load(&dir)), Some(dir.clone()));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

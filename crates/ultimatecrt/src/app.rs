@@ -193,10 +193,15 @@ pub fn run() -> Res<()> {
     // T-54, T-57, HW-3, A23: the hotkey chords, the remembered window rectangle, the GPU choice and the source
     // selection come from the settings file.
     let settings_dir = settings::default_dir();
-    let stored = settings_dir
-        .as_deref()
-        .map(|d| settings::load(d).settings)
-        .unwrap_or_default();
+    let loaded = settings_dir.as_deref().map(settings::load);
+    // R-15: a settings file this session must not overwrite (unreadable, newer schema) leaves `writable_dir`
+    // empty: the session runs on the defaults in memory. The warning (already on stderr from `live_params`) is
+    // also shown in the window picker.
+    let writable_dir = loaded
+        .as_ref()
+        .and_then(|l| live::writable_dir(settings_dir.as_deref(), l));
+    let settings_notice = loaded.as_ref().and_then(|l| l.warning.clone());
+    let stored = loaded.map(|l| l.settings).unwrap_or_default();
     // A23: the windows recently in the foreground come first in the picker (the z-order seeds the list).
     let mut recent = picker::Recent::default();
     let mut start_message: Option<(bool, String)> = None;
@@ -498,7 +503,7 @@ pub fn run() -> Res<()> {
     let mut live = live::Live::new(
         args.fullscreen,
         stored,
-        settings_dir,
+        writable_dir,
         library,
         current_preset,
         output::default_outer_size(windowed_size),
@@ -562,7 +567,7 @@ pub fn run() -> Res<()> {
         _ => None,
     };
     output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
-    ui.set_picker_message(start_message.take());
+    ui.set_picker_message(start_message.take().or(settings_notice.map(|w| (false, w))));
     let mut source_request: Option<SourceAction> = None;
     // The Source section's picture area (Auto detection, manual limits) and multiplier edits; `remap` recomputes
     // the view (native size, placement, readouts) at the next frame even when the source sends none.
@@ -586,778 +591,925 @@ pub fn run() -> Res<()> {
     let mut thumbs = picker::ThumbPlan::default();
     let mut thumb_capture: Option<(isize, capture::Capture)> = None;
     let own = win.hwnd.0 as isize;
+    // R-04: the previous iteration idled (minimised output).
+    let mut was_idle = false;
 
-    loop {
-        if !output::pump() {
-            break;
-        }
-        live.tick(&mut ui, win.hwnd, &mut renderer, &mut params, &mut lost_watch);
-        if live.controls.quit {
-            break;
-        }
-        if args.exit_after.is_some_and(|s| start.elapsed().as_secs_f64() > s) {
-            break;
-        }
-        let now = start.elapsed().as_secs_f64();
-        // SAFETY: plain query.
-        let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as isize;
-        if fg != own {
-            recent.note(fg);
-        }
+    // R-01: the session loop. Every error in it (a `?`) ends the loop and comes out here as `outcome`; the
+    // shutdown below then runs on every exit path, normal or not.
+    #[allow(clippy::redundant_closure_call)]
+    let outcome: Res<()> = (|| -> Res<()> {
+        loop {
+            if !output::pump() {
+                break;
+            }
+            live.tick(&mut ui, win.hwnd, &mut renderer, &mut params, &mut lost_watch);
+            if live.controls.quit {
+                break;
+            }
+            if args.exit_after.is_some_and(|s| start.elapsed().as_secs_f64() > s) {
+                break;
+            }
+            let now = start.elapsed().as_secs_f64();
+            // R-04: minimised (or no client area): no frame taken, no render; the loop sleeps in `wait_messages`
+            // below, so the hotkeys, the menu key and the lifecycle (reattach, lost source) keep working.
+            let out_size = output::client_size(win.hwnd);
+            let idle = output::should_idle(out_size, output::is_iconic(win.hwnd));
+            if was_idle && !idle {
+                // Back from the minimised state: the frames that were not taken are not a silent source.
+                health.reset(now);
+            }
+            was_idle = idle;
+            // SAFETY: plain query.
+            let fg = unsafe { windows::Win32::UI::WindowsAndMessaging::GetForegroundWindow() }.0 as isize;
+            if fg != own {
+                recent.note(fg);
+            }
 
-        // ---- A23: source requests of the picker and the menu ----
-        let mut attach_request = None;
-        let mut area_request: Option<SourceAction> = None;
-        let mut multiplier_request: Option<scaling::Multiplier> = None;
-        match source_request.take() {
-            None => {}
-            Some(
-                a @ (SourceAction::DetectNow
-                | SourceAction::SetAreaMode(_)
-                | SourceAction::SetLimits(_)
-                | SourceAction::ResetCrop
-                | SourceAction::UndoCrop),
-            ) => area_request = Some(a),
-            Some(SourceAction::SetMultiplier(m)) => multiplier_request = Some(m),
-            Some(SourceAction::Attach(h)) => attach_request = Some(h),
-            Some(SourceAction::Cancel) => phase = picker::next(phase, Event::Cancel),
-            Some(SourceAction::ChangeSource) => {
-                phase = picker::next(phase, Event::ShowPicker);
-                if !picker::follows_target(phase) {
-                    // Change source while a lost source was waited for: the wait ends, nothing to go back to.
+            // ---- A23: source requests of the picker and the menu ----
+            let mut attach_request = None;
+            let mut area_request: Option<SourceAction> = None;
+            let mut multiplier_request: Option<scaling::Multiplier> = None;
+            match source_request.take() {
+                None => {}
+                Some(
+                    a @ (SourceAction::DetectNow
+                    | SourceAction::SetAreaMode(_)
+                    | SourceAction::SetLimits(_)
+                    | SourceAction::ResetCrop
+                    | SourceAction::UndoCrop),
+                ) => area_request = Some(a),
+                Some(SourceAction::SetMultiplier(m)) => multiplier_request = Some(m),
+                Some(SourceAction::Attach(h)) => attach_request = Some(h),
+                Some(SourceAction::Cancel) => phase = picker::next(phase, Event::Cancel),
+                Some(SourceAction::ChangeSource) => {
+                    phase = picker::next(phase, Event::ShowPicker);
+                    if !picker::follows_target(phase) {
+                        // Change source while a lost source was waited for: the wait ends, nothing to go back to.
+                        reattach = None;
+                        lost_at = None;
+                        lost_watch.update(now, true);
+                        frame = idle_frame();
+                        fresh = true;
+                        source_name = None;
+                        ui.source_gone();
+                        ui.show_picker(false);
+                    }
+                    list_due = 0.0;
+                }
+                Some(SourceAction::Detach) => {
+                    if let Some(c) = capture.take() {
+                        captured_base += c.frames_captured();
+                    }
                     reattach = None;
                     lost_at = None;
                     lost_watch.update(now, true);
+                    phase = picker::next(phase, Event::Detach);
+                    synthetic = false;
                     frame = idle_frame();
                     fresh = true;
-                    source_name = None;
+                    size_watch.request_history_clear();
                     ui.source_gone();
-                    ui.show_picker(false);
+                    output::set_source(HWND::default());
+                    source_name = None;
+                    bars_state.forget();
+                    output::set_title(win.hwnd, &window_title(None, None));
+                    println!("source: detached");
                 }
+                Some(SourceAction::Refresh) => list_due = 0.0,
+                Some(SourceAction::RefreshPreview) => thumbs.refresh(),
+            }
+            if let Some(h) = attach_request {
+                let entry = entry_of(h, &ui.picker().rows);
+                let t = lifecycle::TargetKey::of(&entry);
+                let new_profile = profile_for(live.settings(), &t).unwrap_or_default();
+                let mut p = params;
+                for w in new_profile.switch_to(&mut p, &base_params(&live)) {
+                    eprintln!("warning: {w}");
+                }
+                if let Err(e) = args.apply_source(&mut p) {
+                    eprintln!("warning: {e}");
+                }
+                let (new_map, warnings) = resolve_map(&p, &new_profile, cli_crop, cli_divisor);
+                for w in &warnings {
+                    eprintln!("warning: {w}");
+                }
+                match capture::Capture::start(hwnd_of(h), new_map.client_area, capture_luid) {
+                    Ok(c) => {
+                        if let Some(old) = capture.replace(c) {
+                            captured_base += old.frames_captured();
+                        }
+                        frame.seq = 0; // the new session counts from 1
+                        synthetic = false;
+                        println!("source: attached \"{}\" ({})", entry.title, t.describe());
+                        if new_profile != settings::SourceProfile::default() {
+                            println!("source profile: {}", t.describe());
+                        }
+                        live.remember_source(settings::LastSource {
+                            exe: t.exe.clone().unwrap_or_default(),
+                            class: t.class.clone(),
+                            title: t.title.clone(),
+                        });
+                        source_name = Some(target_name(&t));
+                        output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
+                        reattach = Some(lifecycle::Reattacher::new(t, h));
+                        lost_at = None;
+                        lost_watch.update(now, true);
+                        profile = new_profile;
+                        map = new_map;
+                        params = p;
+                        renderer.set_params(params);
+                        baseline = baseline_of(live.library(), live.current_preset(), &profile);
+                        health.reset(now);
+                        smoothing.reset();
+                        detector.reset();
+                        detect_key = (0, 0, None);
+                        remap = true;
+                        // A new window: the command-line crop and divisor stay, the last detection is forgotten; in Auto
+                        // the picture area is detected on its first frames.
+                        bars_state.forget();
+                        if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+                            bars_state.auto.start(now, bars::Trigger::Attach, None);
+                            println!("picture area: detecting (auto, at attach)");
+                        }
+                        size_watch.request_history_clear();
+                        output::set_source(hwnd_of(h));
+                        phase = picker::next(phase, Event::Attached);
+                        ui.attached(h);
+                    }
+                    Err(e) => {
+                        phase = picker::next(phase, Event::AttachFailed);
+                        let name = if entry.title.is_empty() {
+                            "this window".to_string()
+                        } else {
+                            format!("\u{201C}{}\u{201D}", entry.title)
+                        };
+                        ui.set_picker_message(Some((false, format!("Cannot capture {name}: {e}"))));
+                        eprintln!("warning: cannot capture \"{}\": {e}", entry.title);
+                    }
+                }
+            }
+            if phase == Phase::NoSource {
+                // Nothing captured: the picker (it takes the foreground, as the menu does).
+                ui.source_gone();
+                ui.show_picker(false);
+                phase = picker::next(phase, Event::ShowPicker);
                 list_due = 0.0;
             }
-            Some(SourceAction::Detach) => {
-                if let Some(c) = capture.take() {
-                    captured_base += c.frames_captured();
-                }
-                reattach = None;
-                lost_at = None;
-                lost_watch.update(now, true);
-                phase = picker::next(phase, Event::Detach);
-                synthetic = false;
-                frame = idle_frame();
-                fresh = true;
-                size_watch.request_history_clear();
-                ui.source_gone();
-                output::set_source(HWND::default());
-                source_name = None;
-                bars_state.forget();
-                output::set_title(win.hwnd, &window_title(None, None));
-                println!("source: detached");
-            }
-            Some(SourceAction::Refresh) => list_due = 0.0,
-            Some(SourceAction::RefreshPreview) => thumbs.refresh(),
-        }
-        if let Some(h) = attach_request {
-            let entry = entry_of(h, &ui.picker().rows);
-            let t = lifecycle::TargetKey::of(&entry);
-            let new_profile = profile_for(live.settings(), &t).unwrap_or_default();
-            let mut p = params;
-            for w in new_profile.switch_to(&mut p, &base_params(&live)) {
-                eprintln!("warning: {w}");
-            }
-            if let Err(e) = args.apply_source(&mut p) {
-                eprintln!("warning: {e}");
-            }
-            let (new_map, warnings) = resolve_map(&p, &new_profile, cli_crop, cli_divisor);
-            for w in &warnings {
-                eprintln!("warning: {w}");
-            }
-            match capture::Capture::start(hwnd_of(h), new_map.client_area, capture_luid) {
-                Ok(c) => {
-                    if let Some(old) = capture.replace(c) {
-                        captured_base += old.frames_captured();
-                    }
-                    frame.seq = 0; // the new session counts from 1
-                    synthetic = false;
-                    println!("source: attached \"{}\" ({})", entry.title, t.describe());
-                    if new_profile != settings::SourceProfile::default() {
-                        println!("source profile: {}", t.describe());
-                    }
-                    live.remember_source(settings::LastSource {
-                        exe: t.exe.clone().unwrap_or_default(),
-                        class: t.class.clone(),
-                        title: t.title.clone(),
-                    });
-                    source_name = Some(target_name(&t));
-                    output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
-                    reattach = Some(lifecycle::Reattacher::new(t, h));
-                    lost_at = None;
-                    lost_watch.update(now, true);
-                    profile = new_profile;
-                    map = new_map;
-                    params = p;
-                    renderer.set_params(params);
-                    baseline = baseline_of(live.library(), live.current_preset(), &profile);
-                    health.reset(now);
-                    smoothing.reset();
-                    detector.reset();
-                    detect_key = (0, 0, None);
-                    remap = true;
-                    // A new window: the command-line crop and divisor stay, the last detection is forgotten; in Auto
-                    // the picture area is detected on its first frames.
-                    bars_state.forget();
-                    if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
-                        bars_state.auto.start(now, bars::Trigger::Attach, None);
-                        println!("picture area: detecting (auto, at attach)");
-                    }
-                    size_watch.request_history_clear();
-                    output::set_source(hwnd_of(h));
-                    phase = picker::next(phase, Event::Attached);
-                    ui.attached(h);
-                }
-                Err(e) => {
-                    phase = picker::next(phase, Event::AttachFailed);
-                    let name = if entry.title.is_empty() {
-                        "this window".to_string()
-                    } else {
-                        format!("\u{201C}{}\u{201D}", entry.title)
-                    };
-                    ui.set_picker_message(Some((false, format!("Cannot capture {name}: {e}"))));
-                    eprintln!("warning: cannot capture \"{}\": {e}", entry.title);
-                }
-            }
-        }
-        if phase == Phase::NoSource {
-            // Nothing captured: the picker (it takes the foreground, as the menu does).
-            ui.source_gone();
-            ui.show_picker(false);
-            phase = picker::next(phase, Event::ShowPicker);
-            list_due = 0.0;
-        }
 
-        // ---- Lifecycle of the attached window: reattach during the wait, then the picker ----
-        if picker::follows_target(phase) {
-            if let Some(r) = reattach.as_mut() {
-                let closed = capture.as_ref().is_some_and(|c| c.is_closed());
-                match r.update(now, closed, sources::window_exists, sources::list_entries) {
-                    lifecycle::Step::Idle => {}
-                    lifecycle::Step::Lost => {
-                        captured_base += capture.as_ref().map_or(0, |c| c.frames_captured());
-                        capture = None;
-                        lost_at = Some(now);
-                        phase = picker::next(phase, Event::SourceLost);
-                        println!("source lost: waiting for {}", r.target().describe());
-                    }
-                    lifecycle::Step::TryAttach(hwnd) => {
-                        match capture::Capture::start(hwnd_of(hwnd), map.client_area, capture_luid) {
-                            Ok(c) => {
-                                capture = Some(c);
-                                r.attach_result(now, hwnd, true);
-                                ui.set_source(Some(hwnd));
-                                output::set_source(hwnd_of(hwnd));
-                                frame.seq = 0; // the new session counts from 1
-                                health.reset(now);
-                                size_watch.request_history_clear();
-                                lost_at = None;
-                                phase = picker::next(phase, Event::Reattached);
-                                source_name = Some(target_name(r.target()));
-                                println!("source reattached: {}", r.target().describe());
-                            }
-                            Err(e) => {
-                                r.attach_result(now, hwnd, false);
-                                if r.failures() == 1 {
-                                    println!("reattach failed, retrying: {e}");
+            // ---- Lifecycle of the attached window: reattach during the wait, then the picker ----
+            if picker::follows_target(phase) {
+                if let Some(r) = reattach.as_mut() {
+                    let closed = capture.as_ref().is_some_and(|c| c.is_closed());
+                    match r.update(now, closed, sources::window_exists, sources::list_entries) {
+                        lifecycle::Step::Idle => {}
+                        lifecycle::Step::Lost => {
+                            captured_base += capture.as_ref().map_or(0, |c| c.frames_captured());
+                            capture = None;
+                            lost_at = Some(now);
+                            phase = picker::next(phase, Event::SourceLost);
+                            println!("source lost: waiting for {}", r.target().describe());
+                        }
+                        lifecycle::Step::TryAttach(hwnd) => {
+                            match capture::Capture::start(hwnd_of(hwnd), map.client_area, capture_luid) {
+                                Ok(c) => {
+                                    capture = Some(c);
+                                    r.attach_result(now, hwnd, true);
+                                    ui.set_source(Some(hwnd));
+                                    output::set_source(hwnd_of(hwnd));
+                                    frame.seq = 0; // the new session counts from 1
+                                    health.reset(now);
+                                    size_watch.request_history_clear();
+                                    lost_at = None;
+                                    phase = picker::next(phase, Event::Reattached);
+                                    source_name = Some(target_name(r.target()));
+                                    println!("source reattached: {}", r.target().describe());
+                                }
+                                Err(e) => {
+                                    r.attach_result(now, hwnd, false);
+                                    if r.failures() == 1 {
+                                        println!("reattach failed, retrying: {e}");
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            if !picker::follows_target(phase) {
-                // Lost while the picker was open (Change source): nothing to go back to.
-                reattach = None;
-                lost_at = None;
-                lost_watch.update(now, true);
-                output::set_source(HWND::default());
-                ui.source_gone();
-                ui.show_picker(false);
-                frame = idle_frame();
-                fresh = true;
-                source_name = None;
-            }
-        }
-        if let Some(r) = reattach.as_ref() {
-            match lost_watch.update(now, r.is_attached()) {
-                lifecycle::LostAction::None => {}
-                lifecycle::LostAction::Remind => println!("{}", lifecycle::LOST_REMINDER),
-                a @ (lifecycle::LostAction::GoWindowed | lifecycle::LostAction::GiveUp) => {
-                    if a == lifecycle::LostAction::GoWindowed && live.go_windowed(win.hwnd) {
-                        lost_watch.set_fullscreen(false);
-                    }
-                    let wait = lost_watch.policy().wait_s;
-                    let what = target_name(r.target());
-                    println!("source lost for {wait:.0} s: choose a window to capture");
-                    ui.set_picker_message(Some((
-                        false,
-                        format!("{what} closed and did not come back within {wait:.0} s."),
-                    )));
+                if !picker::follows_target(phase) {
+                    // Lost while the picker was open (Change source): nothing to go back to.
                     reattach = None;
                     lost_at = None;
                     lost_watch.update(now, true);
-                    phase = picker::next(phase, Event::GiveUp);
+                    output::set_source(HWND::default());
+                    ui.source_gone();
+                    ui.show_picker(false);
                     frame = idle_frame();
                     fresh = true;
-                    size_watch.request_history_clear();
-                    output::set_source(HWND::default());
                     source_name = None;
-                    output::set_title(win.hwnd, &window_title(None, None));
-                }
-                lifecycle::LostAction::Exit => {
-                    println!("source lost: exiting (--exit-on-lost)");
-                    break;
                 }
             }
-        }
+            if let Some(r) = reattach.as_ref() {
+                match lost_watch.update(now, r.is_attached()) {
+                    lifecycle::LostAction::None => {}
+                    lifecycle::LostAction::Remind => println!("{}", lifecycle::LOST_REMINDER),
+                    a @ (lifecycle::LostAction::GoWindowed | lifecycle::LostAction::GiveUp) => {
+                        if a == lifecycle::LostAction::GoWindowed && live.go_windowed(win.hwnd) {
+                            lost_watch.set_fullscreen(false);
+                        }
+                        let wait = lost_watch.policy().wait_s;
+                        let what = target_name(r.target());
+                        println!("source lost for {wait:.0} s: choose a window to capture");
+                        ui.set_picker_message(Some((
+                            false,
+                            format!("{what} closed and did not come back within {wait:.0} s."),
+                        )));
+                        reattach = None;
+                        lost_at = None;
+                        lost_watch.update(now, true);
+                        phase = picker::next(phase, Event::GiveUp);
+                        frame = idle_frame();
+                        fresh = true;
+                        size_watch.request_history_clear();
+                        output::set_source(HWND::default());
+                        source_name = None;
+                        output::set_title(win.hwnd, &window_title(None, None));
+                    }
+                    lifecycle::LostAction::Exit => {
+                        println!("source lost: exiting (--exit-on-lost)");
+                        break;
+                    }
+                }
+            }
 
-        // ---- The picker's list, icons and preview (only while it is shown) ----
-        if ui.picker_open() {
-            if now >= list_due {
-                list_due = now + 1.0;
-                ui.set_picker_rows(picker_rows(&recent));
-                for path in ui.missing_icons() {
-                    let icon = sources::exe_icon(&path);
-                    ui.set_icon(&path, icon);
+            // ---- The picker's list, icons and preview (only while it is shown) ----
+            if ui.picker_open() {
+                if now >= list_due {
+                    list_due = now + 1.0;
+                    ui.set_picker_rows(picker_rows(&recent));
+                    for path in ui.missing_icons() {
+                        let icon = sources::exe_icon(&path);
+                        ui.set_icon(&path, icon);
+                    }
                 }
-            }
-            if let Some(h) = thumbs.update(now, ui.picker().wanted_preview(), |h| h == own) {
-                match capture::Capture::start(hwnd_of(h), true, capture_luid) {
-                    Ok(c) => thumb_capture = Some((h, c)),
-                    Err(_) => {
+                if let Some(h) = thumbs.update(now, ui.picker().wanted_preview(), |h| h == own) {
+                    match capture::Capture::start(hwnd_of(h), true, capture_luid) {
+                        Ok(c) => thumb_capture = Some((h, c)),
+                        Err(_) => {
+                            thumbs.finished(h, now, false);
+                            ui.set_thumbnail_failed(h);
+                        }
+                    }
+                }
+                if let Some((h, c)) = &thumb_capture {
+                    let h = *h;
+                    let mut f = capture::Frame::default();
+                    if c.take_frame(&mut f) {
+                        let (w, th, px) = picker::thumbnail(&f.data, f.width, f.height, 480, 270);
+                        ui.set_thumbnail(h, w, th, &px);
+                        thumbs.finished(h, now, true);
+                        thumb_capture = None;
+                    } else if thumbs.timed_out(now) {
                         thumbs.finished(h, now, false);
                         ui.set_thumbnail_failed(h);
+                        thumb_capture = None;
                     }
                 }
+            } else if thumb_capture.is_some() || thumbs != picker::ThumbPlan::default() {
+                thumb_capture = None;
+                thumbs.reset();
             }
-            if let Some((h, c)) = &thumb_capture {
-                let h = *h;
-                let mut f = capture::Frame::default();
-                if c.take_frame(&mut f) {
-                    let (w, th, px) = picker::thumbnail(&f.data, f.width, f.height, 480, 270);
-                    ui.set_thumbnail(h, w, th, &px);
-                    thumbs.finished(h, now, true);
-                    thumb_capture = None;
-                } else if thumbs.timed_out(now) {
-                    thumbs.finished(h, now, false);
-                    ui.set_thumbnail_failed(h);
-                    thumb_capture = None;
-                }
-            }
-        } else if thumb_capture.is_some() || thumbs != picker::ThumbPlan::default() {
-            thumb_capture = None;
-            thumbs.reset();
-        }
 
-        // ---- Frames ----
-        let got = match &capture {
-            Some(c) => c.take_frame(&mut frame),
-            None if synthetic => synthetic_frame(&mut frame, &mut synthetic_n)?,
-            None => false,
-        };
-        if got {
-            if size_watch.observe(frame.width, frame.height) {
-                // SRC-8: the renderer rebuilds its source-sized resources when it gets this frame
-                // and the detector restarts below; the history is cleared by the persistence stage
-                // (T-41) through `size_watch.take_history_clear()`.
-                smoothing.reset();
-                println!("source size changed: {}x{}", frame.width, frame.height);
-            }
-            if capture.is_some() {
-                let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
-                health.note_frame(now, black);
-                // Auto picture area (or stale stored manual limits): every frame while a detection runs, else a
-                // few sampled frames per second.
-                if bars::detects(&params, &profile, cli_crop, (frame.width, frame.height)) && map.client_area {
-                    bars_state.auto.feed(now, &frame.data, frame.width, frame.height);
+            // ---- Frames ----
+            let got = match &capture {
+                _ if idle => false,
+                Some(c) => c.take_frame(&mut frame),
+                None if synthetic => synthetic_frame(&mut frame, &mut synthetic_n)?,
+                None => false,
+            };
+            if got {
+                if size_watch.observe(frame.width, frame.height) {
+                    // SRC-8: the renderer rebuilds its source-sized resources when it gets this frame
+                    // and the detector restarts below; the history is cleared by the persistence stage
+                    // (T-41) through `size_watch.take_history_clear()`.
+                    smoothing.reset();
+                    println!("source size changed: {}x{}", frame.width, frame.height);
                 }
+                if capture.is_some() {
+                    let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
+                    health.note_frame(now, black);
+                    // Auto picture area (or stale stored manual limits): every frame while a detection runs, else a
+                    // few sampled frames per second.
+                    if bars::detects(&params, &profile, cli_crop, (frame.width, frame.height)) && map.client_area {
+                        bars_state.auto.feed(now, &frame.data, frame.width, frame.height);
+                    }
+                }
+                fresh = true;
             }
-            fresh = true;
-        }
 
-        // ---- The Source section: picture area (Auto, manual limits, reset, undo), scaling multiplier ----
-        let mut edited = false;
-        let mut debounced = false;
-        let client = (frame.width, frame.height);
-        let whole = scaling::Rect {
-            x: 0,
-            y: 0,
-            w: client.0,
-            h: client.1,
-        };
-        if let Some(req) = area_request.filter(|_| capture.is_some()) {
-            let before = bars::CropState::capture(&params, &profile, cli_crop);
-            // The picture area in force (what Manual starts from): the manual crop, else the Auto one.
-            let in_force = bars::crop_in_force(&params, &profile, cli_crop, client, map.crop, bars_state.auto.rect())
-                .map_or(whole, |c| c.clamp(client.0, client.1));
-            let was_limits = std::mem::replace(&mut bars_state.limits_edit, matches!(req, SourceAction::SetLimits(_)));
-            let mut detect = false;
-            match req {
-                SourceAction::DetectNow | SourceAction::SetAreaMode(bars::AreaMode::Auto) => {
-                    bars::set_area_mode(&mut params, &mut profile, &mut cli_crop, bars::AreaMode::Auto);
-                    detect = true;
-                }
-                SourceAction::SetAreaMode(bars::AreaMode::Manual) => {
-                    bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, in_force, client);
-                    bars_state.message = Some((
-                        true,
-                        "Manual: the limits in force are kept; adjust them below (stored for this program)."
-                            .to_string(),
-                    ));
-                    println!("picture area: manual");
-                }
-                SourceAction::SetAreaMode(bars::AreaMode::Client) | SourceAction::ResetCrop => {
-                    bars::reset_crop(&mut params, &mut profile, &mut cli_crop);
-                    bars_state.message = Some((true, "The whole client area is captured (no crop).".to_string()));
-                    println!("picture area: whole client area");
-                }
-                SourceAction::SetLimits(b) => {
-                    if let Some(rect) = b.picture(client) {
-                        bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, rect, client);
-                        debounced = true;
-                        bars_state.message = None;
-                        println!(
-                            "picture area: manual limits left {}, top {}, right {}, bottom {} px",
-                            b.left, b.top, b.right, b.bottom
-                        );
-                    }
-                }
-                SourceAction::UndoCrop => {
-                    if let Some(u) = bars_state.undo.take() {
-                        u.restore(&mut params, &mut profile, &mut cli_crop);
-                        bars_state.message = Some((true, "The last picture-area change was undone.".to_string()));
-                        println!("picture area: last change undone");
-                        detect = bars::detects(&params, &profile, cli_crop, client);
-                    }
-                }
-                _ => {}
-            }
-            if !matches!(req, SourceAction::UndoCrop) && !(was_limits && bars_state.limits_edit) {
-                bars_state.undo = Some(before);
-            }
-            if detect {
-                // The area in force stays on screen until the detection (about one second) gives its answer.
-                bars_state.auto.seed((in_force != whole).then_some(in_force), client);
-                let shown = (map.client_area && frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
-                bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
-                bars_state.message = None;
-                println!("picture area: auto, detecting now");
-            }
-            edited = true;
-        }
-        // Auto: the detections (attach, resize, Detect now) and the periodic check.
-        let auto_on = capture.is_some() && bars::detects(&params, &profile, cli_crop, client) && map.client_area;
-        if auto_on && !std::mem::replace(&mut auto_was_on, true) && !bars_state.auto.running() {
-            // Auto came back another way (the crop mode of the "Source and placement" panel, a reattach): detect.
-            let shown = (frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
-            bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
-        }
-        auto_was_on = auto_on;
-        if auto_on {
-            let before = bars_state.auto.rect();
-            match bars_state.auto.tick(now, view.div) {
-                Some(bars::AutoEvent::Detected(trigger, outcome)) => {
-                    let (_, text) = outcome.message();
-                    println!("picture area ({trigger:?}): {text}");
-                    if let bars::Outcome::Found(f) = outcome {
-                        bars_state.found = Some(f);
-                    }
-                    bars_state.message = Some(outcome.message());
-                }
-                Some(bars::AutoEvent::Followed(how, r)) => {
-                    let text = format!(
-                        "The picture area followed the game ({}): {} \u{00D7} {} at {}, {}.",
-                        match how {
-                            bars::Follow::Grew => "larger or moved",
-                            bars::Follow::Shrank => "the bars stayed dark",
-                            bars::Follow::Found => "a picture appeared",
-                        },
-                        r.w,
-                        r.h,
-                        r.x,
-                        r.y
-                    );
-                    println!("picture area: {text}");
-                    bars_state.message = Some((true, text));
-                }
-                None => {}
-            }
-            if bars_state.auto.rect() != before {
-                remap = true;
-            }
-        }
-        if let Some(m) = multiplier_request {
-            m.apply(&mut params, &mut profile);
-            cli_divisor = None;
-            println!(
-                "source scaling multiplier: {}",
-                match m {
-                    scaling::Multiplier::Auto => "auto".to_string(),
-                    scaling::Multiplier::None => "none (native)".to_string(),
-                    scaling::Multiplier::Manual(x, y) => scaling::Multiplier::pair_text((x, y)),
-                }
-            );
-            edited = true;
-        }
-        if edited {
-            // Live, and stored in the profile of this program and class.
-            renderer.set_params(params);
-            profile = keyed_profile(&profile, reattach.as_ref().map(|r| r.target()));
-            live.save_source_profile(&profile, debounced);
-            baseline = baseline_of(live.library(), live.current_preset(), &profile);
-            let (new_map, warnings) = resolve_map(&params, &profile, cli_crop, cli_divisor);
-            for w in &warnings {
-                eprintln!("warning: {w}");
-            }
-            if switch_map(
-                new_map,
-                &mut map,
-                &mut capture,
-                reattach.as_ref().map(|r| r.hwnd()),
-                &mut captured_base,
-                &mut frame.seq,
-                capture_luid,
-            ) {
-                // The integer-scale detection runs again on the new area.
-                detect_key = (0, 0, None);
-            }
-            remap = true;
-        }
-        if std::mem::take(&mut remap) {
-            fresh = true;
-        }
-        // The source map in force: in Auto, the detected picture area is the crop.
-        let area_mode = bars::AreaMode::of(&params, &profile);
-        let eff_map = scaling::SourceMap {
-            crop: if map.client_area {
-                bars::crop_in_force(
-                    &params,
-                    &profile,
-                    cli_crop,
-                    (frame.width, frame.height),
-                    map.crop,
-                    bars_state.auto.rect(),
-                )
-            } else {
-                map.crop
-            },
-            ..map
-        };
-        if fresh {
-            let full = scaling::Rect {
+            // ---- The Source section: picture area (Auto, manual limits, reset, undo), scaling multiplier ----
+            let mut edited = false;
+            let mut debounced = false;
+            let client = (frame.width, frame.height);
+            let whole = scaling::Rect {
                 x: 0,
                 y: 0,
-                w: frame.width,
-                h: frame.height,
+                w: client.0,
+                h: client.1,
             };
-            let region = eff_map.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
-            let key = (frame.width, frame.height, eff_map.crop);
-            if key != detect_key {
-                detect_key = key;
-                detector.reset();
+            if let Some(req) = area_request.filter(|_| capture.is_some()) {
+                let before = bars::CropState::capture(&params, &profile, cli_crop);
+                // The picture area in force (what Manual starts from): the manual crop, else the Auto one.
+                let in_force =
+                    bars::crop_in_force(&params, &profile, cli_crop, client, map.crop, bars_state.auto.rect())
+                        .map_or(whole, |c| c.clamp(client.0, client.1));
+                let was_limits =
+                    std::mem::replace(&mut bars_state.limits_edit, matches!(req, SourceAction::SetLimits(_)));
+                let mut detect = false;
+                match req {
+                    SourceAction::DetectNow | SourceAction::SetAreaMode(bars::AreaMode::Auto) => {
+                        bars::set_area_mode(&mut params, &mut profile, &mut cli_crop, bars::AreaMode::Auto);
+                        detect = true;
+                    }
+                    SourceAction::SetAreaMode(bars::AreaMode::Manual) => {
+                        bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, in_force, client);
+                        bars_state.message = Some((
+                            true,
+                            "Manual: the limits in force are kept; adjust them below (stored for this program)."
+                                .to_string(),
+                        ));
+                        println!("picture area: manual");
+                    }
+                    SourceAction::SetAreaMode(bars::AreaMode::Client) | SourceAction::ResetCrop => {
+                        bars::reset_crop(&mut params, &mut profile, &mut cli_crop);
+                        bars_state.message = Some((true, "The whole client area is captured (no crop).".to_string()));
+                        println!("picture area: whole client area");
+                    }
+                    SourceAction::SetLimits(b) => {
+                        if let Some(rect) = b.picture(client) {
+                            bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, rect, client);
+                            debounced = true;
+                            bars_state.message = None;
+                            println!(
+                                "picture area: manual limits left {}, top {}, right {}, bottom {} px",
+                                b.left, b.top, b.right, b.bottom
+                            );
+                        }
+                    }
+                    SourceAction::UndoCrop => {
+                        if let Some(u) = bars_state.undo.take() {
+                            u.restore(&mut params, &mut profile, &mut cli_crop);
+                            bars_state.message = Some((true, "The last picture-area change was undone.".to_string()));
+                            println!("picture area: last change undone");
+                            detect = bars::detects(&params, &profile, cli_crop, client);
+                        }
+                    }
+                    _ => {}
+                }
+                if !matches!(req, SourceAction::UndoCrop) && !(was_limits && bars_state.limits_edit) {
+                    bars_state.undo = Some(before);
+                }
+                if detect {
+                    // The area in force stays on screen until the detection (about one second) gives its answer.
+                    bars_state.auto.seed((in_force != whole).then_some(in_force), client);
+                    let shown =
+                        (map.client_area && frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
+                    bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
+                    bars_state.message = None;
+                    println!("picture area: auto, detecting now");
+                }
+                edited = true;
             }
-            // Patterns, images and the idle frame are native.
-            let fixed = map.divisor.or((synthetic || capture.is_none()).then_some((1, 1)));
-            // A capture is always analysed (until the detection locks), also under a forced multiplier, so the
-            // Source section shows what was detected next to the forced value.
-            if capture.is_some() {
-                let was_locked = detector.is_locked();
-                detector.feed(&frame.data, frame.width, region);
-                if detector.is_locked() && !was_locked {
-                    let d = detector.divisor();
-                    if d == (1, 1) {
-                        println!("source scaling: native (x1), {}x{}", region.w, region.h);
-                    } else {
-                        println!(
-                            "source scaling: detected x{}/x{}, native {}x{}",
-                            d.0,
-                            d.1,
-                            region.w / d.0,
-                            region.h / d.1
-                        );
+            // Auto: the detections (attach, resize, Detect now) and the periodic check.
+            let auto_on = capture.is_some() && bars::detects(&params, &profile, cli_crop, client) && map.client_area;
+            if auto_on && !std::mem::replace(&mut auto_was_on, true) && !bars_state.auto.running() {
+                // Auto came back another way (the crop mode of the "Source and placement" panel, a reattach): detect.
+                let shown = (frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
+                bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
+            }
+            auto_was_on = auto_on;
+            if auto_on {
+                let before = bars_state.auto.rect();
+                match bars_state.auto.tick(now, view.div) {
+                    Some(bars::AutoEvent::Detected(trigger, outcome)) => {
+                        let (_, text) = outcome.message();
+                        println!("picture area ({trigger:?}): {text}");
+                        if let bars::Outcome::Found(f) = outcome {
+                            bars_state.found = Some(f);
+                        }
+                        bars_state.message = Some(outcome.message());
                     }
-                    if let Some(f) = map.divisor.filter(|&f| f != d) {
-                        println!(
-                            "source scaling: forced {} ({} detected)",
-                            scaling::Multiplier::pair_text(f),
-                            scaling::Multiplier::pair_text(d)
+                    Some(bars::AutoEvent::Followed(how, r)) => {
+                        let text = format!(
+                            "The picture area followed the game ({}): {} \u{00D7} {} at {}, {}.",
+                            match how {
+                                bars::Follow::Grew => "larger or moved",
+                                bars::Follow::Shrank => "the bars stayed dark",
+                                bars::Follow::Found => "a picture appeared",
+                            },
+                            r.w,
+                            r.h,
+                            r.x,
+                            r.y
                         );
+                        println!("picture area: {text}");
+                        bars_state.message = Some((true, text));
                     }
+                    None => {}
+                }
+                if bars_state.auto.rect() != before {
+                    remap = true;
                 }
             }
-            let div = fixed.unwrap_or_else(|| detector.divisor());
-            view = scaling::View::new(region, div);
-            // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
-            // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
-            // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
-            let eligible = capture.is_some() && map.divisor.is_none() && detector.is_locked() && div == (1, 1);
-            if got && smoothing.feed(&frame.data, frame.width, region, eligible) {
-                println!("warning: {}", lifecycle::SMOOTHED_WARNING);
+            if let Some(m) = multiplier_request {
+                m.apply(&mut params, &mut profile);
+                cli_divisor = None;
+                println!(
+                    "source scaling multiplier: {}",
+                    match m {
+                        scaling::Multiplier::Auto => "auto".to_string(),
+                        scaling::Multiplier::None => "none (native)".to_string(),
+                        scaling::Multiplier::Manual(x, y) => scaling::Multiplier::pair_text((x, y)),
+                    }
+                );
+                edited = true;
             }
-        }
-        let upload = fresh.then_some((frame.width, frame.height, frame.data.as_slice()));
-        // SRC-8: a source size change or a new capture session clears the persistence history (T-41).
-        if size_watch.take_history_clear() {
-            renderer.clear_history();
-        }
-        let out_size = output::client_size(win.hwnd);
-        // T-52a: the menu's input, what the menu and the overlay show, and what the user changed.
-        for (m, w, l) in output::take_ui_messages() {
-            ui.handle_win32_message(m, w, l);
-        }
-        // A preset hotkey stepped to another preset: it is the new reference of the menu.
-        if live.current_preset() != stepped_preset.as_deref() {
-            stepped_preset = live.current_preset().map(str::to_string);
-            baseline = baseline_of(live.library(), stepped_preset.as_deref(), &profile);
-        }
-        if ui.is_open() || ui.overlay_on() {
-            ui_state.params = params;
-            // The preset in force, also when a preset hotkey stepped to it.
-            ui_state.preset = live.current_preset().map(str::to_string);
-            ui_state.baseline = Some(baseline);
-            ui_state.headroom = renderer.headroom();
-            ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
-            let client = (frame.width, frame.height);
-            let stale = bars::stale_manual(&params, &profile, cli_crop, client);
-            let area = area_view(area_mode, &eff_map, stale, &detector, client);
-            ui_state.source = source_view(
-                capture.is_some(),
-                reattach.as_ref().map(|r| r.target()),
-                &profile,
-                &eff_map,
-                &detector,
-                (frame.width, frame.height),
-                view,
-                lost_at.map(|t| (now - t, lost_watch.policy().wait_s)),
-                scaling::Multiplier::of(&params, cli_divisor.or(profile.divisor_pair())),
-                bars_state.view(),
-                area,
-            );
-        }
-        // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
-        // (applied live, recorded in the shared settings, written debounced), the adapter for the next start.
-        let changes = ui.frame(&ui_state);
-        if let Some(lib) = changes.library {
-            live.set_library(lib);
-        }
-        if let Some(mut p) = changes.params {
-            if changes.preset.is_some() {
-                // A new preset: the source profile and the command-line options apply on top again.
-                for w in profile.apply_to(&mut p) {
+            if edited {
+                // Live, and stored in the profile of this program and class.
+                renderer.set_params(params);
+                profile = keyed_profile(&profile, reattach.as_ref().map(|r| r.target()));
+                live.save_source_profile(&profile, debounced);
+                baseline = baseline_of(live.library(), live.current_preset(), &profile);
+                let (new_map, warnings) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+                for w in &warnings {
                     eprintln!("warning: {w}");
                 }
-                args.apply_source(&mut p)?;
-                // The preset hotkeys step on from the preset chosen in the menu.
-                live.set_current_preset(changes.preset.clone());
-                live.note_preset_selected(changes.preset.as_deref());
-                stepped_preset = changes.preset.clone();
-                baseline = baseline_of(live.library(), changes.preset.as_deref(), &profile);
-                // A saved user preset keeps the edits made before the save: recorded against the new preset.
-                live.note_params_edit(&baseline, &p, &baseline);
-                ui_state.preset = changes.preset;
-            } else {
-                live.note_params_edit(&params, &p, &baseline);
-            }
-            params = p;
-            renderer.set_params(params);
-            // T-96, A23: the crop and divisor modes are live: the source map follows them (a change of the
-            // capture area restarts the session on the same window).
-            let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
-            if switch_map(
-                new_map,
-                &mut map,
-                &mut capture,
-                reattach.as_ref().map(|r| r.hwnd()),
-                &mut captured_base,
-                &mut frame.seq,
-                capture_luid,
-            ) {
-                detect_key = (0, 0, None);
+                if switch_map(
+                    new_map,
+                    &mut map,
+                    &mut capture,
+                    reattach.as_ref().map(|r| r.hwnd()),
+                    &mut captured_base,
+                    &mut frame.seq,
+                    capture_luid,
+                ) {
+                    // The integer-scale detection runs again on the new area.
+                    detect_key = (0, 0, None);
+                }
                 remap = true;
             }
-        }
-        if let Some(adapter) = changes.gpu_adapter {
-            println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
-            live.set_gpu_adapter(adapter);
-        }
-        if let Some(SourcePrefs {
-            ask_at_start,
-            wait_s,
-            bars: bars_config,
-        }) = changes.source_prefs
-        {
-            live.set_source_prefs(ask_at_start, wait_s);
-            live.set_bars_prefs(bars_config);
-            bars_state.auto.set_config(bars_config);
-            if !args.wait_source_set {
-                lost_watch.set_wait(wait_s);
+            if std::mem::take(&mut remap) {
+                fresh = true;
             }
-        }
-        if changes.source.is_some() {
-            source_request = changes.source;
-        }
-        // T-43: burn-in map of the preset in force (load, periodic save off the render thread), menu actions.
-        tube.tick(&mut renderer, &params, live.current_preset(), Instant::now());
-        match changes.wear_action {
-            Some(crate::ui::WearAction::BurnInNow(h)) if params.burnin_enable => tube.burn_in_now(&mut renderer, h),
-            Some(crate::ui::WearAction::NewTube) if params.burnin_enable => tube.reset(&mut renderer),
-            _ => {}
-        }
-        for m in tube.take_messages() {
-            println!("{m}");
-        }
-        // The settings the menu changed: once the edits pause, at once when the menu is closed.
-        live.flush_settings(!ui.is_open());
-        // The menu layout, once the menu closed after a change: into the shared settings and the file.
-        if let Some(layout) = ui.take_layout_change() {
-            live.set_ui_layout(layout);
-        }
-        renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
-        fresh = false;
-        // T-96: the resolved placement, printed with --stats when the native raster or the output changes.
-        if args.stats && (view.native, out_size) != readout_key {
-            readout_key = (view.native, out_size);
-            println!("{}", placement::readout(&params, view.native, out_size, args.integer));
-        }
-        renders += 1;
-        if let Some(l) = log.as_mut() {
-            l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
-        }
-
-        if stat_time.elapsed() >= Duration::from_secs(1) {
-            let handbacks = output::take_handbacks();
-            if handbacks > 0 {
-                println!(
-                    "focus: Windows activated the output {handbacks}x at {now:.1} s; foreground handed back (T-07)"
-                );
-            }
-            let captured = captured_base + capture.as_ref().map_or(0, |c| c.frames_captured());
-            // The one message to show: target lost, black or silent frames, smoothed source.
-            let now_notice = if reattach.as_ref().is_some_and(|r| !r.is_attached()) {
-                reattach
-                    .as_ref()
-                    .map(|r| format!("waiting for {}", r.target().describe()))
-            } else if capture.is_none() {
-                None
-            } else if let Some(m) = health.status(now).message() {
-                Some(m)
-            } else if smoothing.warning() {
-                Some("smoothed source?".to_string())
-            } else {
-                // T-32: the output refresh against the field rate (interlace on, fields alternating).
-                let secs = stat_time.elapsed().as_secs_f64();
-                crate::interlace::notice(&params, (captured - last_captured) as f64 / secs, renders as f64 / secs)
+            // The source map in force: in Auto, the detected picture area is the crop.
+            let area_mode = bars::AreaMode::of(&params, &profile);
+            let eff_map = scaling::SourceMap {
+                crop: if map.client_area {
+                    bars::crop_in_force(
+                        &params,
+                        &profile,
+                        cli_crop,
+                        (frame.width, frame.height),
+                        map.crop,
+                        bars_state.auto.rect(),
+                    )
+                } else {
+                    map.crop
+                },
+                ..map
             };
-            if now_notice != notice {
-                if let Some(m) = &now_notice {
-                    println!("notice: {m}");
+            // Idle: the frame stays fresh (uploaded after the restore) and is analysed once, then.
+            if fresh && !idle {
+                let full = scaling::Rect {
+                    x: 0,
+                    y: 0,
+                    w: frame.width,
+                    h: frame.height,
+                };
+                let region = eff_map.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
+                let key = (frame.width, frame.height, eff_map.crop);
+                if key != detect_key {
+                    detect_key = key;
+                    detector.reset();
                 }
-                notice = now_notice;
-            }
-            let secs = stat_time.elapsed().as_secs_f64();
-            // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
-            let gpu = renderer.take_timing_average();
-            // T-48, OUT-6: one step of the automatic quality drop on this second's mean GPU frame time against the
-            // refresh period of the output's monitor (60 Hz when unknown).
-            let period_ms = output::refresh_hz(win.hwnd).map_or(1000.0 / 60.0, |hz| 1000.0 / hz);
-            let user_tier = crate::quality::tier(&params);
-            let gpu_ms = gpu.as_ref().map_or(f64::NAN, |g| g.frame_ms);
-            if let Some(change) = auto_quality.feed(params.quality_auto, user_tier, gpu_ms, period_ms) {
-                renderer.set_quality_drop(auto_quality.drop());
-                println!("notice: {}", change.notice());
-            }
-            ui_state.quality = (auto_quality.drop() > 0).then(|| {
-                format!(
-                    "{} (auto, selected {})",
-                    auto_quality.effective(user_tier).name(),
-                    user_tier.name()
-                )
-            });
-            if let Some(l) = log.as_mut() {
-                l.second(captured - last_captured, renders, secs, gpu.as_ref())?;
-            }
-            (ui_state.timings, ui_state.capture_fps, ui_state.render_fps) = (
-                gpu.clone(),
-                (captured - last_captured) as f64 / secs,
-                renders as f64 / secs,
-            );
-            let rates = (source_name.is_some()).then(|| {
-                format!(
-                    "capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}{}",
-                    (captured - last_captured) as f64 / secs,
-                    renders as f64 / secs,
-                    view.native.0,
-                    view.native.1,
-                    view.div.0,
-                    view.div.1,
-                    renderer.gpu_name,
-                    notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
-                        + &ui_state
-                            .quality
-                            .as_ref()
-                            .map(|q| format!(" | quality {q}"))
-                            .unwrap_or_default()
-                )
-            });
-            output::set_title(win.hwnd, &window_title(source_name.as_deref(), rates));
-            if args.stats {
-                println!(
-                    "capture {:.0} fps | render {:.0} fps | frame {}x{} | native {}x{} (div {}x{})",
-                    (captured - last_captured) as f64 / secs,
-                    renders as f64 / secs,
-                    frame.width,
-                    frame.height,
-                    view.native.0,
-                    view.native.1,
-                    view.div.0,
-                    view.div.1
-                );
-                if let Some(g) = &gpu {
-                    println!("  {}", g.stats_line());
+                // Patterns, images and the idle frame are native.
+                let fixed = map.divisor.or((synthetic || capture.is_none()).then_some((1, 1)));
+                // A capture is always analysed (until the detection locks), also under a forced multiplier, so the
+                // Source section shows what was detected next to the forced value.
+                if capture.is_some() {
+                    let was_locked = detector.is_locked();
+                    detector.feed(&frame.data, frame.width, region);
+                    if detector.is_locked() && !was_locked {
+                        let d = detector.divisor();
+                        if d == (1, 1) {
+                            println!("source scaling: native (x1), {}x{}", region.w, region.h);
+                        } else {
+                            println!(
+                                "source scaling: detected x{}/x{}, native {}x{}",
+                                d.0,
+                                d.1,
+                                region.w / d.0,
+                                region.h / d.1
+                            );
+                        }
+                        if let Some(f) = map.divisor.filter(|&f| f != d) {
+                            println!(
+                                "source scaling: forced {} ({} detected)",
+                                scaling::Multiplier::pair_text(f),
+                                scaling::Multiplier::pair_text(d)
+                            );
+                        }
+                    }
+                }
+                let div = fixed.unwrap_or_else(|| detector.divisor());
+                view = scaling::View::new(region, div);
+                // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
+                // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
+                // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
+                let eligible = capture.is_some() && map.divisor.is_none() && detector.is_locked() && div == (1, 1);
+                if got && smoothing.feed(&frame.data, frame.width, region, eligible) {
+                    println!("warning: {}", lifecycle::SMOOTHED_WARNING);
                 }
             }
-            // The Auto picture area's periodic check: frames sampled and CPU time spent in the last second.
-            let (samples, spent) = bars_state.auto.take_cost();
-            if args.stats && samples > 0 {
-                println!(
-                    "  picture area (auto): {samples} frames sampled, {:.2} ms",
-                    spent * 1000.0
+            let upload = fresh.then_some((frame.width, frame.height, frame.data.as_slice()));
+            // SRC-8: a source size change or a new capture session clears the persistence history (T-41).
+            if size_watch.take_history_clear() {
+                renderer.clear_history();
+            }
+            // T-52a: the menu's input, what the menu and the overlay show, and what the user changed.
+            for (m, w, l) in output::take_ui_messages() {
+                ui.handle_win32_message(m, w, l);
+            }
+            // A preset hotkey stepped to another preset: it is the new reference of the menu.
+            if live.current_preset() != stepped_preset.as_deref() {
+                stepped_preset = live.current_preset().map(str::to_string);
+                baseline = baseline_of(live.library(), stepped_preset.as_deref(), &profile);
+            }
+            if ui.is_open() || ui.overlay_on() {
+                ui_state.params = params;
+                // The preset in force, also when a preset hotkey stepped to it.
+                ui_state.preset = live.current_preset().map(str::to_string);
+                ui_state.baseline = Some(baseline);
+                ui_state.headroom = renderer.headroom();
+                ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
+                let client = (frame.width, frame.height);
+                let stale = bars::stale_manual(&params, &profile, cli_crop, client);
+                let area = area_view(area_mode, &eff_map, stale, &detector, client);
+                ui_state.source = source_view(
+                    capture.is_some(),
+                    reattach.as_ref().map(|r| r.target()),
+                    &profile,
+                    &eff_map,
+                    &detector,
+                    (frame.width, frame.height),
+                    view,
+                    lost_at.map(|t| (now - t, lost_watch.policy().wait_s)),
+                    scaling::Multiplier::of(&params, cli_divisor.or(profile.divisor_pair())),
+                    bars_state.view(),
+                    area,
                 );
             }
-            stat_time = Instant::now();
-            renders = 0;
-            last_captured = captured;
+            // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
+            // (applied live, recorded in the shared settings, written debounced), the adapter for the next start.
+            let changes = ui.frame(&ui_state);
+            if let Some(lib) = changes.library {
+                live.set_library(lib);
+            }
+            if let Some(mut p) = changes.params {
+                if changes.preset.is_some() {
+                    // A new preset: the source profile and the command-line options apply on top again.
+                    for w in profile.apply_to(&mut p) {
+                        eprintln!("warning: {w}");
+                    }
+                    // Checked at start already: a failure here is a warning, as at an attach.
+                    if let Err(e) = args.apply_source(&mut p) {
+                        eprintln!("warning: {e}");
+                    }
+                    // The preset hotkeys step on from the preset chosen in the menu.
+                    live.set_current_preset(changes.preset.clone());
+                    live.note_preset_selected(changes.preset.as_deref());
+                    stepped_preset = changes.preset.clone();
+                    baseline = baseline_of(live.library(), changes.preset.as_deref(), &profile);
+                    // A saved user preset keeps the edits made before the save: recorded against the new preset.
+                    live.note_params_edit(&baseline, &p, &baseline);
+                    ui_state.preset = changes.preset;
+                } else {
+                    live.note_params_edit(&params, &p, &baseline);
+                }
+                params = p;
+                renderer.set_params(params);
+                // T-96, A23: the crop and divisor modes are live: the source map follows them (a change of the
+                // capture area restarts the session on the same window).
+                let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+                if switch_map(
+                    new_map,
+                    &mut map,
+                    &mut capture,
+                    reattach.as_ref().map(|r| r.hwnd()),
+                    &mut captured_base,
+                    &mut frame.seq,
+                    capture_luid,
+                ) {
+                    detect_key = (0, 0, None);
+                    remap = true;
+                }
+            }
+            if let Some(adapter) = changes.gpu_adapter {
+                println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
+                live.set_gpu_adapter(adapter);
+            }
+            if let Some(SourcePrefs {
+                ask_at_start,
+                wait_s,
+                bars: bars_config,
+            }) = changes.source_prefs
+            {
+                live.set_source_prefs(ask_at_start, wait_s);
+                live.set_bars_prefs(bars_config);
+                bars_state.auto.set_config(bars_config);
+                if !args.wait_source_set {
+                    lost_watch.set_wait(wait_s);
+                }
+            }
+            if changes.source.is_some() {
+                source_request = changes.source;
+            }
+            // T-43: burn-in map of the preset in force (load, periodic save off the render thread), menu actions.
+            tube.tick(&mut renderer, &params, live.current_preset(), Instant::now());
+            match changes.wear_action {
+                Some(crate::ui::WearAction::BurnInNow(h)) if params.burnin_enable => tube.burn_in_now(&mut renderer, h),
+                Some(crate::ui::WearAction::NewTube) if params.burnin_enable => tube.reset(&mut renderer),
+                _ => {}
+            }
+            for m in tube.take_messages() {
+                println!("{m}");
+            }
+            // The settings the menu changed: once the edits pause, at once when the menu is closed.
+            live.flush_settings(!ui.is_open());
+            // The menu layout, once the menu closed after a change: into the shared settings and the file.
+            if let Some(layout) = ui.take_layout_change() {
+                live.set_ui_layout(layout);
+            }
+            if idle {
+                // R-04: no busy loop while minimised; any message (a hotkey, the restore) wakes it at once.
+                output::wait_messages(IDLE_WAIT);
+            } else {
+                renderer.render_with_ui(upload, view, out_size, Some(&mut ui))?;
+                fresh = false;
+                // T-96: the resolved placement, printed with --stats when the native raster or the output changes.
+                if args.stats && (view.native, out_size) != readout_key {
+                    readout_key = (view.native, out_size);
+                    println!("{}", placement::readout(&params, view.native, out_size, args.integer));
+                }
+                renders += 1;
+                if let Some(l) = log.as_mut() {
+                    l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
+                }
+            }
+
+            if stat_time.elapsed() >= Duration::from_secs(1) {
+                let handbacks = output::take_handbacks();
+                if handbacks > 0 {
+                    println!(
+                        "focus: Windows activated the output {handbacks}x at {now:.1} s; foreground handed back (T-07)"
+                    );
+                }
+                let captured = captured_base + capture.as_ref().map_or(0, |c| c.frames_captured());
+                // The one message to show: target lost, black or silent frames, smoothed source.
+                let now_notice = if reattach.as_ref().is_some_and(|r| !r.is_attached()) {
+                    reattach
+                        .as_ref()
+                        .map(|r| format!("waiting for {}", r.target().describe()))
+                } else if capture.is_none() {
+                    None
+                } else if let Some(m) = health.status(now).message() {
+                    Some(m)
+                } else if smoothing.warning() {
+                    Some("smoothed source?".to_string())
+                } else {
+                    // T-32: the output refresh against the field rate (interlace on, fields alternating).
+                    let secs = stat_time.elapsed().as_secs_f64();
+                    crate::interlace::notice(&params, (captured - last_captured) as f64 / secs, renders as f64 / secs)
+                };
+                if now_notice != notice {
+                    if let Some(m) = &now_notice {
+                        println!("notice: {m}");
+                    }
+                    notice = now_notice;
+                }
+                let secs = stat_time.elapsed().as_secs_f64();
+                // Mean GPU time per stage over this second (frames lag the CPU by at most the frames in flight).
+                let gpu = renderer.take_timing_average();
+                // T-48, OUT-6: one step of the automatic quality drop on this second's mean GPU frame time against the
+                // refresh period of the output's monitor (60 Hz when unknown).
+                let period_ms = output::refresh_hz(win.hwnd).map_or(1000.0 / 60.0, |hz| 1000.0 / hz);
+                let user_tier = crate::quality::tier(&params);
+                let gpu_ms = gpu.as_ref().map_or(f64::NAN, |g| g.frame_ms);
+                if let Some(change) = auto_quality.feed(params.quality_auto, user_tier, gpu_ms, period_ms) {
+                    renderer.set_quality_drop(auto_quality.drop());
+                    println!("notice: {}", change.notice());
+                }
+                ui_state.quality = (auto_quality.drop() > 0).then(|| {
+                    format!(
+                        "{} (auto, selected {})",
+                        auto_quality.effective(user_tier).name(),
+                        user_tier.name()
+                    )
+                });
+                // A diagnostics log that cannot be written is closed with a warning; the session goes on.
+                let log_failed = log
+                    .as_mut()
+                    .and_then(|l| l.second(captured - last_captured, renders, secs, gpu.as_ref()).err());
+                if let Some(e) = log_failed {
+                    eprintln!("warning: --log: cannot write the log ({e}); logging stops");
+                    log = None;
+                }
+                (ui_state.timings, ui_state.capture_fps, ui_state.render_fps) = (
+                    gpu.clone(),
+                    (captured - last_captured) as f64 / secs,
+                    renders as f64 / secs,
+                );
+                let rates = (source_name.is_some()).then(|| {
+                    format!(
+                        "capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}{}",
+                        (captured - last_captured) as f64 / secs,
+                        renders as f64 / secs,
+                        view.native.0,
+                        view.native.1,
+                        view.div.0,
+                        view.div.1,
+                        renderer.gpu_name,
+                        notice.as_ref().map(|m| format!(" | {m}")).unwrap_or_default()
+                            + &ui_state
+                                .quality
+                                .as_ref()
+                                .map(|q| format!(" | quality {q}"))
+                                .unwrap_or_default()
+                    )
+                });
+                output::set_title(win.hwnd, &window_title(source_name.as_deref(), rates));
+                if args.stats {
+                    println!(
+                        "capture {:.0} fps | render {:.0} fps | frame {}x{} | native {}x{} (div {}x{})",
+                        (captured - last_captured) as f64 / secs,
+                        renders as f64 / secs,
+                        frame.width,
+                        frame.height,
+                        view.native.0,
+                        view.native.1,
+                        view.div.0,
+                        view.div.1
+                    );
+                    if let Some(g) = &gpu {
+                        println!("  {}", g.stats_line());
+                    }
+                }
+                // The Auto picture area's periodic check: frames sampled and CPU time spent in the last second.
+                let (samples, spent) = bars_state.auto.take_cost();
+                if args.stats && samples > 0 {
+                    println!(
+                        "  picture area (auto): {samples} frames sampled, {:.2} ms",
+                        spent * 1000.0
+                    );
+                }
+                stat_time = Instant::now();
+                renders = 0;
+                last_captured = captured;
+            }
         }
+        Ok(())
+    })();
+
+    // R-01, R-16: the shutdown, on every exit path (quit, lost source, `--exit-after`, or an error above).
+    let hwnd = win.hwnd;
+    shut_down(
+        &mut LiveExit {
+            hwnd,
+            live: &mut live,
+            tube: &mut tube,
+            log: log.take(),
+            thumb: thumb_capture.take(),
+            ui: Some(ui),
+            renderer: Some(renderer),
+            win: Some(win),
+            capture: capture.take(),
+        },
+        outcome,
+    )
+}
+
+/// How long a minimised output sleeps between two loop iterations when no message wakes it (R-04): the lost
+/// source and reattach checks keep running at this rate.
+const IDLE_WAIT: Duration = Duration::from_millis(16);
+
+/// The steps of the shutdown (R-01), in the order [`shut_down`] runs them. The app runs them on its real objects
+/// ([`LiveExit`]); the tests on a fake.
+trait ExitSteps {
+    /// A menu still open gives the foreground back; its layout goes to the session settings.
+    fn close_menu(&mut self);
+    /// The output disappears from the screen at once (the window itself stays until `destroy_window`).
+    fn hide_window(&mut self);
+    /// The window rectangle and the settings (flushed, writer joined), then the burn-in map (read back from the
+    /// GPU and written; a GPU error is a warning).
+    fn save(&mut self);
+    /// The `--log` summary.
+    fn summary(&mut self);
+    /// The menu's renderer, then the renderer (device, swapchain and the Vulkan surface).
+    fn release_gpu(&mut self);
+    /// The output window, after its surface.
+    fn destroy_window(&mut self);
+    /// The capture sessions.
+    fn release_capture(&mut self);
+}
+
+/// Runs the shutdown and returns `outcome`, the loop's result. On an error the message tells the user the
+/// session was saved; `main` shows it (a message box without a console) and exits with a non-zero code.
+fn shut_down(steps: &mut dyn ExitSteps, outcome: Res<()>) -> Res<()> {
+    if let Err(e) = &outcome {
+        eprintln!("error: {e}: saving the session and closing");
     }
-    // A menu still open at exit gives the foreground back and its layout is saved with the window rectangle.
-    ui.close_menu();
-    if let Some(layout) = ui.take_layout_change() {
-        live.set_ui_layout(layout);
+    steps.close_menu();
+    steps.hide_window();
+    steps.save();
+    steps.summary();
+    steps.release_gpu();
+    steps.destroy_window();
+    steps.release_capture();
+    outcome.map_err(|e| {
+        format!("{e}\n\nThe settings and the burn-in state were saved before closing (see any warning above).").into()
+    })
+}
+
+/// The saves of the shutdown (R-01): see [`ExitSteps::save`]. `host` is the renderer, `None` when there is none.
+fn save_session(
+    live: &mut live::Live,
+    tube: &mut crate::tube_state::TubeState,
+    host: Option<&mut dyn crate::tube_state::WearHost>,
+    hwnd: HWND,
+) {
+    live.finish(hwnd);
+    if let Some(h) = host {
+        // T-43: the wear map read back once and written (when burn-in loaded one in this session).
+        tube.finish(h);
     }
-    live.finish(win.hwnd);
-    // T-43: the wear map read back once and written (when burn-in loaded one in this session).
-    tube.finish(&mut renderer);
     for m in tube.take_messages() {
         println!("{m}");
     }
-    if let Some(l) = log.as_mut() {
-        l.summary();
+}
+
+/// The objects of the live session the shutdown saves and releases.
+struct LiveExit<'a> {
+    hwnd: HWND,
+    live: &'a mut live::Live,
+    tube: &'a mut crate::tube_state::TubeState,
+    log: Option<diag::Log>,
+    thumb: Option<(isize, capture::Capture)>,
+    ui: Option<crate::ui::Ui>,
+    renderer: Option<gpu::Renderer>,
+    win: Option<output::Output>,
+    capture: Option<capture::Capture>,
+}
+
+impl ExitSteps for LiveExit<'_> {
+    fn close_menu(&mut self) {
+        if let Some(ui) = self.ui.as_mut() {
+            ui.close_menu();
+            if let Some(layout) = ui.take_layout_change() {
+                self.live.set_ui_layout(layout);
+            }
+        }
     }
-    // The UI first: its ImGui renderer lives on the renderer's device (T-52a).
-    drop(thumb_capture);
-    drop(ui);
-    drop(renderer);
-    drop(capture);
-    Ok(())
+
+    fn hide_window(&mut self) {
+        output::hide(self.hwnd);
+    }
+
+    fn save(&mut self) {
+        let host = self
+            .renderer
+            .as_mut()
+            .map(|r| r as &mut dyn crate::tube_state::WearHost);
+        save_session(self.live, self.tube, host, self.hwnd);
+    }
+
+    fn summary(&mut self) {
+        if let Some(l) = self.log.as_mut() {
+            l.summary();
+        }
+    }
+
+    fn release_gpu(&mut self) {
+        // The UI first: its ImGui renderer lives on the renderer's device (T-52a).
+        drop(self.thumb.take());
+        drop(self.ui.take());
+        drop(self.renderer.take());
+    }
+
+    fn destroy_window(&mut self) {
+        drop(self.win.take());
+    }
+
+    fn release_capture(&mut self) {
+        drop(self.capture.take());
+    }
 }
 
 /// Switches the source map to `new_map`. A change of the capture area (client area or whole window) restarts the
@@ -1664,5 +1816,176 @@ mod tests {
         };
         assert_eq!(crop_text(&crop), "crop 8, 4, 320 \u{00D7} 240");
         assert_eq!(idle_frame().data.len(), (IDLE_SIZE.0 * IDLE_SIZE.1 * 4) as usize);
+    }
+
+    use crate::tube_state::{self, TubeState, WearHost, WearMap};
+
+    /// A renderer whose wear map lives in memory (4 x 3), read back as is.
+    struct FakeHost {
+        map: WearMap,
+        reads: u32,
+    }
+
+    impl WearHost for FakeHost {
+        fn wear_map_size(&self) -> (u32, u32) {
+            (4, 3)
+        }
+        fn set_wear_map(&mut self, map: &WearMap) -> Res<()> {
+            self.map = map.clone();
+            Ok(())
+        }
+        fn reset_wear(&mut self) {
+            self.map = WearMap::new(4, 3);
+        }
+        fn burn_in_now(&mut self, _: f32) {}
+        fn request_wear_snapshot(&mut self) {}
+        fn take_wear_snapshot(&mut self) -> Res<Option<WearMap>> {
+            Ok(None)
+        }
+        fn read_wear_map(&mut self) -> Res<Option<WearMap>> {
+            self.reads += 1;
+            Ok(Some(self.map.clone()))
+        }
+    }
+
+    /// The shutdown steps of a session without a window: the order they ran in, and the real saves
+    /// ([`save_session`]) on a real `Live` and `TubeState` with a fake renderer.
+    struct FakeExit<'a> {
+        order: Vec<&'static str>,
+        live: &'a mut live::Live,
+        tube: &'a mut TubeState,
+        host: FakeHost,
+    }
+
+    impl ExitSteps for FakeExit<'_> {
+        fn close_menu(&mut self) {
+            self.order.push("close_menu");
+        }
+        fn hide_window(&mut self) {
+            self.order.push("hide_window");
+        }
+        fn save(&mut self) {
+            self.order.push("save");
+            save_session(
+                self.live,
+                self.tube,
+                Some(&mut self.host as &mut dyn WearHost),
+                HWND::default(),
+            );
+        }
+        fn summary(&mut self) {
+            self.order.push("summary");
+        }
+        fn release_gpu(&mut self) {
+            self.order.push("release_gpu");
+        }
+        fn destroy_window(&mut self) {
+            self.order.push("destroy_window");
+        }
+        fn release_capture(&mut self) {
+            self.order.push("release_capture");
+        }
+    }
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("ucrt-app-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// R-01: after a render error the shutdown still runs in full, in order (the window is hidden before the
+    /// saves and destroyed only after the GPU objects, R-16): the wear map is read back and written to its state
+    /// file, the settings changed in the session are on disk, and the error comes back naming its cause.
+    #[test]
+    fn a_render_error_still_saves_the_session() {
+        let dir = temp_dir("exit");
+        let lib = presets::Library::embedded();
+        let id = lib.list()[0].id.clone();
+        let mut live = live::Live::new(
+            false,
+            settings::Settings::default(),
+            Some(dir.clone()),
+            lib.clone(),
+            Some(id.clone()),
+            (800, 600),
+        );
+        let reference = lib.list()[0].params();
+        let mut edited = reference;
+        edited.exposure = 1.75;
+        live.note_params_edit(&reference, &edited, &reference); // debounced, not written yet
+        let t0 = Instant::now();
+        let mut tube = TubeState::new(Some(dir.clone()), false, t0);
+        let mut host = FakeHost {
+            map: WearMap::new(4, 3),
+            reads: 0,
+        };
+        let burn = crate::params::Params {
+            burnin_enable: true,
+            ..crate::params::Params::default()
+        };
+        tube.tick(&mut host, &burn, Some(&id), t0);
+        host.map.q.fill(2.5); // the session wore the tube
+        let mut exit = FakeExit {
+            order: Vec::new(),
+            live: &mut live,
+            tube: &mut tube,
+            host,
+        };
+        // The loop stopped on a renderer error.
+        let result = shut_down(&mut exit, Err("GPU device lost (driver reset or update)".into()));
+        let message = result.unwrap_err().to_string();
+        assert!(message.starts_with("GPU device lost"), "{message}");
+        assert!(message.contains("saved"), "{message}");
+        assert_eq!(
+            exit.order,
+            [
+                "close_menu",
+                "hide_window",
+                "save",
+                "summary",
+                "release_gpu",
+                "destroy_window",
+                "release_capture"
+            ]
+        );
+        assert_eq!(exit.host.reads, 1, "the map was read back");
+        match tube_state::load(&tube_state::state_path(&dir, Some(&id)), (4, 3)) {
+            tube_state::Loaded::Map { map, .. } => assert_eq!(map.max_charge(), 2.5),
+            other => panic!("{other:?}"),
+        }
+        let saved = settings::load(&dir).settings;
+        assert_eq!(saved.global.overrides.get("exposure"), Some(&toml::Value::Float(1.75)));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A normal exit runs the same steps and returns `Ok`.
+    #[test]
+    fn a_normal_exit_runs_the_same_shutdown() {
+        let dir = temp_dir("exit-ok");
+        let mut live = live::Live::new(
+            false,
+            settings::Settings::default(),
+            Some(dir.clone()),
+            presets::Library::embedded(),
+            None,
+            (800, 600),
+        );
+        live.set_gpu_adapter("Intel".into());
+        let mut tube = TubeState::new(Some(dir.clone()), false, Instant::now());
+        let mut exit = FakeExit {
+            order: Vec::new(),
+            live: &mut live,
+            tube: &mut tube,
+            host: FakeHost {
+                map: WearMap::new(4, 3),
+                reads: 0,
+            },
+        };
+        assert!(shut_down(&mut exit, Ok(())).is_ok());
+        assert_eq!(exit.order.len(), 7);
+        assert_eq!(exit.host.reads, 0, "burn-in never loaded: nothing to read back");
+        assert_eq!(settings::load(&dir).settings.global.gpu.adapter, "Intel");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -1,6 +1,9 @@
 //! Diagnostics log (`--log <file.csv>`): per-second capture and render interval statistics, gaps and
 //! foreground-window changes, plus a summary at exit. The statistics are pure and unit tested; only
 //! `Foreground` and `Log` touch the operating system.
+//!
+//! Privacy (R-34): the log names the foreground window by its process id and executable file name only, never
+//! by its title (titles of other programs can hold document names, chat partners, and the like).
 
 use std::{
     fs::File,
@@ -10,7 +13,7 @@ use std::{
 
 use windows::Win32::{
     Foundation::HWND,
-    UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowTextW, GetWindowThreadProcessId},
+    UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId},
 };
 
 use crate::gpu::FrameTimings;
@@ -71,7 +74,9 @@ pub fn stats_of(values: &mut [f64]) -> IntervalStats {
 pub struct ForegroundInfo {
     pub hwnd: isize,
     pub pid: u32,
-    pub title: String,
+    /// Executable file name of the window's process (`Game.exe`), empty when it cannot be queried. Never the
+    /// window title.
+    pub exe: String,
 }
 
 /// Polls `GetForegroundWindow` (no hooks) and reports changes.
@@ -97,15 +102,12 @@ impl Foreground {
         }
         self.last = Some(key);
         let mut pid = 0u32;
-        let mut buf = [0u16; 256];
-        let n = unsafe {
-            GetWindowThreadProcessId(hwnd, Some(&mut pid));
-            GetWindowTextW(hwnd, &mut buf)
-        };
+        // SAFETY: plain query on a window handle (0 when the window is gone).
+        unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
         Some(ForegroundInfo {
             hwnd: key,
             pid,
-            title: String::from_utf16_lossy(&buf[..n.max(0) as usize]),
+            exe: crate::sources::executable_name(hwnd).unwrap_or_default(),
         })
     }
 
@@ -116,6 +118,15 @@ impl Foreground {
 
 fn csv_field(text: &str) -> String {
     format!("\"{}\"", text.replace('"', "\"\"").replace(['\r', '\n'], " "))
+}
+
+/// The `fg_pid` and `fg_exe` fields of a row: the last foreground window when it changed during the second
+/// (`changes` > 0), else empty. The executable name only, never a window title (R-34).
+fn foreground_fields(changes: usize, last: Option<&ForegroundInfo>) -> (String, String) {
+    match last {
+        Some(i) if changes > 0 => (i.pid.to_string(), csv_field(&i.exe)),
+        _ => (String::new(), String::new()),
+    }
 }
 
 #[derive(Default)]
@@ -148,9 +159,10 @@ pub struct Log {
     gpu_names: Vec<&'static str>,
 }
 
-/// The columns before the GPU timings; their order never changes (readers index them by position).
+/// The columns before the GPU timings; their order never changes (readers index them by position). Column 14
+/// is the foreground executable name (`fg_exe`); it held the window title before R-34.
 const BASE_HEADER: &str = "t_s,capture_fps,cap_min_ms,cap_max_ms,cap_p99_ms,cap_gaps_50ms,render_fps,render_min_ms,\
-                           render_max_ms,render_p99_ms,render_gaps_50ms,fg_changes,fg_pid,fg_title,fg_is_source";
+                           render_max_ms,render_p99_ms,render_gaps_50ms,fg_changes,fg_pid,fg_exe,fg_is_source";
 
 /// The CSV header: the fixed columns, then `gpu_frame_ms` and one `gpu_<segment>_ms` per GPU timing
 /// segment (T-21), appended so that the earlier columns keep their position.
@@ -215,13 +227,7 @@ impl Log {
         let c = self.capture.stats();
         let r = self.render.stats();
         let cap_fps = captured_frames as f64 / secs;
-        let (pid, title) = if self.changes > 0 {
-            self.last_change.as_ref().map_or((String::new(), String::new()), |i| {
-                (i.pid.to_string(), csv_field(&i.title))
-            })
-        } else {
-            (String::new(), String::new())
-        };
+        let (pid, exe) = foreground_fields(self.changes, self.last_change.as_ref());
         let is_source = self.fg.is_source();
         writeln!(
             self.out,
@@ -239,7 +245,7 @@ impl Log {
             r.gaps,
             self.changes,
             pid,
-            title,
+            exe,
             u8::from(is_source),
             FrameTimings::csv_values(gpu, &self.gpu_names)
         )?;
@@ -337,7 +343,8 @@ mod tests {
         let fixed: Vec<&str> = BASE_HEADER.split(',').collect();
         assert_eq!(fixed.len(), 15);
         assert_eq!(&fixed[..3], ["t_s", "capture_fps", "cap_min_ms"]);
-        assert_eq!(&fixed[11..], ["fg_changes", "fg_pid", "fg_title", "fg_is_source"]);
+        assert_eq!(&fixed[11..], ["fg_changes", "fg_pid", "fg_exe", "fg_is_source"]);
+        assert!(!BASE_HEADER.contains("title"), "no window title column (R-34)");
         let h = csv_header(&["upload", "decode", "encode"]);
         let cols: Vec<&str> = h.split(',').collect();
         assert_eq!(&cols[..15], &fixed[..]);
@@ -377,5 +384,21 @@ mod tests {
     #[test]
     fn csv_field_quotes() {
         assert_eq!(csv_field("a,\"b\"\n"), "\"a,\"\"b\"\" \"");
+    }
+
+    /// R-34: the row names the foreground process by pid and executable, only when it changed that second.
+    #[test]
+    fn the_foreground_is_logged_by_executable_only() {
+        let info = ForegroundInfo {
+            hwnd: 0x10,
+            pid: 4242,
+            exe: "Game.exe".into(),
+        };
+        assert_eq!(
+            foreground_fields(1, Some(&info)),
+            ("4242".to_string(), "\"Game.exe\"".to_string())
+        );
+        assert_eq!(foreground_fields(0, Some(&info)), (String::new(), String::new()));
+        assert_eq!(foreground_fields(2, None), (String::new(), String::new()));
     }
 }

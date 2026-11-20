@@ -24,23 +24,28 @@ impl IRect {
         }
     }
 
+    /// Width, saturated to the `i32` range (a hand-edited rectangle may span more than `i32::MAX`).
     pub fn width(&self) -> i32 {
-        self.right - self.left
+        self.right.saturating_sub(self.left)
     }
 
+    /// Height, saturated like [`IRect::width`].
     pub fn height(&self) -> i32 {
-        self.bottom - self.top
+        self.bottom.saturating_sub(self.top)
     }
 
+    /// Area, in `i64` (saturated for the full `i32` plane).
     pub fn area(&self) -> i64 {
-        i64::from(self.width().max(0)) * i64::from(self.height().max(0))
+        let w = i64::from(self.right) - i64::from(self.left);
+        let h = i64::from(self.bottom) - i64::from(self.top);
+        w.max(0).saturating_mul(h.max(0))
     }
 
-    /// Area of the overlap with `other`.
+    /// Area of the overlap with `other` (in `i64`, saturated: no overflow for any pair of rectangles).
     pub fn overlap(&self, other: &IRect) -> i64 {
-        let w = self.right.min(other.right) - self.left.max(other.left);
-        let h = self.bottom.min(other.bottom) - self.top.max(other.top);
-        i64::from(w.max(0)) * i64::from(h.max(0))
+        let w = i64::from(self.right.min(other.right)) - i64::from(self.left.max(other.left));
+        let h = i64::from(self.bottom.min(other.bottom)) - i64::from(self.top.max(other.top));
+        w.max(0).saturating_mul(h.max(0))
     }
 
     pub fn to_array(self) -> [i32; 4] {
@@ -50,7 +55,22 @@ impl IRect {
     pub fn from_array(a: [i32; 4]) -> IRect {
         IRect::new(a[0], a[1], a[2], a[3])
     }
+
+    /// A rectangle read from the settings file, `None` when it cannot be a window rectangle: empty or inverted,
+    /// larger than [`MAX_EXTENT`] on a side, or with a coordinate beyond [`MAX_COORD`] (a hand-edited file).
+    /// The caller falls back to the default placement.
+    pub fn from_saved(a: [i32; 4]) -> Option<IRect> {
+        let r = IRect::from_array(a);
+        let coords_ok = a.iter().all(|v| v.unsigned_abs() <= MAX_COORD as u32);
+        let size_ok = |lo: i32, hi: i32| hi > lo && i64::from(hi) - i64::from(lo) <= i64::from(MAX_EXTENT);
+        (coords_ok && size_ok(r.left, r.right) && size_ok(r.top, r.bottom)).then_some(r)
+    }
 }
+
+/// Largest side of a remembered window rectangle (the largest Windows desktop is 32767 px wide).
+pub const MAX_EXTENT: i32 = 32_767;
+/// Largest absolute coordinate of a remembered window rectangle (the virtual screen lies well within it).
+pub const MAX_COORD: i32 = 100_000;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WindowMode {
@@ -158,12 +178,6 @@ impl ModeState {
                 Placement::Windowed { rect }
             }
         }
-    }
-
-    /// The fullscreen output dropped to a window by itself (T-56, source lost): the mode is windowed and the
-    /// window was centred by `output::drop_to_windowed`.
-    pub fn force_windowed(&mut self) {
-        self.mode = WindowMode::Windowed;
     }
 
     /// After a monitor change (`WM_DISPLAYCHANGE`): a fullscreen output is re-placed over the monitor that now
@@ -312,17 +326,44 @@ mod tests {
         assert_eq!(s.windowed, Some(a));
     }
 
+    /// R-42: hand-edited rectangles never overflow (no panic in a debug build) and are not usable.
     #[test]
-    fn dropping_to_windowed_by_the_lost_source_policy_sets_the_mode() {
-        let mut s = ModeState::new(WindowMode::Fullscreen, Some(r(10, 10, 1300, 800)));
-        s.force_windowed();
-        assert_eq!(s.mode, WindowMode::Windowed);
-        // F11 then goes back to fullscreen.
-        let mons = [M0];
+    fn extreme_rectangles_do_not_overflow() {
+        let mons = [M0, M1];
+        let huge = IRect::from_array([i32::MIN, 0, i32::MAX, 100]);
+        assert_eq!(huge.width(), i32::MAX, "saturated");
+        assert_eq!(huge.area(), (i64::from(i32::MAX) - i64::from(i32::MIN)) * 100);
+        assert!(!usable_rect(&huge, &mons));
+        let all = IRect::from_array([i32::MIN, i32::MIN, i32::MAX, i32::MAX]);
+        assert!(visible_fraction(&all, &mons) < 1e-6);
+        assert!(!usable_rect(&all, &mons));
+        let inverted = IRect::from_array([i32::MAX, i32::MAX, i32::MIN, i32::MIN]);
+        assert_eq!(inverted.width(), i32::MIN, "saturated, negative");
+        assert_eq!((inverted.area(), inverted.overlap(&M0)), (0, 0));
+        assert!(!usable_rect(&inverted, &mons));
+        assert_eq!(restore_rect(Some(huge), &mons, &M0, DEFAULT).width(), DEFAULT.0);
+        let moved = ModeState::new(WindowMode::Windowed, None).display_change(all, &mons);
+        assert!(matches!(moved, Some(Placement::Windowed { rect }) if usable_rect(&rect, &mons)));
+    }
+
+    /// R-42: absurd remembered rectangles are rejected at load (the default placement is used instead).
+    #[test]
+    fn saved_rectangles_are_sanitised() {
+        assert_eq!(IRect::from_saved([100, 50, 1380, 770]), Some(r(100, 50, 1380, 770)));
         assert_eq!(
-            s.toggle(r(100, 100, 1400, 900), M0, &mons, DEFAULT),
-            Placement::Fullscreen { cover: M0 }
+            IRect::from_saved([-2000, -100, -500, 900]),
+            Some(r(-2000, -100, -500, 900))
         );
+        for bad in [
+            [i32::MIN, 0, i32::MAX, 100],
+            [0, 0, 0, 100],
+            [10, 10, 5, 100],
+            [0, 0, 40_000, 100],
+            [200_000, 0, 201_000, 100],
+            [0, i32::MIN, 100, i32::MIN + 50],
+        ] {
+            assert_eq!(IRect::from_saved(bad), None, "{bad:?}");
+        }
     }
 
     #[test]
