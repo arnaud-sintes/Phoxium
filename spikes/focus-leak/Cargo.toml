@@ -2,6 +2,7 @@
 name = "focus-leak"
 version = "0.0.0"
 edition = "2021"
+license = "MIT"
 publish = false
 
 # T-07 spike: the output window of ultimatecrt without Vulkan, to find what activates it after ~25 s.
