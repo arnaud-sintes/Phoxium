@@ -22,6 +22,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 
 use crate::params::{ParamType, ParamValue, Params, PARAMS_META};
+use crate::zerocopy::CapturePath;
 
 /// Schema version written to the file. Files with a higher version are not understood and are set aside.
 pub const SCHEMA_VERSION: u32 = 1;
@@ -196,6 +197,31 @@ impl Default for GpuSettings {
     }
 }
 
+/// Capture settings (`[global.capture]`, A29).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CaptureSettings {
+    /// How captured frames reach the renderer: `cpu` (the default, the simple CPU copy that works on every adapter
+    /// pair) or `zero_copy` (GPU sharing, experimental, one adapter for capture and rendering). Any other value
+    /// reads as `cpu` with a note (the hard range of an enum, WP4). `--capture-path` wins over it.
+    pub path: String,
+}
+
+impl Default for CaptureSettings {
+    fn default() -> Self {
+        Self {
+            path: CapturePath::Cpu.id().to_string(),
+        }
+    }
+}
+
+impl CaptureSettings {
+    /// The path asked for (`cpu` for a value that is not one).
+    pub fn path(&self) -> CapturePath {
+        CapturePath::parse(&self.path).unwrap_or_default()
+    }
+}
+
 /// The window the user attached to last (source selection, A23): the source-profile key (executable and class)
 /// and the title as a hint. Written on every attach; used at start when `ask_at_start` is off.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -286,6 +312,8 @@ pub struct Global {
     pub output: OutputState,
     /// The adapter that runs the chain (`[global.gpu] adapter`, HW-3).
     pub gpu: GpuSettings,
+    /// The capture path (`[global.capture] path`, A29).
+    pub capture: CaptureSettings,
     /// Source selection: ask at start, lost-source wait, last choice (`[global.source]`, A23).
     pub source: SourceSettings,
 }
@@ -300,6 +328,7 @@ impl Default for Global {
             ui: UiState::default(),
             output: OutputState::default(),
             gpu: GpuSettings::default(),
+            capture: CaptureSettings::default(),
             source: SourceSettings::default(),
         }
     }
@@ -521,8 +550,8 @@ impl Settings {
     }
 
     /// "Reset everything to defaults" (menu, owner definition 2026-11-20): the parameter overrides cleared (the
-    /// preset in force stays, with its own values), the hotkeys, the UI scale and the GPU adapter back to their
-    /// defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
+    /// preset in force stays, with its own values), the hotkeys, the UI scale, the GPU adapter and the capture path
+    /// back to their defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
     /// layout, the first-run state; user presets and burn-in maps are files this never touches.
     pub fn reset_everything(&mut self) {
         let g = &mut self.global;
@@ -530,6 +559,7 @@ impl Settings {
         g.hotkeys = default_hotkeys();
         g.ui.scale = UiScale::Auto;
         g.gpu = GpuSettings::default();
+        g.capture = CaptureSettings::default();
     }
 
     /// Inserts or replaces the profile with the same executable and class.
@@ -577,6 +607,17 @@ impl Settings {
         }
         let w = &mut s.global.output.windowed;
         *w = w.filter(|a| crate::modes::IRect::from_saved(*a).is_some());
+        // WP4: an enum value outside its range reads as the default, with a note; the file is normalised.
+        let path = &mut s.global.capture.path;
+        match CapturePath::parse(path) {
+            Some(p) => *path = p.id().to_string(),
+            None => {
+                notes.push(format!(
+                    "[global.capture] path = \"{path}\" is not cpu or zero_copy: the CPU copy is used"
+                ));
+                *path = CapturePath::Cpu.id().to_string();
+            }
+        }
         Ok((s, notes))
     }
 }
@@ -1350,6 +1391,32 @@ mod tests {
         // A file without the table keeps working.
         let s = Settings::from_toml("version = 1\n").unwrap();
         assert_eq!(s.global.output, OutputState::default());
+    }
+
+    #[test]
+    fn capture_path_defaults_to_cpu_reads_zero_copy_and_clamps_the_rest() {
+        let s = Settings::default();
+        assert_eq!(s.global.capture.path(), CapturePath::Cpu);
+        assert!(s.to_toml().unwrap().contains("[global.capture]\npath = \"cpu\""));
+        let (s, notes) = Settings::from_toml_noted("version = 1\n[global.capture]\npath = \"zero-copy\"\n").unwrap();
+        assert_eq!(s.global.capture.path(), CapturePath::ZeroCopy);
+        // Normalised to the settings spelling.
+        assert_eq!(s.global.capture.path, "zero_copy");
+        assert!(notes.is_empty());
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert_eq!(back.global.capture.path(), CapturePath::ZeroCopy);
+        // Outside the range: the CPU copy, with a note; a missing table: the default.
+        let (s, notes) = Settings::from_toml_noted("version = 1\n[global.capture]\npath = \"gpu\"\n").unwrap();
+        assert_eq!(s.global.capture.path, "cpu");
+        assert!(notes.iter().any(|n| n.contains("[global.capture] path")), "{notes:?}");
+        assert_eq!(
+            Settings::from_toml("version = 1\n").unwrap().global.capture.path(),
+            CapturePath::Cpu
+        );
+        // Reset everything puts it back.
+        let mut s = Settings::from_toml("version = 1\n[global.capture]\npath = \"zero_copy\"\n").unwrap();
+        s.reset_everything();
+        assert_eq!(s.global.capture.path(), CapturePath::Cpu);
     }
 
     #[test]

@@ -13,6 +13,7 @@ use ash::{ext, khr, vk, Device, Entry, Instance};
 
 use super::{GpuError, Res};
 use crate::quality::ImageLimits;
+use crate::zerocopy::{select_handle, HandleKind};
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
@@ -305,6 +306,13 @@ pub struct Context {
     shader_accesses: bool,
     /// What one chain image may be on this device (R-02): `maxImageDimension2D` and the memory budget.
     image_limits: ImageLimits,
+    /// The zero-copy capture path was asked for when the device was created (A29).
+    external_requested: bool,
+    /// `VK_KHR_external_memory_win32` is enabled, with the handle kind of the shared Direct3D 11 textures the device
+    /// imports (`zerocopy::select_handle`); `None` when it was not asked for or the device cannot import.
+    external_memory: Option<HandleKind>,
+    /// The extension's functions, with `external_memory`.
+    pub(super) external_fn: Option<khr::external_memory_win32::Device>,
 }
 
 impl Context {
@@ -354,11 +362,30 @@ impl Context {
     /// accesses shaders make through descriptors when it offers `VK_EXT_layer_settings`.
     pub fn new_headless(validation: bool) -> Res<Self> {
         // SAFETY: no window handle is involved; `create` owns or destroys everything it creates.
-        unsafe { Self::create(None, DeviceRequest::Default, validation).map(|(ctx, _)| ctx) }
+        unsafe { Self::create(None, DeviceRequest::Default, validation, false).map(|(ctx, _)| ctx) }
+    }
+
+    /// [`Context::new_headless`] with `VK_KHR_external_memory_win32` enabled when the device offers it and imports
+    /// Direct3D 11 textures ([`Context::external_memory`]): the zero-copy tests and measurements.
+    pub fn new_headless_external(validation: bool) -> Res<Self> {
+        // SAFETY: as in `new_headless`.
+        unsafe { Self::create(None, DeviceRequest::Default, validation, true).map(|(ctx, _)| ctx) }
+    }
+
+    /// The handle kind of the shared Direct3D 11 textures this device imports, when `VK_KHR_external_memory_win32`
+    /// was asked for at creation and enabled (zero-copy capture, A29); `None` otherwise.
+    pub fn external_memory(&self) -> Option<HandleKind> {
+        self.external_memory
+    }
+
+    /// Whether the device was created for the zero-copy path (the extension asked for, whether or not offered).
+    pub fn external_memory_requested(&self) -> bool {
+        self.external_requested
     }
 
     /// Creates a context whose device can present to the window `hwnd`, and returns the Vulkan
-    /// surface created for it. The caller passes the surface to
+    /// surface created for it. With `external_memory` (the zero-copy capture path is asked for, A29),
+    /// `VK_KHR_external_memory_win32` is enabled when the device offers it. The caller passes the surface to
     /// [`super::Presenter::from_surface`], which takes ownership of it.
     ///
     /// # Safety
@@ -369,8 +396,9 @@ impl Context {
         hinstance: isize,
         gpu: DeviceRequest,
         validation: bool,
+        external_memory: bool,
     ) -> Res<(Self, vk::SurfaceKHR)> {
-        let (ctx, surface) = Self::create(Some((hwnd, hinstance)), gpu, validation)?;
+        let (ctx, surface) = Self::create(Some((hwnd, hinstance)), gpu, validation, external_memory)?;
         Ok((ctx, surface.expect("window context has a surface")))
     }
 
@@ -380,6 +408,7 @@ impl Context {
         window: Option<(isize, isize)>,
         gpu: DeviceRequest,
         validation: bool,
+        external: bool,
     ) -> Res<(Self, Option<vk::SurfaceKHR>)> {
         let entry = Entry::load()?;
         if validation && !layer_present(&entry) {
@@ -441,8 +470,9 @@ impl Context {
             None => None,
         };
 
-        match create_device(&instance, &surface_fn, surface, gpu) {
-            Ok((gpu, physical, queue_family, device)) => {
+        match create_device(&instance, &surface_fn, surface, gpu, external) {
+            Ok((gpu, physical, queue_family, device, external_memory)) => {
+                let external_fn = external_memory.map(|_| khr::external_memory_win32::Device::new(&instance, &device));
                 let queue = device.get_device_queue(queue_family, 0);
                 let image_limits = image_limits_of(&instance, physical);
                 let ctx = Self {
@@ -460,6 +490,9 @@ impl Context {
                     sync_validation,
                     shader_accesses,
                     image_limits,
+                    external_requested: external,
+                    external_memory,
+                    external_fn,
                 };
                 Ok((ctx, surface))
             }
@@ -730,7 +763,8 @@ unsafe fn create_device(
     surface_fn: &khr::surface::Instance,
     surface: Option<vk::SurfaceKHR>,
     gpu: DeviceRequest,
-) -> Res<(GpuInfo, vk::PhysicalDevice, u32, Device)> {
+    external: bool,
+) -> Res<(GpuInfo, vk::PhysicalDevice, u32, Device, Option<HandleKind>)> {
     let mut infos = Vec::new();
     let mut handles = Vec::new();
     let mut rejected: Vec<(GpuInfo, String)> = Vec::new();
@@ -805,8 +839,22 @@ unsafe fn create_device(
     let queues = [vk::DeviceQueueCreateInfo::default()
         .queue_family_index(queue_family)
         .queue_priorities(&priorities)];
-    let swapchain_ext = [khr::swapchain::NAME.as_ptr()];
-    let dev_exts: &[*const std::ffi::c_char] = if surface.is_some() { &swapchain_ext } else { &[] };
+    let mut dev_exts: Vec<*const std::ffi::c_char> = Vec::new();
+    if surface.is_some() {
+        dev_exts.push(khr::swapchain::NAME.as_ptr());
+    }
+    // Zero-copy capture (A29): the extension only when the path is asked for, offered, and the device imports a
+    // Direct3D 11 texture handle in B8G8R8A8 (`VK_KHR_external_memory` and dedicated allocations are core 1.1).
+    let external_memory = if external {
+        let probe = external_memory_probe(instance, physical);
+        let kind = select_handle(probe.d3d11_texture, probe.d3d11_texture_kmt).filter(|_| probe.win32_extension);
+        if kind.is_some() {
+            dev_exts.push(khr::external_memory_win32::NAME.as_ptr());
+        }
+        kind
+    } else {
+        None
+    };
     let mut f13 = vk::PhysicalDeviceVulkan13Features::default()
         .dynamic_rendering(true)
         .synchronization2(true);
@@ -817,12 +865,12 @@ unsafe fn create_device(
         physical,
         &vk::DeviceCreateInfo::default()
             .queue_create_infos(&queues)
-            .enabled_extension_names(dev_exts)
+            .enabled_extension_names(&dev_exts)
             .enabled_features(&features)
             .push_next(&mut f13),
         None,
     )?;
-    Ok((g, physical, queue_family, device))
+    Ok((g, physical, queue_family, device, external_memory))
 }
 
 impl Drop for Context {

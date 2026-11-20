@@ -36,5 +36,6 @@ pub mod sources;
 pub mod tube_state;
 pub mod ui;
 pub mod white;
+pub mod zerocopy;
 
 pub type Res<T> = Result<T, Box<dyn std::error::Error>>;

@@ -56,6 +56,7 @@ fn idle_frame() -> capture::Frame {
         height: IDLE_SIZE.1,
         data: [0u8, 0, 0, 255].repeat((IDLE_SIZE.0 * IDLE_SIZE.1) as usize),
         seq: 0,
+        ..capture::Frame::default()
     }
 }
 
@@ -403,6 +404,7 @@ pub fn run() -> Res<()> {
         selection.device_request(),
         args.validation,
         args.integer,
+        false,
     )?;
     let got = &renderer.context().gpu;
     selection.note_renderer(adapters::VulkanDevice {

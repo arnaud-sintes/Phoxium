@@ -49,6 +49,7 @@ impl Source {
                 height: size.1,
                 data: patterns::generate(pattern, size.0, size.1, n),
                 seq: n + 1,
+                ..Frame::default()
             }),
             Source::Image(path) => {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -103,6 +104,7 @@ pub fn decode_png(bytes: &[u8]) -> Res<Frame> {
         height: h,
         data,
         seq: 0,
+        ..Frame::default()
     })
 }
 

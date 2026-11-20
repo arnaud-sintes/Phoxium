@@ -85,6 +85,9 @@ pub struct Headless {
     pipeline: Pipeline,
     /// Which images are read back with the target ([`Headless::set_read_stages`]).
     read_stages: StageReadback,
+    /// Zero-copy (A29): the shared slots held (the source, and those read by frames in flight), as the window
+    /// renderer holds them.
+    shared: crate::zerocopy::InFlight<crate::capture::SharedFrame, FRAMES_IN_FLIGHT>,
     /// Destroyed last, by the field drop after `Drop for Headless`.
     ctx: Context,
 }
@@ -105,6 +108,7 @@ impl Headless {
         Ok(Self {
             pipeline,
             read_stages: StageReadback::All,
+            shared: Default::default(),
             ctx,
         })
     }
@@ -205,6 +209,106 @@ impl Headless {
         self.render_frames(&[(frame, view, params)], settings, target, format, Some(ui))
     }
 
+    /// Zero-copy (A29): runs `frames` back to back like [`Headless::render_burst`], each one sampling its shared
+    /// texture in place (imported once per pool), and reads back the last one. Each frame waits only for its own
+    /// frame slot; the shared slot a frame read stays held until that frame's fence was waited (as in the window
+    /// renderer), so a test that publishes new frames meanwhile exercises the slot reuse rule. A shared frame that
+    /// cannot be used is an error here (the window renderer falls back instead).
+    pub fn render_shared_burst(
+        &mut self,
+        frames: &[(crate::capture::SharedFrame, View)],
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        if target.0 == 0 || target.1 == 0 || frames.is_empty() {
+            return Err("headless render: empty target or no frame".into());
+        }
+        let mut s = Scratch::default();
+        // SAFETY: as in `render_frames`.
+        unsafe {
+            let out = self.run_shared(&mut s, frames, settings, params, target, format);
+            let _ = self.ctx.device.device_wait_idle();
+            self.pipeline.collect_all(&self.ctx);
+            // Every frame finished: only the source stays held.
+            for k in 0..FRAMES_IN_FLIGHT {
+                self.shared.frame_done(k);
+            }
+            if out.is_err() {
+                self.pipeline.drop_external_source();
+                self.shared.clear_current();
+            }
+            s.destroy(&self.ctx.device);
+            out.map_err(|e| super::lift(e, "rendering a frame"))
+        }
+    }
+
+    /// [`Headless::render_shared_burst`] of one frame.
+    pub fn render_shared(
+        &mut self,
+        frame: &crate::capture::SharedFrame,
+        view: View,
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        self.render_shared_burst(&[(frame.clone(), view)], settings, params, target, format)
+    }
+
+    /// Shared slots the renderer holds now (the source, and the frames in flight): the release-by-fence rule.
+    pub fn shared_holds(&self) -> usize {
+        self.shared.held()
+    }
+
+    /// Body of [`Headless::render_shared_burst`].
+    ///
+    /// # Safety
+    /// As [`Headless::run`].
+    unsafe fn run_shared(
+        &mut self,
+        s: &mut Scratch,
+        frames: &[(crate::capture::SharedFrame, View)],
+        settings: &Settings,
+        params: &Params,
+        target: (u32, u32),
+        format: TargetFormat,
+    ) -> Res<Rendered> {
+        let ctx = &self.ctx;
+        let extent = vk::Extent2D {
+            width: target.0,
+            height: target.1,
+        };
+        let (last, earlier) = frames.split_last().expect("frames is not empty");
+        for (frame, view) in earlier {
+            let t = self.next_target(s, extent, format)?;
+            self.pipeline.wait_slot(ctx)?;
+            let slot = self.pipeline.slot();
+            self.shared.frame_done(slot);
+            if self.pipeline.stage_external(ctx, frame.pool(), frame.slot())? {
+                self.shared.drain();
+            }
+            self.shared.set_current(frame.clone());
+            self.pipeline.record(ctx, *view, settings, params, &t)?;
+            self.pipeline.submit(ctx, &[], &[], &[])?;
+            self.shared.submitted(slot, self.pipeline.submitted_external());
+        }
+        let (frame, view) = last;
+        let t = self.next_target(s, extent, format)?;
+        self.pipeline.wait_slot(ctx)?;
+        let slot = self.pipeline.slot();
+        self.shared.frame_done(slot);
+        if self.pipeline.stage_external(ctx, frame.pool(), frame.slot())? {
+            self.shared.drain();
+        }
+        self.shared.set_current(frame.clone());
+        let cb = self.pipeline.record(ctx, *view, settings, params, &t)?;
+        let r = self.read_back_or_abandon(s, cb, &t, format);
+        self.shared.submitted(slot, self.pipeline.submitted_external());
+        r
+    }
+
     /// The Vulkan format of a [`TargetFormat`] (to create a `crate::ui::Ui` for the headless target).
     pub fn vk_format(format: TargetFormat) -> vk::Format {
         format.vk()
@@ -262,6 +366,7 @@ impl Headless {
             self.pipeline.wait_slot(ctx)?;
             if let Some(f) = frame {
                 self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
+                self.shared.clear_current();
             }
             self.pipeline.record(ctx, *view, settings, params, &t)?;
             self.pipeline.submit(ctx, &[], &[], &[])?;
@@ -272,6 +377,7 @@ impl Headless {
         self.pipeline.wait_slot(ctx)?;
         if let Some(f) = frame {
             self.pipeline.stage_source(ctx, f.width, f.height, f.bgra)?;
+            self.shared.clear_current();
         }
         let cb = self.pipeline.record_ui(ctx, *view, settings, params, &t, ui)?;
         self.read_back_or_abandon(s, cb, &t, format)
@@ -625,6 +731,7 @@ impl Headless {
         Ok(Self {
             pipeline,
             read_stages: StageReadback::All,
+            shared: Default::default(),
             ctx,
         })
     }
