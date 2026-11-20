@@ -182,7 +182,7 @@ Before, `ui_menu` alone was about 160 s on an idle GPU and 950 s under contentio
 
 ### Manual end-to-end test
 
-1. Start the source: `target\release\pixel-demo.exe` (`--scale 3`, `--res 160x144`, `--scene card`, `--image file.png`; Space cycles content, 1 to 9 sets the scale, Esc quits).
+1. Start the source: `target\release\pixel-demo.exe` (`--scale 3`, `--res 160x144`, `--scene card`, `--image file.png`; Space cycles content, 1 to 9 sets the scale, Esc quits pixel-demo, not ultimatecrt).
 2. Start the CRT app: `target\release\ultimatecrt.exe --stats --validation`.
 3. Expect: a second window duplicating the demo, `render` near the display refresh rate, a line `source scaling: detected x3/x3, native 256x240` (or `native (x1)` at scale 1), and no validation messages.
 4. Press F10: the settings menu opens and takes the focus. Press F10 or Esc to close it: the focus goes back to the source. Esc never quits the output (in the framed window or fullscreen); quit with `Ctrl+Alt+Q` or the close button of the framed window. F11 toggles fullscreen and the framed window.
