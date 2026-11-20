@@ -1,0 +1,179 @@
+# Composite video module (T-31, optional, off by default; slot `signal`, before the video amplifier,
+# voltage domain; ARCHITECTURE 3.7). Format: crates/paramgen/src/lib.rs. Each id is defined once in the
+# whole params/ folder.
+#
+# Model (oracle crates/crt-model/src/composite.rs, shader shaders/composite.comp): the drive voltages R'G'B'
+# of each native row are encoded to Y + C (NTSC or PAL quadrature chroma on the colour subcarrier, the
+# subcarrier phase advancing per pixel, per line and per frame), optionally low-passed by the channel, split
+# into luma and chroma by the decoder (notch or comb; S-Video carries them apart), demodulated, low-passed to
+# the chroma bandwidth and converted back to R'G'B'. The line runs at the source pixel clock
+# `amp_pixel_clock_mhz` (shared with the amplifier), simulated with 8 samples per source pixel. Off: the slot
+# is skipped and the picture passes bit for bit.
+
+[[param]]
+id = "composite_enable"
+stage = "composite"
+type = "bool"
+unit = "1"
+default = false
+tag = "D"
+source = "PLAN T-31 and A15 (optional modules off by default); CRT.md Composite, S-Video, component: only as an optional authenticity pre-stage"
+description = "Composite (or S-Video) encode and decode before the video amplifier: chroma bleed, cross-colour (the artifact colours of 8-bit era games), dot crawl. Uses the pixel clock of the amplifier panel (amp_pixel_clock_mhz) as the source's clock. Off: the picture passes unchanged."
+group = "Composite video"
+
+[[param]]
+id = "composite_connection"
+stage = "composite"
+type = "enum"
+unit = "1"
+default = "composite"
+values = ["composite", "svideo"]
+tag = "K"
+source = "CRT.md Composite, S-Video, component: S-Video carries luma and chroma on separate wires (no luma/chroma crosstalk); NTSC and PAL practice"
+description = "Composite: luma and chroma share one wire and the decoder separates them, with cross-colour and dot crawl. S-Video: separate luma and chroma wires, no crosstalk; only the chroma bandwidth (bleed) remains."
+group = "Composite video"
+
+[[param]]
+id = "composite_standard"
+stage = "composite"
+type = "enum"
+unit = "1"
+default = "ntsc"
+values = ["ntsc", "pal"]
+tag = "K"
+source = "CRT.md Composite: NTSC subcarrier 3.579545 MHz, PAL 4.43361875 MHz; NTSC I/Q axes turned 33 degrees from U/V, PAL V switch per line (standard practice)"
+description = "NTSC: chroma on the I and Q axes (different bandwidths), same phase rule on every line. PAL: U and V, the V axis inverted every other line (the V switch), which lets a delay-line decoder cancel phase errors. Also picks the default subcarrier and line rate."
+group = "Composite video"
+
+[[param]]
+id = "composite_separation"
+stage = "composite"
+type = "enum"
+unit = "1"
+default = "notch"
+values = ["notch", "comb"]
+tag = "E"
+source = "CRT.md Composite: dot crawl and cross-colour come from luma/chroma separation errors; the box notch and the band-split 1-line comb are simple model forms of the decoder"
+description = "Decoder. Notch: the luma is the mean over one subcarrier period (soft luma, strong cross-colour on fine luma detail). Comb (NTSC): a 1-line comb removes cross-colour where adjacent lines match, at the cost of hanging dots on vertical colour changes; needs the 180 degree line advance of NTSC timing. In PAL, Comb selects the chroma delay line (PAL-D, phase errors become a saturation loss) and Notch the simple PAL-S decoder."
+group = "Composite video"
+
+[[param]]
+id = "composite_subcarrier_mhz"
+stage = "composite"
+type = "f32"
+unit = "MHz"
+default = 0.0
+min = 0.0
+max = 5.0
+tag = "S"
+source = "CRT.md Composite, S-Video, component: NTSC 3.579545 MHz, PAL 4.43361875 MHz"
+description = "Colour subcarrier frequency. 0 uses the standard's value (NTSC 3.579545, PAL 4.43361875 MHz). With the pixel clock it sets the subcarrier cycles per source pixel: 2/3 for the NES (5.369 MHz), 0.533 for the Genesis H40 (6.711 MHz), 1/2 for a 7.16 MHz (2 f_sc) clock (Apple II high res, CGA 320) and 1/4 for 14.32 MHz (CGA 640): a pixel clock that is a small multiple of the subcarrier makes the artifact colours of those machines."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_line_rate_khz"
+stage = "composite"
+type = "f32"
+unit = "kHz"
+default = 0.0
+min = 0.0
+max = 32.0
+tag = "S"
+source = "CRT.md Raster timing: NTSC 15.734 kHz, PAL 15.625 kHz"
+description = "Line rate of the source's video timing. 0 uses the standard's value (NTSC 15.734 kHz: 227.5 subcarrier cycles per line, the dot pattern shifts 180 degrees each line; PAL 15.625 kHz: 270.6 degrees). Consoles differ: the NES (341 dots at 5.369 MHz, 15.746 kHz) advances 120 degrees per line."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_frame_advance_deg"
+stage = "composite"
+type = "f32"
+unit = "deg"
+default = 180.0
+min = 0.0
+max = 360.0
+tag = "K"
+source = "NTSC timing: a 525-line frame holds 119437.5 subcarrier cycles, so the phase flips 180 degrees per frame (the 30 Hz dot crawl); many 240p consoles repeat the same phase every frame (0)"
+description = "Subcarrier phase advance from one frame to the next. 180: the dot pattern and the artifact colours alternate each frame (broadcast NTSC: dot crawl, flicker of the artifact colours). 0: the pattern stands still (consoles whose frame holds a whole number of subcarrier cycles). Uses the frame counter of the output."
+group = "Composite video"
+
+[[param]]
+id = "composite_phase_deg"
+stage = "composite"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = 0.0
+max = 360.0
+tag = "E"
+source = "Model parameter: the subcarrier phase at the left edge of the first line is set by each machine's clock divider and is not documented in CRT.md"
+description = "Subcarrier phase at the left edge of the first line of the first frame (sine axis of U). Shifts which hues the artifact colours of fine luma patterns take; machine specific."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_i_bandwidth_mhz"
+stage = "composite"
+type = "f32"
+unit = "MHz"
+default = 1.3
+min = 0.3
+max = 4.0
+tag = "K"
+source = "NTSC I channel bandwidth 1.3 MHz, PAL U and V about 1.3 MHz (standards practice); CRT.md: chroma bandwidth about 0.5 to 1.3 MHz"
+description = "-3 dB bandwidth of the decoder's I low-pass (NTSC), or of U and V (PAL); Gaussian. Sets the chroma bleed at colour edges: 10-90 % width 0.3396 x pixel clock / bandwidth source pixels (1.4 px at 5.37 MHz)."
+group = "Composite video"
+
+[[param]]
+id = "composite_q_bandwidth_mhz"
+stage = "composite"
+type = "f32"
+unit = "MHz"
+default = 0.5
+min = 0.3
+max = 4.0
+tag = "K"
+source = "NTSC Q channel bandwidth 0.5 MHz (standards practice); CRT.md: chroma bandwidth about 0.5 to 1.3 MHz"
+description = "-3 dB bandwidth of the decoder's Q low-pass (NTSC only; Gaussian). Narrower than I: colours along the Q axis (green to magenta) bleed 2.6 times further. Many consumer sets used equal I and Q (set both to the same value)."
+group = "Composite video"
+
+[[param]]
+id = "composite_bandwidth_mhz"
+stage = "composite"
+type = "f32"
+unit = "MHz"
+default = 4.2
+min = 0.0
+max = 8.0
+tag = "K"
+source = "NTSC broadcast luma bandwidth 4.2 MHz (standards practice); Gaussian channel and burst-referenced colour gain (ACC) are model forms"
+description = "-3 dB bandwidth of the composite channel (Gaussian), before the decoder; 0 = no channel filter. Softens luma detail; the decoder's automatic colour control restores the chroma level at the subcarrier, as a real set does from the colour burst. Not applied to S-Video."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_hue_deg"
+stage = "composite"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = -180.0
+max = 180.0
+tag = "K"
+source = "CRT.md Controls table: Colour / tint act in the chroma decoder (composite/YC only)"
+description = "Tint: phase error of the decoder's subcarrier reference. Turns every decoded hue in NTSC; in PAL with the delay line it only lowers the saturation (by its cosine)."
+group = "Composite video"
+
+[[param]]
+id = "composite_saturation"
+stage = "composite"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.0
+max = 2.0
+tag = "K"
+source = "CRT.md Controls table: Colour / tint act in the chroma decoder (composite/YC only)"
+description = "Colour: gain of the decoded chroma. 0 gives grey with the same luma."
+group = "Composite video"
