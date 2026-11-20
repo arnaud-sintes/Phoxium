@@ -56,7 +56,7 @@ Everything the app keeps is under `%APPDATA%\ultimateCRT\`: `settings.toml` (you
 
 ### Known limits
 
-- Zero-copy capture (the default since v0.3.0, see Capture path) has been checked live only on the development laptop with the demo source: it is not yet validated with a wide range of games and drivers. If the picture looks wrong, stutters or freezes, choose **CPU copy (most compatible)** in the **Capture** combo of the menu's Source section (or start once with `--capture-path cpu`).
+- Zero-copy capture (the default since v0.3.0, see Capture path) has been checked live only on the development laptop with the demo source (the last fixes of v0.3.0 were verified by automated tests and 45 consecutive starts without a crash, but not yet re-checked by hand on an unlocked desktop with this exact build): it is not yet validated with a wide range of games and drivers. If the picture looks wrong, stutters or freezes, choose **CPU copy (most compatible)** in the **Capture** combo of the menu's Source section (or start once with `--capture-path cpu`).
 - SDR output only; HDR output and HDR colour are out of scope for now.
 - Window capture only (Windows.Graphics.Capture): a program that uses exclusive fullscreen cannot be captured; run it in a window or in borderless fullscreen. Protected content is captured black.
 - Developed and tested on one NVIDIA GPU (RTX A2000 Laptop, with an Intel GPU in the same laptop) and Windows 11; the target is NVIDIA. AMD and Intel GPUs, and other PCs, have not been tested beyond that laptop: please report what you see.
