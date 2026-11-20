@@ -16,11 +16,11 @@
 //    cylinder of horizontal radius R with a vertical axis); the arc length to that point, R atan(rho, R - z),
 //    along the lateral direction (spherical) or along x with y unchanged (cylindrical). No refraction.
 // 2. rotation (inverse): the landing point turned back by -angle about the centre.
-// 3. trapezoid (inverse, exact): x / (1 + t y / half height); y is unchanged by the trapezoid.
+// 3. trapezoid (inverse, exact): x / (1 + t y / half height); y is unchanged by the trapezoid (a non-positive
+//    factor, only far outside the raster at |t| <= 0.5: black).
 // 4. pincushion (inverse): the forward residual is s (1 + k |s|^2 / rc^2) (rc the half diagonal); inverted by
-//    four fixed-point steps (contraction about 2|k| (r / rc)^2 <= 0.1, each step cuts the error 8 to 11x; at
-//    |k| = 0.05 in the corner of a 386 x 290 mm picture the residual is 0.0006 mm (k > 0) to 0.0028 mm (k < 0),
-//    0.003 to 0.014 px at 1440 lines, against 0.007 to 0.023 mm with three steps; T-37 review, f64 check).
+//    Newton steps on the radius until converged (geometry_pincushion_inverse: f32 rounding over the whole
+//    hard range |k| <= 0.3; a barrel's landing points beyond its fold have no preimage: black).
 // 5. size: the nominal raster is scaled by (1 + overscan) per axis and by raster_scale (ABL breathing, T-35)
 //    about the tube centre, so the raster point is the landing point divided by those factors.
 // Identity (every parameter at its default, raster_scale 1): geometry_footprint returns vec2(q) exactly through
@@ -105,6 +105,46 @@ bool geometry_surface_arc(vec2 u, out vec2 arc) {
     return true;
 }
 
+// Step 4, inverse: replaces the landing point s (mm) by the raster point s' whose pincushion residual
+// s' (1 + k |s'|^2 / rc2) lands there; false when there is none. Radially, Newton on f(r) = r + a r^3 - L
+// (a = k / rc2, L = |s|) for the smallest positive root, from r0 = L / (1 + a L^2) (one fixed-point step,
+// below the root for either sign of k). k < 0: f is concave, the iterates rise monotonically to the root;
+// k > 0: f is convex, the first step overshoots, then they fall monotonically. A barrel folds at
+// r_max = rc / sqrt(3 |k|) (f' = 0), landing at (2/3) r_max: a landing point beyond that has no preimage (the
+// iteration passes the fold, f' <= 0, or does not converge) and is black. Over the hard range |k| <= 0.3 the
+// fold lies beyond the raster corner (r_max >= 1.054 rc, f' >= 0.1 at the corner): about 6 steps there, 2 to 3
+// at |k| <= 0.05. Stops when a step is under 1e-6 of r, at most GEOMETRY_PINCUSHION_STEPS steps (review D-08:
+// the former four fixed-point steps left tens of px in the corner at k = -0.3, and oscillated past it).
+const int GEOMETRY_PINCUSHION_STEPS = 16;
+bool geometry_pincushion_inverse(inout vec2 s, float rc2) {
+    float a = params.geometry_pincushion / rc2;
+    float l = length(s);
+    if (!(l > 0.0)) {
+        return true; // the centre is fixed
+    }
+    float d0 = 1.0 + a * l * l;
+    if (!(d0 > 0.0)) {
+        return false; // barrel, far beyond the fold
+    }
+    float r = l / d0;
+    for (int i = 0; i < GEOMETRY_PINCUSHION_STEPS; i++) {
+        float d = 1.0 + 3.0 * a * r * r;
+        if (!(d > 0.0)) {
+            return false; // passed the fold
+        }
+        float step = (r + a * r * r * r - l) / d;
+        r -= step;
+        if (abs(step) <= 1e-6 * r) {
+            break;
+        }
+    }
+    if (!(r > 0.0) || !(abs(r + a * r * r * r - l) <= 1e-5 * l)) {
+        return false; // no converged preimage (just past the fold)
+    }
+    s *= r / l;
+    return true;
+}
+
 // Raster position (host px of the tube rectangle) of the host position p (host px).
 vec2 geometry_raster_px(vec2 p, float scale) {
     float ppm = frame.px_per_mm;
@@ -122,16 +162,15 @@ vec2 geometry_raster_px(vec2 p, float scale) {
         float si = sin(ang);
         s = vec2(co * s.x + si * s.y, -si * s.x + co * s.y);
     }
-    // 3. Trapezoid, inverse.
-    s.x /= 1.0 + params.geometry_trapezoid * s.y / half_mm.y;
-    // 4. Pincushion, inverse (fixed point).
-    float k = params.geometry_pincushion;
-    if (k != 0.0) {
-        float rc2 = dot(half_mm, half_mm);
-        vec2 land = s;
-        for (int i = 0; i < 4; i++) {
-            s = land / (1.0 + k * dot(s, s) / rc2);
-        }
+    // 3. Trapezoid, inverse (a non-positive width factor, far outside the raster: black).
+    float tz = 1.0 + params.geometry_trapezoid * s.y / half_mm.y;
+    if (!(tz > 0.0)) {
+        return vec2(-1e6);
+    }
+    s.x /= tz;
+    // 4. Pincushion, inverse (Newton on the radius, see the header; no preimage: black).
+    if (params.geometry_pincushion != 0.0 && !geometry_pincushion_inverse(s, dot(half_mm, half_mm))) {
+        return vec2(-1e6);
     }
     // 5. Size: overscan per axis and raster_scale.
     s /= vec2(1.0 + params.geometry_overscan_x, 1.0 + params.geometry_overscan_y) * scale;
