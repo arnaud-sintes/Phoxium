@@ -90,6 +90,8 @@ pub struct Picker {
     pub first_run: Option<String>,
     /// The hint's "Do not show again" box.
     pub first_run_never: bool,
+    /// The high surrogate of a character outside the BMP (an emoji), waiting for its low half ([`Picker::on_char`]).
+    pub high_surrogate: Option<u16>,
 }
 
 impl Picker {
@@ -167,9 +169,24 @@ impl Picker {
     }
 
     /// A character typed while the card is shown (`WM_CHAR`, one UTF-16 unit): printable characters go to the
-    /// search text. Returns whether the picker used it.
+    /// search text. A character outside the BMP (an emoji) comes as two units, a high then a low surrogate: they
+    /// are combined (review D-14), as `super::input` does for Dear ImGui; a lone surrogate is dropped. Returns
+    /// whether the picker used it.
     pub fn on_char(&mut self, unit: usize) -> bool {
-        match char::from_u32(unit as u32) {
+        let unit16 = (unit & 0xFFFF) as u16;
+        let c = if (0xD800..0xDC00).contains(&unit16) {
+            self.high_surrogate = Some(unit16);
+            return true;
+        } else if (0xDC00..0xE000).contains(&unit16) {
+            match self.high_surrogate.take() {
+                Some(hi) => char::decode_utf16([hi, unit16]).next().and_then(Result::ok),
+                None => return true,
+            }
+        } else {
+            self.high_surrogate = None;
+            char::from_u32(unit as u32)
+        };
+        match c {
             Some(c) if !c.is_control() => {
                 let mut q = self.query.clone();
                 q.push(c);
@@ -734,6 +751,28 @@ mod tests {
         p.selected = Some(1);
         p.query = "zzz".into();
         assert_eq!(p.on_key(VK_RETURN), (true, None));
+    }
+
+    /// Review D-14: a character outside the BMP arrives as two UTF-16 units and is kept whole; a lone surrogate
+    /// (a high one followed by an ordinary character, or a low one alone) is dropped.
+    #[test]
+    fn surrogate_pairs_are_combined_in_the_search_text() {
+        let mut p = picker();
+        p.rows.push(row(9, "game \u{1F3AE} night"));
+        let mut units = [0u16; 2];
+        for u in '\u{1F3AE}'.encode_utf16(&mut units).iter() {
+            assert!(p.on_char(usize::from(*u)), "both halves are used");
+        }
+        assert_eq!(p.query, "\u{1F3AE}");
+        assert_eq!(p.visible(), [9]);
+        p.on_key(VK_BACK);
+        assert_eq!(p.query, "", "Backspace removes the whole character");
+        assert!(p.on_char(0xD83C));
+        assert!(p.on_char('a' as usize));
+        assert_eq!(p.query, "a", "the unpaired high half is dropped");
+        assert!(p.on_char(0xDFAE));
+        assert_eq!(p.query, "a", "a low half alone is dropped");
+        assert_eq!(p.high_surrogate, None);
     }
 
     #[test]
