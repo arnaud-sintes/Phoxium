@@ -232,7 +232,7 @@ impl Headless {
             let _ = self.ctx.device.device_wait_idle();
             self.pipeline.collect_all(&self.ctx);
             s.destroy(&self.ctx.device);
-            out
+            out.map_err(|e| super::lift(e, "rendering a frame"))
         }
     }
 
@@ -296,8 +296,28 @@ impl Headless {
             let _ = self.ctx.device.device_wait_idle();
             self.pipeline.collect_all(&self.ctx);
             s.destroy(&self.ctx.device);
-            out
+            out.map_err(|e| super::lift(e, "rendering a frame"))
         }
+    }
+
+    /// The GPU-side notice in force after the last frame, as [`super::Renderer::gpu_notice`].
+    pub fn gpu_notice(&self) -> Option<String> {
+        self.pipeline.notice()
+    }
+
+    /// The notices that appeared since the previous call, as [`super::Renderer::take_gpu_notices`].
+    pub fn take_gpu_notices(&mut self) -> Vec<String> {
+        self.pipeline.take_notices()
+    }
+
+    /// The image limits the pipeline applies (the device's, `Context::image_limits`, unless replaced).
+    pub fn image_limits(&self) -> crate::quality::ImageLimits {
+        self.pipeline.image_limits()
+    }
+
+    /// Replaces the image limits the pipeline applies (tests: the limits of a smaller device, R-02).
+    pub fn set_image_limits(&mut self, limits: crate::quality::ImageLimits) {
+        self.pipeline.set_image_limits(limits);
     }
 
     /// Body of [`Headless::render_stages`].
@@ -438,7 +458,7 @@ impl Headless {
         super::pipeline::barrier_to_host(d, cb, true);
 
         let fence = self.pipeline.submit(ctx, &[], &[], &[])?;
-        d.wait_for_fences(&[fence], true, u64::MAX)?;
+        super::wait_fences(d, &[fence], "a frame")?;
 
         // The readback memory is HOST_COHERENT: after the HOST_READ barrier and the fence wait, the
         // copies are visible to the host without an invalidate.
@@ -1104,6 +1124,93 @@ mod tests {
         }
         drop(gpu);
         assert_eq!(counter.count(), 0, "validation messages");
+    }
+
+    /// A headless renderer with validation when the layer is installed, `None` (skip) without a device unless
+    /// `UCRT_REQUIRE_GPU=1`.
+    fn gpu_or_skip(test: &str) -> Option<Headless> {
+        let require = crate::gpu::gpu_required();
+        let validation = crate::gpu::validation_layer_available();
+        assert!(
+            validation || !require,
+            "UCRT_REQUIRE_GPU=1 but the validation layer is not installed"
+        );
+        match Headless::new(validation) {
+            Ok(g) => Some(g),
+            Err(e) => {
+                assert!(!require, "UCRT_REQUIRE_GPU=1 but no headless Vulkan device: {e}");
+                eprintln!("{test} skipped: {e}");
+                None
+            }
+        }
+    }
+
+    /// R-27: a source reallocation that fails half way (the second slot's staging buffer) leaves no size without
+    /// its buffers: the same size fails again (reallocated again, never a copy through a null mapping), and once
+    /// the allocation works the frame renders normally, with zero validation messages.
+    #[test]
+    fn a_failed_source_reallocation_leaves_no_null_staging() {
+        let Some(mut gpu) = gpu_or_skip("failed source reallocation test") else {
+            return;
+        };
+        let counter = gpu.validation_counter();
+        gpu.enable_only(&[]).expect("bypass every slot");
+        let (w, h) = (5u32, 3u32);
+        let bgra: Vec<u8> = (0..w * h)
+            .flat_map(|i| [i as u8 * 9 + 1, i as u8 * 7 + 2, i as u8 * 5 + 3, 255])
+            .collect();
+        // SAFETY: the pipeline and the context are the ones of `gpu`; no frame is recorded in between.
+        unsafe {
+            let ctx = &gpu.ctx;
+            gpu.pipeline.wait_slot(ctx).expect("wait");
+            for slot in [1, 0] {
+                gpu.pipeline.fail_staging_alloc = Some(slot);
+                assert!(
+                    gpu.pipeline.stage_source(ctx, w, h, &bgra).is_err(),
+                    "slot {slot} fault"
+                );
+                assert!(
+                    gpu.pipeline.stage_source(ctx, w, h, &bgra).is_err(),
+                    "slot {slot} fault, same size again"
+                );
+                assert_eq!(
+                    gpu.pipeline.source_allocation(),
+                    ((0, 0), 0),
+                    "no size without its buffers, no buffer left"
+                );
+            }
+            gpu.pipeline.fail_staging_alloc = None;
+        }
+        let (view, settings, params) = (View::full(w, h), Settings::identity(), Params::default());
+        let frame = SourceFrame {
+            width: w,
+            height: h,
+            bgra: &bgra,
+        };
+        let r = gpu
+            .render(Some(frame), view, &settings, &params, (w, h), TargetFormat::Bgra8Unorm)
+            .expect("render once the allocation works");
+        for i in 0..w * h {
+            let p = r.output.pixel(i % w, i / w);
+            let got = [p[0], p[1], p[2]].map(|v| (v * 255.0).round() as u8);
+            let k = i as u8;
+            assert_eq!(got, [k * 5 + 3, k * 7 + 2, k * 9 + 1], "pixel {i}");
+        }
+        drop(gpu);
+        assert_eq!(counter.count(), 0, "validation messages");
+    }
+
+    /// R-50: the clip counters read before any frame finished are zero in every frame slot.
+    #[test]
+    fn clip_counters_start_at_zero() {
+        let Some(gpu) = gpu_or_skip("clip counter test") else {
+            return;
+        };
+        // SAFETY: no frame was ever submitted, so no slot is in use.
+        let (current, last) = unsafe { (gpu.pipeline.clip_counts(), gpu.pipeline.last_clip_counts()) };
+        for c in [current, last] {
+            assert_eq!((c.over_white, c.out_of_gamut), (0, 0));
+        }
     }
 
     #[test]

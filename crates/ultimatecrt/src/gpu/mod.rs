@@ -7,6 +7,15 @@
 //! T-52a). `Renderer` is the facade used by the application.
 //! `headless` runs the same pipeline into an offscreen image and reads it back, without any window
 //! (tests).
+//!
+//! Failures (R-01): what the renderer can recover from is not an error. A minimised window, a 0 x 0 surface, an
+//! out-of-date or suboptimal swapchain and a lost surface give a [`FrameStatus`] (the swapchain or surface is
+//! recreated before the next frame); a frame whose tube area is empty or too large for the GPU draws the surround
+//! only, with a notice ([`Renderer::gpu_notice`]). A lost device (`ERROR_DEVICE_LOST`, or a fence that does not
+//! signal within [`FENCE_TIMEOUT`]) is a [`GpuError::DeviceLost`]: the application saves its state and stops;
+//! rebuilding the renderer after a device loss is not done yet.
+
+use std::time::Duration;
 
 use ash::vk;
 
@@ -14,6 +23,137 @@ use crate::params::Params;
 use crate::scaling::View;
 
 use crate::Res;
+
+/// What [`Renderer::render`] did with a frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameStatus {
+    /// The frame was drawn and presented.
+    Presented,
+    /// Nothing to draw into: the window is minimised or its surface has a 0 side. The frame (if any) is staged
+    /// for later. The caller should wait (about one refresh period, for messages) before the next call instead of
+    /// calling again at once: nothing paces the loop while minimised.
+    NothingToDraw,
+    /// The frame was skipped while the swapchain or the surface is recreated (out of date, lost surface, or no
+    /// image free within the acquire timeout): the next call draws normally.
+    Skipped,
+}
+
+/// How long a wait for a frame's fence may take before the GPU counts as hung (R-01): longer than the Windows GPU
+/// timeout (TDR, 2 s by default), so a real reset shows as `ERROR_DEVICE_LOST` first, and a wait beyond it means
+/// the driver no longer answers.
+pub const FENCE_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// A GPU failure the application must handle as such (R-01): it reads it with
+/// `error.downcast_ref::<GpuError>()` and tells the user, after saving its state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GpuError {
+    /// The device is gone: `ERROR_DEVICE_LOST` (driver reset after a timeout, driver update, GPU removed or switched),
+    /// or `hung` when a fence did not signal within [`FENCE_TIMEOUT`]. The renderer cannot be used any more.
+    DeviceLost { during: &'static str, hung: bool },
+    /// The output window's surface was lost and could not be recreated.
+    SurfaceLost { detail: String },
+    /// Out of host or GPU memory.
+    OutOfMemory { during: &'static str },
+    /// No GPU of the machine has what the renderer needs (device selection, [`Context`]).
+    Unsupported { reason: String },
+}
+
+impl GpuError {
+    /// True for [`GpuError::DeviceLost`]: the renderer is unusable and the application should save and stop.
+    pub fn is_device_lost(&self) -> bool {
+        matches!(self, GpuError::DeviceLost { .. })
+    }
+}
+
+impl std::fmt::Display for GpuError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            GpuError::DeviceLost { during, hung: false } => {
+                write!(f, "GPU device lost (driver reset or update) while {during}")
+            }
+            GpuError::DeviceLost { during, hung: true } => write!(
+                f,
+                "GPU device lost (driver reset or update): the GPU did not finish {during} within {} s",
+                FENCE_TIMEOUT.as_secs()
+            ),
+            GpuError::SurfaceLost { detail } => write!(f, "the output window's Vulkan surface was lost: {detail}"),
+            GpuError::OutOfMemory { during } => write!(f, "out of GPU or system memory while {during}"),
+            GpuError::Unsupported { reason } => write!(f, "this GPU is not supported: {reason}"),
+        }
+    }
+}
+
+impl std::error::Error for GpuError {}
+
+/// What a Vulkan result means for the renderer ([`classify`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VkClass {
+    /// `SUCCESS`.
+    Ok,
+    /// `SUBOPTIMAL_KHR`: works, recreate the swapchain when convenient.
+    Suboptimal,
+    /// `ERROR_OUT_OF_DATE_KHR`: recreate the swapchain, skip the frame.
+    OutOfDate,
+    /// `ERROR_SURFACE_LOST_KHR`: recreate the surface and the swapchain, skip the frame.
+    SurfaceLost,
+    /// `ERROR_DEVICE_LOST`: fatal for the renderer.
+    DeviceLost,
+    /// `TIMEOUT` or `NOT_READY` from a bounded wait.
+    Timeout,
+    /// `ERROR_OUT_OF_HOST_MEMORY`, `ERROR_OUT_OF_DEVICE_MEMORY`.
+    OutOfMemory,
+    /// Anything else (an error of the program or the driver).
+    Other,
+}
+
+/// Classifies a Vulkan result (pure; R-01).
+pub fn classify(r: vk::Result) -> VkClass {
+    match r {
+        vk::Result::SUCCESS => VkClass::Ok,
+        vk::Result::SUBOPTIMAL_KHR => VkClass::Suboptimal,
+        vk::Result::ERROR_OUT_OF_DATE_KHR => VkClass::OutOfDate,
+        vk::Result::ERROR_SURFACE_LOST_KHR => VkClass::SurfaceLost,
+        vk::Result::ERROR_DEVICE_LOST => VkClass::DeviceLost,
+        vk::Result::TIMEOUT | vk::Result::NOT_READY => VkClass::Timeout,
+        vk::Result::ERROR_OUT_OF_HOST_MEMORY | vk::Result::ERROR_OUT_OF_DEVICE_MEMORY => VkClass::OutOfMemory,
+        _ => VkClass::Other,
+    }
+}
+
+/// The error a failed Vulkan call becomes: [`GpuError`] for a lost device or surface and for lack of memory,
+/// the plain `vk::Result` otherwise.
+pub fn vk_error(r: vk::Result, during: &'static str) -> Box<dyn std::error::Error> {
+    match classify(r) {
+        VkClass::DeviceLost => Box::new(GpuError::DeviceLost { during, hung: false }),
+        VkClass::OutOfMemory => Box::new(GpuError::OutOfMemory { during }),
+        VkClass::SurfaceLost => Box::new(GpuError::SurfaceLost {
+            detail: format!("{r} while {during}"),
+        }),
+        _ => Box::new(r),
+    }
+}
+
+/// Lifts an error that is a bare `vk::Result` (any `?` on an ash call) to its [`vk_error`] form; other errors are
+/// returned as they are.
+pub fn lift(e: Box<dyn std::error::Error>, during: &'static str) -> Box<dyn std::error::Error> {
+    match e.downcast_ref::<vk::Result>() {
+        Some(&r) => vk_error(r, during),
+        None => e,
+    }
+}
+
+/// Waits for `fences` at most [`FENCE_TIMEOUT`]: a timeout is a hung GPU, [`GpuError::DeviceLost`] with `hung`
+/// (never an endless wait, R-01).
+///
+/// # Safety
+/// The fences are live fences of `d` that a submission will signal (or already did).
+pub unsafe fn wait_fences(d: &ash::Device, fences: &[vk::Fence], during: &'static str) -> Res<()> {
+    match d.wait_for_fences(fences, true, FENCE_TIMEOUT.as_nanos() as u64) {
+        Ok(()) => Ok(()),
+        Err(r) if classify(r) == VkClass::Timeout => Err(Box::new(GpuError::DeviceLost { during, hung: true })),
+        Err(r) => Err(vk_error(r, during)),
+    }
+}
 
 mod context;
 mod headless;
@@ -26,12 +166,12 @@ mod ui_render;
 pub use timing::{csv_columns, FrameTimings, StageTiming, TimingAverager};
 pub use ui_render::UiPass;
 
-pub use context::{gpu_required, validation_layer_available, ValidationCounter};
+pub use context::{device_meets, gpu_required, validation_layer_available, DeviceCaps, ValidationCounter};
 pub use context::{list_gpus, vulkan_report, Context, DeviceRequest, ExternalMemoryProbe, GpuInfo, VulkanReport};
 pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
 pub use headless::{StageInput, StageReadback, StageRun};
 pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
-pub use present::Presenter;
+pub use present::{extent_for, Acquired, Presenter};
 pub use stages::encode::{output_matrix, ClipCounts};
 pub use stages::screen::{warp_plan, WarpPlan, WARP_SIGMA_STEPS};
 pub use stages::{Domain, AMP_K};
@@ -54,6 +194,8 @@ pub struct Renderer {
     quality_drop: u32,
     /// Clip counters of the last frame that finished (T-46), refreshed by `render`.
     clip: ClipCounts,
+    /// Set by the first device loss: every later call returns it without touching the device.
+    lost: Option<GpuError>,
     /// Destroyed last: `Drop for Renderer` releases every child object above first, then the
     /// field drop of `ctx` destroys the device and the instance.
     ctx: Context,
@@ -68,7 +210,7 @@ impl Renderer {
         // by `Drop for Renderer` before `ctx`.
         unsafe {
             let (ctx, surface) = Context::with_window(hwnd, hinstance, gpu, validation)?;
-            let presenter = Presenter::from_surface(&ctx, surface, hwnd_client_size(hwnd))?;
+            let presenter = Presenter::from_surface(&ctx, surface, Some((hwnd, hinstance)), hwnd_client_size(hwnd))?;
             let mut r = Self {
                 gpu_name: ctx.gpu.name.clone(),
                 presenter,
@@ -81,6 +223,7 @@ impl Renderer {
                 params: Params::default(),
                 quality_drop: 0,
                 clip: ClipCounts::default(),
+                lost: None,
                 ctx,
             };
             for s in &mut r.image_available {
@@ -110,9 +253,24 @@ impl Renderer {
     ///
     /// A given frame is always staged for upload, also when the window is minimised or the swapchain
     /// is out of date (the frame is then not drawn but kept for the next call), so the caller may
-    /// consider it consumed once this returns `Ok`.
-    pub fn render(&mut self, frame: Option<(u32, u32, &[u8])>, view: View, client: (u32, u32)) -> Res<()> {
+    /// consider it consumed once this returns `Ok`. The status says whether anything was drawn
+    /// ([`FrameStatus::NothingToDraw`]: the caller waits before calling again). An `Err` holding a
+    /// [`GpuError::DeviceLost`] means the renderer is unusable (every later call returns it again).
+    pub fn render(&mut self, frame: Option<(u32, u32, &[u8])>, view: View, client: (u32, u32)) -> Res<FrameStatus> {
         self.render_with_ui(frame, view, client, None)
+    }
+
+    /// The GPU-side notice in force, for the title and the overlay: what the renderer limited or left out because
+    /// of the GPU or the parameters (amplifier samples limited to the image size the GPU allows, an empty or
+    /// too large tube area, the line images of the warp path), `None` when nothing is limited. Each one is also
+    /// printed once (`notice: ...`) when it appears.
+    pub fn gpu_notice(&self) -> Option<String> {
+        self.pipeline.as_ref().and_then(Pipeline::notice)
+    }
+
+    /// The notices that appeared since the previous call, each once (for a log or a toast).
+    pub fn take_gpu_notices(&mut self) -> Vec<String> {
+        self.pipeline.as_mut().map(Pipeline::take_notices).unwrap_or_default()
     }
 
     /// The Vulkan context (device, queue, chosen GPU): the settings menu (`crate::ui::Ui`) creates its
@@ -135,7 +293,28 @@ impl Renderer {
         view: View,
         client: (u32, u32),
         ui: Option<&mut dyn UiPass>,
-    ) -> Res<()> {
+    ) -> Res<FrameStatus> {
+        if let Some(e) = &self.lost {
+            return Err(Box::new(e.clone()));
+        }
+        let r = self.render_frame(frame, view, client, ui);
+        r.map_err(|e| {
+            let e = lift(e, "rendering a frame");
+            if let Some(g) = e.downcast_ref::<GpuError>().filter(|g| g.is_device_lost()) {
+                self.lost = Some(g.clone());
+            }
+            e
+        })
+    }
+
+    /// Body of [`Renderer::render_with_ui`].
+    fn render_frame(
+        &mut self,
+        frame: Option<(u32, u32, &[u8])>,
+        view: View,
+        client: (u32, u32),
+        ui: Option<&mut dyn UiPass>,
+    ) -> Res<FrameStatus> {
         let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
         // SAFETY: every handle used below belongs to `self.ctx`. `wait_slot` guarantees the slot's
         // previous submission finished, so its command buffer, staging and uniform buffers and its
@@ -146,14 +325,9 @@ impl Renderer {
             if let Some((w, h, data)) = frame {
                 pipeline.stage_source(&self.ctx, w, h, data)?;
             }
-            if client.0 == 0 || client.1 == 0 {
-                return Ok(()); // minimised
-            }
-
-            let extent = self.presenter.extent();
-            if (extent.width, extent.height) != client {
-                self.ctx.device.device_wait_idle()?;
-                self.presenter.resize(&self.ctx, client)?;
+            // Minimised, or the surface has no extent now (the old swapchain is kept): nothing to draw into.
+            if !self.presenter.ensure(&self.ctx, client)? {
+                return Ok(FrameStatus::NothingToDraw);
             }
             // Everything that can fail for a reason other than the device or the surface (settings,
             // pipeline creation, image allocation) is done before the acquire.
@@ -169,29 +343,23 @@ impl Renderer {
 
             let slot = pipeline.slot();
             let acquired = self.image_available[slot];
-            let Some(index) = self.presenter.acquire(&self.ctx, client, acquired)? else {
-                return Ok(());
+            let index = match self.presenter.acquire(&self.ctx, acquired)? {
+                Acquired::Image { index, .. } => index,
+                Acquired::Skip => return Ok(FrameStatus::Skipped),
             };
-            if let Err(e) = self.draw(index, acquired, view, client, ui) {
-                self.recover_after_acquire(slot, client);
+            if let Err(e) = self.draw(index, acquired, view, ui) {
+                self.recover_after_acquire(slot);
                 return Err(e);
             }
         }
-        Ok(())
+        Ok(FrameStatus::Presented)
     }
 
     /// Records, submits and presents the frame into the acquired image `index`.
     ///
     /// # Safety
     /// As [`Renderer::render`]; `index` was acquired with `acquired` as its semaphore.
-    unsafe fn draw(
-        &mut self,
-        index: u32,
-        acquired: vk::Semaphore,
-        view: View,
-        client: (u32, u32),
-        ui: Option<&mut dyn UiPass>,
-    ) -> Res<()> {
+    unsafe fn draw(&mut self, index: u32, acquired: vk::Semaphore, view: View, ui: Option<&mut dyn UiPass>) -> Res<()> {
         let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
         let target = Target {
             image: self.presenter.image(index),
@@ -218,17 +386,18 @@ impl Renderer {
             &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
             &[self.presenter.render_done(index)],
         )?;
-        self.presenter.present(&self.ctx, index, client)
+        self.presenter.present(&self.ctx, index)
     }
 
     /// Error path after a successful acquire: the image is acquired and will not be presented, and its
     /// semaphore may still be signalled. Waits for the device, rolls back the unsubmitted frame,
-    /// replaces the semaphore and recreates the swapchain (which discards the acquired image), so the
-    /// next frame starts clean. Best effort: a failure here is dropped, the caller reports the first error.
+    /// replaces the semaphore and asks for a new swapchain before the next frame (which discards the
+    /// acquired image), so the next frame starts clean. Best effort: a failure here is dropped, the caller
+    /// reports the first error.
     ///
     /// # Safety
     /// As [`Renderer::render`].
-    unsafe fn recover_after_acquire(&mut self, slot: usize, client: (u32, u32)) {
+    unsafe fn recover_after_acquire(&mut self, slot: usize) {
         let d = &self.ctx.device;
         let _ = d.device_wait_idle();
         if let Some(p) = self.pipeline.as_mut() {
@@ -238,7 +407,7 @@ impl Renderer {
             d.destroy_semaphore(self.image_available[slot], None);
             self.image_available[slot] = fresh;
         }
-        let _ = self.presenter.resize(&self.ctx, client);
+        self.presenter.mark_stale();
     }
 
     /// Pixels clipped by the output transform in the last frame the GPU finished (COL-1 clip indicator
@@ -473,5 +642,71 @@ impl Drop for Renderer {
             }
             self.presenter.destroy(&self.ctx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// R-01: every Vulkan result the window path meets maps to one recovery.
+    #[test]
+    fn vulkan_results_are_classified() {
+        assert_eq!(classify(vk::Result::SUCCESS), VkClass::Ok);
+        assert_eq!(classify(vk::Result::SUBOPTIMAL_KHR), VkClass::Suboptimal);
+        assert_eq!(classify(vk::Result::ERROR_OUT_OF_DATE_KHR), VkClass::OutOfDate);
+        assert_eq!(classify(vk::Result::ERROR_SURFACE_LOST_KHR), VkClass::SurfaceLost);
+        assert_eq!(classify(vk::Result::ERROR_DEVICE_LOST), VkClass::DeviceLost);
+        assert_eq!(classify(vk::Result::TIMEOUT), VkClass::Timeout);
+        assert_eq!(classify(vk::Result::NOT_READY), VkClass::Timeout);
+        assert_eq!(classify(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY), VkClass::OutOfMemory);
+        assert_eq!(classify(vk::Result::ERROR_OUT_OF_HOST_MEMORY), VkClass::OutOfMemory);
+        assert_eq!(classify(vk::Result::ERROR_INITIALIZATION_FAILED), VkClass::Other);
+    }
+
+    /// R-01: a lost device becomes a [`GpuError`] whatever path it took (a `?` on an ash call boxes the bare
+    /// `vk::Result`), with the message the application shows; other errors pass unchanged.
+    #[test]
+    fn device_loss_is_a_distinct_descriptive_error() {
+        let e = lift(Box::new(vk::Result::ERROR_DEVICE_LOST), "rendering a frame");
+        let g = e.downcast_ref::<GpuError>().expect("a GpuError");
+        assert!(g.is_device_lost());
+        let text = e.to_string();
+        assert!(text.contains("GPU device lost (driver reset or update)"), "{text}");
+        assert!(text.contains("rendering a frame"), "{text}");
+
+        let hung = GpuError::DeviceLost {
+            during: "a frame",
+            hung: true,
+        };
+        assert!(hung.is_device_lost());
+        assert!(hung.to_string().contains("did not finish a frame within 5 s"));
+
+        let e = lift(Box::new(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY), "allocating an image");
+        let g = e.downcast_ref::<GpuError>().expect("a GpuError");
+        assert_eq!(
+            g,
+            &GpuError::OutOfMemory {
+                during: "allocating an image"
+            }
+        );
+        assert!(!g.is_device_lost());
+        assert!(lift(Box::new(vk::Result::ERROR_SURFACE_LOST_KHR), "presenting")
+            .downcast_ref::<GpuError>()
+            .is_some_and(|g| matches!(g, GpuError::SurfaceLost { .. })));
+
+        // Not a Vulkan result, or another one: unchanged.
+        let e = lift("pipeline: something".into(), "x");
+        assert_eq!(e.to_string(), "pipeline: something");
+        let e = lift(Box::new(vk::Result::ERROR_INITIALIZATION_FAILED), "x");
+        assert_eq!(
+            e.downcast_ref::<vk::Result>(),
+            Some(&vk::Result::ERROR_INITIALIZATION_FAILED)
+        );
+
+        let u = GpuError::Unsupported {
+            reason: "x needs 256 invocations".into(),
+        };
+        assert_eq!(u.to_string(), "this GPU is not supported: x needs 256 invocations");
     }
 }

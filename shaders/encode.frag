@@ -21,7 +21,9 @@
 //   6. dither of 1 LSB of the target format (COL-4, CAP-9) when `levels` > 0 and the mode is not off:
 //      code = floor(v levels + threshold), threshold in [0, 1), so the error is below one code and its
 //      mean is zero. Float targets (levels = 0) are never dithered.
-// Outside the tube rectangle: black surround, not counted.
+// Outside the tube rectangle: the surround, which this shader does not draw: the draw is scissored to the tube
+// rectangle and the rest of the target keeps the attachment's clear colour, `source_surround_color` (black by
+// default; `gpu/stages/encode.rs`, T-96). Not counted.
 
 #include "params.glsl"
 #include "common.glsl"
@@ -58,6 +60,8 @@ layout(location = 0) out vec4 out_color;
 void main() {
     vec2 f = gl_FragCoord.xy;
     vec4 r = frame.tube_rect_px;
+    // A guard only: the scissor keeps every fragment inside the tube rectangle, so this branch does not run and
+    // the surround is the clear colour (above), not this black.
     if (f.x < r.x || f.y < r.y || f.x >= r.z || f.y >= r.w) {
         out_color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
