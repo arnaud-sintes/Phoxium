@@ -30,6 +30,8 @@ Constraints: Windows 11 x64 only, SDR output, a Vulkan 1.3 GPU (developed on an 
 | `params/` | The declarative parameter table, one TOML file per stage (see 3.6). |
 | `presets/tubes/` | The 10 shipped tube presets, data files embedded in the binary (see 3.1, `presets.rs`). |
 | `crates/paramgen` | Build-time generator: reads `params/*.toml`, writes the Rust and GLSL parameter code (see 3.6). |
+| `crates/appres` | Build-time and test tool, no dependency: `.ico` writer and reader, `.res` writer (icon group, VERSIONINFO) that the build scripts of `ultimatecrt` and `pixel-demo` pass to the MSVC linker (no rc.exe), and a PE resource reader for `tests/exe_resources.rs`. Its example `gen_icon` draws the icons procedurally (dev-only, `png` dev-dependency). |
+| `assets/icon/` | The generated application icons (`icon.ico`, `icon-256.png`, `icon.svg`, `pixel-demo.ico`, `pixel-demo-256.png`) and how to regenerate them (`README.md`). Embedded in the executables; the output window class (`output.rs`) and the pixel-demo window class load them as resource 1. |
 | `spikes/imgui-spike` | Own Cargo workspace, throw-away spike TEC-5 (T-08): Dear ImGui on the ash device, with a live harness script. Not part of the product build (its input mapping and renderer setup were copied into `crates/ultimatecrt/src/ui`, T-52a). |
 | `THIRD-PARTY.md` | Upstream licence notices the crate packages do not carry (Dear ImGui, cimgui), appended to the release zip's licence list by `scripts/package.ps1`. |
 | `spikes/focus-leak` | Own Cargo workspace, T-07 spike: the output window without Vulkan (options for title updates, hotkey, windowed), to bisect the focus leak. Not part of the product build. |

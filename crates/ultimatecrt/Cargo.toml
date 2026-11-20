@@ -43,4 +43,10 @@ windows = { version = "0.62", features = [
 ] }
 
 [build-dependencies]
+# Executable icon and VERSIONINFO as a .res file for the linker (workspace crate, no dependency).
+appres = { path = "../appres" }
 paramgen = { path = "../paramgen" }
+
+[dev-dependencies]
+# PE resource reader for tests/exe_resources.rs.
+appres = { path = "../appres" }

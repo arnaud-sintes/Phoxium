@@ -492,6 +492,31 @@ fn monitor_rect(m: HMONITOR) -> Option<RECT> {
     unsafe { GetMonitorInfoW(m, &mut info).as_bool().then_some(info.rcMonitor) }
 }
 
+/// The executable's icon (icon group 1, embedded by build.rs) at the system's large or small icon size for the
+/// system DPI; a null icon (Windows' default) if it cannot be loaded.
+fn app_icon(hinstance: windows::Win32::Foundation::HINSTANCE, small: bool) -> HICON {
+    use windows::Win32::UI::HiDpi::{GetDpiForSystem, GetSystemMetricsForDpi};
+    let (cx, cy) = if small {
+        (SM_CXSMICON, SM_CYSMICON)
+    } else {
+        (SM_CXICON, SM_CYICON)
+    };
+    unsafe {
+        let dpi = GetDpiForSystem();
+        let (w, h) = (GetSystemMetricsForDpi(cx, dpi), GetSystemMetricsForDpi(cy, dpi));
+        LoadImageW(
+            Some(hinstance),
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            w,
+            h,
+            LR_DEFAULTCOLOR,
+        )
+        .map(|h| HICON(h.0))
+        .unwrap_or_default()
+    }
+}
+
 pub fn create(opts: &Options) -> Result<Output> {
     // Every mode starts non-activating (OUT-2, OUT-3), the default framed window included: starting, clicking or
     // dragging the output leaves the foreground and the keyboard focus on the captured window. Only the settings
@@ -505,14 +530,18 @@ pub fn create(opts: &Options) -> Result<Output> {
     LAST_FOREGROUND.store(unsafe { GetForegroundWindow() }.0 as isize, Ordering::Relaxed);
     unsafe {
         let hinstance = GetModuleHandleW(None)?;
-        let class = WNDCLASSW {
+        let class = WNDCLASSEXW {
+            cbSize: std::mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
+            // Title bar, taskbar button and Alt+Tab: the executable's icon (assets/icon, embedded by build.rs).
+            hIcon: app_icon(hinstance.into(), false),
+            hIconSm: app_icon(hinstance.into(), true),
             lpszClassName: w!("ultimatecrt_output"),
             ..Default::default()
         };
-        RegisterClassW(&class);
+        RegisterClassExW(&class);
 
         let hwnd = if opts.fullscreen {
             let rect = match opts.monitor {
