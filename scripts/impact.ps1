@@ -288,9 +288,16 @@ function New-Model([string]$Root) {
     $M.Tests = @{}
     $testsDir = Join-Path $ucDir 'tests'
     $common = $null
+    $M.CommonClean = $null
+    # The modules the binary starts from (what main.rs names): tests that run the binary depend on them.
+    $M.Entry = @{}
+    if ($M.Uc.Main) {
+        foreach ($r in (Get-ExternalRefs $M.Uc.Main.Text $M.UcCrateIdent $M.Uc.Nodes)) { if ($r) { $M.Entry[$r] = $true } }
+    }
     if (Test-Path (Join-Path $testsDir 'common')) {
         $cfile = Get-ChildItem (Join-Path $testsDir 'common') -Filter *.rs | Select-Object -First 1
         if ($cfile) {
+            $M.CommonClean = Remove-Literals (Read-Text $cfile.FullName)
             $ct = Remove-Comments (Read-Text $cfile.FullName)
             $common = @{
                 Uc = (Get-ExternalRefs $ct $M.UcCrateIdent $M.Uc.Nodes)
@@ -307,6 +314,7 @@ function New-Model([string]$Root) {
             $t = @{
                 Name = $f.BaseName
                 File = "crates/$MainPackageDir/tests/$($f.Name)"
+                Raw = $raw
                 Text = $txt
                 Lines = ($raw -split "`n").Count
                 Uc = (Get-ExternalRefs $txt $M.UcCrateIdent $M.Uc.Nodes)
@@ -530,6 +538,505 @@ function Get-ChangedParamIds($M, [string]$file, [string]$diffBase, [string]$rev)
     return @($ids)
 }
 
+# ---------------------------------------------------------------------------------------------------
+# Item-level model: the items (fn, struct, const, ...) a diff touches, and who uses those items
+# ---------------------------------------------------------------------------------------------------
+
+# Words too common to identify a method on their own: a user must also name the type that owns the method.
+$GenericNames = @('new', 'default', 'from', 'into', 'get', 'set', 'run', 'apply', 'update', 'build', 'draw', 'render', 'init', 'create', 'close', 'open', 'start', 'stop', 'reset', 'load', 'save', 'read', 'write', 'push', 'pop', 'take', 'with', 'call', 'name', 'value', 'size', 'next', 'clear', 'step')
+# OS glue (Win32 window procedure, hotkeys, capture, command line): leaves unless a public interface changed.
+$GlueModules = @('output', 'hotkeys', 'capture', 'cli')
+
+# Blanks comments, string and char literals (keeps every newline and offset): what is left is code only.
+$script:LiteralRx = [regex]'(?s)//[^\n]*|/\*.*?\*/|(?<![A-Za-z0-9_])(?:br|cr|r)(#*)".*?"\1|(?<![A-Za-z0-9_])[bc]?"(?:\\.|[^"\\])*"|(?<![A-Za-z0-9_])b?''(?:\\u\{[0-9a-fA-F_]+\}|\\x[0-9a-fA-F]{2}|\\.|[^''\\\r\n])'''
+$script:BlankEval = [System.Text.RegularExpressions.MatchEvaluator] { param($m) [regex]::Replace($m.Value, '[^\r\n]', ' ') }
+$script:ItemRx = [regex]'(?s)^(?<vis>pub(?:\s*\([^)]*\))?\s+)?(?:(?:default|const|unsafe|async|extern)\s+)*(?<kind>fn|struct|enum|trait|impl|mod|union|static|const|type|use)\b(?<rest>.*)$'
+
+# Comments only: string literals stay, so that a changed message or constant text still counts as a change.
+$script:CommentEval = [System.Text.RegularExpressions.MatchEvaluator] { param($m) if ($m.Value.StartsWith('//') -or $m.Value.StartsWith('/*')) { [regex]::Replace($m.Value, '[^\r\n]', ' ') } else { $m.Value } }
+
+function Remove-Literals([string]$text) { return $script:LiteralRx.Replace($text, $script:BlankEval) }
+function Remove-CommentsOnly([string]$text) { return $script:LiteralRx.Replace($text, $script:CommentEval) }
+
+function Split-Attributes([string]$t) {
+    $attrs = ''
+    $t = $t.TrimStart()
+    while ($t.StartsWith('#')) {
+        $k = $t.IndexOf('[')
+        if ($k -lt 0) { break }
+        $d = 0; $end = -1
+        for ($j = $k; $j -lt $t.Length; $j++) {
+            if ($t[$j] -eq '[') { $d++ } elseif ($t[$j] -eq ']') { $d--; if ($d -eq 0) { $end = $j; break } }
+        }
+        if ($end -lt 0) { break }
+        $attrs += $t.Substring(0, $end + 1) + ' '
+        $t = $t.Substring($end + 1).TrimStart()
+    }
+    return @{ Attrs = $attrs; Rest = $t }
+}
+
+# The type an impl block is for, and whether it implements a trait (`impl<T> Trait for Type<T>`).
+function Get-ImplInfo([string]$rest) {
+    $t = $rest.TrimStart()
+    if ($t.StartsWith('<')) {
+        $d = 0
+        for ($j = 0; $j -lt $t.Length; $j++) {
+            if ($t[$j] -eq '<') { $d++ }
+            elseif ($t[$j] -eq '>' -and ($j -eq 0 -or $t[$j - 1] -ne '-')) { $d--; if ($d -eq 0) { $t = $t.Substring($j + 1).TrimStart(); break } }
+        }
+    }
+    $m = [regex]::Match($t, '(?<![A-Za-z0-9_])for\s+(?:&\s*(?:''[A-Za-z_]+\s+)?)?(?:mut\s+)?(?:[A-Za-z_][A-Za-z0-9_]*::)*(?<ty>[A-Za-z_][A-Za-z0-9_]*)')
+    if ($m.Success) { return @{ Owner = $m.Groups['ty'].Value; Trait = $true } }
+    $m = [regex]::Match($t, '^(?:[A-Za-z_][A-Za-z0-9_]*::)*(?<ty>[A-Za-z_][A-Za-z0-9_]*)')
+    if ($m.Success) { return @{ Owner = $m.Groups['ty'].Value; Trait = $false } }
+    return @{ Owner = ''; Trait = $false }
+}
+
+# The item a statement or block header declares, or $null (an expression, a macro call...).
+function Get-ItemHeader([string]$text) {
+    $sp = Split-Attributes $text
+    $t = $sp.Rest.Trim()
+    if ($t -eq '') { return $null }
+    if ($t -match '^[A-Za-z_][A-Za-z0-9_:]*!\s*$') { return @{ MacroBlock = $true } }
+    $m = $script:ItemRx.Match($t)
+    if (-not $m.Success) { return $null }
+    $kind = $m.Groups['kind'].Value; $rest = $m.Groups['rest'].Value
+    $h = @{ MacroBlock = $false; Kind = $kind; Pub = $m.Groups['vis'].Success; Name = ''; Owner = ''; TraitImpl = $false
+            Test = [bool]($sp.Attrs -match 'cfg\s*\(\s*test\s*\)'); Sig = ($t -replace '\s+', ' ') }
+    if ($kind -eq 'impl') { $ii = Get-ImplInfo $rest; $h.Owner = $ii.Owner; $h.TraitImpl = $ii.Trait }
+    elseif ($kind -eq 'use') { $h.Name = ($rest -replace '\s+', ' ').Trim() }
+    else {
+        $nm = [regex]::Match($rest, '^\s*(?:mut\s+)?(?<n>[A-Za-z_][A-Za-z0-9_]*)')
+        if (-not $nm.Success) { return $null }
+        $h.Name = $nm.Groups['n'].Value
+        if ($kind -eq 'mod' -and $h.Name -eq 'tests') { $h.Test = $true }
+    }
+    return $h
+}
+
+function Get-LineOf([int[]]$nl, [int]$off) {
+    $k = [Array]::BinarySearch($nl, $off)
+    if ($k -lt 0) { $k = -bnot $k }
+    return ($k + 1)
+}
+
+function New-OutlineRecord($h, $parent, [int]$startOff, [int]$startLine) {
+    $owner = $h.Owner; $trait = $h.TraitImpl; $pub = $h.Pub
+    if ($parent) {
+        if ($parent.Kind -eq 'impl') { $owner = $parent.Owner; $trait = $parent.TraitImpl; if ($trait) { $pub = $true } }
+        elseif ($parent.Kind -eq 'trait') { $owner = $parent.Name; $trait = $true; $pub = $true }
+    }
+    return @{
+        Kind = $h.Kind; Name = $h.Name; Owner = $owner; TraitImpl = $trait; Pub = $pub; Sig = $h.Sig
+        Test = ($h.Test -or [bool]($parent -and $parent.Test))
+        Start = $startLine; End = $startLine; StartOff = $startOff; EndOff = $startOff
+        Key = ($h.Kind + '|' + $owner + '|' + $h.Name)
+    }
+}
+
+# Items of a Rust file: free items, impl and trait members, inline modules (a `#[cfg(test)]` module is one record).
+# Each record knows its line range, whether it is public, its signature and (lazily) its code.
+function Get-RustOutline([string]$raw) {
+    $clean = Remove-Literals $raw
+    $nlList = New-Object System.Collections.Generic.List[int]
+    foreach ($m in [regex]::Matches($clean, "`n")) { $nlList.Add($m.Index) }
+    $nl = $nlList.ToArray()
+    $recs = New-Object System.Collections.Generic.List[object]
+    $stack = New-Object System.Collections.Generic.List[object]
+    $stmt = 0; $depth = 0
+    foreach ($m in [regex]::Matches($clean, '[{};()\[\]]')) {
+        $i = $m.Index; $c = $m.Value
+        $top = $null; if ($stack.Count -gt 0) { $top = $stack[$stack.Count - 1] }
+        if ($top -and -not $top.Container) {
+            if ($c -eq '{') { $stack.Add(@{ Rec = $null; Container = $false; Reset = $false }) }
+            elseif ($c -eq '}') {
+                $stack.RemoveAt($stack.Count - 1)
+                if ($top.Rec) { $top.Rec.End = (Get-LineOf $nl $i); $top.Rec.EndOff = $i }
+                if ($top.Reset) { $stmt = $i + 1 }
+            }
+            continue
+        }
+        if ($c -eq '(' -or $c -eq '[') { $depth++; continue }
+        if ($c -eq ')' -or $c -eq ']') { if ($depth -gt 0) { $depth-- }; continue }
+        if ($depth -gt 0) {
+            if ($c -eq '{') { $stack.Add(@{ Rec = $null; Container = $false; Reset = $false }) }
+            continue
+        }
+        if ($c -eq '}') {
+            if ($stack.Count -gt 0) {
+                $stack.RemoveAt($stack.Count - 1)
+                if ($top.Rec) { $top.Rec.End = (Get-LineOf $nl $i); $top.Rec.EndOff = $i }
+            }
+            $stmt = $i + 1; continue
+        }
+        $text = $clean.Substring($stmt, $i - $stmt)
+        $h = Get-ItemHeader $text
+        $parent = $null; if ($top) { $parent = $top.Rec }
+        $startOff = $stmt + ($text.Length - $text.TrimStart().Length)
+        if ($c -eq '{') {
+            if (-not $h) { $stack.Add(@{ Rec = $null; Container = $false; Reset = $true }); $stmt = $i + 1; continue }
+            if ($h.MacroBlock) {
+                # `thread_local! { static X: ... }`: a transparent block, the items inside are records.
+                $mh = @{ Kind = 'macro'; Name = ''; Pub = $false; Owner = ''; TraitImpl = $false; Test = $false; Sig = '' }
+                $mrec = New-OutlineRecord $mh $parent $startOff (Get-LineOf $nl $startOff)
+                $recs.Add($mrec)
+                $stack.Add(@{ Rec = $mrec; Container = $true; Reset = $true }); $stmt = $i + 1; continue
+            }
+            if ($h.Kind -in 'const', 'static', 'type', 'use') {
+                # A brace inside the expression of a `;`-terminated item: the record is made at the `;`.
+                $stack.Add(@{ Rec = $null; Container = $false; Reset = $false }); continue
+            }
+            $rec = New-OutlineRecord $h $parent $startOff (Get-LineOf $nl $startOff)
+            $recs.Add($rec)
+            $container = ($h.Kind -in 'impl', 'trait') -or ($h.Kind -eq 'mod')
+            if ($rec.Test) { $container = $false }
+            $stack.Add(@{ Rec = $rec; Container = $container; Reset = $true })
+            $stmt = $i + 1
+        } else {
+            if ($h -and -not $h.MacroBlock -and $h.Kind -ne 'impl') {
+                $rec = New-OutlineRecord $h $parent $startOff (Get-LineOf $nl $startOff)
+                $rec.End = (Get-LineOf $nl $i); $rec.EndOff = $i
+                $recs.Add($rec)
+            }
+            $stmt = $i + 1
+        }
+    }
+    return @{ Balanced = ($stack.Count -eq 0); Clean = $clean; Lines = ((Remove-CommentsOnly $raw) -split "`n"); Records = $recs; Nl = $nl }
+}
+
+function Get-RecordBody($outline, $r) {
+    if (-not $r.ContainsKey('Body')) {
+        $len = [Math]::Max(0, [Math]::Min($outline.Clean.Length - $r.StartOff, $r.EndOff - $r.StartOff + 1))
+        $r.Body = $outline.Clean.Substring($r.StartOff, $len)
+    }
+    return $r.Body
+}
+
+# The innermost item that contains a line (null: the line is outside any item).
+function Get-InnerRecord($outline, [int]$line) {
+    $best = $null
+    foreach ($r in $outline.Records) {
+        if ($r.Start -le $line -and $line -le $r.End) {
+            if (-not $best -or ($r.End - $r.Start) -lt ($best.End - $best.Start)) { $best = $r }
+        }
+    }
+    return $best
+}
+
+function New-Token([string]$name, [string]$owner, [bool]$generic) {
+    return @{ Name = $name; Owner = $owner; Generic = $generic; Rx = ('\b' + [regex]::Escape($name) + '\b'); OwnerRx = $(if ($owner) { '\b' + [regex]::Escape($owner) + '\b' } else { '' }) }
+}
+
+# What a user writes to reach an item: its name (a trait method is reached through its type).
+function Get-RecordToken($r) {
+    if ($r.TraitImpl -and $r.Owner) { return (New-Token $r.Owner '' $false) }
+    $generic = [bool]($r.Owner -and ($r.Name.Length -lt 5 -or $GenericNames -contains $r.Name))
+    return (New-Token $r.Name $r.Owner $generic)
+}
+
+# The first token the (code-only) text mentions, or $null. A generic method name also needs its owner type.
+function Test-Mentions([string]$body, $tokens, [string]$ownerOfBody) {
+    foreach ($tk in $tokens) {
+        if ($body -cnotmatch $tk.Rx) { continue }
+        if ($tk.Generic -and $tk.Owner) {
+            if ($ownerOfBody -and $ownerOfBody -eq $tk.Owner) { return $tk }
+            if ($body -cmatch $tk.OwnerRx) { return $tk }
+            continue
+        }
+        return $tk
+    }
+    return $null
+}
+
+# The tokens a text can really be using from module `$leaf`: a text that defines an item of the same name (its own
+# `on_activate`, `Options`) uses the other module's item only when it writes the path (`output::on_activate`).
+function Get-LiveTokens([string]$clean, $tokens, [string]$leaf) {
+    $live = New-Object System.Collections.Generic.List[object]
+    foreach ($tk in $tokens) {
+        if ($tk.Owner) { $live.Add($tk); continue }
+        $defined = $clean -cmatch ('\b(?:fn|struct|enum|const|static|type|trait|union)\s+' + [regex]::Escape($tk.Name) + '\b')
+        $esc = [regex]::Escape($tk.Name)
+        $imp = '\buse\b[^;]*\b' + [regex]::Escape($leaf) + '\b[^;]*\b' + $esc + '\b'
+        $imported = ($clean -cmatch $imp) -or ($clean -cmatch ('\buse\b[^;]*\b' + [regex]::Escape($leaf) + '::\*'))
+        # Imported from somewhere else (`use dear_imgui_ash::{Options}`): a bare mention is that item.
+        $elsewhere = $false
+        foreach ($um in [regex]::Matches($clean, '\buse\b([^;]*);')) {
+            if ($um.Groups[1].Value -cmatch ('\b' + $esc + '\b') -and $um.Value -cnotmatch ('\b' + [regex]::Escape($leaf) + '\b')) { $elsewhere = $true; break }
+        }
+        $counts = $false
+        $rx = '(?<![A-Za-z0-9_:.])(?<path>(?:[A-Za-z_][A-Za-z0-9_]*::)*)' + [regex]::Escape($tk.Name) + '\b'
+        foreach ($m in [regex]::Matches($clean, $rx)) {
+            $path = $m.Groups['path'].Value
+            if ($path -eq '') { if ($imported -or (-not $defined -and -not $elsewhere)) { $counts = $true; break } }
+            else {
+                $last = ($path.Substring(0, $path.Length - 2) -split '::')[-1]
+                # `menu::on_activate` is the item of module `menu`, not of the changed module.
+                if ($last -ceq $leaf -or $last -in 'crate', 'self', 'super') { $counts = $true; break }
+            }
+        }
+        if ($counts) { $live.Add($tk) }
+    }
+    return $live.ToArray()
+}
+
+function Add-Token($list, $seen, $tk) {
+    $k = $tk.Name + '|' + $tk.Owner
+    if (-not $seen.ContainsKey($k)) { $seen[$k] = $true; $list.Add($tk) }
+}
+
+# The items of a file that a change reaches: the seed items, then every item whose code mentions one of them
+# (the call chain up to the public items). A changed type reaches its methods. Test code is left out.
+function Get-Chain($outline, $seedRecs, $seedTokens) {
+    $set = @{}
+    $tokens = New-Object System.Collections.Generic.List[object]
+    $seen = @{}
+    foreach ($tk in $seedTokens) { Add-Token $tokens $seen $tk }
+    foreach ($r in $seedRecs) { $set[$r.Key] = $r; if ($r.Kind -ne 'use') { Add-Token $tokens $seen (Get-RecordToken $r) } }
+    $items = @($outline.Records | Where-Object { -not $_.Test -and $_.Kind -notin 'impl', 'mod', 'macro' -and -not $set.ContainsKey($_.Key) })
+    $reexports = New-Object System.Collections.Generic.List[object]
+    $reseen = @{}
+    $changed = $true
+    while ($changed) {
+        $changed = $false
+        $types = @{}
+        foreach ($r in $set.Values) { if ($r.Kind -in 'struct', 'enum', 'union', 'trait') { $types[$r.Name] = $true } }
+        foreach ($r in $items) {
+            if ($set.ContainsKey($r.Key)) { continue }
+            $hit = $null
+            if ($r.Owner -and $types.ContainsKey($r.Owner)) { $hit = $true }
+            else { $hit = Test-Mentions (Get-RecordBody $outline $r) $tokens $r.Owner }
+            if (-not $hit) { continue }
+            $set[$r.Key] = $r; $changed = $true
+            if ($r.Kind -eq 'use') { if ($r.Pub -and $hit -is [hashtable]) { Add-Token $reexports $reseen $hit } }
+            else { Add-Token $tokens $seen (Get-RecordToken $r) }
+        }
+    }
+    $pub = New-Object System.Collections.Generic.List[object]
+    $pseen = @{}
+    foreach ($r in $set.Values) { if ($r.Pub -and -not $r.Test -and $r.Kind -ne 'use') { Add-Token $pub $pseen (Get-RecordToken $r) } }
+    foreach ($tk in $reexports) { Add-Token $pub $pseen $tk }
+    return @{ Set = $set; Tokens = $tokens; PubTokens = $pub }
+}
+
+function Invoke-Git([string]$root, [string[]]$gitArgs) {
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    try { $out = & git -C $root -c core.quotepath=false @gitArgs 2>$null; $code = $LASTEXITCODE } finally { $ErrorActionPreference = $prev }
+    if ($code -ne 0) { return $null }
+    if ($null -eq $out) { return , @() }
+    return , @($out)
+}
+
+# The names a `use` statement brings in (its last segments, aliases included).
+function Get-UseLeaves([string]$u) {
+    $set = @{}
+    foreach ($m in [regex]::Matches($u, '\b([A-Za-z_][A-Za-z0-9_]*)\b(?!\s*::)')) {
+        $w = $m.Groups[1].Value
+        if ($w -notin 'self', 'crate', 'super', 'as') { $set[$w] = $true }
+    }
+    return @($set.Keys)
+}
+
+# What the diff of a source file changed, item by item: the changed items (old and new side), whether each public
+# interface changed, whether test code changed, whether a changed line is outside every item (then: $Unplaced).
+# $null when there is no usable diff (explicit file list, new or untracked file).
+function Get-FileItemChange($M, [string]$file, $ctx) {
+    if (-not $ctx.Base) { return $null }
+    $dargs = @('diff', '-U0', '--no-renames', $ctx.Base)
+    if ($ctx.Rev) { $dargs += $ctx.Rev }
+    $dargs += @('--', $file)
+    $d = Invoke-Git $M.Root $dargs
+    if (-not $d -or $d.Count -eq 0) { return $null }
+    $oldLines = Invoke-Git $M.Root @('show', ($ctx.Base + ':' + $file))
+    if ($null -eq $oldLines) { return $null }
+    if ($ctx.Rev) { $newLines = Invoke-Git $M.Root @('show', ($ctx.Rev + ':' + $file)); if ($null -eq $newLines) { return $null }; $newText = $newLines -join "`n" }
+    else { $newText = Read-Text (Join-Path $M.Root $file) }
+    $old = Get-RustOutline ($oldLines -join "`n")
+    $new = Get-RustOutline $newText
+    if (-not $old.Balanced -or -not $new.Balanced) { return $null }   # the outline lost track of the braces: do not trust it
+    $res = @{ Unplaced = $false; TestsChanged = $false; Changed = (New-Object System.Collections.Generic.List[object]); NewOutline = $new; Hunks = 0 }
+    $oldKeys = @{}; $newKeys = @{}
+    foreach ($l in @($d)) {
+        $s = "$l"
+        if ($s -notmatch '^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@') { continue }
+        $res.Hunks++
+        # A group that did not take part is absent from $Matches (a count of 1 is written without the comma).
+        $oa = [int]$Matches[1]; $ob = 1; if ($Matches.ContainsKey(2) -and $Matches[2] -ne '') { $ob = [int]$Matches[2] }
+        $na = [int]$Matches[3]; $nb = 1; if ($Matches.ContainsKey(4) -and $Matches[4] -ne '') { $nb = [int]$Matches[4] }
+        foreach ($side in @(@{ O = $old; A = $oa; B = $ob; K = $oldKeys }, @{ O = $new; A = $na; B = $nb; K = $newKeys })) {
+            for ($ln = $side.A; $ln -lt ($side.A + $side.B); $ln++) {
+                if ($ln -lt 1 -or $ln -gt $side.O.Lines.Count) { continue }
+                if ($side.O.Lines[$ln - 1].Trim() -eq '') { continue }   # a blank or comment-only line changes nothing
+                $r = Get-InnerRecord $side.O $ln
+                if (-not $r) { $res.Unplaced = $true; continue }
+                if ($r.Test) { $res.TestsChanged = $true; continue }
+                if ($r.Kind -eq 'macro') { continue }   # the block's own lines; the items inside are tracked
+                if ($r.Kind -eq 'impl') {
+                    # The closing brace and the header of an impl block: only a changed header (type, generics, trait)
+                    # touches all its methods; a block that exists on one side only is made of changed methods.
+                    if ($side.O.Lines[$ln - 1].Trim() -eq '}') { continue }
+                    $other = $new; if ($side.O -eq $new) { $other = $old }
+                    $same = @($other.Records | Where-Object { $_.Kind -eq 'impl' -and $_.Key -eq $r.Key -and $_.Sig -eq $r.Sig }).Count
+                    $exists = @($other.Records | Where-Object { $_.Kind -eq 'impl' -and $_.Key -eq $r.Key -and $_.TraitImpl -eq $r.TraitImpl }).Count
+                    if ($same -eq 0 -and $exists -gt 0) { $res.Unplaced = $true }
+                    continue
+                }
+                if ($r.Kind -eq 'mod') {
+                    # `pub mod child;` added or removed: the child's own file carries the change, a user that breaks fails to compile.
+                    if ($side.O.Clean[$r.EndOff] -ne ';') { $res.Unplaced = $true }
+                    continue
+                }
+                $side.K[$r.Key] = $r
+            }
+        }
+    }
+    $useOld = @(); $useNew = @()
+    $res.UseNames = @()
+    $keys = @{}
+    foreach ($k in $oldKeys.Keys) { $keys[$k] = $true }
+    foreach ($k in $newKeys.Keys) { $keys[$k] = $true }
+    foreach ($k in ($keys.Keys | Sort-Object)) {
+        $o = $null; $n = $null
+        if ($oldKeys.ContainsKey($k)) { $o = $oldKeys[$k] } else { $o = @($old.Records | Where-Object { $_.Key -eq $k -and -not $_.Test })[0] }
+        if ($newKeys.ContainsKey($k)) { $n = $newKeys[$k] } else { $n = @($new.Records | Where-Object { $_.Key -eq $k -and -not $_.Test })[0] }
+        $r = $n; if (-not $r) { $r = $o }
+        $pub = [bool](($o -and $o.Pub) -or ($n -and $n.Pub))
+        if ($r.Kind -eq 'use') {
+            if ($pub) { if ($o) { $useOld += $o }; if ($n) { $useNew += $n } }   # a re-export changed
+            continue
+        }
+        $iface = $false
+        if ($pub) {
+            if ($r.Kind -eq 'fn') { $iface = (-not $o) -or (-not $n) -or ($o.Sig -ne $n.Sig) }
+            else { $iface = $true }   # struct, enum, trait, const, static, type: the whole item is the interface
+        }
+        $res.Changed.Add(@{ Key = $k; Old = $o; New = $n; Rec = $r; Pub = $pub; Interface = $iface })
+    }
+    # Re-exports (`pub use`): the names added or removed are the changed interface; a glob is not tracked.
+    if ($useOld.Count + $useNew.Count -gt 0) {
+        $lo = @{}; $ln2 = @{}
+        foreach ($u in $useOld) { if ($u.Name -match '\*') { $res.Unplaced = $true }; foreach ($w in (Get-UseLeaves $u.Name)) { $lo[$w] = $true } }
+        foreach ($u in $useNew) { if ($u.Name -match '\*') { $res.Unplaced = $true }; foreach ($w in (Get-UseLeaves $u.Name)) { $ln2[$w] = $true } }
+        $names = @{}
+        foreach ($w in $lo.Keys) { if (-not $ln2.ContainsKey($w)) { $names[$w] = $true } }
+        foreach ($w in $ln2.Keys) { if (-not $lo.ContainsKey($w)) { $names[$w] = $true } }
+        $res.UseNames = @($names.Keys | Sort-Object)
+    }
+    return $res
+}
+
+function Get-TestClean($M, $t) {
+    if (-not $t.ContainsKey('CleanAll')) {
+        $c = Remove-Literals $t.Raw
+        if ($t.UsesCommon -and $M.CommonClean) { $c += "`n" + $M.CommonClean }
+        $t.CleanAll = $c
+    }
+    return $t.CleanAll
+}
+
+function Get-NodeOutline($n) {
+    if (-not $n.ContainsKey('Outline')) { $n.Outline = Get-RustOutline $n.Raw }
+    return $n.Outline
+}
+
+function Join-TokenNames($tokens, [int]$max = 6) {
+    $names = @($tokens | ForEach-Object { if ($_.Owner) { "$($_.Owner)::$($_.Name)" } else { $_.Name } } | Select-Object -Unique)
+    $s = ($names | Select-Object -First $max) -join ', '
+    if ($names.Count -gt $max) { $s += ", (+$($names.Count - $max) more)" }
+    return $s
+}
+
+# Modules that use the given items of $node (they mention them in their code), then, one more hop, the users of the
+# public items of those modules that the change reaches. Tests that name the items of a user module come with it.
+function Add-ModuleUsers($M, $S, [string]$node, $tokens, [int]$depth, [string]$reason, $impacted, $kidTokens = @()) {
+    foreach ($d in ($M.Uc.Nodes.Values | Sort-Object { $_.Name })) {
+        if ($d.Name -eq $node -or -not $d.Deps.Contains($node)) { continue }
+        $out = Get-NodeOutline $d
+        $use = $tokens; if ($kidTokens.Count -gt 0 -and $d.Name.StartsWith($node + "::")) { $use = $kidTokens }   # a child module sees the private items of its parent
+        $live = Get-LiveTokens $out.Clean $use (($node -split '::')[-1])
+        $hit = Test-Mentions $out.Clean $live ''
+        if (-not $hit) { continue }
+        $tag = "transitive (depth ${depth}): $($d.Name) uses $(Join-TokenNames $live 3) of $node"
+        $chain = Get-Chain $out @() $live
+        $inTests = $false
+        foreach ($r in $out.Records) { if ($r.Test -and (Test-Mentions (Get-RecordBody $out $r) $live '')) { $inTests = $true } }
+        $codeUse = @($chain.Set.Values | Where-Object { $_.Kind -ne 'use' }).Count -gt 0
+        if (-not $codeUse -and -not $inTests) { continue }   # only imported
+        $impacted[$d.Name] = $true
+        if (Test-StageNode $d.Name) {
+            $sn = $d.Name.Substring($StagePrefix.Length)
+            if ($sn -ne '' -and $sn -notmatch '::') { Add-Stage $M $S $sn "$reason, $tag"; continue }
+        }
+        Add-Lib $M $S $d.Name "$reason, $tag"
+        $next = $chain.PubTokens.ToArray()
+        if ($GlueModules -contains $d.Name) { $next = @() }   # OS glue is a leaf
+        foreach ($t in ($M.Tests.Values | Sort-Object { $_.Name })) {
+            if (-not (Test-Matches-Node $t $d.Name $true)) { continue }
+            $tc = Get-TestClean $M $t
+            $th = Test-Mentions $tc (Get-LiveTokens $tc $next (($d.Name -split '::')[-1])) ''
+            if ($th) { Add-Reason $S.Tests $t.Name "$reason, $tag; references ultimatecrt::$($d.Name) and uses $($th.Name)" }
+        }
+        if ($depth -lt 2 -and ($next.Count -gt 0 -or $chain.Tokens.Count -gt 0)) { Add-ModuleUsers $M $S $d.Name $next ($depth + 1) $reason $impacted $chain.Tokens.ToArray() }
+    }
+}
+
+# A changed source module (not a stage file), by items: its own unit tests, and the users of the items the change
+# reaches (the changed items and the public items that call them). Falls back to the module-level model when the
+# diff cannot be read or a changed line is outside every item. Returns the description for the plan.
+function Add-NodeItems($M, $S, [string]$node, [string]$file, $ctx, [string]$reason) {
+    $ch = $null
+    try { $ch = Get-FileItemChange $M $file $ctx } catch { $ch = $null }
+    if (-not $ch -or $ch.Unplaced) {
+        Add-Node $M $S $node $reason
+        $why = 'no item-level diff available'; if ($ch) { $why = 'a changed line is outside every item' }
+        return "module $node, tests referencing it, dependants (depth 2) (module level: $why)"
+    }
+    Add-Lib $M $S $node "$reason (its own unit tests)"
+    $impacted = @{}; $impacted[$node] = $true
+    $glue = $GlueModules -contains $node
+    $seedRecs = @(); $ifaceTokens = New-Object System.Collections.Generic.List[object]; $iseen = @{}
+    $pubNames = @(); $privNames = @()
+    foreach ($c in $ch.Changed) {
+        if ($c.New) { $seedRecs += $c.New }
+        $tk = Get-RecordToken $c.Rec
+        if ($c.Pub) { $pubNames += $c.Rec.Name }
+        else { $privNames += $c.Rec.Name }
+        if ($c.Interface) { Add-Token $ifaceTokens $iseen $tk }
+    }
+    $seedTokens = @(); foreach ($c in $ch.Changed) { if (-not $c.New) { $seedTokens += (Get-RecordToken $c.Rec) } }
+    foreach ($w in $ch.UseNames) {
+        $tk = New-Token $w '' $false
+        Add-Token $ifaceTokens $iseen $tk; $seedTokens += $tk; $pubNames += $w
+    }
+    $chain = Get-Chain $ch.NewOutline $seedRecs $seedTokens
+    $direct = New-Object System.Collections.Generic.List[object]; $dseen = @{}
+    foreach ($tk in $chain.PubTokens) { Add-Token $direct $dseen $tk }
+    foreach ($tk in $ifaceTokens) { Add-Token $direct $dseen $tk }
+    $prop = $direct.ToArray()
+    if ($glue) { $prop = $ifaceTokens.ToArray() }
+    if ($direct.Count -gt 0) {
+        foreach ($t in ($M.Tests.Values | Sort-Object { $_.Name })) {
+            if (-not (Test-Matches-Node $t $node $true)) { continue }
+            $tc = Get-TestClean $M $t
+            $th = Test-Mentions $tc (Get-LiveTokens $tc $direct (($node -split '::')[-1])) ''
+            if ($th) { Add-Reason $S.Tests $t.Name "$reason; references ultimatecrt::$node and uses $($th.Name)" }
+        }
+    }
+    # Users of the public items; the child modules also see the private items the change reaches.
+    if ($prop.Count -gt 0 -or $chain.Tokens.Count -gt 0) { Add-ModuleUsers $M $S $node $prop 1 $reason $impacted $chain.Tokens.ToArray() }
+    $entry = $glue -and ($ch.Changed.Count -gt 0 -or $ch.UseNames.Count -gt 0)   # OS glue is embedded by the binary
+    foreach ($k in $impacted.Keys) { if ($M.Entry.ContainsKey($k)) { $entry = $true } }
+    if ($entry) {
+        foreach ($t in ($M.Tests.Values | Sort-Object { $_.Name })) {
+            if ($t.Process) { Add-Reason $S.Tests $t.Name "$reason; the test runs the binary, which embeds ultimatecrt::$node" }
+        }
+    }
+    $desc = "module $node by items: changed pub [$(($pubNames | Select-Object -Unique) -join ', ')], private [$(($privNames | Select-Object -Unique) -join ', ')]"
+    if ($ch.Changed.Count -eq 0 -and $ch.UseNames.Count -eq 0) { $desc = "module ${node}: no code item changed (comments, blank lines, tests or imports only)" }
+    $desc += "; reaches pub [$(Join-TokenNames $chain.PubTokens)]"
+    if ($glue) { $desc += '; OS glue: leaf unless a public interface changed' + $(if ($ifaceTokens.Count -gt 0) { " (interface changed: $(Join-TokenNames $ifaceTokens))" } else { '' }) }
+    return $desc
+}
+
 # Plans one file. $ctx carries the git context for finer decisions (changed parameter ids).
 function Add-FileImpact($M, $S, [string]$f, $ctx) {
     $p = $f
@@ -629,8 +1136,8 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
                     Add-Stage $M $S $sn "stage $sn changed ($p)"
                     $S.Files.Add("$p -> stage ${sn}: its unit tests, tests naming it, whole-chain tests")
                 } else {
-                    Add-Node $M $S $node "module $node changed ($p)"
-                    $S.Files.Add("$p -> module $node, tests referencing it, dependants (depth 2)")
+                    $desc = Add-NodeItems $M $S $node $p $ctx "module $node changed ($p)"
+                    $S.Files.Add("$p -> $desc")
                 }
                 return
             }
@@ -1081,27 +1588,33 @@ function Invoke-SelfTest {
         W 'crates/pixel-demo/src/options.rs' "pub struct Options;`n"
         W 'crates/ultimatecrt/Cargo.toml' "[package]`nname = `"ultimatecrt`"`n[dependencies]`ncrt-model = { path = `"../crt-model`" }`n[build-dependencies]`nparamgen = { path = `"../paramgen`" }`n"
         W 'crates/ultimatecrt/build.rs' "fn main() {}`n"
-        W 'crates/ultimatecrt/src/lib.rs' "pub mod gpu;`npub mod params;`npub mod placement;`npub mod presets;`npub mod scaling;`npub mod ui;`n"
-        W 'crates/ultimatecrt/src/main.rs' "fn main() { ultimatecrt::gpu::run(); }`n"
+        W 'crates/ultimatecrt/src/lib.rs' "pub mod app;`npub mod cli;`npub mod gpu;`npub mod output;`npub mod params;`npub mod placement;`npub mod presets;`npub mod scaling;`npub mod ui;`n"
+        W 'crates/ultimatecrt/src/main.rs' "fn main() { ultimatecrt::app::run(); }`n"
+        W 'crates/ultimatecrt/src/app.rs' "use crate::output;`npub fn run() { let _ = output::create(); }`n"
+        W 'crates/ultimatecrt/src/output.rs' "pub struct Options { pub fullscreen: bool }`npub enum OnActivate { Default }`npub const TITLE_H: u32 = 4;`npub fn create() -> Options { wndproc(); Options { fullscreen: false } }`npub fn self_drag_hit(h: u32) -> bool { h == 2 }`nfn wndproc() { helper(); }`nfn helper() {}`n#[cfg(test)]`nmod tests {`n    fn t() {}`n}`n"
+        W 'crates/ultimatecrt/src/cli.rs' "pub const USAGE: &str = `"usage: ultimatecrt [options]`";`npub struct Args { pub flag: bool }`npub fn parse() -> Args { Args { flag: parse_flag() } }`nfn parse_flag() -> bool { false }`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/params.rs' "pub struct Params;`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/scaling.rs' "pub struct View;`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/placement.rs' "use crate::scaling::View;`nuse crate::params::Params;`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/ultimatecrt/src/scaling.rs' "pub struct View;`npub fn fit() -> u32 { inner() }`nfn inner() -> u32 { 1 }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/ultimatecrt/src/placement.rs' "use crate::scaling::View;`nuse crate::params::Params;`npub fn place() -> u32 { crate::scaling::fit() }`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/presets.rs' "use crate::params::Params;`nconst P: &str = include_str!(`"../../../presets/tubes/01-a.toml`");`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/ui/mod.rs' "pub mod menu;`n"
         W 'crates/ultimatecrt/src/ui/menu.rs' "use crate::params::Params;`nuse crate::presets::Library;`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/gpu/mod.rs' "pub mod stages;`npub mod pipeline;`npub struct Headless;`n"
-        W 'crates/ultimatecrt/src/gpu/pipeline.rs' "use super::stages::abl::Abl;`nconst R: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/resample.comp.spv`"));`n"
+        W 'crates/ultimatecrt/src/gpu/mod.rs' "pub mod stages;`npub mod pipeline;`npub struct Headless;`npub fn client_size() -> u32 { if crate::output::self_drag_hit(1) { 1 } else { crate::output::TITLE_H } }`nfn secret() -> u32 { 7 }`n"
+        W 'crates/ultimatecrt/src/gpu/pipeline.rs' "use super::stages::abl::Abl;`npub fn p() -> u32 { super::secret() }`nconst R: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/resample.comp.spv`"));`n"
         W 'crates/ultimatecrt/src/gpu/stages/mod.rs' "pub mod abl;`npub mod screen;`n#[cfg(test)]`nmod tests { fn scan() { std::fs::read_dir(`"shaders`"); } }`n"
-        W 'crates/ultimatecrt/src/gpu/stages/abl.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/abl.comp.spv`"));`nfn name() -> &'static str { `"abl`" }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/ultimatecrt/src/gpu/stages/abl.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/abl.comp.spv`"));`nfn name() -> &'static str { `"abl`" }`nfn size() -> u32 { crate::gpu::client_size() }`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/src/gpu/stages/screen.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/screen.comp.spv`"));`nfn name() -> &'static str { `"screen`" }`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/ultimatecrt/tests/common/mod.rs' "use ultimatecrt::gpu::Headless;`npub fn gpu_or_skip() {}`n"
         W 'crates/ultimatecrt/tests/stage_abl.rs' "mod common;`nuse crt_model::abl::Abl;`nfn t() { gpu.enable_only(&[`"abl`"]); let _ = `"gun`"; }`n"
         W 'crates/ultimatecrt/tests/stage_screen.rs' "mod common;`nuse crt_model::beam::Spot;`nfn t() { gpu.enable_only(&[`"screen`"]); }`n"
         W 'crates/ultimatecrt/tests/pipeline_skip.rs' "mod common;`nuse ultimatecrt::gpu::Headless;`nfn t() { gpu.render(); }`n"
-        W 'crates/ultimatecrt/tests/placement_modes.rs' "use ultimatecrt::placement::place;`nuse ultimatecrt::scaling::View;`nfn t() {}`n"
+        W 'crates/ultimatecrt/tests/placement_modes.rs' "use ultimatecrt::placement::place;`nuse ultimatecrt::scaling::{fit, View};`nfn t() { let _ = (place(), fit()); }`n"
+        W 'crates/ultimatecrt/tests/output_win.rs' "use ultimatecrt::output::{create, Options};`nfn t() { let _: Options = create(); }`n"
+        W 'crates/ultimatecrt/tests/binary_run.rs' "fn t() { let _ = std::process::Command::new(env!(`"CARGO_BIN_EXE_ultimatecrt`")); }`n"
+        W 'crates/ultimatecrt/tests/pipe_p.rs' "use ultimatecrt::gpu::pipeline::p;`nfn t() { let _ = p(); }`n"
         W 'crates/ultimatecrt/tests/ui_menu.rs' "mod common;`nuse ultimatecrt::ui::menu::MenuRects;`nuse ultimatecrt::params::Params;`nfn t() { gpu.render(); }`n"
         W 'crates/ultimatecrt/tests/presets.rs' "mod common;`nuse ultimatecrt::presets::Library;`nfn t() { render_source(); let _ = `"preset`"; }`n"
-        W 'crates/ultimatecrt/tests/smoke.rs' "use ultimatecrt::{scaling, params};`nfn t() {}`n"
+        W 'crates/ultimatecrt/tests/smoke.rs' "use ultimatecrt::{cli, scaling, params};`nfn t() { let _ = cli::USAGE; }`n"
         W 'crates/ultimatecrt/tests/units_only.rs' "use crt_model::units::mm;`nfn t() {}`n"
         W 'shaders/abl.comp' "#include `"abl.glsl`"`nvoid main() {}`n"
         W 'shaders/screen.comp' "#include `"beam.glsl`"`nvoid main() {}`n"
@@ -1142,11 +1655,55 @@ function Invoke-SelfTest {
             @{ Name = 'build.rs'; Files = @('crates/ultimatecrt/build.rs'); Full = $true }
             @{ Name = 'unknown file kind'; Files = @('weird.bin'); Full = $true }
             @{ Name = 'mixed doc and unknown'; Files = @('ENV.md', 'weird.bin'); Full = $true }
+            @{ Name = 'pixel-demo only (main.rs)'; Files = @('crates/pixel-demo/src/main.rs', 'crates/pixel-demo/src/options.rs'); Tests = @(); NotTests = '*'; Pkg = @('pixel-demo'); NotLib = @('output::', 'cli::', 'gpu::stages::abl::'); Full = $false }
+            # Item level (a git fixture: the diff of the working tree against HEAD).
+            @{ Name = 'item: output.rs private fn only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn helper() {}'; Replace = 'fn helper() { let _ = 1; }' })
+               Tests = @('output_win', 'binary_run'); NotTests = @('stage_abl', 'stage_screen', 'pipeline_skip', 'ui_menu', 'presets', 'placement_modes', 'smoke', 'units_only'); Lib = @('output::'); NotLib = @('gpu::stages::abl::', 'placement::', 'ui::menu::'); Full = $false }
+            @{ Name = 'item: output.rs pub fn body only (OS glue is a leaf)'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'h == 2'; Replace = 'h == 3' })
+               Tests = @('binary_run'); NotTests = @('stage_abl', 'pipeline_skip', 'output_win', 'smoke', 'ui_menu'); Lib = @('output::'); NotLib = @('gpu::stages::abl::'); Full = $false }
+            @{ Name = 'item: output.rs public signature change'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'pub fn self_drag_hit(h: u32) -> bool { h == 2 }'; Replace = 'pub fn self_drag_hit(h: u32, w: u32) -> bool { h == w }' })
+               Tests = @('stage_abl', 'pipeline_skip', 'presets', 'ui_menu'); NotTests = @('stage_screen', 'smoke', 'units_only', 'output_win', 'placement_modes'); Lib = @('output::', 'gpu::stages::abl::'); NotLib = @('placement::'); Full = $false }
+            @{ Name = 'item: output.rs pub const used by gpu'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'TITLE_H: u32 = 4'; Replace = 'TITLE_H: u32 = 5' })
+               Tests = @('stage_abl', 'pipeline_skip'); NotTests = @('stage_screen', 'smoke', 'output_win', 'placement_modes'); Lib = @('gpu::stages::abl::'); Full = $false }
+            @{ Name = 'item: output.rs unit test only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn t() {}'; Replace = 'fn t() { let _ = 1; }' })
+               Tests = @(); NotTests = '*'; Lib = @('output::'); NotLib = @('gpu::stages::abl::'); Full = $false }
+            @{ Name = 'item: output.rs comment only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn helper() {}'; Replace = "// a note`nfn helper() {}" })
+               Tests = @(); NotTests = '*'; Lib = @('output::'); NotLib = @('gpu::stages::abl::'); Full = $false }
+            @{ Name = 'item: cli.rs flag parsing body'; Edits = @(@{ File = 'crates/ultimatecrt/src/cli.rs'; Find = 'fn parse_flag() -> bool { false }'; Replace = 'fn parse_flag() -> bool { true }' })
+               Tests = @('binary_run'); NotTests = @('smoke', 'stage_abl', 'stage_screen', 'ui_menu', 'presets', 'pipeline_skip', 'output_win'); Lib = @('cli::'); NotLib = @('gpu::stages::abl::'); Full = $false }
+            @{ Name = 'item: cli.rs usage text (a public const)'; Edits = @(@{ File = 'crates/ultimatecrt/src/cli.rs'; Find = 'usage: ultimatecrt [options]'; Replace = 'usage: ultimatecrt [options] [--new-flag]' })
+               Tests = @('smoke', 'binary_run'); NotTests = @('stage_abl', 'stage_screen', 'ui_menu', 'presets', 'pipeline_skip', 'output_win'); Lib = @('cli::'); Full = $false }
+            @{ Name = 'item: scaling.rs private fn (not OS glue)'; Edits = @(@{ File = 'crates/ultimatecrt/src/scaling.rs'; Find = 'fn inner() -> u32 { 1 }'; Replace = 'fn inner() -> u32 { 2 }' })
+               Tests = @('placement_modes'); NotTests = @('smoke', 'stage_abl', 'units_only', 'output_win'); Lib = @('scaling::', 'placement::'); Full = $false }
+            @{ Name = 'item: gpu/mod.rs private fn seen by a child module'; Edits = @(@{ File = 'crates/ultimatecrt/src/gpu/mod.rs'; Find = '{ 7 }'; Replace = '{ 8 }' })
+               Tests = @('pipe_p'); NotTests = @('smoke', 'output_win', 'units_only', 'placement_modes'); Full = $false }
         )
+        $gitOk = $false
+        if (Get-Command git -ErrorAction SilentlyContinue) {
+            $g = @('-c', 'user.name=impact', '-c', 'user.email=impact@example.invalid', '-c', 'core.autocrlf=false', '-c', 'commit.gpgsign=false')
+            [void](Invoke-Git $fx @('init', '-q'))
+            [void](Invoke-Git $fx ($g + @('add', '-A')))
+            $gitOk = $null -ne (Invoke-Git $fx ($g + @('commit', '-q', '-m', 'fixture')))
+        }
+        if (-not $gitOk) { Write-Host '  note: git is not available, the item-level cases are skipped' }
         $fail = 0; $n = 0
         foreach ($c in $cases) {
             $n++
-            $plan = Get-ImpactPlan -Root $fx -ChangedFiles $c.Files
+            if ($c.Edits) {
+                if (-not $gitOk) { Write-Host ("  skip {0,2}. {1}" -f $n, $c.Name); continue }
+                $c.Files = @()
+                foreach ($e in $c.Edits) {
+                    $ep = Join-Path $fx $e.File
+                    $txt = [IO.File]::ReadAllText($ep)
+                    if (-not $txt.Contains($e.Find)) { throw "self test fixture: '$($e.Find)' not found in $($e.File)" }
+                    [IO.File]::WriteAllText($ep, $txt.Replace($e.Find, $e.Replace))
+                    $c.Files += $e.File
+                }
+                $plan = Get-ImpactPlan -Root $fx -ChangedFiles $c.Files -DiffBase 'HEAD'
+                [void](Invoke-Git $fx @('checkout', '-q', '--', '.'))
+            } else {
+                $plan = Get-ImpactPlan -Root $fx -ChangedFiles $c.Files
+            }
             $sel = @($plan.Selected | Where-Object { $_ -like 'test:*' } | ForEach-Object { $_.Substring(5) })
             $problems = @()
             if ($c.Full -ne ($plan.Selection.Full.Count -gt 0)) { $problems += "expected Full=$($c.Full)" }
@@ -1155,6 +1712,7 @@ function Invoke-SelfTest {
                 if ($c.NotTests -eq '*') { if ($sel.Count -gt 0) { $problems += "expected no integration tests, got " + ($sel -join ',') } }
                 else { foreach ($t in @($c.NotTests)) { if ($t -and ($sel -contains $t)) { $problems += "unexpected test $t" } } }
                 foreach ($k in @($c.Lib)) { if ($k -and -not $plan.Selection.Lib.ContainsKey($k)) { $problems += "missing lib filter $k" } }
+                foreach ($k in @($c.NotLib)) { if ($k -and $plan.Selection.Lib.ContainsKey($k)) { $problems += "unexpected lib filter $k" } }
                 foreach ($k in @($c.Pkg)) { if ($k -and -not $plan.Selection.Pkg.ContainsKey($k)) { $problems += "missing package $k" } }
                 if ($c.Ps -and $plan.Selection.Ps.Count -eq 0) { $problems += 'expected a PowerShell parse check' }
                 if ($c.NoCargoTest -and @($plan.Commands | Where-Object { $_.Args -and $_.Args[0] -eq 'test' }).Count -gt 0) { $problems += 'expected no cargo test' }
