@@ -4,6 +4,13 @@
 [graph]
 targets = [{ triple = "x86_64-pc-windows-msvc" }]
 
+# RustSec advisories (review D-15): a dependency with a known vulnerability fails the check. Run:
+# cargo deny check advisories (fetches the advisory database; scripts/package.ps1 runs it before a release),
+# or cargo deny --offline check advisories (the copy fetched last, under CARGO_HOME\advisory-dbs).
+# An advisory accepted after review goes into `ignore` with its id and a reason, never silently.
+[advisories]
+ignore = []
+
 [licenses]
 confidence-threshold = 0.8
 unused-allowed-license = "allow"
