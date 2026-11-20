@@ -1,6 +1,7 @@
-//! Headless GPU tests of the menu's Source section controls (owner requirement 2026-11-20): Detect black bars,
-//! Reset crop, Undo, Detect at attach, the detection thresholds (Advanced) and the source scaling multiplier
-//! (Auto, None, x1 to x10, X and Y separately). The menu is drawn by the UI layer into an offscreen
+//! Headless GPU tests of the menu's Source section controls (owner requirements 2026-11-20): the picture area
+//! (Auto, Manual, Whole client area; Detect now, Back to Auto, Reset, Undo; the four manual limits with their
+//! nudges, drag and snapping; the resize warning; the detection thresholds in Advanced) and the source scaling
+//! multiplier (Auto, None, x1 to x10, X and Y separately). The menu is drawn by the UI layer into an offscreen
 //! `B8G8R8A8_UNORM` target and driven by raw Win32 messages through `Ui::handle_win32_message`; what the app
 //! would do with the requests is checked with the same pure functions it calls (`bars`, `scaling::Multiplier`).
 //! No window is created or captured and no focus changes (a headless `Ui` has no output window).
@@ -11,14 +12,14 @@ mod common;
 
 use std::sync::{Mutex, MutexGuard};
 
-use ultimatecrt::bars::{Bars, Found};
+use ultimatecrt::bars::{edit_limit, AreaMode, Bars, Found, Side};
 use ultimatecrt::gpu::{Headless, ImageF32, Settings, SourceFrame, StageReadback, TargetFormat};
-use ultimatecrt::params::{Params, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_DIVISOR_MODE_NONE};
+use ultimatecrt::params::{Params, SOURCE_CROP_MODE_MANUAL, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_DIVISOR_MODE_NONE};
 use ultimatecrt::scaling::{Multiplier, Rect, View};
 use ultimatecrt::settings::SourceProfile;
 use ultimatecrt::ui::input::{mouse_lparam, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE};
 use ultimatecrt::ui::menu::MenuRects;
-use ultimatecrt::ui::{AttachedView, BarsView, SourceAction, SourceView, Ui, UiConfig, UiState};
+use ultimatecrt::ui::{AreaView, AttachedView, BarsView, SourceAction, SourceView, Ui, UiConfig, UiState};
 
 static IMGUI: Mutex<()> = Mutex::new(());
 
@@ -26,23 +27,39 @@ fn lock() -> MutexGuard<'static, ()> {
     IMGUI.lock().unwrap_or_else(|e| e.into_inner())
 }
 
-/// A 256 x 224 game at x3 with a 32 px bar left and right, as the Source section would describe it.
+/// The owner's geometry: a 256 x 224 game at x3 (768 x 672) centred in a 914 x 754 client area, the picture area
+/// in Auto with the detected limits, as the Source section would describe it.
 fn attached() -> AttachedView {
     AttachedView {
-        exe: Some("snes9x-x64.exe".into()),
-        class: "Snes9X: WndClass".into(),
-        title: "Super Metroid (USA) - Snes9x 1.62.3".into(),
-        frame: (832, 672),
+        exe: Some("pixel-demo.exe".into()),
+        class: "pixel_demo".into(),
+        title: "pixel-demo | scene 256x224 integer x3".into(),
+        frame: (914, 754),
         native: (256, 224),
         scale: "x3 detected".into(),
-        crop: "client area".into(),
+        crop: "crop 73, 41, 768 \u{00D7} 672".into(),
         profile: false,
         multiplier: Multiplier::Auto,
         detected: Some((3, 3)),
-        crop_manual: false,
+        crop_manual: true,
         bars: BarsView::default(),
+        area: AreaView {
+            mode: AreaMode::Auto,
+            whole_window: false,
+            limits: LIMITS,
+            client: (914, 754),
+            divisor: (3, 3),
+            set_for: None,
+        },
     }
 }
+
+const LIMITS: Bars = Bars {
+    left: 73,
+    top: 41,
+    right: 73,
+    bottom: 41,
+};
 
 struct Rig {
     ui: Ui,
@@ -57,13 +74,17 @@ struct Rig {
 
 impl Rig {
     fn new(test: &str, w: u32, h: u32) -> Option<Rig> {
+        Rig::with_menu_width(test, w, h, 520.0)
+    }
+
+    fn with_menu_width(test: &str, w: u32, h: u32, menu_w: f32) -> Option<Rig> {
         let mut gpu = common::gpu_or_skip(test)?;
         gpu.enable_only(&[]).expect("chain slots off");
         gpu.set_read_stages(StageReadback::None);
         let mut config = UiConfig::headless();
         // A tall menu: the whole Source section fits without scrolling.
         config.layout.menu_h = h as f32 - 40.0;
-        config.layout.menu_w = 520.0;
+        config.layout.menu_w = menu_w;
         let mut ui =
             Ui::new(gpu.context(), Headless::vk_format(TargetFormat::Bgra8Unorm), config).expect("create the UI");
         ui.set_frame_time(Some(1.0 / 60.0));
@@ -166,7 +187,47 @@ impl Rig {
             self.frame(&[]);
         }
         self.click("header:Source");
-        self.item("source:detect_bars");
+        self.item("source:detect_now");
+    }
+
+    fn area(&mut self) -> &mut AreaView {
+        &mut self.state.source.attached.as_mut().unwrap().area
+    }
+
+    /// What the app does with a picture-area request, on the state the menu shows next.
+    fn apply(&mut self, a: SourceAction) {
+        let area = self.area();
+        match a {
+            SourceAction::SetLimits(b) => {
+                area.limits = b;
+                area.mode = AreaMode::Manual;
+            }
+            SourceAction::SetAreaMode(m) => {
+                area.mode = m;
+                if m == AreaMode::Client {
+                    area.limits = Bars::default();
+                }
+            }
+            _ => {}
+        }
+        self.frame(&[]);
+    }
+
+    /// Drags the mouse from `a` to `b` (fractions of the item `key`), button held.
+    fn drag(&mut self, key: &str, a: f32, b: f32) {
+        let r = self.item(key);
+        let p = |t: f32| {
+            let q = MenuRects::at(r, t, 0.5);
+            mouse_lparam(q[0] as i16, q[1] as i16)
+        };
+        self.frame(&[(WM_MOUSEMOVE, 0, p(a))]);
+        self.frame(&[(WM_LBUTTONDOWN, 1, p(a))]);
+        for i in 1..=4 {
+            let t = a + (b - a) * i as f32 / 4.0;
+            self.frame(&[(WM_MOUSEMOVE, 1, p(t))]);
+        }
+        self.frame(&[(WM_LBUTTONUP, 0, p(b))]);
+        self.frame(&[]);
     }
 
     fn finish(self) {
@@ -177,75 +238,174 @@ impl Rig {
     }
 }
 
-/// Detect black bars issues the request; Reset crop and Undo only act when there is something to reset or undo;
-/// Detect at attach goes back as a preference; the app's handling of the outcome stores a manual crop.
+/// The picture-area mode and buttons: the combo (Auto, Manual, Whole client area), Detect now (disabled while a
+/// detection runs), Back to Auto (only off Auto), Reset (disabled for the whole client area) and Undo (only with
+/// something to undo); the thresholds stay in Advanced.
 #[test]
-fn black_bar_buttons_issue_requests() {
+fn picture_area_mode_and_buttons_issue_requests() {
     let _g = lock();
-    let Some(mut rig) = Rig::new("black_bar_buttons_issue_requests", 1280, 900) else {
+    let Some(mut rig) = Rig::new("picture_area_mode_and_buttons_issue_requests", 1280, 1000) else {
         return;
     };
     rig.open_source();
-    rig.click("source:detect_bars");
-    assert_eq!(rig.actions, [SourceAction::DetectBars]);
-    // No manual crop and nothing to undo: both buttons are disabled.
-    rig.click("source:reset_crop");
+    rig.item("source:picture");
+    rig.click("source:detect_now");
+    assert_eq!(rig.actions, [SourceAction::DetectNow]);
+    // Auto: no Back to Auto; nothing to undo.
+    assert!(rig.ui.item_rect("source:back_to_auto").is_none());
     rig.click("source:undo_crop");
     assert_eq!(rig.actions.len(), 1, "{:?}", rig.actions);
-    // While a detection runs the button is disabled too.
+    // While a detection runs, Detect now is disabled.
     rig.state.source.attached.as_mut().unwrap().bars.running = true;
     rig.frame(&[]);
-    rig.click("source:detect_bars");
+    rig.click("source:detect_now");
     assert_eq!(rig.actions.len(), 1);
-    // The app found bars (32 px left and right): the crop is manual, the bars and the message are shown.
+    rig.state.source.attached.as_mut().unwrap().bars.running = false;
+    // The combo: Manual (keeps the limits in force), then Whole client area.
+    rig.click("source:area");
+    rig.item("source:area:0");
+    rig.click("source:area:1");
+    assert_eq!(rig.actions.last(), Some(&SourceAction::SetAreaMode(AreaMode::Manual)));
+    rig.apply(SourceAction::SetAreaMode(AreaMode::Manual));
+    rig.click("source:back_to_auto");
+    assert_eq!(rig.actions.last(), Some(&SourceAction::SetAreaMode(AreaMode::Auto)));
+    rig.click("source:reset_crop");
+    assert_eq!(rig.actions.last(), Some(&SourceAction::ResetCrop));
+    rig.click("source:area");
+    rig.click("source:area:2");
+    assert_eq!(rig.actions.last(), Some(&SourceAction::SetAreaMode(AreaMode::Client)));
+    rig.apply(SourceAction::SetAreaMode(AreaMode::Client));
+    // Whole client area: Reset has nothing to reset.
+    let n = rig.actions.len();
+    rig.click("source:reset_crop");
+    assert_eq!(rig.actions.len(), n);
+    // Undo, once there is something to undo.
+    rig.state.source.attached.as_mut().unwrap().bars.can_undo = true;
+    rig.frame(&[]);
+    rig.click("source:undo_crop");
+    assert_eq!(rig.actions.last(), Some(&SourceAction::UndoCrop));
+    // A detection's outcome is shown.
     let found = Found {
-        bars: Bars {
-            left: 32,
-            top: 0,
-            right: 32,
-            bottom: 0,
-        },
+        bars: LIMITS,
         picture: Rect {
-            x: 32,
-            y: 0,
+            x: 73,
+            y: 41,
             w: 768,
             h: 672,
         },
-        limited: false,
+        limited: None,
         snapped_to: (3, 3),
     };
-    {
-        let a = rig.state.source.attached.as_mut().unwrap();
-        a.bars = BarsView {
-            running: false,
-            found: Some(found),
-            message: Some(ultimatecrt::bars::Outcome::Found(found).message()),
-            can_undo: true,
-        };
-        a.crop_manual = true;
-    }
+    rig.state.source.attached.as_mut().unwrap().bars.message = Some(ultimatecrt::bars::Outcome::Found(found).message());
     rig.frame(&[]);
-    rig.item("source:bars");
     rig.item("source:bars_message");
-    rig.click("source:reset_crop");
-    assert_eq!(rig.actions.last(), Some(&SourceAction::ResetCrop));
-    rig.click("source:undo_crop");
-    assert_eq!(rig.actions.last(), Some(&SourceAction::UndoCrop));
-    // What the app does with the detection: a manual crop in the source profile of the program.
-    let (mut params, mut profile, mut cli) = (Params::default(), SourceProfile::default(), None);
-    ultimatecrt::bars::set_manual_crop(&mut params, &mut profile, &mut cli, found.picture);
-    assert_eq!(params.source_crop_mode, ultimatecrt::params::SOURCE_CROP_MODE_MANUAL);
-    assert_eq!(profile.crop, Some([32, 0, 800, 672]));
-    // Detect at attach: off by default, a preference of the settings.
-    assert!(!rig.ui.source_prefs().detect_bars_at_attach);
-    rig.tick("source:detect_at_attach");
-    assert!(rig.ui.source_prefs().detect_bars_at_attach);
     // The thresholds are Advanced: hidden until the Advanced box is ticked.
     assert!(rig.ui.item_rect("source:bars_tolerance").is_none());
     rig.tick("advanced");
     rig.item("source:bars_tolerance");
     rig.item("source:bars_min");
     rig.item("source:bars_max_crop");
+    // The whole window captured (crop mode none): the picture area does not apply, no limits shown.
+    rig.area().whole_window = true;
+    rig.frame(&[]);
+    rig.frame(&[]);
+    assert!(rig.ui.item_rect("source:limit_left").is_none());
+    rig.finish();
+}
+
+/// The four manual limits: the detected values are shown in Auto; a nudge switches to Manual from them; with a
+/// multiplier known the nudges and drags move in whole source pixels ("Snap to source pixels", on by default), off
+/// they move by 1 px; the limits never cross; the app stores the result as a manual crop; a resize of the window
+/// since the limits were set shows a warning.
+#[test]
+fn manual_limits_nudge_drag_and_snap() {
+    let _g = lock();
+    let Some(mut rig) = Rig::new("manual_limits_nudge_drag_and_snap", 1280, 1000) else {
+        return;
+    };
+    rig.open_source();
+    for key in [
+        "source:limit_left",
+        "source:limit_top",
+        "source:limit_right",
+        "source:limit_bottom",
+    ] {
+        rig.item(key);
+        rig.item(&format!("{key}:minus"));
+        rig.item(&format!("{key}:plus"));
+    }
+    let client = (914, 754);
+    // Auto, x3 known: + on Left moves one source pixel (3 px) and switches to Manual.
+    rig.click("source:limit_left:plus");
+    let want = Bars { left: 76, ..LIMITS };
+    assert_eq!(rig.actions.last(), Some(&SourceAction::SetLimits(want)));
+    assert_eq!(want.picture(client).unwrap().w % 3, 0);
+    rig.apply(SourceAction::SetLimits(want));
+    // - on Bottom.
+    rig.click("source:limit_bottom:minus");
+    let want = Bars { bottom: 38, ..want };
+    assert_eq!(rig.actions.last(), Some(&SourceAction::SetLimits(want)));
+    rig.apply(SourceAction::SetLimits(want));
+    // Snap off: 1 px steps.
+    rig.tick("source:snap");
+    rig.click("source:limit_top:plus");
+    let want = Bars { top: 42, ..want };
+    assert_eq!(rig.actions.last(), Some(&SourceAction::SetLimits(want)));
+    rig.apply(SourceAction::SetLimits(want));
+    // A drag on Right (snap on again): a whole number of source pixels across.
+    rig.tick("source:snap");
+    let n = rig.actions.len();
+    rig.drag("source:limit_right", 0.1, 0.3);
+    assert!(rig.actions.len() > n, "the drag asked for new limits");
+    let Some(SourceAction::SetLimits(dragged)) = rig.actions.last().copied() else {
+        panic!("{:?}", rig.actions.last())
+    };
+    assert!((150..400).contains(&dragged.right), "{dragged:?}");
+    assert_eq!(dragged.picture(client).unwrap().w % 3, 0, "{dragged:?}");
+    assert_eq!(
+        dragged,
+        edit_limit(want, Side::Right, i64::from(dragged.right), client, (3, 3))
+    );
+    rig.apply(SourceAction::SetLimits(dragged));
+    // Pushing Left far right never crosses Right: the picture keeps at least 8 px (9 at x3).
+    let crossed = edit_limit(dragged, Side::Left, 5000, client, (3, 3));
+    let p = crossed.picture(client).unwrap();
+    assert!(p.w >= 8 && p.w.is_multiple_of(3), "{p:?}");
+    // What the app stores: a manual crop for this program, with the client size it was set for.
+    let (mut params, mut profile, mut cli) = (Params::default(), SourceProfile::default(), None);
+    ultimatecrt::bars::set_manual_crop(
+        &mut params,
+        &mut profile,
+        &mut cli,
+        dragged.picture(client).unwrap(),
+        client,
+    );
+    assert_eq!(params.source_crop_mode, SOURCE_CROP_MODE_MANUAL);
+    assert_eq!(profile.crop_rect(), dragged.picture(client));
+    assert_eq!(profile.crop_client, Some([914, 754]));
+    // The window was resized since: the warning offers Detect now.
+    assert!(rig.ui.item_rect("source:area_warning").is_none());
+    {
+        let a = rig.area();
+        a.set_for = Some((914, 754));
+        a.client = (1000, 800);
+    }
+    rig.frame(&[]);
+    rig.item("source:area_warning");
+    // No multiplier known: the snap box is disabled and steps are 1 px.
+    {
+        let a = rig.area();
+        a.set_for = None;
+        a.client = client;
+        a.divisor = (1, 1);
+        a.limits = LIMITS;
+    }
+    rig.frame(&[]);
+    rig.click("source:limit_right:plus");
+    assert_eq!(
+        rig.actions.last(),
+        Some(&SourceAction::SetLimits(Bars { right: 74, ..LIMITS }))
+    );
     rig.finish();
 }
 
@@ -330,45 +490,55 @@ fn write_png(img: &ImageF32, name: &str) -> std::path::PathBuf {
     path.canonicalize().unwrap_or(path)
 }
 
-/// Preview images of the Source section: after a detection with a forced multiplier that disagrees (basic), and
-/// with Advanced on (thresholds, X and Y separately).
+/// Preview images of the Source section: Auto with the detected picture area of the owner's geometry (basic),
+/// Manual limits set for another window size with a forced multiplier and Advanced on (thresholds, X and Y), and
+/// Manual at the default menu width (460 px: the button row wraps instead of clipping).
 #[test]
 fn source_controls_preview_images() {
     let _g = lock();
-    for (name, advanced) in [("menu-source-bars", false), ("menu-source-bars-advanced", true)] {
-        let Some(mut rig) = Rig::new(name, 1280, 900) else {
+    for (name, advanced, menu_w) in [
+        ("menu-source-area-auto", false, 520.0),
+        ("menu-source-area-manual", true, 520.0),
+        ("menu-source-area-narrow", true, 460.0),
+    ] {
+        let Some(mut rig) = Rig::with_menu_width(name, 1280, 1000, menu_w) else {
             return;
         };
         let found = Found {
-            bars: Bars {
-                left: 32,
-                top: 0,
-                right: 32,
-                bottom: 0,
-            },
+            bars: LIMITS,
             picture: Rect {
-                x: 32,
-                y: 0,
+                x: 73,
+                y: 41,
                 w: 768,
                 h: 672,
             },
-            limited: false,
+            limited: None,
             snapped_to: (3, 3),
         };
         {
             let a = rig.state.source.attached.as_mut().unwrap();
-            a.crop = "crop 32, 0, 768 \u{00D7} 672".into();
-            a.native = (384, 336);
-            a.scale = "x2 (manual, detected x3)".into();
-            a.multiplier = Multiplier::Manual(2, 2);
-            a.crop_manual = true;
             a.profile = true;
             a.bars = BarsView {
                 running: false,
                 found: Some(found),
                 message: Some(ultimatecrt::bars::Outcome::Found(found).message()),
-                can_undo: true,
+                can_undo: advanced,
             };
+            if advanced {
+                a.native = (384, 336);
+                a.scale = "x2 (manual, detected x3)".into();
+                a.multiplier = Multiplier::Manual(2, 2);
+                a.area.mode = AreaMode::Manual;
+                a.area.divisor = (2, 2);
+                a.area.limits = Bars {
+                    left: 76,
+                    top: 41,
+                    right: 70,
+                    bottom: 38,
+                };
+                a.area.set_for = Some((832, 720));
+                a.bars.message = None;
+            }
         }
         rig.open_source();
         if advanced {
@@ -379,7 +549,7 @@ fn source_controls_preview_images() {
         rig.frame(&[]);
         let img = rig.frame(&[]);
         let window = rig.ui.menu_rects().window;
-        assert!(window[1][1] <= 900.0, "{name}: menu {window:?}");
+        assert!(window[1][1] <= 1000.0, "{name}: menu {window:?}");
         let path = write_png(&img, name);
         eprintln!("{name}: preview {}", path.display());
         rig.finish();

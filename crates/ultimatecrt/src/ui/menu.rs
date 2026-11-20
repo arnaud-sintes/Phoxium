@@ -273,6 +273,8 @@ pub struct MenuModel<'a> {
     pub prefs: &'a mut super::SourcePrefs,
     /// The scaling multiplier is shown per axis (Advanced, "Separate X and Y").
     pub split_multiplier: &'a mut bool,
+    /// Manual limits move in whole source pixels when a multiplier is known.
+    pub snap_limits: &'a mut bool,
 }
 
 /// What the menu window did in one frame.
@@ -288,8 +290,8 @@ pub struct MenuResult {
     pub gpu_adapter: Option<String>,
     /// A burn-in action asked in this frame (T-43): "Burn in now" or "New tube".
     pub wear_action: Option<super::WearAction>,
-    /// A request of the Source section (A23): Change source, Detach, Detect black bars, Reset crop, Undo, a
-    /// scaling multiplier.
+    /// A request of the Source section (A23): Change source, Detach, the picture area (mode, Detect now, limits,
+    /// Reset, Undo), a scaling multiplier.
     pub source: Option<super::SourceAction>,
     /// The ask-at-start box, the lost-source wait or a black-bar detection preference changed (A23).
     pub prefs_changed: bool,
@@ -878,36 +880,175 @@ pub fn bars_text(b: &crate::bars::Bars) -> String {
     )
 }
 
-/// Picture area: Detect black bars, Reset crop and Undo, what the last detection found, Detect at attach, and
-/// (Advanced) the detection thresholds.
-fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &super::AttachedView) {
-    let fonts = m.fonts;
-    theme::subheading(ui, &fonts, "Picture area");
-    let running = a.bars.running;
-    let disabled = ui.begin_disabled_with_cond(running);
-    if theme::button(ui, if running { "Detecting..." } else { "Detect black bars" }) {
-        r.source = Some(super::SourceAction::DetectBars);
+/// The picture inside its limits in words: `256 × 224 at 329, 265 of 914 × 754`.
+pub fn picture_text(limits: &crate::bars::Bars, client: (u32, u32)) -> String {
+    match limits.picture(client) {
+        Some(p) => format!(
+            "{} \u{00D7} {} at {}, {} in {} \u{00D7} {}",
+            p.w, p.h, p.x, p.y, client.0, client.1
+        ),
+        None => format!("nothing left of {} \u{00D7} {}", client.0, client.1),
     }
-    drop(disabled);
-    record(ui, r, "source:detect_bars");
+}
+
+/// Places the next button of a row of [`theme::button`]s on the same line when `label` still fits in the content
+/// width, else on the next line (a narrow menu wraps the row instead of clipping it).
+fn same_line_if_fits(ui: &Frame, label: &str) {
+    let s = theme::scale_of(ui);
+    let spacing = ui.clone_style().item_spacing()[0];
+    let width = ui.calc_text_size(label.split("##").next().unwrap_or(label))[0] + 20.0 * s;
+    let right = ui.window_pos()[0] + ui.window_size()[0] - ui.clone_style().window_padding()[0];
+    if ui.item_rect_max()[0] + spacing + width <= right - 12.0 * s {
+        ui.same_line();
+    }
+}
+
+/// One manual limit row: the label, a `-` nudge, the slider (drag, Ctrl+click to type), a `+` nudge and the value.
+/// Returns the new value asked for (not yet clamped or snapped).
+fn limit_row(ui: &Frame, r: &mut MenuResult, side: crate::bars::Side, value: u32, max: u32, step: u32) -> Option<i64> {
+    let key = format!("source:limit_{}", side.name().to_lowercase());
+    let width = theme::row_label(ui, side.name());
+    let spacing = ui.clone_style().item_spacing()[0];
+    let button_w = ui.calc_text_size("+")[0] + 2.0 * 8.0 * theme::scale_of(ui);
+    let value_w = ui.calc_text_size("0000 px")[0];
+    let track = (width - 2.0 * button_w - value_w - 3.0 * spacing).max(40.0);
+    let mut asked = None;
+    let small = |label: &str| {
+        let s = theme::scale_of(ui);
+        let _p = ui.push_style_var(StyleVar::FramePadding([8.0 * s, 4.0 * s]));
+        ui.button(label)
+    };
+    if small(&format!("-##{key}")) {
+        asked = Some(i64::from(value) - i64::from(step));
+    }
+    record(ui, r, &format!("{key}:minus"));
+    ui.same_line();
+    let mut v = value.min(max) as i32;
+    if theme::slider_ex(ui, &format!("##{key}"), &mut v, 0, max as i32, track, false, "%d") {
+        asked = Some(i64::from(v));
+    }
+    record(ui, r, &key);
     if ui.is_item_hovered() {
         theme::tooltip(
             ui,
-            "Watch the window for about one second and crop the capture to the picture inside its black bars \
-             (letterbox, pillarbox, a border area). Run it while the game shows a picture.",
+            &format!(
+                "Pixels cropped from the {} of the captured window. Drag, or Ctrl+click to type a value; - and + \
+                 move one step. Changing it switches the picture area to Manual.",
+                side.name().to_lowercase()
+            ),
         );
     }
     ui.same_line();
-    let disabled = ui.begin_disabled_with_cond(!a.crop_manual || running);
-    if theme::button(ui, "Reset crop") {
+    if small(&format!("+##{key}")) {
+        asked = Some(i64::from(value) + i64::from(step));
+    }
+    record(ui, r, &format!("{key}:plus"));
+    ui.same_line();
+    theme::text_right(ui, PALETTE.text, &format!("{value} px"));
+    asked
+}
+
+/// Picture area: the mode (Auto, Manual, Whole client area), what is in force, Detect now, Back to Auto, Reset and
+/// Undo, the four manual limits with their snapping, the last message and (Advanced) the detection thresholds.
+fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &super::AttachedView) {
+    use crate::bars::{edit_limit, AreaMode, Side};
+    let fonts = m.fonts;
+    theme::subheading(ui, &fonts, "Picture area");
+    let area = &a.area;
+    let running = a.bars.running;
+    // The mode.
+    let width = theme::row_label(ui, "Picture area");
+    let disabled = ui.begin_disabled_with_cond(area.whole_window);
+    ui.set_next_item_width(width);
+    let preview = if area.whole_window {
+        "Whole window".to_string()
+    } else {
+        area.mode.label().to_string()
+    };
+    if let Some(_combo) = ui.begin_combo("##source_area", &preview) {
+        for (i, mode) in AreaMode::ALL.iter().enumerate() {
+            let selected = *mode == area.mode;
+            if ui
+                .selectable_config(format!("{}##source_area{i}", mode.label()))
+                .selected(selected)
+                .build()
+                && !selected
+            {
+                r.source = Some(super::SourceAction::SetAreaMode(*mode));
+            }
+            record(ui, r, &format!("source:area:{i}"));
+            if selected {
+                ui.set_item_default_focus();
+            }
+        }
+    }
+    drop(disabled);
+    record(ui, r, "source:area");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "The part of the captured window that is the game's picture. Auto finds it inside the black bars \
+             (at attach, after a resize, and by itself while the game runs); Manual keeps your limits; Whole \
+             client area crops nothing. Stored for this program.",
+        );
+    }
+    let state = if area.whole_window {
+        "the whole window is captured (crop mode none in Source and placement)".to_string()
+    } else if running {
+        "detecting...".to_string()
+    } else {
+        let what = match area.mode {
+            AreaMode::Auto if area.limits == crate::bars::Bars::default() => "detected: no bars",
+            AreaMode::Auto => "detected",
+            AreaMode::Manual => "manual",
+            AreaMode::Client => "no crop",
+        };
+        format!("{what}  \u{00B7}  {}", picture_text(&area.limits, area.client))
+    };
+    theme::with_font(ui, None, METRICS.font_small, || {
+        ui.set_cursor_pos_x(ui.cursor_pos()[0] + theme::label_width(ui));
+        ui.text_colored(PALETTE.text_muted, &state);
+    });
+    record(ui, r, "source:picture");
+    if area.whole_window {
+        return;
+    }
+    // The actions.
+    ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+    let disabled = ui.begin_disabled_with_cond(running);
+    if theme::button(ui, if running { "Detecting..." } else { "Detect now" }) {
+        r.source = Some(super::SourceAction::DetectNow);
+    }
+    drop(disabled);
+    record(ui, r, "source:detect_now");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Find the picture inside the black bars now (about one second) and follow it in Auto. Run it while \
+             the game shows a picture.",
+        );
+    }
+    if area.mode != AreaMode::Auto {
+        same_line_if_fits(ui, "Back to Auto");
+        if theme::button(ui, "Back to Auto") {
+            r.source = Some(super::SourceAction::SetAreaMode(AreaMode::Auto));
+        }
+        record(ui, r, "source:back_to_auto");
+        if ui.is_item_hovered() {
+            theme::tooltip(ui, "Let the app find and follow the picture area again.");
+        }
+    }
+    same_line_if_fits(ui, "Reset (whole client area)");
+    let disabled = ui.begin_disabled_with_cond(area.mode == AreaMode::Client || running);
+    if theme::button(ui, "Reset (whole client area)") {
         r.source = Some(super::SourceAction::ResetCrop);
     }
     drop(disabled);
     record(ui, r, "source:reset_crop");
     if ui.is_item_hovered() {
-        theme::tooltip(ui, "Capture the whole client area of the window again (no crop).");
+        theme::tooltip(ui, "Capture the whole client area of the window (no crop).");
     }
-    ui.same_line();
+    same_line_if_fits(ui, "Undo");
     let disabled = ui.begin_disabled_with_cond(!a.bars.can_undo || running);
     if theme::button(ui, "Undo") {
         r.source = Some(super::SourceAction::UndoCrop);
@@ -915,22 +1056,54 @@ fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &
     drop(disabled);
     record(ui, r, "source:undo_crop");
     if ui.is_item_hovered() {
+        theme::tooltip(ui, "Put back the picture area as it was before your last change.");
+    }
+    if let (AreaMode::Manual, Some(was)) = (area.mode, area.set_for) {
+        theme::callout(
+            ui,
+            PALETTE.accent,
+            &[format!(
+                "These limits were set for a {} \u{00D7} {} window; it is {} \u{00D7} {} now (the limits are kept in \
+                 pixels). Detect now finds the picture again.",
+                was.0, was.1, area.client.0, area.client.1
+            )],
+        );
+        record(ui, r, "source:area_warning");
+    }
+    // The four limits: what is in force, editable (an edit switches to Manual from these values).
+    let snap = if *m.snap_limits { area.divisor } else { (1, 1) };
+    for side in Side::ALL {
+        let (size, step) = if side.horizontal() {
+            (area.client.0, snap.0)
+        } else {
+            (area.client.1, snap.1)
+        };
+        let value = area.limits.get(side);
+        if let Some(asked) = limit_row(ui, r, side, value, size, step.max(1)) {
+            let new = edit_limit(area.limits, side, asked, area.client, snap);
+            if new != area.limits || area.mode != AreaMode::Manual {
+                r.source = Some(super::SourceAction::SetLimits(new));
+            }
+        }
+    }
+    let known = area.divisor != (1, 1);
+    let disabled = ui.begin_disabled_with_cond(!known);
+    let label = if known {
+        format!(
+            "Snap to source pixels ({})",
+            crate::scaling::Multiplier::pair_text(area.divisor)
+        )
+    } else {
+        "Snap to source pixels".to_string()
+    };
+    ui.checkbox(format!("{label}###source_snap"), m.snap_limits);
+    drop(disabled);
+    record(ui, r, "source:snap");
+    if ui.is_item_hovered() {
         theme::tooltip(
             ui,
-            "Put back the capture area as it was before the last detection or reset.",
-        );
-    }
-    if let Some(f) = &a.bars.found {
-        theme::kv_row(ui, "Bars", &bars_text(&f.bars), PALETTE.text);
-        record(ui, r, "source:bars");
-        theme::kv_row(
-            ui,
-            "Picture",
-            &format!(
-                "{} \u{00D7} {} at {}, {}",
-                f.picture.w, f.picture.h, f.picture.x, f.picture.y
-            ),
-            PALETTE.text,
+            "With a scaling multiplier known, the limits move in whole source pixels (x3: 3 px at a time), so the \
+             picture keeps whole game pixels.",
         );
     }
     if let Some((ok, text)) = &a.bars.message {
@@ -940,17 +1113,6 @@ fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &
             drop(wrap);
         });
         record(ui, r, "source:bars_message");
-    }
-    if ui.checkbox("Detect at attach", &mut m.prefs.detect_bars_at_attach) {
-        r.prefs_changed = true;
-    }
-    record(ui, r, "source:detect_at_attach");
-    if ui.is_item_hovered() {
-        theme::tooltip(
-            ui,
-            "Run the black-bar detection every time a window is attached (its result is stored for that \
-             program like a manual crop).",
-        );
     }
     if *m.advanced {
         let b = &mut m.prefs.bars;
@@ -988,18 +1150,19 @@ fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &
             r.prefs_changed = true;
         }
         let mut pct = (b.max_crop * 100.0) as f32;
+        let (lo, hi) = crate::bars::MAX_CROP_RANGE;
         if pref_slider(
             ui,
             r,
             "source:bars_max_crop",
             "Largest crop",
             &mut pct,
-            10.0,
-            90.0,
+            (lo * 100.0) as f32,
+            (hi * 100.0) as f32,
             &format!("{:.0} %", b.max_crop * 100.0),
             "48 / 255",
-            "The bars of one axis may remove at most this share of it; larger dark borders (a dark scene) are \
-             left alone.",
+            "The bars of one axis may remove at most this share of it (default 97 %: a small game in a large \
+             window is fine). The picture left is always at least 16 game pixels and 2 % of the window.",
         ) {
             b.max_crop = f64::from(pct.round()) / 100.0;
             r.prefs_changed = true;

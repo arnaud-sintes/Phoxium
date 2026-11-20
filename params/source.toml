@@ -128,7 +128,7 @@ default = "auto"
 values = ["auto", "manual", "none"]
 tag = "E"
 source = "QUESTIONS SRC-1 and PLAN D-13: the client area of the window by default, a manual rectangle (--crop or the source profile), or the whole window"
-description = "Which part of the captured window is the source. auto: the client area. manual: the crop rectangle of the command line or of the source profile, inside the client area. none: the whole window, frame included."
+description = "Which part of the captured window is the source. auto: the client area, cropped to the picture found inside its black bars (the Source section's picture area Auto; Whole client area keeps all of it). manual: the crop rectangle of the command line or of the source profile, inside the client area. none: the whole window, frame included."
 group = "Source"
 advanced = true
 

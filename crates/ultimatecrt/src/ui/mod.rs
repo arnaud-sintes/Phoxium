@@ -110,23 +110,43 @@ pub struct AttachedView {
     pub multiplier: crate::scaling::Multiplier,
     /// What the automatic integer-scale detection found on the source area, `None` while it is still looking.
     pub detected: Option<(u32, u32)>,
-    /// The capture area is a manual crop (Reset crop has something to reset).
+    /// The capture area is not the whole client area (Reset has something to reset).
     pub crop_manual: bool,
-    /// The black-bar detection: running, its last outcome, Undo available.
+    /// The picture-area detection: running, its last outcome, Undo available.
     pub bars: BarsView,
+    /// The picture area: mode, limits, client size.
+    pub area: AreaView,
 }
 
-/// The black-bar detection as the Source section shows it.
+/// The picture-area detection as the Source section shows it.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct BarsView {
     /// A detection is running (about one second).
     pub running: bool,
-    /// The bars of the last detection that found some (they are the crop now, unless undone or reset).
+    /// The last detection that found bars.
     pub found: Option<crate::bars::Found>,
-    /// The outcome of the last detection, reset or undo: (good news, text).
+    /// The outcome of the last detection, change, reset or undo: (good news, text).
     pub message: Option<(bool, String)>,
-    /// The last crop change (detection, reset) can be undone.
+    /// The last picture-area change made by the user can be undone.
     pub can_undo: bool,
+}
+
+/// The picture area as the Source section shows and edits it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct AreaView {
+    /// Auto, Manual or Whole client area.
+    pub mode: crate::bars::AreaMode,
+    /// The capture is the whole window, frame included (crop mode none): the picture area does not apply.
+    pub whole_window: bool,
+    /// The limits in force (pixels cropped from each side of the client area): the detected ones in Auto, the
+    /// user's in Manual, zero for the whole client area.
+    pub limits: crate::bars::Bars,
+    /// The captured client size (px).
+    pub client: (u32, u32),
+    /// The source scaling multiplier known (forced or detected), for "Snap to source pixels"; 1 x 1 unknown.
+    pub divisor: (u32, u32),
+    /// Manual limits set for another client size: that size (the window was resized since).
+    pub set_for: Option<(u32, u32)>,
 }
 
 /// The source selection settings the menu and the picker edit (`[global.source]`, A23).
@@ -135,9 +155,7 @@ pub struct SourcePrefs {
     pub ask_at_start: bool,
     /// Seconds a lost source is waited for; 0 forever.
     pub wait_s: f64,
-    /// Detect black bars every time a window is attached.
-    pub detect_bars_at_attach: bool,
-    /// The black-bar detection thresholds (Advanced).
+    /// The picture-area detection thresholds (Advanced).
     pub bars: crate::bars::Config,
 }
 
@@ -146,7 +164,6 @@ impl SourcePrefs {
         Self {
             ask_at_start: s.ask_at_start,
             wait_s: s.wait_s,
-            detect_bars_at_attach: s.detect_bars_at_attach,
             bars: s.bars_config(),
         }
     }
@@ -173,11 +190,15 @@ pub enum SourceAction {
     Refresh,
     /// Take the preview again now.
     RefreshPreview,
-    /// Detect the black bars around the picture and crop to it (the Source section's Detect black bars).
-    DetectBars,
-    /// Back to the whole client area (no crop).
+    /// Detect the picture area at once (the Source section's Detect now): Auto mode, the hysteresis reset.
+    DetectNow,
+    /// The picture area mode chosen (Auto, Manual from the limits in force, Whole client area).
+    SetAreaMode(crate::bars::AreaMode),
+    /// Manual limits (pixels cropped from each side of the client area), live and in the source profile.
+    SetLimits(crate::bars::Bars),
+    /// "Reset (whole client area)": no crop.
     ResetCrop,
-    /// Undo the last crop change (detection or reset).
+    /// Undo the last picture-area change (mode, limits, reset).
     UndoCrop,
     /// Use this source scaling multiplier (auto, none, manual), live and in the source profile.
     SetMultiplier(crate::scaling::Multiplier),
@@ -371,6 +392,8 @@ pub struct Ui {
     prefs: SourcePrefs,
     /// The Source section shows the scaling multiplier per axis (Advanced, "Separate X and Y").
     split_multiplier: bool,
+    /// Manual limits move in whole source pixels when a multiplier is known ("Snap to source pixels").
+    snap_limits: bool,
     /// Dropped last (declared last, and `Drop for Ui` shuts the renderer down before).
     imgui: ImContext,
 }
@@ -475,6 +498,7 @@ impl Ui {
             },
             prefs: config.source_prefs,
             split_multiplier: false,
+            snap_limits: true,
             imgui,
         };
         if let Some(out) = ui.output {
@@ -972,6 +996,7 @@ impl UiPass for Ui {
                     fonts: self.fonts,
                     prefs: &mut self.prefs,
                     split_multiplier: &mut self.split_multiplier,
+                    snap_limits: &mut self.snap_limits,
                 },
             ));
         }
