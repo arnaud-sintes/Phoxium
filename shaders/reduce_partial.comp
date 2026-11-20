@@ -1,0 +1,56 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `abl`, parallel reduce, pass 1 of 2 (T-48: every quality tier but `exact`, which keeps the one-workgroup
+// reduce.comp; src/gpu/stages/abl.rs). Workgroup g sums (I_r + I_g + I_b) of the texels [g C, (g + 1) C) of the
+// amp image in FP32 (C = ABL_REDUCE_CHUNK texels, larger for very large images so that at most
+// ABL_MAX_PARTIALS groups run), each invocation every 256th texel of the chunk (coalesced), then a tree in shared
+// memory, and writes its sum to partials[g]. reduce_final.comp adds the partials and updates the state. The sum is
+// the same as reduce.comp's up to the FP32 rounding of another summation order (relative 1e-7).
+
+#include "params.glsl"
+#include "common.glsl"
+
+#define REDUCE_SIZE 256u
+// Texels per workgroup (16 per invocation) and the largest number of partials (src/gpu/stages/abl.rs, the same
+// constants and chunk rule).
+#define ABL_REDUCE_CHUNK 4096u
+#define ABL_MAX_PARTIALS 65536u
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 2) uniform sampler2D current_in;
+layout(set = 1, binding = 1, std430) writeonly buffer AblPartials {
+    float partials[];
+} abl_partials;
+
+shared float partial[REDUCE_SIZE];
+
+void main() {
+    uint t = gl_LocalInvocationIndex;
+    ivec2 size = textureSize(current_in, 0);
+    uint w = uint(size.x);
+    uint n = w * uint(size.y);
+    // The chunk grows in steps of 256 texels when n needs more than ABL_MAX_PARTIALS groups.
+    uint chunk = max(ABL_REDUCE_CHUNK, ((n + ABL_MAX_PARTIALS - 1u) / ABL_MAX_PARTIALS + 255u) / 256u * 256u);
+    uint base = gl_WorkGroupID.x * chunk;
+    float s = 0.0;
+    for (uint k = t; k < chunk; k += REDUCE_SIZE) {
+        uint i = base + k;
+        if (i < n) {
+            vec3 c = texelFetch(current_in, ivec2(int(i % w), int(i / w)), 0).rgb;
+            s += c.r + c.g + c.b;
+        }
+    }
+    partial[t] = s;
+    barrier();
+    for (uint h = REDUCE_SIZE / 2u; h > 0u; h >>= 1u) {
+        if (t < h) {
+            partial[t] += partial[t + h];
+        }
+        barrier();
+    }
+    if (t == 0u) {
+        abl_partials.partials[gl_WorkGroupID.x] = partial[0];
+    }
+}
