@@ -221,22 +221,17 @@ pub struct Renderer {
 
 impl Renderer {
     /// Creates the Vulkan context on a device that can present to `hwnd` (the requested one, see
-    /// [`DeviceRequest`]; the chosen device is [`Context::gpu`]), its presenter and the pipeline. With
-    /// `zero_copy` (the zero-copy capture path is asked for, A29) the device gets `VK_KHR_external_memory_win32`
-    /// when it offers it ([`Renderer::zero_copy_support`]).
-    pub fn new(
-        hwnd: isize,
-        hinstance: isize,
-        gpu: DeviceRequest,
-        validation: bool,
-        integer_scale: bool,
-        zero_copy: bool,
-    ) -> Res<Self> {
+    /// [`DeviceRequest`]; the chosen device is [`Context::gpu`]), its presenter and the pipeline. The device gets
+    /// `VK_KHR_external_memory_win32` whenever it offers it and imports the shared Direct3D 11 textures
+    /// ([`Renderer::zero_copy_support`]), whatever the capture path asked at start, so the path can be switched both
+    /// ways during the session (A29). The CPU path does not use the extension: its output is the same with or
+    /// without it (`tests/zero_copy.rs`).
+    pub fn new(hwnd: isize, hinstance: isize, gpu: DeviceRequest, validation: bool, integer_scale: bool) -> Res<Self> {
         // SAFETY: `hwnd` is the live output window of `hinstance`, owned by the application, which
         // drops the renderer before destroying the window. The presenter and pipeline are destroyed
         // by `Drop for Renderer` before `ctx`.
         unsafe {
-            let (ctx, surface) = Context::with_window(hwnd, hinstance, gpu, validation, zero_copy)?;
+            let (ctx, surface) = Context::with_window(hwnd, hinstance, gpu, validation, true)?;
             let presenter = Presenter::from_surface(&ctx, surface, Some((hwnd, hinstance)), hwnd_client_size(hwnd))?;
             let mut r = Self {
                 gpu_name: ctx.gpu.name.clone(),
@@ -445,19 +440,14 @@ impl Renderer {
         self.presenter.present(&self.ctx, index)
     }
 
-    /// The handle kind of the shared textures the device imports, when the zero-copy path was asked for at start and
-    /// the device supports it (A29); `None` otherwise.
+    /// The handle kind of the shared textures the device imports, when the device supports it (A29); `None`
+    /// otherwise.
     pub fn zero_copy_support(&self) -> Option<HandleKind> {
         self.ctx.external_memory()
     }
 
-    /// Whether the device was created for the zero-copy path (the setting was on at start).
-    pub fn zero_copy_requested(&self) -> bool {
-        self.ctx.external_memory_requested()
-    }
-
     /// What the zero-copy decision needs from the renderer (`zerocopy::decide`): the extension offered, the handle kind
-    /// imported (when enabled at start), and whether `capture` (the capture device's adapter) is the renderer's.
+    /// imported, and whether `capture` (the capture device's adapter) is the renderer's.
     pub fn zero_copy_check(&self, capture: Option<crate::adapters::Luid>) -> crate::zerocopy::Support {
         let render = self.ctx.gpu.luid.map(crate::adapters::Luid::from_vulkan);
         crate::zerocopy::Support {

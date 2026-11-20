@@ -201,24 +201,30 @@ impl Default for GpuSettings {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct CaptureSettings {
-    /// How captured frames reach the renderer: `cpu` (the default, the simple CPU copy that works on every adapter
-    /// pair) or `zero_copy` (GPU sharing, experimental, one adapter for capture and rendering). Any other value
-    /// reads as `cpu` with a note (the hard range of an enum, WP4). `--capture-path` wins over it.
+    /// How captured frames reach the renderer: `zero_copy` (the default: GPU sharing when the machine allows it,
+    /// else the CPU copy, with an automatic fallback on any failure) or `cpu` (the simple CPU copy that works on
+    /// every adapter pair). `auto` reads as the default. Any other value reads as the default with a note (the hard
+    /// range of an enum, WP4). Stored only when it differs from the default. `--capture-path` wins over it.
     pub path: String,
 }
 
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
-            path: CapturePath::Cpu.id().to_string(),
+            path: CapturePath::default().id().to_string(),
         }
     }
 }
 
 impl CaptureSettings {
-    /// The path asked for (`cpu` for a value that is not one).
+    /// The path asked for (the default for a value that is not one).
     pub fn path(&self) -> CapturePath {
         CapturePath::parse(&self.path).unwrap_or_default()
+    }
+
+    /// The default path: not written to the file.
+    pub fn is_default(&self) -> bool {
+        self.path() == CapturePath::default()
     }
 }
 
@@ -312,7 +318,9 @@ pub struct Global {
     pub output: OutputState,
     /// The adapter that runs the chain (`[global.gpu] adapter`, HW-3).
     pub gpu: GpuSettings,
-    /// The capture path (`[global.capture] path`, A29).
+    /// The capture path (`[global.capture] path`, A29): written only when it is not the default (zero-copy), so a
+    /// file without it follows the default.
+    #[serde(skip_serializing_if = "CaptureSettings::is_default")]
     pub capture: CaptureSettings,
     /// Source selection: ask at start, lost-source wait, last choice (`[global.source]`, A23).
     pub source: SourceSettings,
@@ -613,9 +621,9 @@ impl Settings {
             Some(p) => *path = p.id().to_string(),
             None => {
                 notes.push(format!(
-                    "[global.capture] path = \"{path}\" is not cpu or zero_copy: the CPU copy is used"
+                    "[global.capture] path = \"{path}\" is not zero_copy or cpu: the default (zero-copy) is used"
                 ));
-                *path = CapturePath::Cpu.id().to_string();
+                *path = CapturePath::default().id().to_string();
             }
         }
         Ok((s, notes))
@@ -1394,29 +1402,53 @@ mod tests {
     }
 
     #[test]
-    fn capture_path_defaults_to_cpu_reads_zero_copy_and_clamps_the_rest() {
+    fn capture_path_defaults_to_zero_copy_is_stored_only_when_cpu_and_clamps_the_rest() {
+        // The default is zero-copy, and it is not written.
         let s = Settings::default();
-        assert_eq!(s.global.capture.path(), CapturePath::Cpu);
-        assert!(s.to_toml().unwrap().contains("[global.capture]\npath = \"cpu\""));
-        let (s, notes) = Settings::from_toml_noted("version = 1\n[global.capture]\npath = \"zero-copy\"\n").unwrap();
         assert_eq!(s.global.capture.path(), CapturePath::ZeroCopy);
-        // Normalised to the settings spelling.
-        assert_eq!(s.global.capture.path, "zero_copy");
-        assert!(notes.is_empty());
-        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
-        assert_eq!(back.global.capture.path(), CapturePath::ZeroCopy);
-        // Outside the range: the CPU copy, with a note; a missing table: the default.
-        let (s, notes) = Settings::from_toml_noted("version = 1\n[global.capture]\npath = \"gpu\"\n").unwrap();
-        assert_eq!(s.global.capture.path, "cpu");
-        assert!(notes.iter().any(|n| n.contains("[global.capture] path")), "{notes:?}");
+        let text = s.to_toml().unwrap();
+        assert!(!text.contains("[global.capture]"), "{text}");
         assert_eq!(
-            Settings::from_toml("version = 1\n").unwrap().global.capture.path(),
+            Settings::from_toml(&text).unwrap().global.capture.path(),
+            CapturePath::ZeroCopy
+        );
+        // An explicit cpu is written and read back as cpu.
+        let mut s = Settings::default();
+        s.global.capture.path = CapturePath::Cpu.id().to_string();
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("[global.capture]\npath = \"cpu\""), "{text}");
+        assert_eq!(
+            Settings::from_toml(&text).unwrap().global.capture.path(),
             CapturePath::Cpu
         );
-        // Reset everything puts it back.
-        let mut s = Settings::from_toml("version = 1\n[global.capture]\npath = \"zero_copy\"\n").unwrap();
+        // A file of v0.2.0 has no such key: the new default.
+        assert_eq!(
+            Settings::from_toml("version = 1\n[global.gpu]\nadapter = \"auto\"\n")
+                .unwrap()
+                .global
+                .capture
+                .path(),
+            CapturePath::ZeroCopy
+        );
+        // Other spellings, normalised; an explicit zero_copy or auto is the default, so not written back.
+        for v in ["zero-copy", "zero_copy", "auto"] {
+            let (s, notes) =
+                Settings::from_toml_noted(&format!("version = 1\n[global.capture]\npath = \"{v}\"\n")).unwrap();
+            assert_eq!(s.global.capture.path, "zero_copy", "{v}");
+            assert!(notes.is_empty());
+            assert!(!s.to_toml().unwrap().contains("[global.capture]"));
+        }
+        let (s, _) = Settings::from_toml_noted("version = 1\n[global.capture]\npath = \"CPU\"\n").unwrap();
+        assert_eq!(s.global.capture.path, "cpu");
+        // Outside the range: the default, with a note.
+        let (s, notes) = Settings::from_toml_noted("version = 1\n[global.capture]\npath = \"gpu\"\n").unwrap();
+        assert_eq!(s.global.capture.path, "zero_copy");
+        assert!(notes.iter().any(|n| n.contains("[global.capture] path")), "{notes:?}");
+        // Reset everything puts it back to the default.
+        let mut s = Settings::from_toml("version = 1\n[global.capture]\npath = \"cpu\"\n").unwrap();
         s.reset_everything();
-        assert_eq!(s.global.capture.path(), CapturePath::Cpu);
+        assert_eq!(s.global.capture.path(), CapturePath::ZeroCopy);
+        assert!(!s.to_toml().unwrap().contains("[global.capture]"));
     }
 
     #[test]

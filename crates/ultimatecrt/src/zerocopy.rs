@@ -5,7 +5,10 @@
 //! into one of [`POOL_SLOTS`] shared Direct3D 11 textures (`capture.rs`), waits on the GPU for that copy, then
 //! publishes the slot; the renderer imports every texture of the pool once as a Vulkan image
 //! (`VK_KHR_external_memory_win32`, `gpu/external.rs`) and `decode` samples it directly. No pixel crosses the CPU.
-//! The simple CPU copy stays the default ([`CapturePath::Cpu`]): it works on any adapter pair.
+//! Zero-copy is the default ([`CapturePath::ZeroCopy`], owner request 2026-11-20): the session uses it when the
+//! platform allows it ([`decide`]) and falls back to the simple CPU copy ([`CapturePath::Cpu`], which works on any
+//! adapter pair) otherwise, or on any failure at runtime ([`Fallback`]). The Vulkan device enables the extension
+//! whenever it can import the shared textures, so the path can be switched both ways during a session.
 //!
 //! This module holds what both sides agree on and what can be decided without a device: the setting
 //! ([`CapturePath`]), the slot state machine shared by the two threads ([`SlotPool`]), the release-by-fence rule of
@@ -22,17 +25,17 @@ pub const POOL_SLOTS: usize = 3;
 /// Which way captured frames reach the renderer (`[global.capture] path`, `--capture-path`).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum CapturePath {
-    /// The capture texture is copied to a CPU buffer and uploaded (the default, works on every adapter pair).
-    #[default]
+    /// The capture texture is copied to a CPU buffer and uploaded (works on every adapter pair).
     Cpu,
-    /// The capture texture is copied on the GPU into a shared texture that Vulkan samples directly
-    /// (experimental, needs one adapter for capture and rendering).
+    /// The capture texture is copied on the GPU into a shared texture that Vulkan samples directly (the default;
+    /// needs one adapter for capture and rendering, else the CPU copy is used).
+    #[default]
     ZeroCopy,
 }
 
 impl CapturePath {
     /// Every value, in menu order.
-    pub const ALL: [CapturePath; 2] = [CapturePath::Cpu, CapturePath::ZeroCopy];
+    pub const ALL: [CapturePath; 2] = [CapturePath::ZeroCopy, CapturePath::Cpu];
 
     /// The settings value: `cpu` or `zero_copy`.
     pub fn id(self) -> &'static str {
@@ -42,11 +45,12 @@ impl CapturePath {
         }
     }
 
-    /// Reads a settings or command-line value: `cpu`, `zero_copy` or `zero-copy` (any case, spaces trimmed).
+    /// Reads a settings or command-line value: `cpu`, `zero_copy` or `zero-copy`, or `auto` (the default, zero-copy
+    /// with the automatic fallback), any case, spaces trimmed.
     pub fn parse(text: &str) -> Option<CapturePath> {
         match text.trim().to_ascii_lowercase().replace('-', "_").as_str() {
             "cpu" => Some(CapturePath::Cpu),
-            "zero_copy" | "zerocopy" => Some(CapturePath::ZeroCopy),
+            "zero_copy" | "zerocopy" | "auto" => Some(CapturePath::ZeroCopy),
             _ => None,
         }
     }
@@ -54,8 +58,16 @@ impl CapturePath {
     /// The menu label.
     pub fn label(self) -> &'static str {
         match self {
-            CapturePath::Cpu => "Simple CPU copy (default)",
-            CapturePath::ZeroCopy => "Zero-copy GPU sharing (experimental)",
+            CapturePath::Cpu => "CPU copy (most compatible)",
+            CapturePath::ZeroCopy => "Zero-copy (GPU sharing, default)",
+        }
+    }
+
+    /// The name of the path in force, for the status lines (menu, About).
+    pub fn name(self) -> &'static str {
+        match self {
+            CapturePath::Cpu => "CPU copy",
+            CapturePath::ZeroCopy => "Zero-copy (GPU sharing)",
         }
     }
 
@@ -295,9 +307,10 @@ pub fn clamp_crop(x: i64, y: i64, w: i64, h: i64, tex: (u32, u32)) -> (u32, u32,
 /// What the zero-copy path needs, from queries and the session state (no allocation).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Support {
-    /// The Vulkan device offers `VK_KHR_external_memory_win32` and it was enabled on the device.
+    /// The Vulkan device offers `VK_KHR_external_memory_win32`.
     pub extension: bool,
-    /// The handle kind the device imports ([`select_handle`]), `None` when it imports neither.
+    /// The handle kind the device imports ([`select_handle`]) with the extension enabled on the device (it is,
+    /// whenever the device imports one), `None` when it imports neither.
     pub handle: Option<HandleKind>,
     /// The capture device and the Vulkan device are on the same adapter (same LUID); `None` when unknown.
     pub same_adapter: Option<bool>,
@@ -306,8 +319,6 @@ pub struct Support {
 /// Why the zero-copy path does not run.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Refusal {
-    /// The device was created without the extension (the setting was off at start): a restart applies it.
-    NotEnabledAtStart,
     /// The Vulkan device does not offer `VK_KHR_external_memory_win32`.
     NoExtension,
     /// The Vulkan device imports neither NT nor KMT Direct3D 11 textures in B8G8R8A8.
@@ -323,7 +334,6 @@ pub enum Refusal {
 impl fmt::Display for Refusal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Refusal::NotEnabledAtStart => f.write_str("zero-copy applies at the next start (the GPU device was created without it)"),
             Refusal::NoExtension => f.write_str("the Vulkan device does not offer VK_KHR_external_memory_win32"),
             Refusal::NoImport => f.write_str("the Vulkan device cannot import Direct3D 11 textures (B8G8R8A8)"),
             Refusal::CrossAdapter => f.write_str(
@@ -335,14 +345,19 @@ impl fmt::Display for Refusal {
     }
 }
 
+impl Refusal {
+    /// A property of this machine and session (extension, import, adapters), not a failure: the default path falls
+    /// back without a title notice, and the menu shows the zero-copy choice disabled with the reason.
+    pub fn is_platform(&self) -> bool {
+        !matches!(self, Refusal::Failed(_))
+    }
+}
+
 /// Whether the zero-copy path may run (the fallback decision table): `Ok` with the handle kind, or why not. The
-/// device-creation check comes first (nothing else matters without the extension), then the adapter, then import.
-pub fn decide(requested: CapturePath, enabled_at_start: bool, s: Support) -> Result<Option<HandleKind>, Refusal> {
+/// extension comes first (nothing else matters without it), then the adapter, then import.
+pub fn decide(requested: CapturePath, s: Support) -> Result<Option<HandleKind>, Refusal> {
     if requested == CapturePath::Cpu {
         return Ok(None);
-    }
-    if !enabled_at_start {
-        return Err(Refusal::NotEnabledAtStart);
     }
     if !s.extension {
         return Err(Refusal::NoExtension);
@@ -353,6 +368,12 @@ pub fn decide(requested: CapturePath, enabled_at_start: bool, s: Support) -> Res
         Some(true) => {}
     }
     s.handle.map(Some).ok_or(Refusal::NoImport)
+}
+
+/// Why this machine cannot run zero-copy at all ([`decide`] for a zero-copy request), `None` when it can: the menu
+/// shows the zero-copy choice disabled with this reason.
+pub fn unavailable(s: Support) -> Option<Refusal> {
+    decide(CapturePath::ZeroCopy, s).err()
 }
 
 /// The path in force for the session: what the setting asks and, after a refusal or a failure, the CPU path with
@@ -458,7 +479,10 @@ mod tests {
         assert_eq!(CapturePath::parse(" Zero-Copy "), Some(CapturePath::ZeroCopy));
         assert_eq!(CapturePath::parse("CPU"), Some(CapturePath::Cpu));
         assert_eq!(CapturePath::parse("gpu"), None);
-        assert_eq!(CapturePath::default(), CapturePath::Cpu);
+        // `auto` is the default: zero-copy with the automatic fallback.
+        assert_eq!(CapturePath::parse(" Auto"), Some(CapturePath::ZeroCopy));
+        assert_eq!(CapturePath::default(), CapturePath::ZeroCopy);
+        assert_eq!(CapturePath::ALL[0], CapturePath::default());
         assert_eq!(CapturePath::ZeroCopy.to_string(), "zero-copy");
     }
 
@@ -664,31 +688,40 @@ mod tests {
             handle: Some(HandleKind::Nt),
             same_adapter: Some(true),
         };
-        assert_eq!(
-            decide(
-                CapturePath::Cpu,
-                false,
-                Support {
-                    extension: false,
-                    handle: None,
-                    same_adapter: None
-                }
-            ),
-            Ok(None)
-        );
-        assert_eq!(decide(CapturePath::ZeroCopy, true, ok), Ok(Some(HandleKind::Nt)));
-        assert_eq!(
-            decide(CapturePath::ZeroCopy, false, ok),
-            Err(Refusal::NotEnabledAtStart)
-        );
-        assert_eq!(
-            decide(CapturePath::ZeroCopy, true, Support { extension: false, ..ok }),
-            Err(Refusal::NoExtension)
-        );
+        let none = Support {
+            extension: false,
+            handle: None,
+            same_adapter: None,
+        };
+        // Explicit CPU: never refused, whatever the machine.
+        assert_eq!(decide(CapturePath::Cpu, none), Ok(None));
+        assert_eq!(decide(CapturePath::Cpu, ok), Ok(None));
+        // The default (zero-copy) on a machine that supports it.
+        assert_eq!(decide(CapturePath::default(), ok), Ok(Some(HandleKind::Nt)));
         assert_eq!(
             decide(
                 CapturePath::ZeroCopy,
-                true,
+                Support {
+                    handle: Some(HandleKind::Kmt),
+                    ..ok
+                }
+            ),
+            Ok(Some(HandleKind::Kmt))
+        );
+        // Not supported: no extension, no import.
+        assert_eq!(
+            decide(CapturePath::ZeroCopy, Support { extension: false, ..ok }),
+            Err(Refusal::NoExtension)
+        );
+        assert_eq!(decide(CapturePath::ZeroCopy, none), Err(Refusal::NoExtension));
+        assert_eq!(
+            decide(CapturePath::ZeroCopy, Support { handle: None, ..ok }),
+            Err(Refusal::NoImport)
+        );
+        // Adapter mismatch, or adapters that cannot be compared.
+        assert_eq!(
+            decide(
+                CapturePath::ZeroCopy,
                 Support {
                     same_adapter: Some(false),
                     ..ok
@@ -699,7 +732,6 @@ mod tests {
         assert_eq!(
             decide(
                 CapturePath::ZeroCopy,
-                true,
                 Support {
                     same_adapter: None,
                     ..ok
@@ -707,15 +739,10 @@ mod tests {
             ),
             Err(Refusal::UnknownAdapter)
         );
-        assert_eq!(
-            decide(CapturePath::ZeroCopy, true, Support { handle: None, ..ok }),
-            Err(Refusal::NoImport)
-        );
         // The adapter check comes before the import check.
         assert_eq!(
             decide(
                 CapturePath::ZeroCopy,
-                true,
                 Support {
                     handle: None,
                     same_adapter: Some(false),
@@ -725,6 +752,65 @@ mod tests {
             Err(Refusal::CrossAdapter)
         );
         assert!(Refusal::CrossAdapter.to_string().contains("different adapters"));
+        // The platform refusals disable the menu choice; a runtime failure does not.
+        assert_eq!(unavailable(ok), None);
+        assert_eq!(unavailable(none), Some(Refusal::NoExtension));
+        for r in [
+            Refusal::NoExtension,
+            Refusal::NoImport,
+            Refusal::CrossAdapter,
+            Refusal::UnknownAdapter,
+        ] {
+            assert!(r.is_platform(), "{r}");
+        }
+        assert!(!Refusal::Failed("x".into()).is_platform());
+    }
+
+    /// The whole session decision for the default request: supported, not supported, adapter mismatch, explicit
+    /// CPU, then a failure injected at runtime and a new request that tries again.
+    #[test]
+    fn default_session_decision_and_failure_injection() {
+        let ok = Support {
+            extension: true,
+            handle: Some(HandleKind::Nt),
+            same_adapter: Some(true),
+        };
+        let run = |requested: CapturePath, s: Support| {
+            let mut f = Fallback::new(requested);
+            if let Err(r) = decide(f.requested(), s) {
+                f.refuse(r);
+            }
+            f
+        };
+        // Supported: zero-copy.
+        let f = run(CapturePath::default(), ok);
+        assert_eq!((f.active(), f.reason()), (CapturePath::ZeroCopy, None));
+        // Not supported: the CPU copy, with the platform reason.
+        let f = run(CapturePath::default(), Support { handle: None, ..ok });
+        assert_eq!(f.active(), CapturePath::Cpu);
+        assert!(f.reason().is_some_and(Refusal::is_platform));
+        // Adapter mismatch: the CPU copy.
+        let f = run(
+            CapturePath::default(),
+            Support {
+                same_adapter: Some(false),
+                ..ok
+            },
+        );
+        assert_eq!(f.reason(), Some(&Refusal::CrossAdapter));
+        assert_eq!(f.active(), CapturePath::Cpu);
+        // Explicit CPU on a supported machine: the CPU copy, no reason.
+        let f = run(CapturePath::Cpu, ok);
+        assert_eq!((f.active(), f.reason()), (CapturePath::Cpu, None));
+        // Failure injection: zero-copy running, then a runtime failure: the CPU copy at once, reported once.
+        let mut f = run(CapturePath::default(), ok);
+        assert!(f.refuse(Refusal::Failed("the GPU copy did not finish".into())));
+        assert!(!f.refuse(Refusal::Failed("again".into())));
+        assert_eq!(f.active(), CapturePath::Cpu);
+        // The user switches to CPU and back to zero-copy: tried again.
+        f.request(CapturePath::Cpu);
+        f.request(CapturePath::ZeroCopy);
+        assert_eq!((f.active(), f.reason()), (CapturePath::ZeroCopy, None));
     }
 
     #[test]

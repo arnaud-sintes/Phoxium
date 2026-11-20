@@ -2,9 +2,9 @@
 //!
 //! The OS hands us a Direct3D 11 texture holding the composed pixels of the target window. Two paths take the
 //! client area to the renderer (ARCHITECTURE A3, A29, QUESTIONS CAP-2):
-//! - **CPU copy** (default, [`CapturePath::Cpu`]): the client area is copied into a staging texture, mapped, and
-//!   its rows copied into a CPU buffer ([`Frame::data`]) that the renderer uploads to Vulkan.
-//! - **Zero-copy** ([`CapturePath::ZeroCopy`], experimental): the client area is copied on the GPU into one of
+//! - **CPU copy** ([`CapturePath::Cpu`], the fallback): the client area is copied into a staging texture, mapped,
+//!   and its rows copied into a CPU buffer ([`Frame::data`]) that the renderer uploads to Vulkan.
+//! - **Zero-copy** ([`CapturePath::ZeroCopy`], the default when the machine allows it): the client area is copied on the GPU into one of
 //!   [`POOL_SLOTS`] shared textures ([`SharedTextures`], created on the capture device, which is on the renderer's
 //!   adapter, HW-3); the capture thread waits for that copy on the GPU (an event query, no pixel crosses the CPU)
 //!   and publishes the slot ([`SharedFrame`]); the renderer imports the textures once and samples them directly.
@@ -13,7 +13,9 @@
 //!   every frame while [`Capture::set_full_rate_samples`] asks for it (a detection is running).
 //!
 //! Any zero-copy failure on the capture side (texture or handle creation, a copy that does not finish) switches
-//! the session to the CPU copy at once, for that frame too, and is reported once ([`Capture::take_failure`]).
+//! the session to the CPU copy at once, for that frame too, and is reported once ([`Capture::take_failure`]). The
+//! path can be switched both ways at any time ([`Capture::set_path`]): the next frame takes the new path, and a
+//! frame kept for want of a free slot goes through the CPU copy when the switch is to the CPU copy.
 
 use std::{
     ffi::c_void,
@@ -118,8 +120,8 @@ fn path_of(v: u8) -> CapturePath {
 pub struct Capture {
     shared: Arc<Shared>,
     worker: Arc<Mutex<Worker>>,
-    pool: Direct3D11CaptureFramePool,
-    session: GraphicsCaptureSession,
+    /// The Windows.Graphics.Capture objects; `None` for a [`Capture::synthetic`] capture (tests).
+    session: Option<(Direct3D11CaptureFramePool, GraphicsCaptureSession)>,
     pub adapter: String,
     /// LUID of that adapter (T-03).
     pub adapter_luid: Luid,
@@ -145,16 +147,7 @@ impl Capture {
         // Needs a recent Windows build and may be refused; the yellow border then stays.
         let _ = session.SetIsBorderRequired(false);
 
-        let shared = Arc::new(Shared {
-            frame: Mutex::new(Latest::default()),
-            closed: AtomicBool::new(false),
-            captured: AtomicU64::new(0),
-            path: AtomicU8::new(0),
-            full_rate: AtomicBool::new(false),
-            failure: Mutex::new(None),
-            cost: Mutex::new(CopyCost::default()),
-        });
-
+        let shared = Shared::new();
         {
             let shared = shared.clone();
             item.Closed(&TypedEventHandler::<GraphicsCaptureItem, IInspectable>::new(
@@ -165,21 +158,15 @@ impl Capture {
             ))?;
         }
 
-        let worker = Arc::new(Mutex::new(Worker {
-            shared: shared.clone(),
-            hwnd_value: hwnd.0 as isize,
+        let worker = Arc::new(Mutex::new(Worker::new(
+            shared.clone(),
+            hwnd.0 as isize,
             crop,
-            device: device.clone(),
+            device,
             context,
-            direct3d_device: direct3d_device.clone(),
-            format,
-            staging: None,
-            pool_size: (size.Width, size.Height),
-            shared_pool: None,
-            generation: 0,
-            last_sample: None,
-            pending: None,
-        }));
+            direct3d_device,
+            (size.Width, size.Height),
+        )));
         {
             let worker = worker.clone();
             pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
@@ -194,11 +181,42 @@ impl Capture {
         Ok(Self {
             shared,
             worker,
-            pool,
-            session,
+            session: Some((pool, session)),
             adapter,
             adapter_luid,
         })
+    }
+
+    /// A capture without a window or a capture session, fed by [`SyntheticFeed::push`] with textures made by the
+    /// caller on `device` (the headless tests of the path switch): every other part (the CPU copy, the zero-copy
+    /// pool, the path switch, [`Capture::take_frame`]) is the real code.
+    pub fn synthetic(device: ID3D11Device, context: ID3D11DeviceContext, adapter_luid: Luid) -> Result<Self> {
+        let direct3d_device = to_winrt_device(&device)?;
+        let shared = Shared::new();
+        let worker = Arc::new(Mutex::new(Worker::new(
+            shared.clone(),
+            0,
+            false,
+            device,
+            context,
+            direct3d_device,
+            (0, 0),
+        )));
+        Ok(Self {
+            shared,
+            worker,
+            session: None,
+            adapter: "synthetic".to_string(),
+            adapter_luid,
+        })
+    }
+
+    /// The feed of a [`Capture::synthetic`] capture (it may go to another thread, as the frame callback runs on
+    /// one).
+    pub fn synthetic_feed(&self) -> SyntheticFeed {
+        SyntheticFeed {
+            worker: self.worker.clone(),
+        }
     }
 
     /// Asks for a capture path from the next frame on (restart-free on the capture side).
@@ -277,15 +295,44 @@ impl Capture {
 
 impl Drop for Capture {
     fn drop(&mut self) {
-        let _ = self.session.Close();
-        let _ = self.pool.Close();
+        if let Some((pool, session)) = &self.session {
+            let _ = session.Close();
+            let _ = pool.Close();
+        }
+    }
+}
+
+/// The frame callback of a [`Capture::synthetic`] capture.
+pub struct SyntheticFeed {
+    worker: Arc<Mutex<Worker>>,
+}
+
+impl SyntheticFeed {
+    /// A captured frame: the client area `crop` (x, y, width, height) of `texture` (BGRA8, on the capture's device)
+    /// goes the way the frame callback sends a real one (the path asked, the zero-copy pool, the fallback).
+    pub fn push(&self, texture: &ID3D11Texture2D, crop: (u32, u32, u32, u32)) -> Result<()> {
+        self.worker.lock().unwrap().deliver(texture.clone(), crop, None)
+    }
+}
+
+impl Shared {
+    fn new() -> Arc<Self> {
+        Arc::new(Shared {
+            frame: Mutex::new(Latest::default()),
+            closed: AtomicBool::new(false),
+            captured: AtomicU64::new(0),
+            path: AtomicU8::new(0),
+            full_rate: AtomicBool::new(false),
+            failure: Mutex::new(None),
+            cost: Mutex::new(CopyCost::default()),
+        })
     }
 }
 
 /// A frame kept because every shared slot was in use: the capture frame object (so the pool does not reuse its
-/// buffer), its texture and the client area.
+/// buffer; `None` for a synthetic frame), its texture and the client area.
 struct Pending {
-    _frame: Direct3D11CaptureFrame,
+    _frame: Option<Direct3D11CaptureFrame>,
     texture: ID3D11Texture2D,
     crop: (u32, u32, u32, u32),
 }
@@ -315,6 +362,32 @@ struct Worker {
 unsafe impl Send for Worker {}
 
 impl Worker {
+    fn new(
+        shared: Arc<Shared>,
+        hwnd_value: isize,
+        crop: bool,
+        device: ID3D11Device,
+        context: ID3D11DeviceContext,
+        direct3d_device: IDirect3DDevice,
+        pool_size: (i32, i32),
+    ) -> Self {
+        Worker {
+            shared,
+            hwnd_value,
+            crop,
+            device,
+            context,
+            direct3d_device,
+            format: DirectXPixelFormat::B8G8R8A8UIntNormalized,
+            staging: None,
+            pool_size,
+            shared_pool: None,
+            generation: 0,
+            last_sample: None,
+            pending: None,
+        }
+    }
+
     fn on_frame(&mut self, pool: &Direct3D11CaptureFramePool) -> Result<()> {
         let Ok(frame) = pool.TryGetNextFrame() else {
             return Ok(());
@@ -336,6 +409,24 @@ impl Worker {
                 desc.Height.min(content.Height as u32),
             )
         };
+        self.deliver(texture, crop, Some(frame))?;
+
+        // The window was resized: the pool must follow or frames get cropped or stretched.
+        if (content.Width, content.Height) != self.pool_size && content.Width > 0 && content.Height > 0 {
+            self.pool_size = (content.Width, content.Height);
+            pool.Recreate(&self.direct3d_device, self.format, 2, content)?;
+        }
+        Ok(())
+    }
+
+    /// One captured frame (the client area `crop` of `texture`) down the path asked now: the zero-copy pool, or
+    /// the CPU copy. A frame that finds every shared slot in use is kept ([`Worker::retry_pending`]).
+    fn deliver(
+        &mut self,
+        texture: ID3D11Texture2D,
+        crop: (u32, u32, u32, u32),
+        frame: Option<Direct3D11CaptureFrame>,
+    ) -> Result<()> {
         // A newer frame replaces a pending one.
         self.pending = None;
         if crop.2 > 0 && crop.3 > 0 {
@@ -351,12 +442,6 @@ impl Worker {
                 self.shared_pool = None;
                 self.cpu_frame(&texture, crop)?;
             }
-        }
-
-        // The window was resized: the pool must follow or frames get cropped or stretched.
-        if (content.Width, content.Height) != self.pool_size && content.Width > 0 && content.Height > 0 {
-            self.pool_size = (content.Width, content.Height);
-            pool.Recreate(&self.direct3d_device, self.format, 2, content)?;
         }
         Ok(())
     }
@@ -477,10 +562,15 @@ impl Worker {
         Ok(true)
     }
 
-    /// Copies the frame kept for want of a slot, when one is free now.
+    /// Copies the frame kept for want of a slot, when one is free now. After a switch to the CPU copy it goes
+    /// through the CPU copy at once (a switch loses no frame).
     fn retry_pending(&mut self) {
         let Some(p) = self.pending.take() else { return };
         if path_of(self.shared.path.load(Ordering::Acquire)) != CapturePath::ZeroCopy {
+            self.shared_pool = None;
+            if let Err(e) = self.cpu_frame(&p.texture, p.crop) {
+                eprintln!("warning: capture: the CPU copy of a kept frame failed: {e}");
+            }
             return;
         }
         if self.zero_copy(&p.texture, p.crop).is_some() {

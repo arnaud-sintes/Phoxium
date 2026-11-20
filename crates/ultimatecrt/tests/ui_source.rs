@@ -414,7 +414,9 @@ fn manual_limits_nudge_drag_and_snap() {
 #[test]
 fn multiplier_is_chosen_in_the_source_section() {
     let _g = lock();
-    let Some(mut rig) = Rig::new("multiplier_is_chosen_in_the_source_section", 1280, 900) else {
+    // 1080 px high: the Source section's rows (capture path included) and the advanced X and Y lists fit above the
+    // pinned footer.
+    let Some(mut rig) = Rig::new("multiplier_is_chosen_in_the_source_section", 1280, 1080) else {
         return;
     };
     rig.open_source();

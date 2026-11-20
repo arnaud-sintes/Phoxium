@@ -393,8 +393,9 @@ impl Context {
     }
 
     /// Creates a context whose device can present to the window `hwnd`, and returns the Vulkan
-    /// surface created for it. With `external_memory` (the zero-copy capture path is asked for, A29),
-    /// `VK_KHR_external_memory_win32` is enabled when the device offers it. The caller passes the surface to
+    /// surface created for it. With `external_memory` (the application always asks, so that the zero-copy capture
+    /// path can be switched on at any time, A29), `VK_KHR_external_memory_win32` is enabled when the device offers
+    /// it and imports Direct3D 11 textures. The caller passes the surface to
     /// [`super::Presenter::from_surface`], which takes ownership of it.
     ///
     /// # Safety
@@ -852,8 +853,10 @@ unsafe fn create_device(
     if surface.is_some() {
         dev_exts.push(khr::swapchain::NAME.as_ptr());
     }
-    // Zero-copy capture (A29): the extension only when the path is asked for, offered, and the device imports a
-    // Direct3D 11 texture handle in B8G8R8A8 (`VK_KHR_external_memory` and dedicated allocations are core 1.1).
+    // Zero-copy capture (A29): the extension when asked (always for the application's window device, so the path can
+    // be switched on during a session), offered, and the device imports a Direct3D 11 texture handle in B8G8R8A8
+    // (`VK_KHR_external_memory`, its dependency, and dedicated allocations are core 1.1). Nothing else changes on
+    // the device: the CPU path never touches the extension.
     let external_memory = if external {
         let probe = external_memory_probe(instance, physical);
         let kind = select_handle(probe.d3d11_texture, probe.d3d11_texture_kmt).filter(|_| probe.win32_extension);

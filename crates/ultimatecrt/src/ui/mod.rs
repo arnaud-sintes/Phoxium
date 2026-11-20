@@ -96,7 +96,7 @@ pub struct UiState {
     pub capture: CaptureView,
 }
 
-/// The capture path as the Performance and About sections show it (A29).
+/// The capture path as the Source, Performance and About sections show it (A29).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct CaptureView {
     /// What the setting (or `--capture-path`) asks.
@@ -105,8 +105,9 @@ pub struct CaptureView {
     pub active: crate::zerocopy::CapturePath,
     /// Why the CPU copy runs although zero-copy is asked (`zerocopy::Refusal`), `None` otherwise.
     pub reason: Option<String>,
-    /// Zero-copy was asked after the start: the GPU device was made without it, it applies at the next start.
-    pub restart_needed: bool,
+    /// Why this machine cannot run zero-copy at all (no extension, no import, capture on another adapter): the
+    /// zero-copy choice is shown disabled with it. `None` when it can.
+    pub unavailable: Option<String>,
     /// The capture thread's copy cost per frame over the last second (mean ms), `None` without frames.
     pub copy_ms: Option<f64>,
 }
@@ -1344,8 +1345,12 @@ impl UiPass for Ui {
             }
             if let Some(p) = r.capture_path {
                 self.out.capture_path = Some(p);
-                // Shown at once; the app's next state says what is in force.
+                // Shown at once (the switch applies from the next frame); the app's next state confirms it.
                 self.state.capture.requested = p;
+                if p == crate::zerocopy::CapturePath::Cpu || self.state.capture.unavailable.is_none() {
+                    self.state.capture.active = p;
+                    self.state.capture.reason = None;
+                }
             }
             if r.wear_action.is_some() {
                 self.out.wear_action = r.wear_action;
