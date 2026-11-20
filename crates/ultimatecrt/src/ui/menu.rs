@@ -962,6 +962,9 @@ fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &
     ui.set_next_item_width(width);
     let preview = if area.whole_window {
         "Whole window".to_string()
+    } else if area.mode == AreaMode::Manual {
+        // A manual choice is stored for this program and comes back at every attach: say so.
+        "Manual (stored)".to_string()
     } else {
         area.mode.label().to_string()
     };
@@ -1000,6 +1003,7 @@ fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &
         let what = match area.mode {
             AreaMode::Auto if area.limits == crate::bars::Bars::default() => "detected: no bars",
             AreaMode::Auto => "detected",
+            AreaMode::Manual if area.set_for.is_some() => "stored limits not applied, detected",
             AreaMode::Manual => "manual",
             AreaMode::Client => "no crop",
         };
@@ -1063,8 +1067,9 @@ fn picture_area_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, a: &
             ui,
             PALETTE.accent,
             &[format!(
-                "These limits were set for a {} \u{00D7} {} window; it is {} \u{00D7} {} now (the limits are kept in \
-                 pixels). Detect now finds the picture again.",
+                "The stored manual limits were set for a {} \u{00D7} {} window; it is {} \u{00D7} {} now, so they \
+                 are not applied: the picture area is detected as in Auto. Back to Auto keeps it that way; changing \
+                 a limit stores new manual limits for this size.",
                 was.0, was.1, area.client.0, area.client.1
             )],
         );

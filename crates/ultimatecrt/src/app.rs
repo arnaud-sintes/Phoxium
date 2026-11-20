@@ -129,6 +129,14 @@ pub fn run() -> Res<()> {
         return crate::render_cmd::run(&argv[1..]);
     }
     let args = cli::parse_args()?;
+    if let Some(path) = &args.detect_bars {
+        // Offline: no window, no capture; the thresholds of the settings file (defaults without one).
+        let cfg = settings::default_dir()
+            .map(|d| settings::load(&d).settings.global.source.bars_config())
+            .unwrap_or_default();
+        println!("{}", detect_bars_report(path, &cfg)?);
+        return Ok(());
+    }
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
         RoInitialize(RO_INIT_MULTITHREADED)?;
@@ -558,7 +566,10 @@ pub fn run() -> Res<()> {
     // the view (native size, placement, readouts) at the next frame even when the source sends none.
     let mut bars_state = BarsState::new(live.settings().global.source.bars_config());
     let mut remap = false;
-    if capture.is_some() && bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+    if capture.is_some() && map.client_area {
+        report_stored_area(&params, &profile, cli_crop, (frame.width, frame.height));
+    }
+    if capture.is_some() && bars::detects(&params, &profile, cli_crop, (frame.width, frame.height)) && map.client_area {
         // The first frame is already here: it counts (a game that redraws rarely still gives one).
         bars_state.auto.start(
             start.elapsed().as_secs_f64(),
@@ -862,8 +873,9 @@ pub fn run() -> Res<()> {
             if capture.is_some() {
                 let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
                 health.note_frame(now, black);
-                // Auto picture area: every frame while a detection runs, else a few sampled frames per second.
-                if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+                // Auto picture area (or stale stored manual limits): every frame while a detection runs, else a
+                // few sampled frames per second.
+                if bars::detects(&params, &profile, cli_crop, (frame.width, frame.height)) && map.client_area {
                     bars_state.auto.feed(now, &frame.data, frame.width, frame.height);
                 }
             }
@@ -883,12 +895,7 @@ pub fn run() -> Res<()> {
         if let Some(req) = area_request.filter(|_| capture.is_some()) {
             let before = bars::CropState::capture(&params, &profile, cli_crop);
             // The picture area in force (what Manual starts from): the manual crop, else the Auto one.
-            let in_force = map
-                .crop
-                .or(bars_state
-                    .auto
-                    .rect()
-                    .filter(|_| bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto))
+            let in_force = bars::crop_in_force(&params, &profile, cli_crop, client, map.crop, bars_state.auto.rect())
                 .map_or(whole, |c| c.clamp(client.0, client.1));
             let was_limits = std::mem::replace(&mut bars_state.limits_edit, matches!(req, SourceAction::SetLimits(_)));
             let mut detect = false;
@@ -927,7 +934,7 @@ pub fn run() -> Res<()> {
                         u.restore(&mut params, &mut profile, &mut cli_crop);
                         bars_state.message = Some((true, "The last picture-area change was undone.".to_string()));
                         println!("picture area: last change undone");
-                        detect = bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto;
+                        detect = bars::detects(&params, &profile, cli_crop, client);
                     }
                 }
                 _ => {}
@@ -946,8 +953,7 @@ pub fn run() -> Res<()> {
             edited = true;
         }
         // Auto: the detections (attach, resize, Detect now) and the periodic check.
-        let auto_on =
-            capture.is_some() && bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area;
+        let auto_on = capture.is_some() && bars::detects(&params, &profile, cli_crop, client) && map.client_area;
         if auto_on && !std::mem::replace(&mut auto_was_on, true) && !bars_state.auto.running() {
             // Auto came back another way (the crop mode of the "Source and placement" panel, a reattach): detect.
             let shown = (frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
@@ -1030,10 +1036,18 @@ pub fn run() -> Res<()> {
         // The source map in force: in Auto, the detected picture area is the crop.
         let area_mode = bars::AreaMode::of(&params, &profile);
         let eff_map = scaling::SourceMap {
-            crop: map.crop.or(bars_state
-                .auto
-                .rect()
-                .filter(|_| area_mode == bars::AreaMode::Auto && map.client_area)),
+            crop: if map.client_area {
+                bars::crop_in_force(
+                    &params,
+                    &profile,
+                    cli_crop,
+                    (frame.width, frame.height),
+                    map.crop,
+                    bars_state.auto.rect(),
+                )
+            } else {
+                map.crop
+            },
             ..map
         };
         if fresh {
@@ -1110,7 +1124,9 @@ pub fn run() -> Res<()> {
             ui_state.baseline = Some(baseline);
             ui_state.headroom = renderer.headroom();
             ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
-            let area = area_view(area_mode, &eff_map, &profile, &detector, (frame.width, frame.height));
+            let client = (frame.width, frame.height);
+            let stale = bars::stale_manual(&params, &profile, cli_crop, client);
+            let area = area_view(area_mode, &eff_map, stale, &detector, client);
             ui_state.source = source_view(
                 capture.is_some(),
                 reattach.as_ref().map(|r| r.target()),
@@ -1399,11 +1415,11 @@ impl BarsState {
 
 /// The picture area as the Source section shows it: the mode, the limits in force (from the source map in force
 /// `map`, the Auto crop included), the client size, the multiplier known for snapping and, for manual limits set
-/// for another client size, that size.
+/// for another client size (stale, not applied: [`bars::stale_manual`]), that size.
 fn area_view(
     mode: bars::AreaMode,
     map: &scaling::SourceMap,
-    profile: &settings::SourceProfile,
+    set_for: Option<(u32, u32)>,
     detector: &scaling::Detector,
     client: (u32, u32),
 ) -> crate::ui::AreaView {
@@ -1414,10 +1430,6 @@ fn area_view(
         .divisor
         .or(detector.is_locked().then(|| detector.divisor()))
         .unwrap_or((1, 1));
-    let set_for = profile
-        .crop_client
-        .map(|[w, h]| (w, h))
-        .filter(|&s| mode == bars::AreaMode::Manual && s != client);
     crate::ui::AreaView {
         mode,
         whole_window: !map.client_area,
@@ -1512,6 +1524,46 @@ pub fn crop_text(map: &scaling::SourceMap) -> String {
         (true, Some(c)) => format!("crop {}, {}, {} \u{00D7} {}", c.x, c.y, c.w, c.h),
         (true, None) => "client area".to_string(),
     }
+}
+
+/// At attach, says on the console where the picture area comes from when a stored manual choice is in force (a
+/// manual choice must never disable Auto silently).
+fn report_stored_area(
+    params: &crate::params::Params,
+    profile: &settings::SourceProfile,
+    cli_crop: Option<scaling::Rect>,
+    client: (u32, u32),
+) {
+    if let Some((w, h)) = bars::stale_manual(params, profile, cli_crop, client) {
+        println!(
+            "picture area: manual (stored) limits set for a {w}x{h} window, it is {}x{} now: not applied, the \
+             picture area is detected (Back to Auto in the Source section makes it permanent)",
+            client.0, client.1
+        );
+    } else if bars::AreaMode::of(params, profile) == bars::AreaMode::Manual {
+        let r = cli_crop.or(profile.crop_rect());
+        println!(
+            "picture area: manual (stored{}){}",
+            if cli_crop.is_some() {
+                ", --crop"
+            } else {
+                " for this program"
+            },
+            r.map(|r| format!(" {}x{} at {}, {}", r.w, r.h, r.x, r.y))
+                .unwrap_or_default()
+        );
+    }
+}
+
+/// `--detect-bars <png>`: the picture-area detector on a saved capture (decoded to the capture's BGRA layout, as
+/// the live app feeds it), in words ([`bars::report`]).
+pub fn detect_bars_report(path: &str, cfg: &bars::Config) -> Res<String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
+    let frame = crate::source::decode_png(&bytes)?;
+    Ok(format!(
+        "{path}\n{}",
+        bars::report(&frame.data, frame.width, frame.height, cfg)
+    ))
 }
 
 fn save_png(path: &str, frame: &capture::Frame) -> Res<()> {
