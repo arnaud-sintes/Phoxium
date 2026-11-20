@@ -18,10 +18,20 @@
 //!      the bilinear tent); it cannot form a ring (bloom-like);
 //!    - `gaussians`: a least-squares mix of four Gaussians (sigma 0.3, 0.6, 0.9, 1.2 times the ring radius)
 //!      at full resolution, separable (`optics_gauss_h.comp`, `optics_gauss_v.comp`); slow, comparison only.
-//! 3. **Diffusion** (when on): the horizontal half of the separable sum into a full-resolution image
+//! 3. **Bloom** (when on; owner request 2026-11-20, model `crt_model::optics::Bloom`): each of the three lobes
+//!    (Gaussians of 1/e radii r, 3 r, 9 r, the ones of weight 0 skipped) runs on one pyramid level l, the finest
+//!    whose remaining blur fits [`BLOOM_R_MAX`] texels ([`bloom_lobe`], the same selection by radius in pixels
+//!    as the kernel method): the level read bilinearly is already a Gaussian of variance [`pyramid_sigma`]^2,
+//!    a separable blur on the level (`optics_bloom_blur.comp`, horizontal into a scratch image, then vertical)
+//!    adds the rest. Without a threshold the lobes read the stage's pyramid; with one, a feed pyramid of q L
+//!    first (`optics_bloom_feed.comp` for its level 1, q from the stage's pyramid level k_q, then
+//!    `optics_down.comp`) up to the coarsest lobe level. The `low` quality tier allows 4 texels instead of 8
+//!    and a reach of 2.5 sigma instead of 3 (a coarser level per lobe); the other tiers use the full plan.
+//! 4. **Diffusion** (when on): the horizontal half of the separable sum into a full-resolution image
 //!    (`optics_diffuse.comp`, radius at most 16 px).
-//! 4. **Composite** (`optics.comp`): the vertical half of the diffusion, the halo, the glare, the vignette, the
-//!    tint and the ambient term.
+//! 5. **Composite** (`optics.comp`): the vertical half of the diffusion, the halo, the glare, the bloom (the fed
+//!    light leaves the direct image, the three lobes read bilinearly come back), the vignette, the tint and the
+//!    ambient term.
 //!
 //! The kernel masses and the diffusion weights are computed on the CPU when their inputs change and written
 //! into a host-visible storage buffer (set 1, binding 18), after idling the device (a frame in flight may read
@@ -39,16 +49,19 @@
 //! # Identity
 //!
 //! `optics_enable` off (the default, D-6, D-24), an unplaced tube (px per mm 0: the model is in mm), or
-//! every effect at its neutral value: [`Stage::is_identity`], the pipeline skips the slot (bit exact).
+//! every effect at its neutral value (no halo, glare, diffusion or bloom, a neutral vignette, tint and ambient):
+//! [`Stage::is_identity`], the pipeline skips the slot (bit exact). Each effect alone makes the stage run.
 
 use ash::vk;
 use crt_model::beam::box_gaussian_overlap;
-use crt_model::optics::{Glass, Halo};
+pub use crt_model::optics::pyramid_sigma;
+use crt_model::optics::{bloom_knee_level, bloom_lobe_weights, bloom_sigmas_px, Glass, Halo, Vignette};
 
 use super::{binding, compute_pipeline, standard_set_layout, ComputePass, Domain, Registration, Stage};
 use crate::gpu::headless::{GpuImage, HostBuffer};
 use crate::gpu::{barrier, Context, FrameConstants};
 use crate::params::{Params, OPTICS_HALO_METHOD_GAUSSIANS, OPTICS_HALO_METHOD_PYRAMID};
+use crate::quality::{self, Tier};
 use crate::Res;
 
 const COMPOSITE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics.comp.spv"));
@@ -58,27 +71,42 @@ const KERNEL_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_kerne
 const GAUSS_H_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_gauss_h.comp.spv"));
 const GAUSS_V_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_gauss_v.comp.spv"));
 const DIFFUSE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_diffuse.comp.spv"));
+const BLOOM_FEED_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_bloom_feed.comp.spv"));
+const BLOOM_BLUR_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_bloom_blur.comp.spv"));
 
 /// Largest pyramid depth (tube images up to 16384 px).
 const MAX_LEVELS: usize = 14;
 /// Pyramid levels the composite can read (`level1` to `level12` of `optics.comp`).
 const PYRAMID_BINDINGS: usize = 12;
-/// Image bindings of set 1 (0 to 17) and the buffer binding.
-const IMAGE_BINDINGS: u32 = 18;
+/// Bindings of set 1: storage images 0 to 17 and 19 to 21 (the bloom lobes), the storage buffer at 18.
+const BINDINGS: u32 = 22;
 const BUFFER_BINDING: u32 = 18;
+/// First binding of the three bloom lobes read by the composite.
+const BLOOM_BINDING: usize = 19;
 /// Largest diffusion radius in px (`OPT_DIFF_MAX`) and the start of the kernel quadrant (`OPT_KERNEL_OFFSET`).
 pub const DIFF_MAX: usize = 16;
 const KERNEL_OFFSET: usize = DIFF_MAX + 1;
-/// Largest kernel radius in texels (`optics_halo_taps` is clamped to it).
+/// Largest kernel radius in texels (`optics_halo_taps` is clamped to it; `OPT_TAPS_MAX_Q` of `optics.glsl`).
 const TAPS_MAX: usize = 48;
-const BUFFER_FLOATS: usize = KERNEL_OFFSET + (TAPS_MAX + 2) * (TAPS_MAX + 2);
-/// Descriptor sets of set 1: one per pyramid level, the kernel, the two Gaussian passes and the composite.
+/// The bloom blur weights in the buffer (`OPT_BLOOM_OFFSET`), [`BLOOM_R_MAX`] + 1 per lobe.
+const BLOOM_OFFSET: usize = KERNEL_OFFSET + (TAPS_MAX + 2) * (TAPS_MAX + 2);
+/// Largest bloom blur radius in texels of the lobe's level (`OPT_BLOOM_R_MAX`): the level of a lobe is the
+/// finest whose remaining blur fits it.
+pub const BLOOM_R_MAX: usize = 8;
+/// The radius allowed in the `low` quality tier (a level coarser per lobe, about a quarter of the texels).
+pub const BLOOM_R_LOW: usize = 4;
+const BUFFER_FLOATS: usize = BLOOM_OFFSET + 3 * (BLOOM_R_MAX + 1);
+/// Descriptor sets of set 1: one per pyramid level, the kernel, the two Gaussian passes, the composite, the
+/// diffusion, one per feed pyramid level, and the two blur passes of each bloom lobe.
 const SET_KERNEL: usize = MAX_LEVELS;
 const SET_GAUSS_H: usize = MAX_LEVELS + 1;
 const SET_GAUSS_V: usize = MAX_LEVELS + 2;
 const SET_COMPOSITE: usize = MAX_LEVELS + 3;
 const SET_DIFFUSE: usize = MAX_LEVELS + 4;
-const SETS: usize = MAX_LEVELS + 5;
+const SET_FEED: usize = MAX_LEVELS + 5;
+const SET_BLOOM_H: usize = 2 * MAX_LEVELS + 5;
+const SET_BLOOM_V: usize = 2 * MAX_LEVELS + 8;
+const SETS: usize = 2 * MAX_LEVELS + 11;
 const FORMAT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const GROUP: (u32, u32) = (8, 8);
 /// Largest Gaussian reach of the gaussians method, px.
@@ -105,13 +133,14 @@ fn gauss_radius_px(h: &Halo, ppm: f64) -> i32 {
     ((3.0 * sig[3]).ceil() as i32).min(GAUSS_RADIUS_MAX)
 }
 
-/// Push constants of every optics pass (`OpticsPush` of `optics.glsl`, std430, 96 bytes).
+/// Push constants of every optics pass (`OpticsPush` of `optics.glsl`, std430, 112 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 struct Push {
     info: [i32; 4],
     scal: [f32; 4],
     w: [[f32; 4]; 4],
+    aux: [i32; 4],
 }
 
 /// Registration of the slot (see [`super::CHAIN`]).
@@ -154,6 +183,109 @@ pub struct Plan {
     /// The `gaussians` method was asked for but needs more than [`GAUSS_TAPS_MAX`] taps: `method` is
     /// `Pyramid` instead.
     pub gauss_fallback: bool,
+    /// The bloom, `None` when it is off.
+    pub bloom: Option<BloomPlan>,
+}
+
+/// One bloom lobe on the GPU: its pyramid level, the remaining blur on that level (radius and sigma in
+/// texels) and its amplitude (`crt_model::optics::bloom_lobe_weights`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BloomLobe {
+    pub level: usize,
+    pub radius: usize,
+    pub sigma_texels: f64,
+    pub amp: f64,
+}
+
+/// The bloom of a frame.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BloomPlan {
+    /// The lobes at r, 3 r, 9 r; `None` for a lobe of weight 0.
+    pub lobes: [Option<BloomLobe>; 3],
+    /// The pyramid level whose bilinear read gives the knee brightness (0: no threshold, q = 1).
+    pub knee_level: usize,
+    /// Levels of the feed pyramid of q L (0: no threshold, the lobes read the stage's pyramid).
+    pub feed_levels: usize,
+}
+
+/// The level, blur radius (texels) and blur sigma (texels) of a bloom lobe of sigma `sigma_px` on a pyramid of
+/// `levels` levels: the finest level l >= 1 whose remaining blur, sigma t with t^2 = (sigma^2 -
+/// [`pyramid_sigma`] (l)^2) / 4^l - 1 / 6 (the pixel-box overlap of the weights adds 1 / 6 texel^2), has a
+/// radius ceil(`reach` t) of at most `max_r` texels (the coarsest level, radius cut to `max_r`, when none
+/// fits). A lobe narrower than level 1 read bilinearly gets no blur (radius 0): it is then slightly wider than
+/// asked (sigma 0.96 px at least).
+pub fn bloom_lobe(sigma_px: f64, levels: usize, max_r: usize, reach: f64) -> (usize, usize, f64) {
+    let mut out = (1, 0, 0.0);
+    for l in 1..=levels.max(1) {
+        let var = (sigma_px * sigma_px - pyramid_sigma(l).powi(2)) / 4f64.powi(l as i32) - 1.0 / 6.0;
+        let t = if var > 0.0 { var.sqrt() } else { 0.0 };
+        let r = if t < 0.05 { 0 } else { (reach * t).ceil() as usize };
+        out = (l, r.min(max_r), t);
+        if r <= max_r {
+            break;
+        }
+    }
+    out
+}
+
+/// The vignette of the parameters (the model's [`Vignette`]).
+pub fn vignette(p: &Params) -> Vignette {
+    Vignette {
+        enable: p.optics_vignette_enable,
+        corner: f64::from(p.optics_vignette_corner),
+        start: f64::from(p.optics_vignette_start),
+        exponent: f64::from(p.optics_vignette_exponent),
+        softness: f64::from(p.optics_vignette_softness),
+        roundness: f64::from(p.optics_vignette_roundness),
+        centre: p.optics_vignette_centre_xy.map(f64::from),
+        floor: f64::from(p.optics_vignette_floor),
+    }
+}
+
+/// The bloom plan of the parameters on a pyramid of `levels` levels at `px_per_mm`, `None` when the bloom is
+/// off (weight 0, every tint channel 0, or no valid radius).
+fn bloom_plan(p: &Params, px_per_mm: f64, levels: usize) -> Option<BloomPlan> {
+    let positive = |v: f32| v > 0.0; // false for NaN
+    let on = positive(p.optics_bloom_weight)
+        && p.optics_bloom_tint_rgb.iter().any(|&t| positive(t))
+        && positive(p.optics_bloom_radius_mm)
+        && p.optics_bloom_radius_mm.is_finite();
+    if !on {
+        return None;
+    }
+    let (max_r, reach) = if quality::tier(p) == Tier::Low {
+        (BLOOM_R_LOW, 2.5)
+    } else {
+        (BLOOM_R_MAX, 3.0)
+    };
+    let sig = bloom_sigmas_px(f64::from(p.optics_bloom_radius_mm), px_per_mm);
+    let amps = bloom_lobe_weights(f64::from(p.optics_bloom_falloff));
+    let lobes: [Option<BloomLobe>; 3] = std::array::from_fn(|j| {
+        (amps[j] > 0.0).then(|| {
+            let (level, radius, sigma_texels) = bloom_lobe(sig[j], levels, max_r, reach);
+            BloomLobe {
+                level,
+                radius,
+                sigma_texels,
+                amp: amps[j],
+            }
+        })
+    });
+    let knee_level = if positive(p.optics_bloom_threshold) {
+        bloom_knee_level(sig[0]).clamp(1, levels.clamp(1, PYRAMID_BINDINGS))
+    } else {
+        0
+    };
+    let feed_levels = if knee_level > 0 {
+        lobes.iter().flatten().map(|l| l.level).max().unwrap_or(1)
+    } else {
+        0
+    };
+    Some(BloomPlan {
+        lobes,
+        knee_level,
+        feed_levels,
+    })
 }
 
 /// Pyramid level sizes: ceil halvings of `size`, `levels` of them.
@@ -199,10 +331,12 @@ pub fn plan(p: &Params, fc: &FrameConstants, size: (u32, u32), halo: Option<&Hal
     let diff = diffusion_sigma(p, fc);
     let halo_on = positive(p.optics_halation_weight) && glass(p).is_some();
     let glare_on = positive(p.optics_glare_weight);
+    let bloom_on = bloom_plan(p, f64::from(fc.px_per_mm), 1).is_some();
     let neutral = !halo_on
         && !glare_on
+        && !bloom_on
         && diff.is_none()
-        && p.optics_vignette_corner == 1.0
+        && vignette(p).is_neutral()
         && p.optics_tint_rgb == [1.0; 3]
         && !positive(p.optics_ambient_lux);
     if neutral {
@@ -220,7 +354,7 @@ pub fn plan(p: &Params, fc: &FrameConstants, size: (u32, u32), halo: Option<&Hal
     if gauss_fallback {
         method = Some(Method::Pyramid);
     }
-    let levels = if halo_on || glare_on {
+    let levels = if halo_on || glare_on || bloom_on {
         let m = size.0.max(size.1).max(2);
         ((32 - (m - 1).leading_zeros()) as usize).min(MAX_LEVELS)
     } else {
@@ -252,6 +386,7 @@ pub fn plan(p: &Params, fc: &FrameConstants, size: (u32, u32), halo: Option<&Hal
         diffusion_sigma_px,
         mean_scale: 4f64.powi(levels as i32) / (f64::from(size.0) * f64::from(size.1)),
         gauss_fallback,
+        bloom: bloom_plan(p, f64::from(fc.px_per_mm), levels),
     })
 }
 
@@ -359,24 +494,46 @@ pub fn gaussian_fit(halo: &Halo, px_per_mm: f64, sigmas_px: &[f64]) -> Vec<f64> 
     (0..n).map(|i| a[i][dim] / a[i][i]).collect()
 }
 
-/// Effective Gaussian sigma (px) of pyramid level k read bilinearly at full resolution: the box chain adds
-/// (4^k - 1) / 12 px^2, the bilinear tent 4^k / 6.
-pub fn pyramid_sigma(k: usize) -> f64 {
-    let s = 4f64.powi(k as i32);
-    ((s - 1.0) / 12.0 + s / 6.0).sqrt()
-}
-
-/// Key of the CPU-computed weights (kernel cells, diffusion weights, fits): all inputs as bits.
+/// Key of the CPU-computed weights (kernel cells, diffusion weights, fits, bloom blurs): all inputs as bits.
 #[derive(Clone, Debug, PartialEq)]
 struct WeightKey {
     glass: [u32; 3],
     px_per_mm: u32,
     plan: (Option<Method>, usize, usize, usize, u64),
     levels: usize,
+    bloom: [(usize, u64); 3],
 }
 
-/// What the images were allocated for: (size, levels, kernel level, gaussians, diffusion).
-type AllocKey = ((u32, u32), usize, usize, bool, bool);
+/// The bloom blur weights of a lobe: `diffusion_weights` of its sigma and radius ([1] without a blur).
+fn bloom_weights(lobe: &BloomLobe) -> Vec<f64> {
+    if lobe.radius == 0 || lobe.sigma_texels <= 0.0 {
+        vec![1.0]
+    } else {
+        diffusion_weights(lobe.sigma_texels, lobe.radius)
+    }
+}
+
+/// What the images were allocated for: (size, levels, kernel level, gaussians, diffusion, bloom feed levels,
+/// bloom lobe levels (0: lobe off)).
+type AllocKey = ((u32, u32), usize, usize, bool, bool, usize, [usize; 3]);
+
+/// The allocation key of `plan`.
+fn alloc_key(plan: &Plan) -> AllocKey {
+    let bloom = plan.bloom.as_ref();
+    (
+        plan.size,
+        plan.levels,
+        if plan.method == Some(Method::Kernel) {
+            plan.kernel_level
+        } else {
+            0
+        },
+        plan.method == Some(Method::Gaussians),
+        plan.diffusion_radius > 0,
+        bloom.map_or(0, |b| b.feed_levels),
+        std::array::from_fn(|j| bloom.and_then(|b| b.lobes[j]).map_or(0, |l| l.level)),
+    )
+}
 
 #[derive(Default)]
 struct Optics {
@@ -391,6 +548,8 @@ struct Optics {
     gauss_h: vk::Pipeline,
     gauss_v: vk::Pipeline,
     diffuse: vk::Pipeline,
+    bloom_feed: vk::Pipeline,
+    bloom_blur: vk::Pipeline,
     pool: vk::DescriptorPool,
     sets: Vec<vk::DescriptorSet>,
     /// Owned images: pyramid levels (index k - 1), kernel halo, Gaussian sums (3), full-resolution halo, and
@@ -401,6 +560,11 @@ struct Optics {
     halo_full: GpuImage,
     /// The horizontal half of the diffusion (full resolution).
     diff: GpuImage,
+    /// The bloom: the feed pyramid of q L (index k - 1), and per lobe the scratch of its horizontal blur and
+    /// the blurred lobe (both at the lobe's level).
+    feed: Vec<GpuImage>,
+    bloom_tmp: [GpuImage; 3],
+    bloom_img: [GpuImage; 3],
     dummy: GpuImage,
     /// Allocation key of the images: (size, levels, kernel level when the kernel method runs, gaussians,
     /// diffusion).
@@ -454,6 +618,13 @@ impl Optics {
         }
         self.halo_full.destroy(d);
         self.diff.destroy(d);
+        for img in &mut self.feed {
+            img.destroy(d);
+        }
+        self.feed.clear();
+        for img in self.bloom_tmp.iter_mut().chain(self.bloom_img.iter_mut()) {
+            img.destroy(d);
+        }
         self.alloc_key = None;
     }
 
@@ -492,11 +663,24 @@ impl Optics {
         if diffusion {
             self.diff = make(plan.size)?;
         }
-        self.alloc_key = Some((plan.size, plan.levels, plan.kernel_level, gaussians, diffusion));
+        if let Some(b) = &plan.bloom {
+            for &s in &level_sizes(plan.size, b.feed_levels) {
+                self.feed.push(make(s)?);
+            }
+            for (j, lobe) in b.lobes.iter().enumerate() {
+                if let Some(l) = lobe {
+                    let s = sizes[l.level - 1];
+                    self.bloom_tmp[j] = make(s)?;
+                    self.bloom_img[j] = make(s)?;
+                }
+            }
+        }
+        self.alloc_key = Some(alloc_key(plan));
         self.fresh = true;
         // Descriptor sets: every binding the dummy, then the pass's own images.
         let dummy = self.dummy.view;
         let level = |k: usize| self.levels.get(k.wrapping_sub(1)).map_or(dummy, |i| i.view);
+        let feed = |k: usize| self.feed.get(k.wrapping_sub(1)).map_or(dummy, |i| i.view);
         let or_dummy = |img: &GpuImage| {
             if img.view == vk::ImageView::null() {
                 dummy
@@ -504,7 +688,26 @@ impl Optics {
                 img.view
             }
         };
-        let mut views = vec![[dummy; IMAGE_BINDINGS as usize]; SETS];
+        let mut views = vec![[dummy; BINDINGS as usize]; SETS];
+        if let Some(b) = &plan.bloom {
+            for k in 1..=b.feed_levels {
+                views[SET_FEED + k - 1][0] = if k == 1 { level(b.knee_level) } else { feed(k - 1) };
+                views[SET_FEED + k - 1][1] = feed(k);
+            }
+            for (j, lobe) in b.lobes.iter().enumerate() {
+                if let Some(l) = lobe {
+                    views[SET_BLOOM_H + j][0] = if b.feed_levels > 0 {
+                        feed(l.level)
+                    } else {
+                        level(l.level)
+                    };
+                    views[SET_BLOOM_H + j][1] = self.bloom_tmp[j].view;
+                    views[SET_BLOOM_V + j][0] = self.bloom_tmp[j].view;
+                    views[SET_BLOOM_V + j][1] = self.bloom_img[j].view;
+                    views[SET_COMPOSITE][BLOOM_BINDING + j] = self.bloom_img[j].view;
+                }
+            }
+        }
         for k in 1..=plan.levels {
             if k >= 2 {
                 views[k - 1][0] = level(k - 1);
@@ -546,7 +749,7 @@ impl Optics {
 
     /// # Safety
     /// No set is in use; the views and the buffer are live.
-    unsafe fn write_sets(&self, d: &ash::Device, views: &[[vk::ImageView; IMAGE_BINDINGS as usize]]) {
+    unsafe fn write_sets(&self, d: &ash::Device, views: &[[vk::ImageView; BINDINGS as usize]]) {
         let infos: Vec<Vec<[vk::DescriptorImageInfo; 1]>> = views
             .iter()
             .map(|set| {
@@ -565,6 +768,9 @@ impl Optics {
         let mut writes = Vec::new();
         for (s, set_infos) in infos.iter().enumerate() {
             for (b, info) in set_infos.iter().enumerate() {
+                if b as u32 == BUFFER_BINDING {
+                    continue;
+                }
                 writes.push(
                     vk::WriteDescriptorSet::default()
                         .dst_set(self.sets[s])
@@ -605,6 +811,12 @@ impl Optics {
                 plan.diffusion_sigma_px.to_bits(),
             ),
             levels: plan.levels,
+            bloom: std::array::from_fn(|j| {
+                plan.bloom
+                    .as_ref()
+                    .and_then(|b| b.lobes[j])
+                    .map_or((0, 0), |l| (l.radius, l.sigma_texels.to_bits()))
+            }),
         };
         if self.weight_key.as_ref() == Some(&key) {
             return Ok(());
@@ -618,6 +830,16 @@ impl Optics {
                 .enumerate()
             {
                 buf[i] = w as f32;
+            }
+        }
+        if let Some(b) = &plan.bloom {
+            for (j, lobe) in b.lobes.iter().enumerate() {
+                if let Some(l) = lobe {
+                    let at = BLOOM_OFFSET + j * (BLOOM_R_MAX + 1);
+                    for (i, w) in bloom_weights(l).into_iter().enumerate() {
+                        buf[at + i] = w as f32;
+                    }
+                }
             }
         }
         self.pyramid_amps = [0.0; 12];
@@ -699,10 +921,16 @@ impl Stage for Optics {
     unsafe fn create(&mut self, d: &ash::Device) -> Res<()> {
         let s = vk::ShaderStageFlags::COMPUTE;
         self.pass.set_layout = standard_set_layout(d)?;
-        let mut b: Vec<_> = (0..IMAGE_BINDINGS)
-            .map(|i| binding(i, vk::DescriptorType::STORAGE_IMAGE, s))
+        let b: Vec<_> = (0..BINDINGS)
+            .map(|i| {
+                let ty = if i == BUFFER_BINDING {
+                    vk::DescriptorType::STORAGE_BUFFER
+                } else {
+                    vk::DescriptorType::STORAGE_IMAGE
+                };
+                binding(i, ty, s)
+            })
             .collect();
-        b.push(binding(BUFFER_BINDING, vk::DescriptorType::STORAGE_BUFFER, s));
         self.set1_layout =
             d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&b), None)?;
         let set_layouts = [self.pass.set_layout, self.set1_layout];
@@ -723,10 +951,12 @@ impl Stage for Optics {
         self.gauss_h = compute_pipeline(d, self.layout, GAUSS_H_SPV)?;
         self.gauss_v = compute_pipeline(d, self.layout, GAUSS_V_SPV)?;
         self.diffuse = compute_pipeline(d, self.layout, DIFFUSE_SPV)?;
+        self.bloom_feed = compute_pipeline(d, self.layout, BLOOM_FEED_SPV)?;
+        self.bloom_blur = compute_pipeline(d, self.layout, BLOOM_BLUR_SPV)?;
         let sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count(IMAGE_BINDINGS * SETS as u32),
+                .descriptor_count((BINDINGS - 1) * SETS as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(SETS as u32),
@@ -809,17 +1039,7 @@ impl Stage for Optics {
             self.fresh = true;
             self.alloc_key = None;
         }
-        let key = (
-            plan.size,
-            plan.levels,
-            if plan.method == Some(Method::Kernel) {
-                plan.kernel_level
-            } else {
-                0
-            },
-            plan.method == Some(Method::Gaussians),
-            plan.diffusion_radius > 0,
-        );
+        let key = alloc_key(&plan);
         if self.alloc_key != Some(key) {
             d.device_wait_idle()?;
             self.free_images(d);
@@ -847,6 +1067,9 @@ impl Stage for Optics {
                 .iter()
                 .chain([&self.halo_low, &self.halo_full, &self.diff, &self.dummy])
                 .chain(self.gauss.iter())
+                .chain(self.feed.iter())
+                .chain(self.bloom_tmp.iter())
+                .chain(self.bloom_img.iter())
                 .filter(|i| i.image != vk::Image::null());
             for img in all {
                 barrier(
@@ -900,6 +1123,37 @@ impl Stage for Optics {
             }
             _ => {}
         }
+        if let Some(b) = &plan.bloom {
+            // The feed pyramid of q L (with a threshold), then each lobe's two blur halves on its level.
+            let feed_sizes = level_sizes(plan.size, b.feed_levels);
+            for (k, &s) in feed_sizes.iter().enumerate() {
+                let (pipe, push) = if k == 0 {
+                    let push = Push {
+                        info: [0, b.knee_level as i32, 0, 0],
+                        ..none
+                    };
+                    (self.bloom_feed, push)
+                } else {
+                    (self.down, none)
+                };
+                self.dispatch(d, cb, set, SET_FEED + k, pipe, &push, s, GROUP);
+                pass_barrier(d, cb);
+            }
+            for (j, lobe) in b.lobes.iter().enumerate() {
+                if let Some(l) = lobe {
+                    let s = sizes[l.level - 1];
+                    let off = (BLOOM_OFFSET + j * (BLOOM_R_MAX + 1)) as i32;
+                    for (dir, set1) in [(0, SET_BLOOM_H + j), (1, SET_BLOOM_V + j)] {
+                        let push = Push {
+                            info: [l.radius as i32, dir, off, 0],
+                            ..none
+                        };
+                        self.dispatch(d, cb, set, set1, self.bloom_blur, &push, s, GROUP);
+                        pass_barrier(d, cb);
+                    }
+                }
+            }
+        }
         if plan.diffusion_radius > 0 {
             let push = Push {
                 info: [plan.diffusion_radius as i32, 0, 0, 0],
@@ -915,6 +1169,12 @@ impl Stage for Optics {
             Some(Method::Gaussians) => 3,
         };
         let a = self.pyramid_amps;
+        let bloom = plan.bloom.as_ref();
+        let lobe = |j: usize| bloom.and_then(|b| b.lobes[j]);
+        let amp = |j: usize| lobe(j).map_or(0.0, |l| l.amp as f32);
+        let packed = (0..3).fold(0i32, |acc, j| {
+            acc | ((lobe(j).map_or(0, |l| l.level) as i32) << (8 * j))
+        });
         let push = Push {
             info: [
                 mode,
@@ -922,12 +1182,18 @@ impl Stage for Optics {
                 plan.diffusion_radius as i32,
                 plan.levels.min(PYRAMID_BINDINGS) as i32,
             ],
-            scal: [plan.mean_scale as f32, 0.0, 0.0, 0.0],
+            scal: [plan.mean_scale as f32, amp(0), amp(1), amp(2)],
             w: [
                 [a[0], a[1], a[2], a[3]],
                 [a[4], a[5], a[6], a[7]],
                 [a[8], a[9], a[10], a[11]],
                 [0.0; 4],
+            ],
+            aux: [
+                i32::from(bloom.is_some()),
+                packed,
+                bloom.map_or(0, |b| b.knee_level as i32),
+                0,
             ],
         };
         self.dispatch(d, cb, set, SET_COMPOSITE, self.composite, &push, size, GROUP);
@@ -946,6 +1212,8 @@ impl Stage for Optics {
             self.gauss_h,
             self.gauss_v,
             self.diffuse,
+            self.bloom_feed,
+            self.bloom_blur,
         ] {
             d.destroy_pipeline(p, None);
         }
@@ -960,17 +1228,109 @@ impl Stage for Optics {
 mod tests {
     use super::*;
 
-    /// The push block is 96 bytes (std430 of `optics.glsl`).
+    /// The push block is 112 bytes (std430 of `optics.glsl`); the buffer layout constants match the shader's.
     #[test]
     fn push_layout_matches_the_shader() {
-        assert_eq!(size_of::<Push>(), 96);
+        assert_eq!(size_of::<Push>(), 112);
         assert_eq!(std::mem::offset_of!(Push, scal), 16);
         assert_eq!(std::mem::offset_of!(Push, w), 32);
+        assert_eq!(std::mem::offset_of!(Push, aux), 96);
         let glsl = include_str!("../../../../../shaders/include/optics.glsl").replace("\r\n", "\n");
-        assert!(glsl.contains("ivec4 info;\n    vec4 scal;\n    vec4 w[4];"));
+        assert!(glsl.contains("ivec4 info;\n    vec4 scal;\n    vec4 w[4];\n    ivec4 aux;"));
         assert!(glsl.contains(&format!("#define OPT_DIFF_MAX {DIFF_MAX}")));
+        assert!(glsl.contains(&format!("#define OPT_TAPS_MAX_Q {TAPS_MAX}")));
+        assert!(glsl.contains(&format!("#define OPT_BLOOM_R_MAX {BLOOM_R_MAX}")));
         let kernel = include_str!("../../../../../shaders/optics_kernel.comp");
         assert!(kernel.contains(&format!("#define OPT_TAPS_MAX {TAPS_MAX}")));
+        let composite = include_str!("../../../../../shaders/optics.comp");
+        assert!(composite.contains(&format!(
+            "binding = {BLOOM_BINDING}, rgba16f) uniform readonly image2D bloom0"
+        )));
+    }
+
+    /// A bloom lobe runs on the finest level whose remaining blur fits the radius budget: level 1 read
+    /// bilinearly for a lobe narrower than it, deeper levels for wider lobes, the total variance (level plus
+    /// blur) equal to the lobe's, and the `low` tier one level coarser with a smaller radius.
+    #[test]
+    fn bloom_lobe_levels_follow_the_radius() {
+        assert_eq!(bloom_lobe(0.5, 11, BLOOM_R_MAX, 3.0), (1, 0, 0.0));
+        let mut last = 0;
+        for s in [2.0, 5.0, 20.0, 60.0, 200.0, 600.0] {
+            let (l, r, t) = bloom_lobe(s, 11, BLOOM_R_MAX, 3.0);
+            assert!(r <= BLOOM_R_MAX && l >= last, "{s}: {l} {r} {t}");
+            if l > 1 {
+                // The next finer level would need more than the budget.
+                let finer = (s * s - pyramid_sigma(l - 1).powi(2)) / 4f64.powi(l as i32 - 1) - 1.0 / 6.0;
+                assert!((3.0 * finer.sqrt()).ceil() as usize > BLOOM_R_MAX, "{s}: level {l}");
+            }
+            if t > 0.0 {
+                let total = pyramid_sigma(l).powi(2) + 4f64.powi(l as i32) * (t * t + 1.0 / 6.0);
+                assert!((total - s * s).abs() < 1e-9 * s * s, "{s}: {total}");
+            }
+            last = l;
+            let (ll, rl, _) = bloom_lobe(s, 11, BLOOM_R_LOW, 2.5);
+            assert!(ll >= l && rl <= BLOOM_R_LOW, "{s}: low {ll} {rl}");
+        }
+        // The plan: three lobes at r, 3 r, 9 r for falloff 0.5, one for falloff 0; a threshold adds the feed
+        // pyramid up to the coarsest lobe level and the knee level.
+        let fc = placed();
+        let p = Params {
+            optics_enable: true,
+            optics_bloom_weight: 0.2,
+            optics_bloom_radius_mm: 4.0,
+            ..Params::default()
+        };
+        let b = plan(&p, &fc, (1920, 1440), Some(&Halo::new(glass(&p).unwrap())))
+            .unwrap()
+            .bloom
+            .unwrap();
+        assert!(b.lobes.iter().all(Option::is_some) && b.knee_level == 0 && b.feed_levels == 0);
+        let levels: Vec<usize> = b.lobes.iter().flatten().map(|l| l.level).collect();
+        assert!(levels[0] < levels[1] && levels[1] < levels[2], "{levels:?}");
+        let amps: f64 = b.lobes.iter().flatten().map(|l| l.amp).sum();
+        assert!((amps - 1.0).abs() < 1e-12);
+        let one = bloom_plan(
+            &Params {
+                optics_bloom_falloff: 0.0,
+                optics_bloom_threshold: 0.7,
+                ..p
+            },
+            4.966,
+            11,
+        )
+        .unwrap();
+        assert!(one.lobes[0].is_some() && one.lobes[1].is_none() && one.lobes[2].is_none());
+        assert!(one.knee_level >= 1 && one.feed_levels == one.lobes[0].unwrap().level);
+        // Low tier: never a finer level than the standard plan.
+        let low = bloom_plan(
+            &Params {
+                quality_tier: crate::params::QUALITY_TIER_LOW,
+                ..p
+            },
+            4.966,
+            11,
+        )
+        .unwrap();
+        for (a, s) in low.lobes.iter().flatten().zip(b.lobes.iter().flatten()) {
+            assert!(a.level >= s.level && a.radius <= BLOOM_R_LOW);
+        }
+        // Off: weight 0, every tint channel 0, or no radius.
+        for q in [
+            Params {
+                optics_bloom_weight: 0.0,
+                ..p
+            },
+            Params {
+                optics_bloom_tint_rgb: [0.0; 3],
+                ..p
+            },
+            Params {
+                optics_bloom_radius_mm: f32::NAN,
+                ..p
+            },
+        ] {
+            assert!(bloom_plan(&q, 4.966, 11).is_none());
+        }
     }
 
     fn placed() -> FrameConstants {
@@ -1025,9 +1385,51 @@ mod tests {
                 optics_diffusion_weight: 0.1,
                 ..on
             },
+            Params {
+                optics_bloom_weight: 0.1,
+                ..on
+            },
         ] {
             assert!(plan(&p, &fc, size, None).is_some());
         }
+        // The vignette alone runs the stage (the default shape, or any shape), and is neutral when disabled,
+        // at a corner of 1 or a floor of 1; the bloom is neutral at weight 0 or with every tint channel at 0.
+        let vig = Params {
+            optics_vignette_corner: 0.2,
+            optics_vignette_start: 0.4,
+            optics_vignette_exponent: 4.0,
+            ..on
+        };
+        assert!(plan(&vig, &fc, size, None).is_some());
+        for p in [
+            Params {
+                optics_vignette_enable: false,
+                ..vig
+            },
+            Params {
+                optics_vignette_floor: 1.0,
+                ..vig
+            },
+            Params {
+                optics_vignette_corner: 1.0,
+                ..vig
+            },
+            Params {
+                optics_bloom_weight: 0.3,
+                optics_bloom_tint_rgb: [0.0; 3],
+                optics_vignette_corner: 1.0,
+                ..vig
+            },
+        ] {
+            assert!(plan(&p, &fc, size, None).is_none(), "{p:?}");
+        }
+        // The bloom alone builds the pyramid and nothing of the halo.
+        let glow = Params {
+            optics_bloom_weight: 0.2,
+            ..on
+        };
+        let pl = plan(&glow, &fc, size, None).unwrap();
+        assert!(pl.levels > 0 && pl.method.is_none() && pl.bloom.is_some());
     }
 
     /// The kernel level follows the taps: t = 12 mm, T 0.85 at 4.966 px/mm has a support of about 620 px; 24

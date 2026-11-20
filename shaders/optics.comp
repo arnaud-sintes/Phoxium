@@ -5,15 +5,19 @@
 // domain, linear light. The composite pass, after the pyramid, halo and horizontal diffusion passes (src/gpu/stages/optics.rs).
 // Model (oracle crates/crt-model/src/optics.rs, module doc):
 //   D   = (1 - w_d) L + w_d (G_sigma * L)                    phosphor-layer diffusion (separable: optics_diffuse.comp, then here)
-//   G   = (1 - w_h - w_g) D + w_h H + w_g mean(L)             halo H (kernel, pyramid or gaussians), glare
-//   out = v^(rho^2) tint G + E (T tint)^2 r_s / (pi L_w)      vignette, tint, ambient reflection
-// The halo and the mean are computed from L, not D: the diffusion conserves the mean and is far narrower than
-// the halo (the difference is part of the measured error).
+//   G   = (1 - w_h - w_g - w_bc q) D + w_h H + w_g mean(L)    halo H (kernel, pyramid or gaussians), glare,
+//         + w_bc B                                           bloom B = sum_j a_j lobe_j * (q L), w_bc = w_b tint_c
+//   out = V tint G + E (T tint)^2 r_s / (pi L_w)             vignette gain V, tint, ambient reflection
+// The halo, the mean and the bloom are computed from L, not D: the diffusion conserves the mean and is far
+// narrower than they are (the difference is part of the measured error). The bloom lobes are blurred pyramid
+// levels (optics_bloom_blur.comp) read bilinearly; q is the soft-knee feed fraction (1 without a threshold).
+// The vignette V (crt_model::optics::Vignette) is v^p with the profile p of the shape controls, then the floor;
+// at the default shape p = rho^2 by the 0.2.0 expression, so the default output is the same bit for bit.
 //
 // Light bounds (review R-49, oracle crt_model::optics::light_weights): each weight is clamped to [0, 1] (NaN
-// reads as 0), and when w_h + w_g > 1 both are divided by their sum, so the direct weight 1 - w_h - w_g is
-// never negative and the redistributed fraction never exceeds 1 (the diffusion is a separate partition, w_d in
-// [0, 1]). With non-negative input light and a non-negative halo no weight setting can then give negative
+// reads as 0), and when w_h + w_g + w_b > 1 the three are divided by their sum, so the direct weight
+// 1 - w_h - w_g - w_b tint q is never negative (tint and q in [0, 1]) and the redistributed fraction never exceeds
+// 1 (the diffusion is a separate partition, w_d in [0, 1]). With non-negative input light and a non-negative halo no weight setting can then give negative
 // light or create light. The halo of the `kernel` method (the default) is non-negative; the `pyramid` and
 // `gaussians` methods mix levels with signed amplitudes and can undershoot slightly far from the light. That
 // undershoot is part of their measured method error and is NOT clamped here: clamping it would add light and
@@ -21,7 +25,9 @@
 //
 // pc.info: x mode (0 no halo, 1 kernel, 2 pyramid, 3 gaussians), y kernel level l, z diffusion radius R_d
 // (<= OPT_DIFF_MAX, 0 = none), w pyramid levels used. pc.scal: x mean scale (4^n / (W H): the top texel of an
-// n-level zero-padded box pyramid times it is the image mean). pc.w[0..2]: pyramid amplitudes, levels 1 to 12.
+// n-level zero-padded box pyramid times it is the image mean), y to w the bloom lobe amplitudes a_j. pc.w[0..2]:
+// pyramid amplitudes, levels 1 to 12. pc.aux: x bloom on (0 off), y the lobe levels (8 bits each, lobe j at bit
+// 8 j), z the knee level k_q (0: no threshold, q = 1).
 
 #include "params.glsl"
 #include "common.glsl"
@@ -53,6 +59,9 @@ layout(set = 1, binding = 14, rgba16f) uniform readonly image2D level9;
 layout(set = 1, binding = 15, rgba16f) uniform readonly image2D level10;
 layout(set = 1, binding = 16, rgba16f) uniform readonly image2D level11;
 layout(set = 1, binding = 17, rgba16f) uniform readonly image2D level12;
+layout(set = 1, binding = 19, rgba16f) uniform readonly image2D bloom0;
+layout(set = 1, binding = 20, rgba16f) uniform readonly image2D bloom1;
+layout(set = 1, binding = 21, rgba16f) uniform readonly image2D bloom2;
 
 OPT_BILINEAR(bilin_halo, halo_img)
 OPT_BILINEAR(bilin1, level1)
@@ -67,6 +76,32 @@ OPT_BILINEAR(bilin9, level9)
 OPT_BILINEAR(bilin10, level10)
 OPT_BILINEAR(bilin11, level11)
 OPT_BILINEAR(bilin12, level12)
+OPT_BILINEAR(bilin_b0, bloom0)
+OPT_BILINEAR(bilin_b1, bloom1)
+OPT_BILINEAR(bilin_b2, bloom2)
+
+// Pyramid level k (1 to 12) read bilinearly at the host pixel p.
+vec3 level_bilin(ivec2 p, int k) {
+    switch (k) {
+    case 1: return bilin1(p, 1);
+    case 2: return bilin2(p, 2);
+    case 3: return bilin3(p, 3);
+    case 4: return bilin4(p, 4);
+    case 5: return bilin5(p, 5);
+    case 6: return bilin6(p, 6);
+    case 7: return bilin7(p, 7);
+    case 8: return bilin8(p, 8);
+    case 9: return bilin9(p, 9);
+    case 10: return bilin10(p, 10);
+    case 11: return bilin11(p, 11);
+    default: return bilin12(p, 12);
+    }
+}
+
+// The soft onset of the vignette (oracle Vignette::profile): 0 for x <= 0, x^2 / (2 w) up to w, x - w / 2 beyond.
+float vig_ramp(float x, float w) {
+    return x <= 0.0 ? 0.0 : (x < w ? x * x / (2.0 * w) : x - 0.5 * w);
+}
 
 float pyr_amp(int k) {
     return pc.w[k / 4][k % 4];
@@ -114,10 +149,12 @@ void main() {
     int mode = pc.info.x;
     float wh = mode != 0 ? opt_unit(params.optics_halation_weight) : 0.0;
     float wg = opt_unit(params.optics_glare_weight);
-    float wsum = wh + wg;
+    float wb = pc.aux.x != 0 ? opt_unit(params.optics_bloom_weight) : 0.0;
+    float wsum = wh + wg + wb;
     if (wsum > 1.0) {
         wh /= wsum;
         wg /= wsum;
+        wb /= wsum;
     }
     vec3 h = vec3(0.0);
     if (mode == 1) {
@@ -130,14 +167,54 @@ void main() {
 
     vec3 mean = wg > 0.0 ? imageLoad(top, ivec2(0)).rgb * pc.scal.x : vec3(0.0);
     vec3 g = (1.0 - wh - wg) * d + wh * h + wg * mean;
+    if (wb > 0.0) {
+        // Bloom: the fed light q L leaves the direct image, the blurred feed comes back.
+        vec3 wbc = wb * clamp(params.optics_bloom_tint_rgb, 0.0, 1.0);
+        float q = 1.0;
+        if (pc.aux.z > 0) {
+            vec3 m = level_bilin(p, pc.aux.z);
+            q = opt_bloom_feed(max(m.r, max(m.g, m.b)), params.optics_bloom_threshold);
+        }
+        int lv = pc.aux.y;
+        vec3 b = vec3(0.0);
+        if (pc.scal.y > 0.0) b += pc.scal.y * bilin_b0(p, lv & 255);
+        if (pc.scal.z > 0.0) b += pc.scal.z * bilin_b1(p, (lv >> 8) & 255);
+        if (pc.scal.w > 0.0) b += pc.scal.w * bilin_b2(p, (lv >> 16) & 255);
+        g += wbc * (b - q * d);
+    }
 
-    // Vignette: v^(rho^2), rho = distance from the image centre over the raster half diagonal.
-    vec2 c = 0.5 * vec2(frame.tube_size);
-    vec2 r = vec2(frame.tube_size - 2 * frame.raster_margin);
-    float hd2 = max(0.25 * dot(r, r), 1.0);
-    vec2 dp = vec2(p) + 0.5 - c;
-    float vc = clamp(params.optics_vignette_corner, 1e-3, 1.0);
-    float v = exp2(dot(dp, dp) / hd2 * log2(vc));
+    // Vignette (oracle crt_model::optics::Vignette): rho^2 from the (moved) centre, round or following the
+    // raster's aspect, the profile p, the gain v^p and the floor. The default shape takes the 0.2.0 expression.
+    float v = 1.0;
+    if (params.optics_vignette_enable) {
+        vec2 c = 0.5 * vec2(frame.tube_size);
+        vec2 r = vec2(frame.tube_size - 2 * frame.raster_margin);
+        float hd2 = max(0.25 * dot(r, r), 1.0);
+        vec2 half_r = max(0.5 * r, vec2(0.5));
+        vec2 dp = vec2(p) + 0.5 - c - params.optics_vignette_centre_xy * half_r;
+        float rho2 = dot(dp, dp) / hd2;
+        float roundness = clamp(params.optics_vignette_roundness, 0.0, 1.0);
+        if (roundness < 1.0) {
+            vec2 a = dp / half_r;
+            rho2 = mix(0.5 * dot(a, a), rho2, roundness);
+        }
+        float n = clamp(params.optics_vignette_exponent, 0.25, 16.0);
+        float start = clamp(params.optics_vignette_start, 0.0, 0.95);
+        float w = clamp(params.optics_vignette_softness, 0.0, 1.0);
+        float prof;
+        if (start <= 0.0 && w <= 0.0) {
+            prof = n == 2.0 ? rho2 : pow(rho2, 0.5 * n);
+        } else {
+            float x = (sqrt(rho2) - start) / (1.0 - start);
+            prof = pow(vig_ramp(x, w) / vig_ramp(1.0, w), n);
+        }
+        float vc = clamp(params.optics_vignette_corner, 1e-4, 1.0);
+        v = exp2(prof * log2(vc));
+        float fl = clamp(params.optics_vignette_floor, 0.0, 1.0);
+        if (fl > 0.0) {
+            v = fl + (1.0 - fl) * v;
+        }
+    }
 
     vec3 tint = params.optics_tint_rgb;
     vec3 tt = params.optics_glass_transmission * tint;

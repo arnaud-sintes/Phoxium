@@ -20,7 +20,7 @@
 
 mod common;
 
-use crt_model::optics::{Glass, Halo, Optics, TubeImage};
+use crt_model::optics::{Bloom, Glass, Halo, Optics, TubeImage, Vignette};
 use ultimatecrt::gpu::{FrameConstants, Headless, ImageF32, Settings, SourceFrame, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::{Params, OPTICS_HALO_METHOD_GAUSSIANS, OPTICS_HALO_METHOD_PYRAMID};
 use ultimatecrt::scaling::View;
@@ -118,7 +118,23 @@ pub fn model(p: &Params) -> Optics {
         diffusion_weight: f64::from(p.optics_diffusion_weight),
         diffusion_sigma_mm: f64::from(p.optics_diffusion_mm),
         glare_weight: f64::from(p.optics_glare_weight),
-        vignette_corner: f64::from(p.optics_vignette_corner),
+        bloom: Bloom {
+            weight: f64::from(p.optics_bloom_weight),
+            radius_mm: f64::from(p.optics_bloom_radius_mm),
+            falloff: f64::from(p.optics_bloom_falloff),
+            threshold: f64::from(p.optics_bloom_threshold),
+            tint: p.optics_bloom_tint_rgb.map(f64::from),
+        },
+        vignette: Vignette {
+            enable: p.optics_vignette_enable,
+            corner: f64::from(p.optics_vignette_corner),
+            start: f64::from(p.optics_vignette_start),
+            exponent: f64::from(p.optics_vignette_exponent),
+            softness: f64::from(p.optics_vignette_softness),
+            roundness: f64::from(p.optics_vignette_roundness),
+            centre: p.optics_vignette_centre_xy.map(f64::from),
+            floor: f64::from(p.optics_vignette_floor),
+        },
         tint: p.optics_tint_rgb.map(f64::from),
         ambient_lux: f64::from(p.optics_ambient_lux),
         screen_reflectance: f64::from(p.optics_screen_reflectance),
@@ -199,6 +215,29 @@ fn off_is_bit_exact_identity() {
         ..off
     };
     assert_eq!(run(&mut gpu, &neutral, &pic, 2.0), pic, "neutral");
+    assert!(gpu.last_skipped_slots().contains(&"optics"));
+    // The master switch off hides the glow and the vignette too; a glow with every tint channel at 0 and a
+    // disabled vignette are neutral.
+    let master_off = Params {
+        optics_bloom_weight: 0.3,
+        optics_vignette_corner: 0.05,
+        optics_vignette_start: 0.3,
+        ..off
+    };
+    assert_eq!(run(&mut gpu, &master_off, &pic, 2.0), pic, "master switch off");
+    assert!(gpu.last_skipped_slots().contains(&"optics"));
+    let neutral_glow = Params {
+        optics_bloom_weight: 0.3,
+        optics_bloom_tint_rgb: [0.0; 3],
+        optics_vignette_enable: false,
+        optics_vignette_corner: 0.05,
+        ..neutral
+    };
+    assert_eq!(
+        run(&mut gpu, &neutral_glow, &pic, 2.0),
+        pic,
+        "neutral glow and vignette"
+    );
     assert!(gpu.last_skipped_slots().contains(&"optics"));
     assert_eq!(run(&mut gpu, &all_on(0.03), &pic, 0.0), pic, "unplaced");
     let on = run(&mut gpu, &all_on(0.03), &pic, 2.0);
@@ -547,6 +586,396 @@ fn diffusion_vignette_glare_tint_ambient() {
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
+
+/// Only the bloom (owner request 2026-11-20): every other effect neutral.
+fn bloom_only(weight: f32, radius_mm: f32, falloff: f32, threshold: f32) -> Params {
+    Params {
+        optics_enable: true,
+        optics_halation_weight: 0.0,
+        optics_glare_weight: 0.0,
+        optics_diffusion_weight: 0.0,
+        optics_vignette_corner: 1.0,
+        optics_bloom_weight: weight,
+        optics_bloom_radius_mm: radius_mm,
+        optics_bloom_falloff: falloff,
+        optics_bloom_threshold: threshold,
+        ..Params::default()
+    }
+}
+
+/// The bloom alone makes the stage run (no other effect on); on an edge, an impulse, a flat white field and
+/// the game-like frame the GPU (lobes on pyramid levels, bilinear) follows the oracle (exact Gaussian mixture by
+/// FFT) within the error budget (MAE <= 0.5 %, max <= 4 % of white; the impulse is compared on its glow, relative
+/// to the glow's peak), keeps the light of an impulse (+/- 0.5 %) and the level of a flat field away from the
+/// edges, with and without a threshold, with a tint, and in the `low` quality tier (looser, recorded).
+#[test]
+fn bloom_matches_the_oracle() {
+    let Some(mut gpu) = common::gpu_or_skip("bloom_matches_the_oracle") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h, ppm) = (320u32, 240u32, 2.0f32);
+    let edge = image(w, h, |x, _| if x >= w / 2 { [1.0; 3] } else { [0.0; 3] });
+    let flat = image(w, h, |_, _| [1.0; 3]);
+    let game = game_frame(w, h);
+    let (cx, cy) = (160u32, 120u32);
+    let v = 1000.0f32;
+    let dot = image(w, h, |x, y| {
+        if (x, y) == (cx, cy) {
+            [v, 0.5 * v, 0.25 * v]
+        } else {
+            [0.0; 3]
+        }
+    });
+    let tinted = Params {
+        optics_bloom_tint_rgb: [1.0, 0.6, 0.3],
+        ..bloom_only(0.3, 6.0, 1.0, 0.6)
+    };
+    let configs = [
+        ("gentle, 3 mm, Gaussian", bloom_only(0.1, 3.0, 0.0, 0.0)),
+        ("strong, 6 mm, falloff 0.5", bloom_only(0.3, 6.0, 0.5, 0.0)),
+        ("highlights only, 6 mm, threshold 0.6, tint", tinted),
+        ("wide, 1.5 mm x 9, falloff 1", bloom_only(0.2, 1.5, 1.0, 0.0)),
+    ];
+    for (pname, p) in &configs {
+        for low in [false, true] {
+            let p = Params {
+                quality_tier: if low {
+                    ultimatecrt::params::QUALITY_TIER_LOW
+                } else {
+                    Params::default().quality_tier
+                },
+                ..*p
+            };
+            let tier = if low { "low" } else { "standard" };
+            let (mae_max, max_max) = if low { (0.01, 0.08) } else { (0.005, 0.04) };
+            for (name, pic) in [("edge", &edge), ("flat white", &flat), ("game", &game)] {
+                let want = oracle(&p, pic, ppm);
+                let got = run(&mut gpu, &p, pic, ppm);
+                assert!(
+                    !gpu.last_skipped_slots().contains(&"optics"),
+                    "the bloom alone runs the stage"
+                );
+                let (mae, max) = errors(&got, &want);
+                println!(
+                    "{pname} ({tier}), {name}: MAE {:.4} %, max {:.3} % of white",
+                    100.0 * mae,
+                    100.0 * max
+                );
+                assert!(mae <= mae_max && max <= max_max, "{pname} {tier} {name}: {mae} {max}");
+            }
+            // Flat white: the middle keeps its level.
+            let got = run(&mut gpu, &p, &flat, ppm);
+            let mid = got.pixel(cx, cy);
+            let want = oracle(&p, &flat, ppm).rgb[(cy * w + cx) as usize];
+            println!("{pname} ({tier}), flat white centre: GPU {mid:?}, oracle {want:?}");
+            for c in 0..3 {
+                assert!(
+                    (f64::from(mid[c]) - want[c]).abs() < 0.004,
+                    "{pname} {tier}: centre {c}"
+                );
+            }
+            // Impulse: the light is kept, the glow follows the oracle relative to its peak.
+            let got = run(&mut gpu, &p, &dot, ppm);
+            let want = oracle(&p, &dot, ppm);
+            for c in 0..3 {
+                let (tin, tout) = (total(&dot, c), total(&got, c));
+                let tor: f64 = want.rgb.iter().map(|q| q[c]).sum();
+                println!("{pname} ({tier}), impulse channel {c}: out {tout:.2}, in {tin:.2}, oracle {tor:.2}");
+                assert!((tout / tor - 1.0).abs() < 5e-3, "{pname} {tier} impulse energy {c}");
+            }
+            let i0 = (cy * w + cx) as usize;
+            let peak = (0..want.rgb.len())
+                .filter(|&i| i != i0)
+                .map(|i| want.rgb[i][0])
+                .fold(0.0, f64::max);
+            let (mut emax, mut esum, mut n) = (0.0f64, 0.0, 0);
+            for i in 0..want.rgb.len() {
+                if i == i0 {
+                    continue;
+                }
+                let e = (f64::from(got.rgba[4 * i]) - want.rgb[i][0]).abs();
+                emax = emax.max(e);
+                esum += e;
+                n += 1;
+            }
+            println!(
+                "{pname} ({tier}), impulse glow: max error {:.1} %, mean {:.3} % of its peak",
+                100.0 * emax / peak,
+                100.0 * esum / f64::from(n) / peak
+            );
+            let bound = if low { 0.6 } else { 0.35 };
+            assert!(emax / peak < bound, "{pname} {tier}: glow error {}", emax / peak);
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The vignette's shape controls on their own (no other effect): the GPU follows the oracle within the FP16
+/// step on a flat field and the game-like frame, for strong, offset, aspect-following and black-corner
+/// settings, in a tube image with a raster margin of 0 (the oracle's raster); the corner is at the asked
+/// value.
+#[test]
+fn vignette_shapes_match_the_oracle() {
+    let Some(mut gpu) = common::gpu_or_skip("vignette_shapes_match_the_oracle") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h, ppm) = (160u32, 96u32, 2.0f32);
+    let flat = image(w, h, |_, _| [1.0; 3]);
+    let game = game_frame(w, h);
+    let base = Params {
+        optics_enable: true,
+        optics_halation_weight: 0.0,
+        optics_glare_weight: 0.0,
+        optics_diffusion_weight: 0.0,
+        ..Params::default()
+    };
+    let shapes = [
+        (
+            "strong physical",
+            Params {
+                optics_vignette_corner: 0.2,
+                ..base
+            },
+        ),
+        (
+            "black corners, late start, soft",
+            Params {
+                optics_vignette_corner: 0.0,
+                optics_vignette_start: 0.5,
+                optics_vignette_softness: 0.4,
+                optics_vignette_exponent: 3.0,
+                ..base
+            },
+        ),
+        (
+            "aspect, offset, floor",
+            Params {
+                optics_vignette_corner: 0.05,
+                optics_vignette_roundness: 0.0,
+                optics_vignette_centre_xy: [0.2, -0.15],
+                optics_vignette_floor: 0.1,
+                ..base
+            },
+        ),
+        (
+            "gentle wide, exponent 6",
+            Params {
+                optics_vignette_corner: 0.4,
+                optics_vignette_exponent: 6.0,
+                optics_vignette_roundness: 0.5,
+                ..base
+            },
+        ),
+    ];
+    for (name, p) in &shapes {
+        for (pic_name, pic) in [("flat", &flat), ("game", &game)] {
+            let want = oracle(p, pic, ppm);
+            let got = run(&mut gpu, p, pic, ppm);
+            assert!(!gpu.last_skipped_slots().contains(&"optics"));
+            let (mut max_rel, mut max_abs) = (0.0f64, 0.0f64);
+            for (i, wv) in want.rgb.iter().enumerate() {
+                for (c, &x) in wv.iter().enumerate() {
+                    let e = (f64::from(got.rgba[4 * i + c]) - x).abs();
+                    max_abs = max_abs.max(e);
+                    max_rel = max_rel.max(e / x.abs().max(1e-3));
+                }
+            }
+            println!(
+                "{name}, {pic_name}: max error {max_abs:.2e} abs, {:.3} % rel",
+                100.0 * max_rel
+            );
+            assert!(max_abs <= 2e-3, "{name} {pic_name}: {max_abs}");
+        }
+        // The corner pixel against the corner value (the pixel centre is just inside the corner).
+        let got = run(&mut gpu, p, &flat, ppm);
+        let want = oracle(p, &flat, ppm);
+        println!(
+            "{name}: corner pixel {:.5} (oracle {:.5}), centre {:.5}",
+            got.pixel(0, 0)[0],
+            want.rgb[0][0],
+            got.pixel(w / 2, h / 2)[0]
+        );
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Cost of the glow and the vignette, headless, run by hand:
+/// `cargo test -p ultimatecrt --test stage_optics glow_cost_study -- --ignored --nocapture`.
+/// A 1920 x 1080 tube image at 4.966 px/mm (the PVM-20M4U across the width), the game-like frame, bursts of 40
+/// frames of the slot alone, each paired with a burst of the calibration pass (the phosphor saturation pass, one
+/// full-resolution read and write), as `optics_cost_study`: median slot time and the ratio to the calibration.
+#[test]
+#[ignore]
+fn glow_cost_study() {
+    let Some(mut gpu) = common::gpu_or_skip("glow_cost_study") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (1920u32, 1080u32);
+    let game = game_frame(w, h);
+    let bgra: Vec<u8> = game
+        .rgba
+        .chunks(4)
+        .flat_map(|p| {
+            let code = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+            [code(p[2]), code(p[1]), code(p[0]), 255]
+        })
+        .collect();
+    let vignette = Params {
+        optics_enable: true,
+        optics_halation_weight: 0.0,
+        optics_glare_weight: 0.0,
+        optics_diffusion_weight: 0.0,
+        optics_vignette_corner: 0.3,
+        optics_vignette_start: 0.3,
+        optics_vignette_softness: 0.3,
+        ..Params::default()
+    };
+    let glow = |weight: f32, radius: f32, falloff: f32, threshold: f32| Params {
+        optics_vignette_corner: 1.0,
+        ..bloom_only(weight, radius, falloff, threshold)
+    };
+    let low = Params {
+        quality_tier: ultimatecrt::params::QUALITY_TIER_LOW,
+        ..glow(0.2, 6.0, 0.5, 0.0)
+    };
+    let all = Params {
+        optics_enable: true,
+        optics_bloom_weight: 0.2,
+        optics_bloom_threshold: 0.6,
+        optics_vignette_corner: 0.3,
+        ..Params::default()
+    };
+    let saturation = Params {
+        phosphor_saturation: true,
+        ..Params::default()
+    };
+    let configs: Vec<(&str, &str, Params)> = vec![
+        ("vignette alone (composite pass)", "optics", vignette),
+        ("glow 6 mm, falloff 0 (one lobe)", "optics", glow(0.2, 6.0, 0.0, 0.0)),
+        (
+            "glow 6 mm, falloff 0.5 (three lobes)",
+            "optics",
+            glow(0.2, 6.0, 0.5, 0.0),
+        ),
+        (
+            "glow 6 mm, falloff 0.5, threshold 0.6",
+            "optics",
+            glow(0.2, 6.0, 0.5, 0.6),
+        ),
+        ("glow 1 mm, falloff 1", "optics", glow(0.2, 1.0, 1.0, 0.0)),
+        ("glow 30 mm, falloff 1", "optics", glow(0.2, 30.0, 1.0, 0.0)),
+        ("glow 6 mm, falloff 0.5, low tier", "optics", low),
+        (
+            "default halo, glare, diffusion (no glow)",
+            "optics",
+            Params {
+                optics_enable: true,
+                ..Params::default()
+            },
+        ),
+        (
+            "everything: halo, glare, diffusion, glow with threshold, vignette",
+            "optics",
+            all,
+        ),
+    ];
+    let settings = Settings::identity();
+    let frames: Vec<(Option<SourceFrame<'_>>, View)> = (0..40)
+        .map(|_| {
+            (
+                Some(SourceFrame {
+                    width: w,
+                    height: h,
+                    bgra: &bgra,
+                }),
+                View::full(w, h),
+            )
+        })
+        .collect();
+    println!("| configuration | median ms | ratio to the calibration pass |");
+    for (name, slot, p) in &configs {
+        let (mut ms, mut ratio) = (Vec::new(), Vec::new());
+        for burst in 0..5 {
+            let mut burst_mean = |slot: &str, p: &Params| {
+                gpu.enable_only(&[slot]).unwrap();
+                let _ = gpu.take_timing_average();
+                gpu.render_burst(&frames, &settings, p, (w, h), TargetFormat::Bgra8Unorm)
+                    .expect("burst");
+                gpu.take_timing_average().and_then(|t| t.stage_ms(slot))
+            };
+            let c = burst_mean("phosphor", &saturation);
+            let m = burst_mean(slot, p);
+            if burst > 0 {
+                if let (Some(c), Some(m)) = (c, m) {
+                    ms.push(m);
+                    ratio.push(m / c);
+                }
+            }
+        }
+        ms.sort_by(f64::total_cmp);
+        ratio.sort_by(f64::total_cmp);
+        println!("| {name} | {:.3} | {:.2} |", ms[ms.len() / 2], ratio[ratio.len() / 2]);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// FNV-1a over the bits of every value of `img`.
+fn fingerprint(img: &ImageF32) -> u64 {
+    let mut h = 0xcbf2_9ce4_8422_2325u64;
+    for v in &img.rgba {
+        for b in v.to_bits().to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
+}
+
+/// The vignette at its defaults (and at a strong corner with tint and room light) gives the output of the
+/// single-parameter vignette of version 0.2.0 bit for bit: fingerprints recorded with the 0.2.0 shader on a
+/// ramp frame (the new shape controls at their defaults take the old formula's path).
+#[test]
+fn vignette_defaults_match_the_recorded_reference() {
+    let Some(mut gpu) = common::gpu_or_skip("vignette_defaults_match_the_recorded_reference") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (64u32, 48u32);
+    let pic = image(w, h, |x, y| {
+        let t = (x + w * y) as f32 / (w * h) as f32;
+        [0.25 + t, 1.0 - 0.5 * t, 0.5 + 0.25 * t]
+    });
+    let base = Params {
+        optics_enable: true,
+        optics_halation_weight: 0.0,
+        optics_glare_weight: 0.0,
+        optics_diffusion_weight: 0.0,
+        ..Params::default()
+    };
+    let strong = Params {
+        optics_vignette_corner: 0.3,
+        optics_tint_rgb: [1.0, 0.9, 0.8],
+        optics_ambient_lux: 50.0,
+        ..base
+    };
+    let got = [
+        fingerprint(&run(&mut gpu, &base, &pic, 2.0)),
+        fingerprint(&run(&mut gpu, &strong, &pic, 2.0)),
+    ];
+    println!("vignette fingerprints: {:#018x} {:#018x}", got[0], got[1]);
+    assert_eq!(got, VIGNETTE_REFERENCE, "the default vignette changed");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Recorded with the 0.2.0 optics shader (see the test above).
+const VIGNETTE_REFERENCE: [u64; 2] = [0xef58_2b02_ee99_fc55, 0x143c_7315_7415_a402];
 
 /// The f32 -> FP16 rounding to nearest (ties to even) of a normal value, as `round_f16` of `common.glsl`.
 fn f16_round(x: f32) -> f32 {

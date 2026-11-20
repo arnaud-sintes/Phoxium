@@ -7,6 +7,13 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- Glow (bloom) in the Optics panel, on the owner's request: a soft, wide halo around bright areas that only moves light (a white screen keeps its level). Controls: weight (0 = off, up to 0.6), radius (0.5 to 60 mm on the tube face), falloff (a single Gaussian up to a long tail made of lobes at 3 and 9 times the radius), threshold (only highlights glow, soft knee) and a per-channel tint. Its weight shares the light with the halation and glare weights (their sum stays at 1 or less). It runs on the stage's image pyramid (each lobe on the level that matches its size); the `low` quality tier uses coarser levels.
+- Vignette controls in the Optics panel: on or off on its own, corner brightness now down to 0 (black corners), start radius, falloff exponent, soft onset, round or following the picture's shape, floor, and an offset centre. At their defaults the vignette is the 0.2.0 one, bit for bit.
+- The Optics panel is grouped (Glow (bloom), Vignette, Glass halo and glare, Phosphor diffusion, Tint and room), with the master switch as its first row and one sentence at its top saying that everything in it needs that switch (still off by default).
+- Tests: the glow and vignette model against the f64 oracle (energy, radius, threshold, falloff, exact defaults, monotonic falloff, black corners, centre offset), the GPU against the oracle, a recorded fingerprint of the 0.2.0 vignette, the hard-bound sweep with the glow on, a typed value on the glow slider, and a cost study run by hand (`glow_cost_study`).
+
 ## [0.2.0] - 2026-11-20
 
 ultimateCRT v0.2.0 is the first public release (MIT licence, binaries not code-signed). It captures the window of a game or a program, runs it through a virtual CRT tube on the GPU and shows the result in a second window that can go fullscreen over the source without taking its keyboard focus; nothing is injected into the captured program. What is in it:

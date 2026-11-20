@@ -172,9 +172,9 @@ pub const MIN_DISPLAY_ASPECT: f32 = 0.25;
 /// `None` when `id` has none.
 pub fn constraint_rule(id: &str) -> Option<&'static str> {
     Some(match id {
-        "optics_halation_weight" | "optics_glare_weight" => {
-            "the halation and glare weights share the emitted light and must not sum above 1 (else the direct \
-             picture gets a negative weight); the value just set is lowered to 1 minus the other"
+        "optics_halation_weight" | "optics_glare_weight" | "optics_bloom_weight" => {
+            "the halation, glare and glow (bloom) weights share the emitted light and must not sum above 1 (else \
+             the direct picture gets a negative weight); the value just set is lowered to 1 minus the others"
         }
         "source_display_aspect" => "a forced display aspect is 0 (off) or at least 0.25",
         _ => return None,
@@ -314,10 +314,11 @@ impl Params {
     /// clamped into its hard range). True when a value changed. Each rule lowers the parameter just set, so the
     /// last edit yields and earlier ones are kept (presets and overrides apply in id order, which makes the
     /// result deterministic):
-    /// - **Optics energy:** `optics_halation_weight + optics_glare_weight <= 1`. `optics.comp` gives the direct
-    ///   picture the weight `1 - halation - glare`; above 1 it would be negative (negative light, R-49). With
-    ///   the sum at most 1 the three weights are a partition of the emitted light, so the total light of the
-    ///   picture is kept (energy conserving). `optics_diffusion_weight` is not part of the sum: the phosphor
+    /// - **Optics energy:** `optics_halation_weight + optics_glare_weight + optics_bloom_weight <= 1`.
+    ///   `optics.comp` gives the direct picture the weight `1 - halation - glare - bloom x tint x feed` (tint and
+    ///   feed in [0, 1]); above 1 it would be negative (negative light, R-49). With the sum at most 1 the weights
+    ///   are a partition of the emitted light, so the total light of the picture is kept (energy conserving).
+    ///   `optics_diffusion_weight` is not part of the sum: the phosphor
     ///   diffusion is a separate convex blend `(1 - w) x + w blur` before the halo, conserving on its own for
     ///   any `w` in its hard range [0, 1].
     /// - **Display aspect:** `source_display_aspect` is 0 (off) or at least [`MIN_DISPLAY_ASPECT`].
@@ -332,8 +333,18 @@ impl Params {
             }
         }
         match id {
-            "optics_halation_weight" => cap(&mut self.optics_halation_weight, 1.0 - self.optics_glare_weight),
-            "optics_glare_weight" => cap(&mut self.optics_glare_weight, 1.0 - self.optics_halation_weight),
+            "optics_halation_weight" => cap(
+                &mut self.optics_halation_weight,
+                1.0 - self.optics_glare_weight - self.optics_bloom_weight,
+            ),
+            "optics_glare_weight" => cap(
+                &mut self.optics_glare_weight,
+                1.0 - self.optics_halation_weight - self.optics_bloom_weight,
+            ),
+            "optics_bloom_weight" => cap(
+                &mut self.optics_bloom_weight,
+                1.0 - self.optics_halation_weight - self.optics_glare_weight,
+            ),
             "source_display_aspect" if self.source_display_aspect > 0.0 => {
                 let low = self.source_display_aspect < MIN_DISPLAY_ASPECT;
                 if low {
@@ -689,6 +700,40 @@ mod tests {
         assert_eq!(
             p.set_checked("optics_diffusion_weight", ParamValue::F32(1.5)),
             Ok(Applied::Clamped(ParamValue::F32(1.0)))
+        );
+    }
+
+    /// The glow (bloom) weight joins the energy sum: halation + glare + bloom <= 1 whatever the order, the value
+    /// just set yields, and the bloom's own hard range (0.6) applies first.
+    #[test]
+    fn the_bloom_weight_joins_the_optics_energy_sum() {
+        let f = ParamValue::F32;
+        let mut p = Params::default();
+        assert_eq!(p.set_checked("optics_halation_weight", f(0.3)), Ok(Applied::Exact));
+        assert_eq!(p.set_checked("optics_glare_weight", f(0.3)), Ok(Applied::Exact));
+        let room = 1.0f32 - 0.3 - 0.3;
+        assert_eq!(
+            p.set_checked("optics_bloom_weight", f(0.6)),
+            Ok(Applied::Clamped(f(room)))
+        );
+        let msg = clamp_message("optics_bloom_weight", f(0.6), p.get("optics_bloom_weight").unwrap());
+        assert!(msg.contains("glow") && msg.contains("must not sum above 1"), "{msg}");
+        // Raising the halation now yields to the glare and the bloom.
+        assert!(matches!(
+            p.set_checked("optics_halation_weight", f(0.9)),
+            Ok(Applied::Clamped(_))
+        ));
+        let sum = p.optics_halation_weight + p.optics_glare_weight + p.optics_bloom_weight;
+        assert!(sum <= 1.0 + 1e-6, "{sum}");
+        // Alone, the bloom is limited by its hard maximum.
+        let mut q = Params {
+            optics_halation_weight: 0.0,
+            optics_glare_weight: 0.0,
+            ..Params::default()
+        };
+        assert_eq!(
+            q.set_checked("optics_bloom_weight", f(0.9)),
+            Ok(Applied::Clamped(f(0.6)))
         );
     }
 
