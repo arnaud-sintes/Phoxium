@@ -117,6 +117,92 @@ impl SourceMap {
     }
 }
 
+/// Largest manual source scaling multiplier offered in the Source section.
+pub const MAX_MULTIPLIER: u32 = 10;
+
+/// The "Source scaling multiplier" of the Source section: the integer factor the game was upscaled by in the
+/// captured window. It is the divisor mode (`source_divisor_mode`) and the manual divisor (`--divisor`, else the
+/// source profile) seen as one choice.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Multiplier {
+    /// Detected from the captured frames (`auto`, the default).
+    #[default]
+    Auto,
+    /// The capture is the native raster (`none`, divisor 1).
+    None,
+    /// Forced (`manual`): horizontal and vertical factor, 1 to [`MAX_MULTIPLIER`] (equal when linked).
+    Manual(u32, u32),
+}
+
+impl Multiplier {
+    /// The multiplier the parameters and the manual divisor in force give (as [`SourceMap::resolve`] reads
+    /// them: a manual mode without a divisor is the automatic one).
+    pub fn of(params: &crate::params::Params, divisor: Option<(u32, u32)>) -> Multiplier {
+        use crate::params::{SOURCE_DIVISOR_MODE_MANUAL, SOURCE_DIVISOR_MODE_NONE};
+        match (params.source_divisor_mode, divisor) {
+            (SOURCE_DIVISOR_MODE_NONE, _) => Multiplier::None,
+            (SOURCE_DIVISOR_MODE_MANUAL, Some((x, y))) => Multiplier::Manual(x, y),
+            _ => Multiplier::Auto,
+        }
+    }
+
+    /// A forced value with both factors within 1 to [`MAX_MULTIPLIER`].
+    pub fn manual(x: u32, y: u32) -> Multiplier {
+        Multiplier::Manual(x.clamp(1, MAX_MULTIPLIER), y.clamp(1, MAX_MULTIPLIER))
+    }
+
+    /// The fixed divisor of the source map (`None`: detected).
+    pub fn divisor(self) -> Option<(u32, u32)> {
+        match self {
+            Multiplier::Auto => None,
+            Multiplier::None => Some((1, 1)),
+            Multiplier::Manual(x, y) => Some((x, y)),
+        }
+    }
+
+    /// Whether X and Y are the same factor.
+    pub fn linked(self) -> bool {
+        !matches!(self, Multiplier::Manual(x, y) if x != y)
+    }
+
+    /// Writes the choice to the parameters and the source profile (mode, divisor, vertical divisor when it
+    /// differs). The caller drops any command-line divisor, so the menu's choice wins for the session.
+    pub fn apply(self, params: &mut crate::params::Params, profile: &mut crate::settings::SourceProfile) {
+        use crate::params::{SOURCE_DIVISOR_MODE_AUTO, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_DIVISOR_MODE_NONE};
+        let (mode, name, divisor) = match self {
+            Multiplier::Auto => (SOURCE_DIVISOR_MODE_AUTO, "auto", None),
+            Multiplier::None => (SOURCE_DIVISOR_MODE_NONE, "none", None),
+            Multiplier::Manual(x, y) => (SOURCE_DIVISOR_MODE_MANUAL, "manual", Some((x, y))),
+        };
+        params.source_divisor_mode = mode;
+        profile.divisor_mode = Some(name.to_string());
+        profile.divisor = divisor.map(|d| d.0);
+        profile.divisor_v = divisor.filter(|d| d.0 != d.1).map(|d| d.1);
+    }
+
+    /// The factor in words: `x3`, `x2 × 3`.
+    pub fn pair_text(d: (u32, u32)) -> String {
+        if d.0 == d.1 {
+            format!("x{}", d.0)
+        } else {
+            format!("x{} \u{00D7} {}", d.0, d.1)
+        }
+    }
+
+    /// The hint shown when a forced value disagrees with the detection: `detected x3, forced x2`.
+    pub fn disagreement(self, detected: Option<(u32, u32)>) -> Option<String> {
+        let forced = self.divisor()?;
+        let detected = detected?;
+        (forced != detected).then(|| {
+            format!(
+                "detected {}, forced {}",
+                Multiplier::pair_text(detected),
+                Multiplier::pair_text(forced)
+            )
+        })
+    }
+}
+
 /// Informative frames analysed before the detected divisor is locked (unless x1 is certain earlier).
 /// A flat frame (a black boot screen, a fade) is not informative and does not count.
 const DETECT_FRAMES: u32 = 30;
@@ -439,6 +525,66 @@ mod tests {
         assert!(crate::settings::set_enum_by_name(&mut p, "source_divisor_mode", "none"));
         let (m, _) = SourceMap::resolve(&p, Some(r), Some((2, 2)));
         assert_eq!((m.client_area, m.crop, m.divisor), (false, None, Some((1, 1))));
+    }
+
+    /// The Source section's multiplier against the divisor mode and value: auto, none, manual (linked or per
+    /// axis), the profile round trip and the source map it gives.
+    #[test]
+    fn multiplier_state_mapping() {
+        use crate::params::{Params, SOURCE_DIVISOR_MODE_AUTO, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_DIVISOR_MODE_NONE};
+        use crate::settings::SourceProfile;
+        let p = Params::default();
+        assert_eq!(p.source_divisor_mode, SOURCE_DIVISOR_MODE_AUTO);
+        assert_eq!(
+            Multiplier::of(&p, Some((3, 3))),
+            Multiplier::Auto,
+            "auto ignores a divisor"
+        );
+        for (m, mode, profile_div, profile_v) in [
+            (Multiplier::Auto, SOURCE_DIVISOR_MODE_AUTO, None, None),
+            (Multiplier::None, SOURCE_DIVISOR_MODE_NONE, None, None),
+            (Multiplier::Manual(3, 3), SOURCE_DIVISOR_MODE_MANUAL, Some(3), None),
+            (Multiplier::Manual(2, 4), SOURCE_DIVISOR_MODE_MANUAL, Some(2), Some(4)),
+        ] {
+            let mut params = Params::default();
+            let mut profile = SourceProfile {
+                exe: "game.exe".into(),
+                class: "C".into(),
+                divisor: Some(7),
+                ..SourceProfile::default()
+            };
+            m.apply(&mut params, &mut profile);
+            assert_eq!(params.source_divisor_mode, mode, "{m:?}");
+            assert_eq!((profile.divisor, profile.divisor_v), (profile_div, profile_v), "{m:?}");
+            // Live: the multiplier read back from the parameters and the profile's divisor.
+            assert_eq!(Multiplier::of(&params, profile.divisor_pair()), m);
+            // The profile alone, applied at the next attach, gives the same choice and the same source map.
+            let mut fresh = Params::default();
+            assert!(profile.apply_to(&mut fresh).is_empty());
+            assert_eq!(Multiplier::of(&fresh, profile.divisor_pair()), m);
+            let (map, warnings) = SourceMap::resolve(&fresh, None, profile.divisor_pair());
+            assert!(warnings.is_empty());
+            assert_eq!(map.divisor, m.divisor());
+            // Through the settings file.
+            let mut s = crate::settings::Settings::default();
+            s.upsert_source(profile.clone());
+            let back = crate::settings::Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+            assert_eq!(back.find_source("game.exe", "C"), Some(&profile));
+        }
+        assert!(Multiplier::Manual(3, 3).linked() && Multiplier::Auto.linked());
+        assert!(!Multiplier::Manual(2, 3).linked());
+        assert_eq!(Multiplier::manual(0, 12), Multiplier::Manual(1, MAX_MULTIPLIER));
+        assert_eq!(
+            Multiplier::Manual(2, 2).disagreement(Some((3, 3))).as_deref(),
+            Some("detected x3, forced x2")
+        );
+        assert_eq!(Multiplier::Manual(3, 3).disagreement(Some((3, 3))), None);
+        assert_eq!(Multiplier::Auto.disagreement(Some((3, 3))), None);
+        assert_eq!(Multiplier::Manual(2, 2).disagreement(None), None);
+        assert_eq!(
+            Multiplier::None.disagreement(Some((2, 3))).as_deref(),
+            Some("detected x2 \u{00D7} 3, forced x1")
+        );
     }
 
     #[test]

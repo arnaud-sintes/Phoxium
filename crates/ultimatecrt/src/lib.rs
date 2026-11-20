@@ -3,6 +3,7 @@
 pub mod adapters;
 pub mod ageing;
 pub mod app;
+pub mod bars;
 pub mod capture;
 pub mod cli;
 pub mod controls;
