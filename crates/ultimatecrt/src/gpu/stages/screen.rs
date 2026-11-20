@@ -24,9 +24,14 @@
 //! error bound): `screen_lines.comp` writes the standard beam's pass-1 entries of every raster line at raster
 //! columns on a uniform grid into the stage's line images, `screen_warp.comp` evaluates each host pixel from
 //! them through the geometry, then the mask and the opening. The decision is the CPU's, per frame, from the
-//! parameters and constants ([`warp_plan`], in [`Stage::prepare`]): the identity and the separable geometries
-//! (margin, overscan, `raster_scale`, convergence) keep the single `screen.comp` pass, bit for bit and at the
-//! same cost, and nothing of the warp path is recorded or allocated for them. This is the per-stage form of
+//! parameters and constants ([`warp_plan`], in [`Stage::prepare`]). In the `exact` quality tier the identity and
+//! the separable geometries (margin, overscan, `raster_scale`, convergence) keep the single `screen.comp` pass, bit
+//! for bit, and nothing of the warp path is recorded or allocated for them. Quality tiers (T-48, `crate::quality`):
+//! from `standard` on, an unscaled separable raster (no overscan, no running ABL breathing) also takes the two
+//! passes, on a grid aligned with the host columns (ox 1, every host pixel on a grid column, Catmull-Rom weights
+//! (0, 1, 0, 0)): the entries are the tile path's, computed once per (line, column) instead of once per tile, at
+//! about 0.4 times the cost, within one FP16 step of `exact`; from `fast` on, a scaled separable raster too
+//! (interpolated, within the warp path's contract). This is the per-stage form of
 //! `Stage::is_identity`: `screen` changes domain, so the pipeline never skips it, and a slot `warp` between
 //! beam and mask would need a raster-space domain the image contract does not have (and would cut the slot
 //! `screen` that every test and timing names). So the slot stays one slot; like `abl` it records two passes and
@@ -41,7 +46,8 @@
 //! `interlace_mode` off the driver compiles the progressive raster alone and the picture is bit-identical to the
 //! build without the module (a branch on the parameter alone changed the driver's code enough to flip a few FP16
 //! results, about 12 values of 3.7 million). The variants with the constant true (the three shaders) are created
-//! by `prepare` the first time a frame needs them and kept until `destroy`.
+//! by `prepare` the first time a frame needs them and kept until `destroy`; the same holds for the `low` tier's
+//! beam reach (constant 1 `BEAM_REACH_SIGMAS`, 3 instead of 4, T-48), alone or with the interlace ([`VariantKey`]).
 
 use std::cell::Cell;
 
@@ -142,6 +148,12 @@ fn raster_lines(fc: &FrameConstants) -> u32 {
 /// raster px, overscan included) is at least [`WARP_SIGMA_STEPS`] grid steps at some `ox` of 1, 2 or 4 (the
 /// smallest is taken). Below 0.3 raster px the standard quality keeps the per-pixel reference form.
 pub fn warp_plan(fc: &FrameConstants, params: &Params) -> Option<WarpPlan> {
+    warp_plan_with(fc, params, true)
+}
+
+/// [`warp_plan`] knowing whether the `abl` slot runs in the frame (`abl_runs`): the ABL breathing scales the
+/// raster only then (`geometry_raster_scale`), so without it a breathing setting leaves the raster unscaled.
+pub fn warp_plan_with(fc: &FrameConstants, params: &Params, abl_runs: bool) -> Option<WarpPlan> {
     let positive = |v: f32| v > 0.0; // false for NaN
     let sep = separable(params);
     // T-48: the `exact` tier keeps the tile path of `screen.comp` for the separable geometries (the output before
@@ -166,8 +178,15 @@ pub fn warp_plan(fc: &FrameConstants, params: &Params) -> Option<WarpPlan> {
     // A separable geometry whose raster is not scaled (no overscan, no ABL breathing: raster px = host px) puts
     // every host pixel's footprint on a grid column at ox 1 (Catmull-Rom weights (0, 1, 0, 0)): no interpolation,
     // whatever the spot size, so the line images hold exactly the tile path's entries (to their FP16 storage).
-    let aligned =
-        sep && params.geometry_overscan_x == 0.0 && params.geometry_overscan_y == 0.0 && params.abl_breathing == 0.0;
+    let aligned = sep
+        && params.geometry_overscan_x == 0.0
+        && params.geometry_overscan_y == 0.0
+        && (params.abl_breathing == 0.0 || !abl_runs);
+    // A scaled separable raster (overscan, breathing) needs the horizontal interpolation, an approximation: only
+    // from the `fast` tier on (`standard` keeps the tile path there, so it stays within one FP16 step of `exact`).
+    if sep && !aligned && quality::tier(params) < Tier::Fast {
+        return None;
+    }
     let steps = quality::warp_sigma_steps(params, WARP_SIGMA_STEPS);
     let ox = if aligned {
         1
@@ -561,7 +580,11 @@ impl Stage for Screen {
             };
             self.variant_pipelines.push((key, v));
         }
-        self.warp = if runs { warp_plan(fc, params) } else { None };
+        self.warp = if runs {
+            warp_plan_with(fc, params, self.abl_runs.get())
+        } else {
+            None
+        };
         match self.warp {
             None => {
                 if self.lines_size != (0, 0) {
@@ -688,15 +711,39 @@ mod tests {
         };
         assert_eq!(warp_plan(&fc, &d).map(|w| w.ox), Some(1), "identity, standard");
         assert_eq!(warp_plan(&fc, &tiny).map(|w| w.ox), Some(1), "aligned grid, tiny spot");
-        for p in separable {
-            let p = Params {
-                quality_tier: d.quality_tier,
-                ..p
-            };
-            assert_eq!(warp_plan(&fc, &p).map(|w| w.ox), Some(1), "separable, standard");
-        }
+        // Overscan scales the raster: the line path would interpolate, so standard keeps the tile path and fast
+        // takes the line path; the unscaled one (a radius without curvature) is aligned in both.
+        let tier = |p: Params, t: u32| Params { quality_tier: t, ..p };
+        let fast = crate::params::QUALITY_TIER_FAST;
+        assert_eq!(
+            warp_plan(&fc, &tier(separable[0], d.quality_tier)),
+            None,
+            "scaled, standard"
+        );
+        assert_eq!(
+            warp_plan(&fc, &tier(separable[0], fast)).map(|w| w.ox),
+            Some(1),
+            "scaled, fast"
+        );
+        assert_eq!(
+            warp_plan(&fc, &tier(separable[1], d.quality_tier)).map(|w| w.ox),
+            Some(1),
+            "unscaled, standard"
+        );
+        // The ABL breathing scales the raster only while the abl slot runs.
+        let breathing = Params {
+            abl_breathing: 0.03,
+            ..d
+        };
+        assert_eq!(warp_plan_with(&fc, &breathing, true), None, "breathing, abl runs");
+        assert_eq!(
+            warp_plan_with(&fc, &breathing, false).map(|w| w.ox),
+            Some(1),
+            "breathing, abl off"
+        );
         let scaled_tiny = Params {
             geometry_overscan_x: 0.05,
+            quality_tier: fast,
             ..tiny
         };
         assert_eq!(

@@ -1184,6 +1184,9 @@ impl Pipeline {
         let mut abl_runs = false;
         for i in 0..self.chain.len() {
             let runs = have_source && self.plan.iter().any(|&(j, m, _)| j == i && m == Mode::Run);
+            // `screen` decides its beam path in `prepare` (T-48: an unscaled raster when `abl` does not run),
+            // so every stage learns whether an earlier `abl` runs before its own `prepare`.
+            self.chain[i].stage.set_abl_runs(abl_runs);
             self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
             abl_runs |= runs && self.chain[i].stage.abl_state().is_some();
         }
