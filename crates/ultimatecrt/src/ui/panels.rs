@@ -97,11 +97,8 @@ pub const PANELS: &[PanelDef] = &[
     PanelDef {
         name: OPTICS,
         stages: &["optics"],
-        first: &[],
-        empty_note: Some(
-            "Not implemented yet: halation, glare and bloom will come with the optics stage. The picture passes \
-             through it unchanged.",
-        ),
+        first: &["optics_enable", "optics_halation_weight", "optics_glare_weight"],
+        empty_note: None,
     },
     PanelDef {
         name: OUTPUT,
@@ -786,7 +783,11 @@ mod tests {
         assert_eq!(ids[..2], ["output_headroom_mode", "exposure"]);
         assert!(ids.contains(&"mask_depth"));
         assert!(!panel_params("Mask").iter().any(|m| m.id == "mask_depth"));
-        assert!(panel_params(OPTICS).is_empty() && panel(OPTICS).unwrap().empty_note.is_some());
+        let optics: Vec<&str> = panel_params(OPTICS).iter().map(|m| m.id).collect();
+        assert_eq!(
+            optics[..3],
+            ["optics_enable", "optics_halation_weight", "optics_glare_weight"]
+        );
     }
 
     #[test]

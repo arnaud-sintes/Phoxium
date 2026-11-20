@@ -9,7 +9,7 @@ White: about 9300 K as the tube white (D93), P22 primaries. D93 has linear sRGB 
 Spot growth: 0.9 -> 1.6 mm with n = 0.42 keeps a non-negative floor.
 Amplifier: 6 MHz, no arcade row in CRT.md, the consumer RGB class 4 to 8 MHz is used. The amp stage blur is 0.1325 x 5.37 / 6 = 0.119 source px, so amp_samples = 16. Fall/rise ratio 0.8: slow rise, isolated bright pixels lose light; the opposite direction would brighten them and is not chosen.
 M4 values (T-64): persistence on with the Kuhn P22 constants, tail strength 1 (the Ni-killed reduction, 4 to 13 times on the 8 ms residual, is not applied: no CRT.md statement for this tube); spherical 1R faceplate, R = 1.767 x 450 mm = 795 mm (estimate: arcade monitors use TV-class tubes, no arcade value). ABL stays off and convergence stays 0: CRT.md has neither value for arcade chassis. Left at the parameter defaults because CRT.md gives only class ranges or qualitative statements: saturation (off), raster breathing (0; consumer 1 to 5 %, broadcast under 1 %), overscan, pincushion, trapezoid, rotation, eye distance (0, parallel view), phosphor frame rate (60 Hz, set it to the output refresh rate), mask_tier_blend (0.4, D-15).
-Not yet parameters (T-63 values kept for later): faceplate thickness 11 mm (LG.Philips 9 to 11.5 mm for 400 to 500 mm diagonals), halation (12 mm / 3 %).
+Optics (T-45): the faceplate values below (thickness, halation weight, transmission where CRT.md gives one) are set; the others keep the table defaults. The optics stage stays off (optics_enable not set: D-6, D-24, halation is not in the first usable version).
 Headroom (T-84, D-16; default auto, T-84b): a full-white field is not flat on the tube. On the reference host 2560 x 1440 with a 320 x 240 source the readout (crate::headroom) is mask peak 3.720 x scanline peak 1.001 x white matrix maximum 1.347 x exposure 0.74 = 3.712: the brightest elements are 3.712 times panel white, so the exposure alone does not keep white unclipped (the earlier 'no clip' statement covered the unmasked white only). The preset sets mask_depth = 0.25 and does not set output_headroom_mode: it inherits the parameter default auto, which resolves to mask_depth here (the mask is resolved on this host, physical peak 3.720). Measured by the flat-white chain test of tests/presets.rs (ABL off; shares of the intended white mean): the T-46 hard clip loses 44.1 %; the shoulder (knee 0.6, white point = readout x 1.02, non-physical above the knee) keeps 54.6 % with no hard clip; the physical mode keeps every element unclipped at an effective exposure of 0.195 (26.4 %); the mask depth mode (non-physical, white mean kept, exposure derived from the lowered readout so nothing clips) keeps 41.6 % at the parameter default depth 0.5 and 58.5 % at this preset's depth 0.25, which is what the default gives. That is below the 85 % target of the test and is its documented exception: the readout gives a depth of about 0.05 for 85 %, a nearly flat mask (95 % of the stripe contrast removed), so 0.25 is kept as a compromise: the lit stripes are 1 + 0.25 (3.720 - 1) = 1.680 times the mean instead of 3.720. A lower depth keeps more white and flattens the stripes, a higher one the reverse; the shoulder or physical modes stay selectable. The readout changes with the host size and the source lines.
 """
 
@@ -36,6 +36,8 @@ exposure = 0.74
 output_match_srgb = false
 output_dither = "noise"
 mask_depth = 0.25
+optics_glass_thickness_mm = 11.0
+optics_halation_weight = 0.03
 
 [provenance]
 tube_visible_height_mm = "E: CRT.md Starting presets, 19 in arcade 36 x 27 cm"
@@ -60,3 +62,5 @@ exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.7
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"
 mask_depth = "E: T-84b (owner decision 2026-11-19, default to C; user-tunable, no source): a compromise, measured by the flat-white chain test on 2560 x 1440 (320 x 240 source, ABL off): keeps 58.5 % of the intended white at 0.25 against 41.6 % at the parameter default 0.5; about 0.05 would keep 85 % but leaves a nearly flat mask (see notes)"
+optics_glass_thickness_mm = "S: CRT.md Research pass T-63 item 4 (12 -> 11 mm, LG.Philips 9 to 11.5 mm for 400 to 500 mm diagonals, US 7,176,611); a class value"
+optics_halation_weight = "E: CRT.md Starting presets, 19 in arcade halation weight 3 %"

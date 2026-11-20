@@ -1,0 +1,44 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `optics` (T-45), gaussians method (cost-study candidate, slow): horizontal pass of four Gaussians of
+// sigma pc.w[0] (host px) at full resolution, out to pc.info.x px; one output image per channel, the four
+// Gaussians in its four components. Sampled, normalised weights (sigma of several px).
+
+#include "params.glsl"
+#include "common.glsl"
+#include "optics.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D out_r;
+layout(set = 1, binding = 2, rgba16f) uniform writeonly image2D out_g;
+layout(set = 1, binding = 3, rgba16f) uniform writeonly image2D out_b;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = textureSize(light_in, 0);
+    if (any(greaterThanEqual(p, sz))) {
+        return;
+    }
+    int r = pc.info.x;
+    vec4 inv2s2 = 0.5 / (pc.w[0] * pc.w[0]);
+    vec4 norm = 1.0 / (pc.w[0] * 2.5066283);
+    vec4 sr = vec4(0.0);
+    vec4 sg = vec4(0.0);
+    vec4 sb = vec4(0.0);
+    int x0 = max(p.x - r, 0);
+    int x1 = min(p.x + r, sz.x - 1);
+    for (int x = x0; x <= x1; ++x) {
+        float d = float(x - p.x);
+        vec4 wt = norm * exp(-d * d * inv2s2);
+        vec3 v = texelFetch(light_in, ivec2(x, p.y), 0).rgb;
+        sr += wt * v.r;
+        sg += wt * v.g;
+        sb += wt * v.b;
+    }
+    imageStore(out_r, p, round_f16(sr));
+    imageStore(out_g, p, round_f16(sg));
+    imageStore(out_b, p, round_f16(sb));
+}

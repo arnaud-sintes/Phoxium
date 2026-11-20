@@ -1,0 +1,127 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `optics` (ARCHITECTURE 3.7, image contract; T-45, CRT.md rule 7, QUESTIONS PHY-10): tube domain -> tube
+// domain, linear light. The composite pass, after the pyramid, halo and horizontal diffusion passes (src/gpu/stages/optics.rs).
+// Model (oracle crates/crt-model/src/optics.rs, module doc):
+//   D   = (1 - w_d) L + w_d (G_sigma * L)                    phosphor-layer diffusion (separable: optics_diffuse.comp, then here)
+//   G   = (1 - w_h - w_g) D + w_h H + w_g mean(L)             halo H (kernel, pyramid or gaussians), glare
+//   out = v^(rho^2) tint G + E (T tint)^2 r_s / (pi L_w)      vignette, tint, ambient reflection
+// The halo and the mean are computed from L, not D: the diffusion conserves the mean and is far narrower than
+// the halo (the difference is part of the measured error).
+//
+// pc.info: x mode (0 no halo, 1 kernel, 2 pyramid, 3 gaussians), y kernel level l, z diffusion radius R_d
+// (<= OPT_DIFF_MAX, 0 = none), w pyramid levels used. pc.scal: x mean scale (4^n / (W H): the top texel of an
+// n-level zero-padded box pyramid times it is the image mean). pc.w[0..2]: pyramid amplitudes, levels 1 to 12.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "optics.glsl"
+
+#define TILE 8
+
+layout(local_size_x = TILE, local_size_y = TILE) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+layout(set = 1, binding = 2, rgba16f) uniform readonly image2D diff_img;
+layout(set = 1, binding = 4, rgba16f) uniform readonly image2D halo_img;
+layout(set = 1, binding = 5, rgba16f) uniform readonly image2D top;
+layout(set = 1, binding = 6, rgba16f) uniform readonly image2D level1;
+layout(set = 1, binding = 7, rgba16f) uniform readonly image2D level2;
+layout(set = 1, binding = 8, rgba16f) uniform readonly image2D level3;
+layout(set = 1, binding = 9, rgba16f) uniform readonly image2D level4;
+layout(set = 1, binding = 10, rgba16f) uniform readonly image2D level5;
+layout(set = 1, binding = 11, rgba16f) uniform readonly image2D level6;
+layout(set = 1, binding = 12, rgba16f) uniform readonly image2D level7;
+layout(set = 1, binding = 13, rgba16f) uniform readonly image2D level8;
+layout(set = 1, binding = 14, rgba16f) uniform readonly image2D level9;
+layout(set = 1, binding = 15, rgba16f) uniform readonly image2D level10;
+layout(set = 1, binding = 16, rgba16f) uniform readonly image2D level11;
+layout(set = 1, binding = 17, rgba16f) uniform readonly image2D level12;
+
+OPT_BILINEAR(bilin_halo, halo_img)
+OPT_BILINEAR(bilin1, level1)
+OPT_BILINEAR(bilin2, level2)
+OPT_BILINEAR(bilin3, level3)
+OPT_BILINEAR(bilin4, level4)
+OPT_BILINEAR(bilin5, level5)
+OPT_BILINEAR(bilin6, level6)
+OPT_BILINEAR(bilin7, level7)
+OPT_BILINEAR(bilin8, level8)
+OPT_BILINEAR(bilin9, level9)
+OPT_BILINEAR(bilin10, level10)
+OPT_BILINEAR(bilin11, level11)
+OPT_BILINEAR(bilin12, level12)
+
+float pyr_amp(int k) {
+    return pc.w[k / 4][k % 4];
+}
+
+vec3 pyramid_halo(ivec2 p) {
+    int n = pc.info.w;
+    vec3 h = vec3(0.0);
+    if (n > 0) h += pyr_amp(0) * bilin1(p, 1);
+    if (n > 1) h += pyr_amp(1) * bilin2(p, 2);
+    if (n > 2) h += pyr_amp(2) * bilin3(p, 3);
+    if (n > 3) h += pyr_amp(3) * bilin4(p, 4);
+    if (n > 4) h += pyr_amp(4) * bilin5(p, 5);
+    if (n > 5) h += pyr_amp(5) * bilin6(p, 6);
+    if (n > 6) h += pyr_amp(6) * bilin7(p, 7);
+    if (n > 7) h += pyr_amp(7) * bilin8(p, 8);
+    if (n > 8) h += pyr_amp(8) * bilin9(p, 9);
+    if (n > 9) h += pyr_amp(9) * bilin10(p, 10);
+    if (n > 10) h += pyr_amp(10) * bilin11(p, 11);
+    if (n > 11) h += pyr_amp(11) * bilin12(p, 12);
+    return h;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = textureSize(light_in, 0);
+    if (any(greaterThanEqual(p, sz))) {
+        return;
+    }
+    int rd = pc.info.z;
+    vec3 blur = vec3(0.0);
+    if (rd > 0) {
+        // Phosphor-layer diffusion, vertical half of the separable sum (the horizontal half is optics_diffuse.comp).
+        for (int d = -rd; d <= rd; ++d) {
+            int y = p.y + d;
+            if (y >= 0 && y < sz.y) {
+                blur += opt_buf.weight[abs(d)] * imageLoad(diff_img, ivec2(p.x, y)).rgb;
+            }
+        }
+    }
+    vec4 x = texelFetch(light_in, p, 0);
+    float wd = rd > 0 ? clamp(params.optics_diffusion_weight, 0.0, 1.0) : 0.0;
+    vec3 d = (1.0 - wd) * x.rgb + wd * blur;
+
+    int mode = pc.info.x;
+    float wh = mode != 0 ? clamp(params.optics_halation_weight, 0.0, 1.0) : 0.0;
+    float wg = clamp(params.optics_glare_weight, 0.0, 1.0);
+    vec3 h = vec3(0.0);
+    if (mode == 1) {
+        h = bilin_halo(p, pc.info.y);
+    } else if (mode == 2) {
+        h = pyramid_halo(p);
+    } else if (mode == 3) {
+        h = imageLoad(halo_img, p).rgb;
+    }
+    vec3 mean = wg > 0.0 ? imageLoad(top, ivec2(0)).rgb * pc.scal.x : vec3(0.0);
+    vec3 g = (1.0 - wh - wg) * d + wh * h + wg * mean;
+
+    // Vignette: v^(rho^2), rho = distance from the image centre over the raster half diagonal.
+    vec2 c = 0.5 * vec2(frame.tube_size);
+    vec2 r = vec2(frame.tube_size - 2 * frame.raster_margin);
+    float hd2 = max(0.25 * dot(r, r), 1.0);
+    vec2 dp = vec2(p) + 0.5 - c;
+    float vc = clamp(params.optics_vignette_corner, 1e-3, 1.0);
+    float v = exp2(dot(dp, dp) / hd2 * log2(vc));
+
+    vec3 tint = params.optics_tint_rgb;
+    vec3 tt = params.optics_glass_transmission * tint;
+    vec3 amb = max(params.optics_ambient_lux, 0.0) * tt * tt * params.optics_screen_reflectance
+               / (3.14159265 * max(params.optics_white_nits, 1e-3));
+    imageStore(light_out, p, round_f16(vec4(v * tint * g + amb, x.a)));
+}

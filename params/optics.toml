@@ -1,0 +1,204 @@
+# Optics stage parameters (ARCHITECTURE section 5, step 6; shaders/optics*.comp, src/gpu/stages/optics.rs).
+# Format: crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
+# dimensionless. T-45 (CRT.md rule 7, "Glass, halation, glare and reflections"; QUESTIONS PHY-10). The model and
+# its derivation are in the oracle crates/crt-model/src/optics.rs. Off by default (D-6, D-24: halation is not in
+# the first usable version): with optics_enable off the stage is skipped as an exact identity.
+
+[[param]]
+id = "optics_enable"
+stage = "optics"
+type = "bool"
+unit = "1"
+default = false
+tag = "D"
+source = "PLAN D-6 and D-24 (optics off in the first usable version); CRT.md rule 7 and Glass, halation, glare and reflections"
+description = "Faceplate optics on or off. On: phosphor-layer diffusion, the halation ring of the glass, veiling glare, vignetting, glass tint and ambient reflection, each with its own amount below. Off: the picture passes unchanged."
+group = "Optics"
+
+[[param]]
+id = "optics_glass_thickness_mm"
+stage = "optics"
+type = "f32"
+unit = "mm"
+default = 12.0
+min = 5.0
+max = 30.0
+tag = "S"
+source = "CRT.md Faceplate: centre thickness 9 to 13.5 mm for 400 to 760 mm diagonals, 15 mm on a 28 in flat-face tube (patents US 7,176,611, US 4,537,322, US 6,133,686, US Re. 39,739)"
+description = "Thickness of the faceplate glass at the centre. The halation ring sits at 2 t tan(asin(1 / n)), about 1.75 times this thickness from every bright point (21 mm for 12 mm of glass)."
+group = "Optics"
+
+[[param]]
+id = "optics_glass_index"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 1.52
+min = 1.45
+max = 1.65
+tag = "K"
+source = "CRT.md Faceplate: n about 1.52 (CRT panel glass 1.52 to 1.54), critical angle asin(1 / n) = 41 deg"
+description = "Refractive index of the faceplate glass. It sets the critical angle of total internal reflection, so the ring radius (1.747 t at 1.52) and the strength of the weak Fresnel haze inside the ring."
+group = "Optics"
+advanced = true
+
+[[param]]
+id = "optics_glass_transmission"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.85
+min = 0.25
+max = 1.0
+tag = "S"
+source = "CRT.md Faceplate: clear 85 to 90 %, grey 70 to 75 %, dark tint 40 to 55 %, extra dark 30 to 40 %; RCA 1983 clear faceplates 84 to 85.5 %; Starting presets: clear 0.85"
+description = "Transmission of the faceplate glass through its centre thickness at normal incidence. The halo light crosses the glass obliquely twice more (T^(2 / cos)), so dark glass suppresses the halo tail; the room light reflected by the screen crosses it twice (T^2). The picture's own white is measured through the glass, so this does not dim it."
+group = "Optics"
+
+[[param]]
+id = "optics_halation_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.015
+min = 0.0
+max = 0.1
+tag = "E"
+source = "CRT.md Halation: amplitude 0.5 to 5 % (unresolved; only the total veiling glare is sourced, about 4 % for a colour monitor, Flynn and Badano 1999); QUESTIONS PHY-10 default about 1.5 %; Starting presets 1 to 3 %"
+description = "Fraction of the emitted light that ends in the halation halo (the ring around every bright point and its faint inner haze). The direct picture keeps the rest, so a full white field keeps its level. The ring's shape comes from the glass thickness, index and transmission."
+group = "Optics"
+
+[[param]]
+id = "optics_glare_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.01
+min = 0.0
+max = 0.1
+tag = "E"
+source = "CRT.md Other stray-light mechanisms (light leaking behind the phosphor, nearly uniform) and Halation (total glare about 4 % on a colour monitor, 0.4 % on a medical one, halation included); ANSI contrast 100 to 150:1"
+description = "Fraction of the emitted light spread evenly over the whole screen (veiling glare): every point receives this fraction of the mean picture level, so dark areas lift on bright pictures. The picture keeps its total light."
+group = "Optics"
+
+[[param]]
+id = "optics_diffusion_weight"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.1
+min = 0.0
+max = 1.0
+tag = "E"
+source = "CRT.md Other stray-light mechanisms: phosphor-layer scatter gives a near-field glow on the scale of 0.05 to 0.5 mm that partly fills the black-matrix gaps (no amplitude sourced)"
+description = "Fraction of the light scattered sideways inside the phosphor layer (a short glow of the size below around every lit element). Energy conserving."
+group = "Optics"
+
+[[param]]
+id = "optics_diffusion_mm"
+stage = "optics"
+type = "f32"
+unit = "mm"
+default = 0.15
+min = 0.01
+max = 0.5
+tag = "E"
+source = "CRT.md Other stray-light mechanisms: near-field glow on the scale of 0.05 to 0.5 mm"
+description = "Size of the phosphor-layer glow: the sigma of its Gaussian spread. On the GPU the spread is limited to 16 host pixels (about 5 sigma at 3.2 px of sigma); beyond, the outer part is cut and the rest renormalised."
+group = "Optics"
+advanced = true
+
+[[param]]
+id = "optics_vignette_corner"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.85
+min = 0.5
+max = 1.0
+tag = "S"
+source = "CRT.md Uniformity: centre-to-corner luminance 73 % (Barco CDCT 6551), 87 % (Sony 17se), 70 to 90 % typical; a 21 in datasheet specifies 80 to 110 %. Profile v^(rho^2) from the glass thickness growing with the square of the radius, T_edge = T_centre^(t_edge / t_centre) [D]"
+description = "Brightness at the corners of the raster relative to the centre (1 = no vignetting). It falls off as v^(rho^2), rho being the distance from the centre over the half diagonal."
+group = "Optics"
+
+[[param]]
+id = "optics_tint_rgb"
+stage = "optics"
+type = "vec3"
+unit = "1"
+default = [1.0, 1.0, 1.0]
+min = 0.5
+max = 1.0
+tag = "E"
+source = "CRT.md Faceplate (tinted glass classes); the tube white of params/colour.toml is taken as measured through the glass at the centre, so (1, 1, 1) is neutral"
+description = "Relative transmission of the glass per channel (red, green, blue). (1, 1, 1) is neutral: the tube white already includes the glass. Lower one channel to tint the picture and the reflected room light."
+group = "Optics"
+advanced = true
+
+[[param]]
+id = "optics_ambient_lux"
+stage = "optics"
+type = "f32"
+unit = "lx"
+default = 0.0
+min = 0.0
+max = 500.0
+tag = "E"
+source = "CRT.md Surface coatings and reflections: diffuse screen reflectance T^2 x r_s; raised blacks in a lit room about T^2 x 15 to 40 % of the ambient [D][E]"
+description = "Room light falling on the screen (illuminance). The screen reflects it diffusely, lifting the blacks evenly: E (T tint)^2 r_s / (pi white) in units of the tube white. 0 is a dark room. The mirror-like reflection of lamps is not modelled."
+group = "Optics"
+
+[[param]]
+id = "optics_screen_reflectance"
+stage = "optics"
+type = "f32"
+unit = "1"
+default = 0.25
+min = 0.05
+max = 0.5
+tag = "E"
+source = "CRT.md Surface coatings and reflections: raised blacks about T^2 x 15 to 40 % of the ambient (phosphor reflectance about 0.7 times the open matrix fraction; unlit screen without filter 20 to 35 %)"
+description = "Diffuse reflectance r_s of the unlit phosphor screen and black matrix behind the glass (the glass factor T^2 is applied on top). Used only with room light."
+group = "Optics"
+advanced = true
+
+[[param]]
+id = "optics_white_nits"
+stage = "optics"
+type = "f32"
+unit = "cd/m2"
+default = 100.0
+min = 30.0
+max = 500.0
+tag = "S"
+source = "CRT.md Luminance and contrast: broadcast reference white 100 cd/m^2 (80 to 120 in practice), PC monitors about 150 typical"
+description = "Luminance of the tube white, used only to express the reflected room light in units of that white."
+group = "Optics"
+advanced = true
+
+[[param]]
+id = "optics_halo_method"
+stage = "optics"
+type = "enum"
+unit = "1"
+default = "kernel"
+values = ["kernel", "pyramid", "gaussians"]
+tag = "E"
+source = "QUESTIONS PHY-10 cost study (T-44): kernel = the exact halo kernel on one level of a box pyramid, bilinear upsample (chosen); pyramid = least-squares mix of the pyramid levels (bloom-like, cannot form a ring); gaussians = least-squares mix of four separable Gaussians at full resolution (slow, comparison only)"
+description = "How the wide halo is computed. Kernel (default): the physical ring kernel evaluated on a coarse level of an image pyramid, then interpolated. Pyramid: a weighted sum of blurred pyramid levels (cheaper, the ring becomes a soft glow). Gaussians: four large Gaussian blurs at full resolution (slow, for comparison)."
+group = "Optics"
+advanced = true
+
+[[param]]
+id = "optics_halo_taps"
+stage = "optics"
+type = "i32"
+unit = "1"
+default = 24
+min = 8
+max = 48
+tag = "E"
+source = "QUESTIONS PHY-10 cost study (T-44): the pyramid level of the kernel method is the finest whose texels keep the kernel radius within this many texels"
+description = "Quality of the kernel method: the largest halo kernel radius in texels of the pyramid level it runs on. Higher values use a finer level (sharper ring, cost grows with its square)."
+group = "Optics"
+advanced = true

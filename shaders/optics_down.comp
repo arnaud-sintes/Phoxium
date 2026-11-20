@@ -1,0 +1,32 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `optics` (T-45), pyramid level k from level k - 1: 2 x 2 box mean, zero outside the previous level.
+// See include/optics.glsl and optics_down_input.comp.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "optics.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0, rgba16f) uniform readonly image2D src;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D dst;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(dst)))) {
+        return;
+    }
+    ivec2 ss = imageSize(src);
+    vec3 acc = vec3(0.0);
+    for (int j = 0; j < 2; ++j) {
+        for (int i = 0; i < 2; ++i) {
+            ivec2 q = 2 * p + ivec2(i, j);
+            if (all(lessThan(q, ss))) {
+                acc += imageLoad(src, q).rgb;
+            }
+        }
+    }
+    imageStore(dst, p, round_f16(vec4(0.25 * acc, 1.0)));
+}

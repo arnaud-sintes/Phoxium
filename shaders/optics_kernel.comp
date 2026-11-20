@@ -1,0 +1,49 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `optics` (T-45), kernel method: the halo at the centres of the level-l texels,
+//   H(c) = sum_d k(d) Lbar(c + d),
+// Lbar the level texel (block mean of 2^l x 2^l host pixels, zero outside the image) and k(d) the mass of the
+// normalised halo kernel (crt_model::optics::Halo) over the block at offset d from the centre block, computed on
+// the CPU (src/gpu/stages/optics.rs) and stored as a quadrant (the kernel is radially symmetric). pc.info.x = R,
+// the kernel radius in texels.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "optics.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 1, binding = 0, rgba16f) uniform readonly image2D src;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D dst;
+
+// The kernel quadrant, copied once per workgroup (a buffer read per tap dominated the pass). OPT_TAPS_MAX: the
+// largest radius, `TAPS_MAX` of src/gpu/stages/optics.rs.
+#define OPT_TAPS_MAX 48
+shared float kw[(OPT_TAPS_MAX + 1) * (OPT_TAPS_MAX + 1)];
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = imageSize(dst);
+    int r = min(pc.info.x, OPT_TAPS_MAX);
+    int n = (r + 1) * (r + 1);
+    for (int i = int(gl_LocalInvocationIndex); i < n; i += 64) {
+        kw[i] = opt_buf.weight[OPT_KERNEL_OFFSET + i];
+    }
+    barrier();
+    if (any(greaterThanEqual(p, sz))) {
+        return;
+    }
+    vec3 acc = vec3(0.0);
+    int y0 = max(p.y - r, 0);
+    int y1 = min(p.y + r, sz.y - 1);
+    int x0 = max(p.x - r, 0);
+    int x1 = min(p.x + r, sz.x - 1);
+    for (int y = y0; y <= y1; ++y) {
+        int row = abs(y - p.y) * (r + 1);
+        for (int x = x0; x <= x1; ++x) {
+            acc += kw[row + abs(x - p.x)] * imageLoad(src, ivec2(x, y)).rgb;
+        }
+    }
+    imageStore(dst, p, round_f16(vec4(acc, 1.0)));
+}
