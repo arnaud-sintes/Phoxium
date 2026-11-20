@@ -164,7 +164,7 @@ hard_max = 20.0
 hard_why = "each beam moves by half of it: 20 mm is the 10 mm limit of one beam's misconvergence; the reach of the beam sums grows with it (frame cost)"
 tag = "E"
 source = "CRT.md Convergence, purity and landing: in-line red and blue errors roughly mirror images about green, growing with the distance from the centre; 0.3 to 0.8 mm at the corners on monitors, up to 2 mm on TVs, 2 to 3 mm on cheap sets. 0 = off (the neutral identity)"
-description = "Colour fringes growing toward the edges: how far apart red and blue land at the picture corner, along the line from the centre. Red moves outward by half of it, blue inward by the other half, green stays. Negative: red inward. 0 = off. 0.5 to 1 mm looks like a good monitor, 2 to 3 mm like a cheap TV."
+description = "Colour fringes growing toward the edges: how far apart red and blue land at the picture corner, along the line from the centre. Red moves outward by half of it, blue inward by the other half, green stays. Negative: red inward. 0 = off. Recommended: 0.5 to 1 mm for a monitor, 1.5 to 2 mm for a TV. Above about 2 mm the fringes get strong and a colour moire can appear at the sides (3 mm, live review 2026-11-20)."
 group = "Chromatic aberration"
 
 [[param]]
@@ -180,7 +180,7 @@ hard_max = 20.0
 hard_why = "a distance is not negative (the angle gives the direction); each beam moves by half of it, at most the 10 mm limit of one beam's misconvergence"
 tag = "E"
 source = "CRT.md Convergence, purity and landing: static (centre) misconvergence 0.2 to 0.6 mm on monitors, 0.5 to 1.5 mm on TVs. 0 = off (the neutral identity)"
-description = "Colour fringes of the same size everywhere: how far apart red and blue land, in the direction set by the angle. Red moves by half of it, blue by the other half the opposite way. 0 = off."
+description = "Colour fringes of the same size everywhere: how far apart red and blue land, in the direction set by the angle. Red moves by half of it, blue by the other half the opposite way. 0 = off. Recommended: 0.2 to 0.5 mm."
 group = "Chromatic aberration"
 
 [[param]]

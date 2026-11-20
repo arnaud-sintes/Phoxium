@@ -2,7 +2,9 @@
 # Format: crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Units: "1" means
 # dimensionless. T-45 (CRT.md rule 7, "Glass, halation, glare and reflections"; QUESTIONS PHY-10). The model and
 # its derivation are in the oracle crates/crt-model/src/optics.rs. Off by default (D-6, D-24: halation is not in
-# the first usable version): with optics_enable off the stage is skipped as an exact identity.
+# the first usable version): with optics_enable off the stage is skipped as an exact identity. The halation and
+# glare weights default to 0 (opt-in; live finding 2026-11-20, QUESTIONS PHY-10): enabling Optics alone lifts no
+# black; the shipped presets set their own halation.
 #
 # Entries are in menu order: the master switch first, then one `group` per subheading of the Optics panel (Glow
 # (bloom), Vignette, Glass halo and glare, Phosphor diffusion, Tint and room; src/ui/panels.rs). The glow and the
@@ -64,7 +66,7 @@ max = 1.0
 hard_why = "a mixing fraction in [0, 1]"
 tag = "E"
 source = "crt_model::optics::bloom_lobe_weights: lobes at r, 3 r, 9 r weighted 1 - f / 2, 0.3 f, 0.2 f (sum 1), imitating the heavy tail of the eye's glare"
-description = "Shape of the glow's edge. 0: a single smooth Gaussian, the glow ends quickly. 1: a long faint tail (wider lobes at 3 and 9 times the radius), the look of light scattering in the glass and the eye. The total amount does not change."
+description = "Shape of the glow's edge. 0: a single smooth Gaussian, the glow ends quickly. 1: a long faint tail (wider lobes at 3 and 9 times the radius), the look of light scattering in the glass and the eye. The total amount does not change. The tail lifts the blacks a little (weight 0.12: about 2 codes of 255 far from a highlight, 9 inside a black area of a bright picture); 0 keeps them exact."
 group = "Glow (bloom)"
 
 [[param]]
@@ -80,7 +82,7 @@ hard_max = 10.0
 hard_why = "a brightness in units of the tube white, not negative"
 tag = "E"
 source = "Artistic (physical scatter has no threshold): crt_model::optics::bloom_feed, soft knee of half width T / 2 on the brightest channel of the light averaged at half the glow's size"
-description = "Only light brighter than this feeds the glow (1 = the tube white), with a soft knee, so highlights glow while mid-tones stay clean. 0: all light glows a little, as in a real tube. Try 0.5 to 0.8 for glowing highlights only."
+description = "Only light brighter than this feeds the glow (1 = the tube white), with a soft knee, so highlights glow while mid-tones stay clean. 0: all light glows a little, as in a real tube. Try 0.5 to 0.8 for glowing highlights only (0.12, 6 mm, falloff 0 and threshold 0.6 is a gentle glow that keeps the blacks black)."
 group = "Glow (bloom)"
 
 [[param]]
@@ -124,7 +126,7 @@ hard_max = 1.0
 hard_why = "a relative brightness in [0, 1] (0 reads as 0.0001, black to the eye, so the falloff stays smooth); 1 is no vignetting"
 tag = "S"
 source = "CRT.md Uniformity: centre-to-corner luminance 73 % (Barco CDCT 6551), 87 % (Sony 17se), 70 to 90 % typical; a 21 in datasheet specifies 80 to 110 %. Profile v^(rho^2) from the glass thickness growing with the square of the radius, T_edge = T_centre^(t_edge / t_centre) [D]"
-description = "Brightness at the corners of the picture relative to the centre (1 = no vignetting). Real tubes: 0.7 to 0.9 (thicker glass toward the edges, the physical case). Lower values are an artistic grade: 0.3 is a strong vignette, 0 to 0.05 black corners. With the shape controls at their defaults it falls off as v^(rho^2), rho being the distance from the centre over the half diagonal."
+description = "Brightness at the corners of the picture relative to the centre (1 = no vignetting). Real tubes: 0.7 to 0.9 (thicker glass toward the edges, the physical case). Lower values are an artistic grade. With the shape controls at their defaults it falls off as v^(rho^2), rho being the distance from the centre over the half diagonal, so the darkening starts at the centre: a low corner value alone darkens the whole picture (a spotlight, the middle of the left edge of a 16:9 picture at 40 % of the centre for 0.3, 10 % for 0.05). For a strong vignette use 0.3 with start 0.3, exponent 3, softness 0.3; for black corners and clean sides use 0 with start 0.6, exponent 4, softness 0.2 and roundness 0."
 group = "Vignette"
 
 [[param]]
@@ -154,7 +156,7 @@ hard_max = 0.95
 hard_why = "a radius fraction below 1, the corner (the falloff runs from the start to the corner)"
 tag = "E"
 source = "Artistic grade (crt_model::optics::Vignette): x = (rho - start) / (1 - start)"
-description = "Where the darkening begins, as a fraction of the distance from the centre to the corner. 0: from the centre (the physical glass falloff); 0.5: the middle of the picture stays untouched."
+description = "Where the darkening begins, as a fraction of the distance from the centre to the corner. 0: from the centre (the physical glass falloff); 0.5: the middle of the picture stays untouched. For black corners with clean sides use 0.6 to 0.7 (with exponent 4 to 6, softness 0.2, roundness 0)."
 group = "Vignette"
 
 [[param]]
@@ -170,7 +172,7 @@ hard_max = 16.0
 hard_why = "a positive power (very high or low powers turn the falloff into a step)"
 tag = "E"
 source = "Artistic grade (crt_model::optics::Vignette): profile p = x^exponent; 2 is the physical v^(rho^2)"
-description = "Shape of the falloff. 2 (default): the physical glass law. Higher: the centre stays bright longer and the edges drop fast; lower: a gradual darkening that starts right away."
+description = "Shape of the falloff. 2 (default): the physical glass law. Higher: the centre stays bright longer and the edges drop fast; lower: a gradual darkening that starts right away. 3 for a strong vignette, 4 to 6 (with a start of 0.6 to 0.7) for black corners only."
 group = "Vignette"
 
 [[param]]
@@ -198,7 +200,7 @@ max = 1.0
 hard_why = "a blend fraction in [0, 1]"
 tag = "E"
 source = "Artistic grade (crt_model::optics::Vignette): rho^2 blended between d^2 / half diagonal^2 (round) and the half-axes ellipse ((dx / a)^2 + (dy / b)^2) / 2"
-description = "1: a round vignette (the physical case: the same darkening at the same distance from the centre). 0: it follows the picture's shape (an ellipse touching the middle of every edge alike), so the sides of a wide picture darken as much as the top and bottom."
+description = "1: a round vignette (the physical case: the same darkening at the same distance from the centre). 0: it follows the picture's shape (an ellipse touching the middle of every edge alike), so the sides of a wide picture darken as much as the top and bottom. Use 0 for black corners on a wide picture: round, the middle of the left edge of a 16:9 picture is at 87 % of the way to the corner and darkens with it, at 0 it is at 71 %, like the top."
 group = "Vignette"
 
 [[param]]
@@ -225,15 +227,15 @@ id = "optics_halation_weight"
 stage = "optics"
 type = "f32"
 unit = "1"
-default = 0.015
+default = 0.0
 min = 0.0
 max = 0.1
 hard_min = 0.0
 hard_max = 1.0
 hard_why = "an energy fraction; with the glare and glow weights the sum is kept at 1 or less (Params::constrain), else the direct picture gets a negative weight"
 tag = "E"
-source = "CRT.md Halation: amplitude 0.5 to 5 % (unresolved; only the total veiling glare is sourced, about 4 % for a colour monitor, Flynn and Badano 1999); QUESTIONS PHY-10 default about 1.5 %; Starting presets 1 to 3 %"
-description = "Fraction of the emitted light that ends in the halation halo (the thin ring around every bright point, about 1.75 times the glass thickness away, and its faint inner haze). The direct picture keeps the rest, so a full white field keeps its level; with the glare and glow weights it is limited to a sum of 1 (the value just set is lowered). The ring's shape comes from the glass thickness, index and transmission. For a soft glow use the Glow (bloom) controls."
+source = "CRT.md Halation: amplitude 0.5 to 5 % (unresolved; only the total veiling glare is sourced, about 4 % for a colour monitor, Flynn and Badano 1999); QUESTIONS PHY-10 physical value about 1.5 %; Starting presets 1 to 3 % (the shipped presets set it). Live finding 2026-11-20: a non-zero default lifted the blacks by 20 to 27 codes as soon as Optics was enabled, so the bare default is 0 (opt-in)"
+description = "Fraction of the emitted light that ends in the halation halo (the thin ring around every bright point, about 1.75 times the glass thickness away, and its faint inner haze). 0 (the default) is off. Physical value: about 0.015 (1.5 %); a glass veil lifts the blacks (halation 1.5 % alone: about 2 codes of 255 far from a bright area and 11 inside a black area of a bright picture, whole chain). The direct picture keeps the rest, so a full white field keeps its level; with the glare and glow weights it is limited to a sum of 1 (the value just set is lowered). The ring's shape comes from the glass thickness, index and transmission. For a soft glow use the Glow (bloom) controls."
 group = "Glass halo and glare"
 
 [[param]]
@@ -241,7 +243,7 @@ id = "optics_glare_weight"
 stage = "optics"
 type = "f32"
 unit = "1"
-default = 0.01
+default = 0.0
 min = 0.0
 max = 0.1
 hard_min = 0.0
@@ -249,7 +251,7 @@ hard_max = 1.0
 hard_why = "an energy fraction; with the halation and glow weights the sum is kept at 1 or less (Params::constrain), else the direct picture gets a negative weight"
 tag = "E"
 source = "CRT.md Other stray-light mechanisms (light leaking behind the phosphor, nearly uniform) and Halation (total glare about 4 % on a colour monitor, 0.4 % on a medical one, halation included); ANSI contrast 100 to 150:1"
-description = "Fraction of the emitted light spread evenly over the whole screen (veiling glare): every point receives this fraction of the mean picture level, so dark areas lift on bright pictures. The picture keeps its total light. With the halation and glow weights it is limited to a sum of 1 (the value just set is lowered)."
+description = "Fraction of the emitted light spread evenly over the whole screen (veiling glare): every point receives this fraction of the mean picture level, so dark areas lift on bright pictures. 0 (the default) is off. Physical value: about 0.01 (1 %); a glass veil lifts the blacks (alone: about 13 codes of 255 far from a bright area and 29 inside a black area of a bright picture, whole chain). The picture keeps its total light. With the halation and glow weights it is limited to a sum of 1 (the value just set is lowered)."
 group = "Glass halo and glare"
 
 [[param]]
