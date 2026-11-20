@@ -123,6 +123,53 @@ fn texel(img: &ImageF32, x: u32, y: u32, ch: usize) -> f64 {
     f64::from(img.rgba[4 * (y * img.width + x) as usize + ch])
 }
 
+/// Review R-05: a negative strength (from a file or a typed value) acts as 0, the identity, never as a
+/// pole of 1 / (1 + s I) or a negative light: -1 on every channel gives the input back (within one FP16
+/// step), finite and non-negative, with and without persistence; a mix of negative and valid strengths
+/// saturates the valid channels as the oracle with the effective strengths.
+#[test]
+fn negative_strength_is_the_identity() {
+    let Some(mut gpu) = common::gpu_or_skip("negative_strength_is_the_identity") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let pic = image(8, 4, |x, y| match (x + y) % 3 {
+        0 => [1.0, 1.0, 1.0],
+        1 => [0.5, 0.75, 0.25],
+        _ => [2.0, 3.0, 1.5],
+    });
+    for persistence in [false, true] {
+        gpu.clear_history();
+        let out = run(&mut gpu, &params(true, [-1.0; 3], persistence), &pic);
+        for (i, (&got, &x)) in out.rgba.iter().zip(&pic.rgba).enumerate() {
+            assert!(
+                got.is_finite() && got >= 0.0,
+                "texel {} channel {}: {got}",
+                i / 4,
+                i % 4
+            );
+            assert!(
+                rel(f64::from(got), f64::from(x)) <= FP16,
+                "persistence {persistence}: {got} vs {x}"
+            );
+        }
+    }
+    let mixed = [-1.0, 0.5, -0.25];
+    let out = run(&mut gpu, &params(true, mixed, false), &pic);
+    let eff = mixed.map(|s| crt_model::phosphor::effective_saturation_strength(f64::from(s)));
+    for y in 0..4 {
+        for x in 0..8 {
+            let i: [f64; 3] = std::array::from_fn(|ch| texel(&pic, x, y, ch));
+            for (ch, want) in saturate_rgb(i, eff).into_iter().enumerate() {
+                let got = texel(&out, x, y, ch);
+                assert!(rel(got, want) <= FP16, "({x}, {y}) {ch}: {got} vs {want}");
+            }
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// Both switches off (the defaults), or saturation off with strengths set: an exact copy, also after a
 /// run with saturation on, and with the strengths 0 the curve is the identity.
 #[test]

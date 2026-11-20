@@ -61,7 +61,8 @@
 //! fraction never exceeds 1. The diffusion is a separate step (D, then G), already a partition with w_d in
 //! [0, 1]. With non-negative input light, every term of G is non-negative and G holds the light of D (up to
 //! the edge loss), so no weight setting can create negative light or gain energy. The shader applies the
-//! same rule and also reads a halo below 0 (the signed fits of the `pyramid` and `gaussians` methods) as 0.
+//! same rule (its `pyramid` and `gaussians` halo methods approximate this model's non-negative kernel with
+//! signed amplitudes; their small undershoot is a method error, measured by the stage tests, not clamped).
 
 use std::f64::consts::PI;
 
