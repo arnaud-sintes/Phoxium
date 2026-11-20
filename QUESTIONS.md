@@ -1179,3 +1179,80 @@ None of them is verified on your machine, which is why they are tied to spikes.
 - `imgui` 0.12 (imgui-rs) tracks Dear ImGui 1.89. `dear-imgui-rs` 0.22.0 tracks 1.93.1 WIP with docking (crates.io, checked by T-08 on 2026-11-19).
 - The development machine reports Windows build 10.0.26300, which Opus identified as an Insider build. No analyst checked which capture features that build has.
 - Not yet checked by anyone: behaviour of Vulkan swapchains on Windows when a non-activating topmost window is presented (layered on DXGI or not), VRR for an unfocused window, HDR swapchain colour spaces per vendor, D3D11 to Vulkan external memory support per vendor, and whether hosted CI has any usable software Vulkan implementation.
+
+## Live review on the real desktop (2026-11-20, evening, owner away)
+
+Binaries: release build of `main` dd1b272 (version 0.2.0 strings). Every run used a temporary settings folder (`APPDATA`), the owner's real `settings.toml` was not touched (same SHA-256 before and after). Machine: RTX A2000 drives the 1920x1080 monitor at (0, 0), Intel UHD drives the 1920x1200 monitor at (1920, -116); both 60 Hz. Source: pixel-demo `--content motion --native-preset snes --present integer --scale 3` (768x672 client) unless stated. Numbers are from `--stats` and `--log`.
+
+### Zero-copy capture on real windows
+
+- **Accepted on both adapters.** RTX (default auto): "capture path: zero-copy asked (Vulkan import of shared textures: NT handle)", the path in force stays zero-copy for the whole run (298 of 298 log seconds in a 5-minute run). Intel UHD (`--gpu 1`, fullscreen on its own monitor): also accepted and kept.
+- **Cost, RTX, windowed, 30 s each, same scene:** zero-copy copy 1.13 ms per frame on average (0.3 to 1.9 ms per second), GPU frame 2.16 ms, no upload segment; CPU copy 2.43 ms per frame plus a 0.62 ms upload, GPU frame 2.55 ms. Capture rate 56.8 fps (zero-copy) and 57.2 fps (CPU), render 60 fps in both.
+- **Intel UHD, fullscreen 1920x1200:** capture 40 to 52 fps, render 60 to 61 fps, GPU frame about 10 ms (the screen stage alone about 9 ms), zero-copy copy 1.4 to 3.9 ms per frame (10 ms in the first second).
+- **5-minute stability (RTX, windowed, zero-copy):** no stop, 291 output screenshots one second apart, never two identical in a row; capture 52.4 fps average (41.9 minimum per second), render 60.2 fps (55.4 minimum); 13 capture intervals and 32 render intervals above 50 ms over 298 s; quit by Ctrl+Alt+End within 8 s.
+- **Capture border:** no yellow border around the captured window (0 yellow pixels in the 7 rows above the frame), zero-copy and CPU alike.
+- **Minimise and restore the source (zero-copy):** the capture pauses (longest capture interval 1.5 s, 0 fps in that second) and resumes by itself; no crash.
+- **Resize the source while running:** CPU copy: 4 resizes (900x760, 600x520, 1100x900, back), no problem, the new native size is detected each time. Zero-copy: the same 4 resizes passed in one run, but another run crashed at the first resize with the start-up crash below.
+- **Live switch through the menu (F10, Source, Capture combo, by mouse):** zero-copy to CPU and back, twice each, under `--validation`: the console reports each change ("capture: path set to cpu", "... zero-copy"), the static corner marker of the output keeps its level in 60 screenshots over 1 s after each click (no black frame), no capture or render interval above 50 ms in the seconds of the switches, **0 validation messages** in 78 s.
+- **BUG, crash at attach with zero-copy (intermittent, severe):** `panicked at crates\ultimatecrt\src\scaling.rs:288:44: range start index 49216 out of range for slice of length 0` in `scaling::Detector::feed`, called from `app::run` (app.rs line 1180, `detector.feed(&frame.data, ...)`), a few hundred ms after the first placement line. With zero-copy the frame's CPU pixel buffer is empty until the first CPU sample, but the scale detector is fed with it. Count: 10 crashes in 35 zero-copy starts on the RTX (27 direct runs plus 8 starts inside the regression scripts), 4 of 5 on the Intel UHD, 1 crash at a source resize after a good start; 0 crashes in 12 CPU-copy starts. The crash handler works (crash file written, settings saved). Repro: `pixel-demo --content motion --native-preset snes --present integer --scale 3`, then `ultimatecrt --window pixel-demo` (default zero-copy), repeated 5 times. Workaround: `--capture-path cpu`.
+- **Note:** the console prints "capture path: zero-copy" every second also for `--pattern` sources, which capture nothing.
+
+### Phosphor persistence through the real output window
+
+Method: `ultimatecrt --pattern bar:8:24` (a white bar 8 source pixels wide moving 24 source pixels per frame on black, 320x240), windowed output 1264x1181 on the RTX monitor (4 host px per source px), screenshots of the output window (System.Drawing), green and blue column means over the middle 20 % of the height, at the places the bar occupied 1 to 6 frames earlier (the same method as `tests/persistence_chain.rs`). Settings in a temporary `settings.toml`, preset `delta-17in` (persistence on); medians over 25 to 60 screenshots. Expected (README, headless test, 60 Hz): bar 212, green 57, 44, 37, 33 one to four frames behind.
+
+| Case | Bar G | Green 1 to 6 frames behind | Red 1 to 4 behind |
+|---|---|---|---|
+| Bare defaults (persistence off) | 235 | 0 0 0 0 0 0 | 0 |
+| Preset, persistence on | 203 | 57 39 29 24 20 16 | 16 11 8 6 |
+| Same, window moved to the Intel UHD monitor | 201 | 57 38 28 23 18 15 | - |
+| Same, back on the RTX monitor, smaller window | 205 | 57 39 33 27 23 20 | - |
+| Extra afterglow 0.5, 0.5, 0.5 at 150 ms | 182 | 67 50 41 32 25 18 | 52 42 34 26 |
+| Decay scale 20 | 192 | 70 48 36 29 24 19 | 89 34 15 9 |
+| A/B bypass on (Ctrl+Alt+F7) | 255 | 0 0 0 0 0 0 | 0 |
+
+- The first trail frame matches the headless value (57); frames 2 to 4 are lower than the headless test (39, 29, 24 against 44, 37, 33). The trail keeps the same age profile on the other adapter's monitor (time constant follows real time). Red shows a small trail (16 one frame behind) in the output, from the colour matrix, although the red phosphor itself has none.
+- Extra afterglow 0.5 at 150 ms raises the trail four frames behind from 24 to 32 (+35 %) and dims the moving bar from 203 to 182; decay scale 20 gives 29 four frames behind (README states 40). Both remain subtle at 60 Hz: the owner's "trail too short" matches the physics plus these values.
+- **BUG, persistence lost after the A/B bypass:** with persistence on, Ctrl+Alt+F7 (bypass on) then Ctrl+Alt+F7 again (console "bypass: off (CRT chain on)"): the trail is 0 in every slot and the bar is 217 in R, G and B (persistence off look), and it stays so for at least 10 s; the phosphor segment still runs (0.10 ms). Reproduced twice. Repro: settings `preset = "delta-17in"`, `ultimatecrt --pattern bar:8:24`, press Ctrl+Alt+F7 twice, compare the trail behind the bar before and after. Restarting brings it back. This may be what the owner saw as "no trail".
+- The owner's real settings carry `phosphor_frame_rate_hz = 397` (the manual trail rate the README warns about); not changed here.
+- Further persistence checks (preset `delta-17in`): a static picture keeps its level with persistence and extra afterglow 0.5 at 150 ms (centre of `--pattern window:30`: 215.9 in all 171 samples over 10 s, no brightening or darkening). The trail one frame behind the moving bar stays between 50 and 62 over 135 screenshots in 5.6 s: no reset or flash every second. At start the output shows a full white area (255) for about 0.3 s before the first rendered frame (seen in the first 5 samples of the static run): a white flash at window creation.
+
+### Look controls (glow, vignette, chromatic aberration), screenshots
+
+pixel-demo `--content card --native-preset snes --scale 2`, CPU copy (to avoid the zero-copy start-up crash), bare defaults plus the overrides below, output window 1264x1000 client on the RTX monitor. Codes are 8-bit green means of the output. GPU times from `--stats` (whole frame about 2 to 4.5 ms in every case, on a busy desktop; optics segment 0.6 to 1.4 ms, screen 1 to 2.4 ms).
+
+| Case | Overrides | Black areas (centre, corner) | Verdict |
+|---|---|---|---|
+| Default | none | 0, 0 | Reference. |
+| Glow | optics on, bloom 0.2, 6 mm, falloff 0.7, threshold 0.6 | 27, 20 | Visible soft halo around white squares and lines; also a general grey veil over every black area. |
+| Gentle glow | optics on, bloom 0.08, 4 mm | 26, 21 | Halo hard to see; the veil is the same as the strong glow. |
+| Strong vignette | optics on, corner 0.15, start 0.3, exponent 3, softness 0.3 | 24, 15 | Clear, smooth darkening toward the corners (white bar near the top-left corner 231 to 161), no banding, no visible start ring. Good. |
+| Black corners | optics on, corner 0 | 18, 1 | Not "black corners": the whole picture becomes a spotlight (a white area at mid-left edge 165 to 24), because the default start is 0 (falloff from the centre). |
+| Chromatic aberration, lateral 1.5 mm | none else | 0, 0 | Thin red and blue fringes at the picture edges, centre clean; colour fringes on 16 % of pixels (5 % default). Good "cheap TV" look. |
+| Chromatic aberration, lateral 3 mm | none else | 0, 0 | Strong fringes at the edges and colour moire on the fine patterns near the sides (23 %). Strong but believable for a bad set. |
+| Chromatic aberration, axis 0.5 mm, angle 0 | none else | 0, 0 | Uniform red-left / blue-right fringe on every vertical edge (13 %). Works. |
+| Extra afterglow 0.5 | persistence on | 0, 6 behind moving parts | Static picture unchanged; trails as measured above. |
+
+- **Finding: switching the optics stage on lifts the blacks by 20 to 27 codes on this bright test card even with the glow at 0** (vignette case). The cause is the optics defaults that are not glow: veiling glare 0.01 of the mean picture level and halation 0.015 (physically motivated, but in sRGB a linear 0.01 is about code 25). A user who only wants a vignette or a glow gets grey blacks. Proposal: when the user enables optics for glow or vignette, keep glare and halation at 0 unless chosen (or lower their defaults), and say in the Optics panel that glare lifts blacks.
+- Recommended values: glow 0.12 to 0.15 at 6 mm, falloff 0.5, threshold 0.6 (visible halo, little veil; to verify once the glare default is settled); vignette 0.3 corner with start 0.3, exponent 3, softness 0.3 for a strong look, 0.85 (default) for the physical one; "black corners" needs start 0.6 to 0.7, exponent 4 to 6, softness 0.2 (the README and tooltip say corner 0 to 0.05 gives black corners, which with the default start darkens the whole picture); chromatic aberration lateral 0.5 to 1 mm (monitor) and 1.5 to 2 mm (TV), axis 0.2 to 0.5 mm.
+
+### Regressions with the new defaults
+
+- `scripts\check-hotkeys.ps1` (fullscreen, zero-copy): PASS, every chord registered, 0 foreground changes.
+- `scripts\check-menu.ps1`: the first run reported FAIL in both modes although the script's own count was 10/10 opens and closes; cause: the independent-poll verdict treated every window whose title contains "pixel-demo" as the source, and the output title now names the source ("ultimateCRT | pixel-demo.exe - ..."). Script fixed on this branch (`Read-ForegroundSamples` classifies the output by its executable first; `-SelfTest` PASS). Rerun (6 cycles, 30 s closed, `--validation`, zero-copy): PASS windowed and fullscreen, 6/6 opens and closes by the independent poll, 0 hand-back blips while closed. The manual checklist of the script header was not done.
+- `scripts\check-focus.ps1`, 60 s each: fullscreen MITIGATED (one blip at 25.2 s, handed back in 0.13 s), windowed MITIGATED (one blip at 25.7 s, 0.11 s); no focus event on the output.
+- `scripts\check-pixel-demo.ps1`: PASS (12 layouts with counter decode, resize, corners, rates 30/50/60/75/120 Hz at 30.2/49.8/59.8/74.8/119.4 painted per second); DPI check skipped (no monitor with another scaling).
+- In-app picker started with no arguments (zero-copy default): the list shows with the first-start note and takes the keyboard; Down, Down, Enter selected pixel-demo and attached, the foreground went back to pixel-demo. Auto picture area for pixel-demo `--present 1to1 --bars black --window 1100x800`: "Picture found inside the black bars: 256 x 224 at 422, 288" (as expected), native x1 256x224.
+- `--list-adapters`: both DXGI adapters and both Vulkan devices with LUIDs, the auto choice per monitor (RTX for the 1920x1080 one, Intel for the 1920x1200 one), verdict "capture and render on the same adapter", zero-copy import supported on both. `--gpu 1` with the output on the RTX monitor prints the cross-adapter warning.
+- Settings persistence: a temporary settings file with preset `delta-17in` and three overrides, quit by Ctrl+Alt+End: the file is rewritten with the same three overrides and no defaults; a fresh run quit by Ctrl+Alt+End writes `[global.overrides]` empty.
+- Burn-in: enabled by override; first run "burn-in: new tube, saved to ...\tubes\delta-17in.state" (3,686,436 bytes) at quit; second run "burn-in: loaded ... (largest charge 853.3 h at 350 cd/m2)", file saved again at quit.
+- Crash handler: exercised by the zero-copy crash above (no test hook used): the crash file is written under the settings folder, the console says the settings and burn-in state were saved, the process exits.
+
+### Window behaviour and the 25 s focus blip
+
+- The 25 s blip: in both focus runs the only foreground events between the source getting the foreground (at start) and the end are the output itself (`ultimatecrt_output`, NOACTIVATE set) at 25.2 s / 25.7 s after launch and the source 0.10 to 0.13 s later; no other process or window takes the foreground before it. The trigger is not identified (no ETW trace taken).
+- Windowed output, after giving it the foreground: Win+Left, Win+Up and Win+Down do nothing (frame unchanged). Double-click on the title bar maximises (frame 0,30 1920x1050 on the 1920x1080 monitor, the picture re-placed 1369x1027). The minimise button minimises; restore brings back the maximised window and the next click on the same button restores 900x700. The app keeps running in every state.
+
+### Not done in this session
+
+- A real game as source; the manual menu checklist (sliders, text input by a person); an ETW trace of the 25 s blip; the DPI move check; tuned glow values (0.12 to 0.15) were proposed, not rendered.
