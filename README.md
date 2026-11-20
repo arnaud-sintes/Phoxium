@@ -51,7 +51,7 @@ F10 opens the menu inside the output window (it takes the focus while open and g
 Everything the app keeps is under `%APPDATA%\ultimateCRT\`: `settings.toml` (your overrides, hotkeys, output window rectangle, GPU choice, the last source), `presets\` (your own presets, `.toml` files), `tubes\` (the burn-in wear map per preset, only when burn-in is on). Delete the folder to start from the defaults. The program has no network code and sends nothing anywhere.
 
 - **Window titles are stored locally.** `settings.toml` keeps the program, window class and **title** of the last captured window (`[global.source] last`), because the title helps to find the same window again after a restart. A title can contain private content (a document name, a chat contact). The file never leaves your PC unless you share it, so look at it before you attach it to a bug report.
-- **Diagnostics.** `--log file.csv` (developer option, off by default) writes one row per second with the process id of the foreground window and whether it is the captured one, and no window titles. `scripts\poll-foreground.ps1` (a developer script, not part of the zip) does write titles into its CSV; delete that file after use.
+- **Diagnostics.** `--log file.csv` (developer option, off by default) writes one row per second with the process id and executable name of the foreground window and whether it is the captured one, and no window titles. `scripts\poll-foreground.ps1` (a developer script, not part of the zip) does write titles into its CSV; delete that file after use.
 
 ### Known limits
 

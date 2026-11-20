@@ -101,8 +101,8 @@ pub fn on_activate(open: bool, activated: bool) -> Option<CloseReason> {
 pub const VK_ESCAPE: usize = 0x1B;
 
 /// Whether the key message `msg` (`wparam` the virtual key) closes the open menu: Esc pressed. The menu
-/// consumes it, so the output window's own Esc (close the output) never fires while the menu is open. The
-/// other hotkeys (F11, the quit chord) are `WM_HOTKEY` registrations and keep working with the menu open.
+/// consumes it. Esc does nothing else in the output window (it never quits; Ctrl+Alt+Q does). The other
+/// hotkeys (F11, the quit chord) are `WM_HOTKEY` registrations and keep working with the menu open.
 pub fn closes_on_key(open: bool, msg: u32, wparam: usize) -> bool {
     open && msg == super::input::WM_KEYDOWN && wparam == VK_ESCAPE
 }
