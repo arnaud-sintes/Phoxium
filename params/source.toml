@@ -34,6 +34,9 @@ unit = "1"
 default = 1.0
 min = 0.5
 max = 2.0
+hard_min = 0.1
+hard_max = 10.0
+hard_why = "a positive pixel aspect ratio; the bounds keep the raster at least a pixel wide on any output"
 tag = "D"
 source = "CRT.md Pixel aspect ratio: NES/SNES 256-wide 8:7 = 1.1429, Genesis H40 32:35 = 0.9143, VGA 320x200 5:6 = 0.8333 (width / height of one source pixel)"
 description = "Pixel aspect ratio of a source pixel (width over height), used when raster_aspect is par. 1 is a square-pixel capture."
@@ -47,6 +50,7 @@ unit = "1"
 default = 1
 min = 1
 max = 2
+hard_why = "1 (single scan) or 2 (double scan)"
 tag = "D"
 source = "QUESTIONS SRC-3 and CRT.md Scanline structure: lines = source rows x multiplier (1 for 240p, 2 for double-scanned 200-line VGA modes), no row resampling"
 description = "Scanlines drawn per source row: 1 for ordinary rasters, 2 for double-scanned modes. The scanline pitch is the raster height over source rows x line_multiplier, so 2 halves it."
@@ -75,6 +79,7 @@ unit = "1"
 default = 0
 min = 0
 max = 10
+hard_why = "0 (automatic) or a manual factor of 1 to 10"
 tag = "E"
 source = "PLAN D-13 (owner decision 2026-11-19): integer scale x1 to x10, 0 = automatic"
 description = "Host pixels per source row in the integer scale mode: 0 = the largest whole factor that fits the output, 1 to 10 manual (reduced to the largest that fits when the output is too small, reported in the readout)."
@@ -99,6 +104,7 @@ unit = "1"
 default = [0.0, 0.0, 0.0]
 min = 0.0
 max = 1.0
+hard_why = "output code values in [0, 1]"
 tag = "E"
 source = "PLAN D-13 (owner decision 2026-11-19): black rectangles around the game zone by default"
 description = "Colour of the output outside the tube rectangle, as output code values (0 to 1 per channel, red green blue). Black by default."
@@ -113,6 +119,9 @@ unit = "1"
 default = 0.0
 min = 0.0
 max = 4.0
+hard_min = 0.0
+hard_max = 10.0
+hard_why = "0 is off, else a positive aspect; a value between 0 and 0.25 becomes 0.25 (Params::constrain: a tinier aspect gives an empty tube)"
 tag = "E"
 source = "CRT.md Pixel aspect ratio and QUESTIONS SRC-4: a source shown at a forced display aspect (4:3 = 1.3333) whatever its pixel count"
 description = "Forced display aspect of the picture (width over height, 4:3 = 1.3333). 0 = off: the aspect comes from source_par (raster_aspect par) or the tube (fill_tube, which wins)."

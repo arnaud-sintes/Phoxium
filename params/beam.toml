@@ -12,6 +12,9 @@ unit = "mm"
 default = 0.45
 min = 0.1
 max = 3.0
+hard_min = 0.01
+hard_max = 3.0
+hard_why = "a spot width is positive; above 3 mm the reach of the beam sums (4 sigma, bounded loops) makes the frame cost explode"
 tag = "E"
 source = "CRT.md Measured and estimated spot sizes (working defaults: PC 0.3 to 0.5, PVM/BVM 0.4 to 0.7, TV 0.7 to 1.5 mm FWHM at mid drive) and Starting presets (PVM-20M4U 0.45 mm mid)"
 description = "Full width at half maximum of the beam spot core at mid drive (drive voltage 0.5, normalised beam current 0.5^2.4 = 0.1895 with the reference gun gamma 2.4), at the screen centre. Spot sigma = FWHM / 2.3548, the same horizontally and vertically. Equal to beam_fwhm_peak_mm: no spot growth."
@@ -25,6 +28,9 @@ unit = "1"
 default = 0.0
 min = 0.0
 max = 0.15
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "an energy fraction in [0, 1]"
 tag = "E"
 source = "CRT.md Spot profile: Gaussian core plus a wider Gaussian or exponential tail at about 2 to 10 % weight; Starting presets, Other defaults (tail 2 to 10 % weight)"
 description = "Fraction of the beam energy in the wide Gaussian tail of the spot (0 = pure Gaussian). The total energy does not change with it."
@@ -38,6 +44,9 @@ unit = "1"
 default = 3.0
 min = 1.5
 max = 10.0
+hard_min = 1.0
+hard_max = 10.0
+hard_why = "the tail is not narrower than the core; the reach of the beam sums grows with it (frame cost)"
 tag = "E"
 source = "CRT.md Spot profile: a 'wider' Gaussian tail; its width is not sourced (estimate)"
 description = "Sigma of the wide tail as a multiple of the core sigma."
@@ -52,6 +61,9 @@ unit = "mm"
 default = 0.8
 min = 0.1
 max = 3.0
+hard_min = 0.01
+hard_max = 3.0
+hard_why = "a spot width is positive; above 3 mm the reach of the beam sums (4 sigma, bounded loops) makes the frame cost explode"
 tag = "E"
 source = "CRT.md Measured and estimated spot sizes (FWHM at peak white: PC 0.4 to 0.6, PVM/BVM 0.7 to 1.1, TV 1.5 to 2 mm) and Starting presets (PVM-20M4U 0.45 -> 0.8 mm)"
 description = "Full width at half maximum of the beam spot core at peak drive (normalised beam current 1). With beam_fwhm_mid_mm and beam_growth_exponent it sets the spot growth law FWHM^2 = d0^2 + k I^(2n). Equal to beam_fwhm_mid_mm: no growth."
@@ -65,6 +77,9 @@ unit = "1"
 default = 0.5
 min = 0.2
 max = 0.5
+hard_min = 0.05
+hard_max = 1.0
+hard_why = "a positive exponent (n = 0 divides by zero; beam.glsl and crt-model guard at 0.05)"
 tag = "E"
 source = "CRT.md Spot growth with beam current (d^2 = d0^2 + k I^(2n), n 0.2 to 0.5; projection-gun rule d ~ sqrt(I); black to full white x1.5 to 2.5). 0.5 is the only value of the range that gives the 0.45 -> 0.8 mm defaults a real floor with a black-to-white ratio near 2.5 (0.8 / 0.317 = 2.53); below n = 0.346 they would need a negative floor"
 description = "Exponent n of the spot growth law FWHM^2 = d0^2 + k I^(2n) (I the normalised beam current). The floor d0 and k follow from the FWHM at mid drive and at peak. When the two widths would need a negative floor (peak / mid > 0.1895^-n), n is raised to the smallest value that gives a zero floor (pure power law)."
