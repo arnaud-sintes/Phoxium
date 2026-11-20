@@ -1,0 +1,33 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `optics` (T-45), phosphor-layer diffusion, horizontal half: each host pixel gets the 1D sum
+// sum_d w(|d|) L(x - d, y), |d| <= R = pc.info.x, w from the stage buffer (the mass a source pixel puts into a
+// pixel d away under the Gaussian, normalised over the truncation); zero outside the image. The composite pass
+// (optics.comp) applies the vertical half to this image.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "optics.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 1, binding = 1, rgba16f) uniform writeonly image2D dst;
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 sz = textureSize(light_in, 0);
+    if (any(greaterThanEqual(p, sz))) {
+        return;
+    }
+    int r = pc.info.x;
+    vec3 acc = vec3(0.0);
+    for (int d = -r; d <= r; ++d) {
+        int x = p.x + d;
+        if (x >= 0 && x < sz.x) {
+            acc += opt_buf.weight[abs(d)] * texelFetch(light_in, ivec2(x, p.y), 0).rgb;
+        }
+    }
+    imageStore(dst, p, round_f16(vec4(acc, 1.0)));
+}
