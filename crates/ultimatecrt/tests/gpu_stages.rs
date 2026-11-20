@@ -17,8 +17,8 @@
 mod common;
 
 use ultimatecrt::gpu::{
-    Domain, FrameConstants, Headless, ImageF32, Rendered, Settings, SourceFrame, StageInput, StageRun, TargetFormat,
-    Transfer, AMP_K,
+    Domain, FrameConstants, Headless, ImageF32, Rendered, Settings, SourceFrame, StageInput, StageReadback, StageRun,
+    TargetFormat, Transfer, AMP_K,
 };
 use ultimatecrt::params::{ParamValue, Params, SOURCE_EOTF_SRGB};
 use ultimatecrt::scaling::View;
@@ -398,6 +398,45 @@ fn injected_image_through_a_stage_subset() {
         ..run
     };
     assert!(gpu.render_stages(&run).is_err());
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// `Headless::set_read_stages` (test-cost option): the default reads back the native raster and every chain
+/// image; `Last` gives only the last chain image (the encode input), equal to the last entry of the full
+/// readback; `None` gives neither. The output is the same in every mode.
+#[test]
+fn stage_readback_modes_change_only_what_is_read_back() {
+    let test = "gpu_stages readback modes";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let bgra = ramp();
+    let all = render(&mut gpu, &bgra, Transfer::Power(2.2));
+    assert!(all.native.width > 0, "{test}: the default reads the native raster");
+    assert_eq!(all.stages.len(), SLOTS.len(), "{test}: every slot read by default");
+    gpu.set_read_stages(StageReadback::Last);
+    let last = render(&mut gpu, &bgra, Transfer::Power(2.2));
+    assert_eq!(last.output, all.output, "{test}: Last changed the output");
+    assert_eq!((last.native.width, last.native.height), (0, 0));
+    assert_eq!(last.stages.len(), 1, "{test}: Last reads one chain image");
+    assert_eq!(
+        last.stages.last(),
+        all.stages.last(),
+        "{test}: Last is the encode input"
+    );
+    gpu.set_read_stages(StageReadback::None);
+    let none = render(&mut gpu, &bgra, Transfer::Power(2.2));
+    assert_eq!(none.output, all.output, "{test}: None changed the output");
+    assert_eq!((none.native.width, none.native.height), (0, 0));
+    assert!(none.stages.is_empty(), "{test}: None read a chain image");
+    gpu.set_read_stages(StageReadback::All);
+    assert_eq!(
+        render(&mut gpu, &bgra, Transfer::Power(2.2)),
+        all,
+        "{test}: back to All"
+    );
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

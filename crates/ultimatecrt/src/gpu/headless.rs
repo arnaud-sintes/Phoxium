@@ -83,6 +83,8 @@ impl Rendered {
 /// Offscreen renderer on a surface-less [`Context`].
 pub struct Headless {
     pipeline: Pipeline,
+    /// Which images are read back with the target ([`Headless::set_read_stages`]).
+    read_stages: StageReadback,
     /// Destroyed last, by the field drop after `Drop for Headless`.
     ctx: Context,
 }
@@ -100,7 +102,20 @@ impl Headless {
     pub fn from_context(ctx: Context) -> Res<Self> {
         // SAFETY: `ctx` is live; `Drop for Headless` destroys the pipeline before the context.
         let pipeline = unsafe { Pipeline::new(&ctx)? };
-        Ok(Self { pipeline, ctx })
+        Ok(Self {
+            pipeline,
+            read_stages: StageReadback::All,
+            ctx,
+        })
+    }
+
+    /// Which images the next calls read back along with the target (default [`StageReadback::All`]). The
+    /// frame renders the same in every mode; only the copies to the host and their conversion are left
+    /// out. For callers that look at the output (or the encode input) only and render many large frames:
+    /// at 1280 x 1080 the native raster and the chain images are about 8 million texels per frame,
+    /// converted to `f32` and copied once per routed slot.
+    pub fn set_read_stages(&mut self, mode: StageReadback) {
+        self.read_stages = mode;
     }
 
     /// The Vulkan context (device, queue, chosen GPU).
@@ -385,8 +400,20 @@ impl Headless {
             &[full_copy(target)],
         );
         // Read back every image the frame routed (decode output and chain images), each once; the
-        // pipeline records the barriers from its tracked state.
-        let routed: Vec<(&'static str, ImgRef)> = self.pipeline.routed().to_vec();
+        // pipeline records the barriers from its tracked state. Fewer when the caller asked for less.
+        let routed: Vec<(&'static str, ImgRef)> = match self.read_stages {
+            StageReadback::All => self.pipeline.routed().to_vec(),
+            StageReadback::Last => self
+                .pipeline
+                .routed()
+                .iter()
+                .rev()
+                .find(|(n, _)| *n != "decode")
+                .copied()
+                .into_iter()
+                .collect(),
+            StageReadback::None => Vec::new(),
+        };
         let mut images: Vec<(ImgRef, (u32, u32), vk::Format)> = Vec::new();
         for &(_, r) in &routed {
             if images.iter().any(|(o, _, _)| *o == r) {
@@ -565,7 +592,11 @@ impl Headless {
         let ctx = Context::new_headless(validation)?;
         // SAFETY: as in `new`.
         let pipeline = unsafe { Pipeline::with_chain(&ctx, chain)? };
-        Ok(Self { pipeline, ctx })
+        Ok(Self {
+            pipeline,
+            read_stages: StageReadback::All,
+            ctx,
+        })
     }
 }
 
@@ -576,6 +607,19 @@ fn texel_bytes(format: vk::Format) -> usize {
     } else {
         8
     }
+}
+
+/// The images a headless call reads back besides the target ([`Headless::set_read_stages`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StageReadback {
+    /// The native raster ([`Rendered::native`]) and the image of every routed chain slot
+    /// ([`Rendered::stages`]), the default.
+    All,
+    /// Only the image of the last routed chain slot, the encode input ([`Rendered::stages`] has that one
+    /// entry, [`Rendered::native`] is empty).
+    Last,
+    /// None: [`Rendered::native`] is empty and [`Rendered::stages`] has no entry.
+    None,
 }
 
 /// Where a stage test's input enters the chain ([`Headless::render_stages`]).

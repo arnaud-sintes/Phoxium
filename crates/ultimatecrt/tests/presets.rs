@@ -1,7 +1,10 @@
 //! GPU test of the tube presets (T-50): each shipped preset, applied onto the parameter defaults, renders a
 //! test pattern through the headless `render` path at 2560x1440 into a finite image, with the validation
-//! layer silent. The debug build renders three presets (a grille monitor, a TV with ABL, a slot TV); the
-//! ignored test renders all ten (`cargo test --test presets -- --ignored`). Every shipped preset has persistence on (T-64),\n//! so these renders include the phosphor trail, the faceplate geometry, convergence and, on the TV presets, ABL.\n//! The persistence test below checks the trail of each preset against the crt_model::phosphor oracle.
+//! layer silent. Three presets (a grille monitor, a TV with ABL, a slot TV) and all ten are rendered (the
+//! ten were an ignored test while the debug build took minutes; with the optimised test profile and the
+//! output-only readback they take about a second). Every shipped preset has persistence on (T-64),
+//! so these renders include the phosphor trail, the faceplate geometry, convergence and, on the TV presets, ABL.
+//! The persistence test below checks the trail of each preset against the crt_model::phosphor oracle.
 
 mod common;
 
@@ -9,7 +12,8 @@ use crt_model::output::{apply, shoulder_with_rate};
 use crt_model::phosphor::{DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED};
 use crt_model::units::frame_period_ms;
 use ultimatecrt::gpu::{
-    output_matrix, FrameConstants, Headless, ImageF32, Settings, SourceFrame, StageInput, StageRun, TargetFormat,
+    output_matrix, FrameConstants, Headless, ImageF32, Settings, SourceFrame, StageInput, StageReadback, StageRun,
+    TargetFormat,
 };
 use ultimatecrt::headroom::{effective_mode, OutputTransform};
 use ultimatecrt::params::{
@@ -28,6 +32,8 @@ fn render_presets(name: &str, indices: &[usize]) {
         return;
     };
     let counter = gpu.validation_counter();
+    // Only the output is checked: the 2560 x 1440 chain images are not read back.
+    gpu.set_read_stages(StageReadback::None);
     let lib = Library::embedded();
     assert!(lib.warnings.is_empty(), "{:?}", lib.warnings);
     let source = Source::choose(Some("crosshatch:16"), Some((320, 240)), None).unwrap();
@@ -64,7 +70,6 @@ fn three_presets_render_finite_images() {
 }
 
 #[test]
-#[ignore = "renders all ten presets at 2560x1440 (slow in the debug build)"]
 fn all_ten_presets_render_finite_images() {
     render_presets("presets all", &(0..10).collect::<Vec<_>>());
 }
@@ -100,6 +105,9 @@ fn flat_white_through_the_chain_in_every_headroom_mode() {
         return;
     };
     let counter = gpu.validation_counter();
+    // The output and the encode input (the last chain image) are checked: the other 2560 x 1440 chain
+    // images are not read back.
+    gpu.set_read_stages(StageReadback::Last);
     let lib = Library::embedded();
     let (w, h) = (320u32, 240u32);
     let white = vec![255u8; (w * h * 4) as usize];
@@ -146,27 +154,29 @@ fn flat_white_through_the_chain_in_every_headroom_mode() {
             let (_, input) = r.stages.last().expect("chain image");
             let e = f64::from(xf.exposure);
             let rate = (xf.knee < 1.0 && xf.rate > 0.0).then_some(f64::from(xf.rate));
-            let (mut unclipped, mut expected, mut max_c, mut intended) = (0.0_f64, 0.0_f64, 0.0_f64, 0.0_f64);
-            for t in input.rgba.chunks(4) {
+            let (exposure, knee) = (f64::from(p.exposure), f64::from(xf.knee));
+            // The per-texel oracle below runs over 3.7 million texels per mode: split over threads (each
+            // keeps the same arithmetic; the partial sums are added in order).
+            let sums = par_sums(&input.rgba, |t, s| {
                 // The intended white: the same texel at the preset's own exposure, no headroom handling.
-                intended += apply(&m, [t[0], t[1], t[2]].map(|v| f64::from(v) * f64::from(p.exposure)))
+                s.intended += apply(&m, [t[0], t[1], t[2]].map(|v| f64::from(v) * exposure))
                     .iter()
                     .map(|v| v.max(0.0))
                     .sum::<f64>();
                 let c = apply(&m, [t[0], t[1], t[2]].map(|v| f64::from(v) * e));
                 for v in c {
-                    unclipped += v.max(0.0);
-                    expected += shoulder_with_rate(v, f64::from(xf.knee), rate);
-                    max_c = max_c.max(v);
+                    s.unclipped += v.max(0.0);
+                    s.expected += shoulder_with_rate(v, knee, rate);
+                    s.max_c = s.max_c.max(v);
                 }
-                input_sum[k] += f64::from(t[0] + t[1] + t[2]);
-            }
-            let got: f64 = r
-                .output
-                .rgba
-                .chunks(4)
-                .map(|o| (0..3).map(|i| f64::from(o[i].max(0.0)).powf(2.2)).sum::<f64>())
-                .sum();
+                s.input += f64::from(t[0] + t[1] + t[2]);
+            });
+            let (unclipped, expected, max_c, intended) = (sums.unclipped, sums.expected, sums.max_c, sums.intended);
+            input_sum[k] += sums.input;
+            let got: f64 = par_sums(&r.output.rgba, |o, s| {
+                s.input += (0..3).map(|i| f64::from(o[i].max(0.0)).powf(2.2)).sum::<f64>();
+            })
+            .input;
             let id = &preset.id;
             assert!(
                 ((got - expected) / expected).abs() < 2e-3,
@@ -262,6 +272,46 @@ fn flat_white_through_the_chain_in_every_headroom_mode() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// Running sums of the flat-white oracle over a part of an image.
+#[derive(Clone, Copy, Default)]
+struct Sums {
+    unclipped: f64,
+    expected: f64,
+    max_c: f64,
+    intended: f64,
+    input: f64,
+}
+
+/// Applies `f` to every RGBA texel of `rgba` (4 values each) with running [`Sums`], on several threads over
+/// consecutive parts of the image; the parts' sums are added in image order (`max_c` is their maximum).
+fn par_sums(rgba: &[f32], f: impl Fn(&[f32], &mut Sums) + Sync) -> Sums {
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).min(8);
+    let per = (rgba.len() / 4).div_ceil(threads).max(1) * 4;
+    let parts: Vec<Sums> = std::thread::scope(|s| {
+        let handles: Vec<_> = rgba
+            .chunks(per)
+            .map(|part| {
+                let f = &f;
+                s.spawn(move || {
+                    let mut sums = Sums::default();
+                    for t in part.chunks(4) {
+                        f(t, &mut sums);
+                    }
+                    sums
+                })
+            })
+            .collect();
+        handles.into_iter().map(|h| h.join().expect("oracle thread")).collect()
+    });
+    parts.iter().fold(Sums::default(), |a, b| Sums {
+        unclipped: a.unclipped + b.unclipped,
+        expected: a.expected + b.expected,
+        max_c: a.max_c.max(b.max_c),
+        intended: a.intended + b.intended,
+        input: a.input + b.input,
+    })
+}
+
 /// Largest share of the full-white field mean the shoulder (knee 0.6, automatic white point) may lose
 /// on a shipped preset at 2560 x 1440 (T-84). Measured worst: preset 06 (slot mask, readout 3.87) 55.1 %, with 5
 /// points of room. The shoulder loses 1 to 4 points MORE than the T-46 hard clip (54.1 % there): the knee 0.6
@@ -346,15 +396,12 @@ fn every_preset_persistence_trail_equals_the_oracle() {
         assert!(p.phosphor_persistence, "{}: persistence on", preset.id);
         assert_eq!(p.phosphor_tail_strength_rgb, [1.0; 3], "{}", preset.id);
         assert_eq!(p.phosphor_frame_rate_hz, 60.0, "{}", preset.id);
-        // Flush the trail of the previous preset, then a black frame primes the history to 0.
-        let mut last = run_phosphor(&mut gpu, &p, &black);
-        for _ in 0..3000 {
-            if last == black {
-                break;
-            }
-            last = run_phosphor(&mut gpu, &p, &black);
-        }
-        assert_eq!(last, black, "{}: trail flushed", preset.id);
+        // Drop the trail of the previous preset: a cleared history is primed by the first frame, so a black
+        // frame leaves it at 0 (the stage's contract; that a trail also decays to exactly 0 frame by frame is
+        // checked once in tests/stage_phosphor.rs, `step_response`, instead of once per preset here).
+        gpu.clear_history();
+        let last = run_phosphor(&mut gpu, &p, &black);
+        assert_eq!(last, black, "{}: trail cleared", preset.id);
         let y0 = run_phosphor(&mut gpu, &p, &white);
         let y1 = run_phosphor(&mut gpu, &p, &black);
         let fits: [(&str, DecayFit<'static>, f64); 3] = [
