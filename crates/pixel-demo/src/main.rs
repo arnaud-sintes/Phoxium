@@ -8,6 +8,7 @@
 mod art;
 mod clock;
 mod counter;
+mod keys;
 mod layout;
 mod options;
 mod patterns;
@@ -24,14 +25,16 @@ use std::{
 use windows::{
     core::{w, HSTRING},
     Win32::{
-        Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, WPARAM},
+        Foundation::{COLORREF, HANDLE, HWND, LPARAM, LRESULT, RECT, SIZE, WPARAM},
         Graphics::{
             Dwm::{DwmSetWindowAttribute, DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_DONOTROUND},
             Gdi::{
-                BeginPaint, CreateDIBPatternBrushPt, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
-                GetMonitorInfoW, InvalidateRect, MonitorFromWindow, SetDIBitsToDevice, SetStretchBltMode,
-                StretchDIBits, UpdateWindow, BITMAPINFO, BITMAPINFOHEADER, COLORONCOLOR, DIB_RGB_COLORS, HBRUSH,
-                HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, PAINTSTRUCT, SRCCOPY,
+                BeginPaint, CreateDIBPatternBrushPt, CreateFontW, CreateSolidBrush, DeleteObject, EndPaint, FillRect,
+                GetMonitorInfoW, GetTextExtentPoint32W, InvalidateRect, MonitorFromWindow, SelectObject, SetBkMode,
+                SetDIBitsToDevice, SetStretchBltMode, SetTextColor, StretchDIBits, TextOutW, UpdateWindow, BITMAPINFO,
+                BITMAPINFOHEADER, CLIP_DEFAULT_PRECIS, COLORONCOLOR, DEFAULT_CHARSET, DEFAULT_QUALITY, DIB_RGB_COLORS,
+                FW_BOLD, HBRUSH, HDC, HGDIOBJ, MONITORINFO, MONITOR_DEFAULTTONEAREST, OUT_DEFAULT_PRECIS, PAINTSTRUCT,
+                SRCCOPY, TRANSPARENT,
             },
         },
         System::{
@@ -48,6 +51,7 @@ use windows::{
     },
 };
 
+use keys::ScaleState;
 use layout::{Align, Layout, Par, ScaleMode};
 use options::{Content, Options, Parsed};
 use patterns::BarPattern;
@@ -80,6 +84,10 @@ struct App {
     /// Integer scale the user asked for (option, digit key, M key), when the window had to show a smaller
     /// one to fit the work area; the title reports both so that it never claims an undisplayed scale.
     requested_scale: Option<u32>,
+    /// Last explicit (non auto-fit) presentation: where the T key goes back to.
+    remembered_mode: ScaleMode,
+    /// Text and start of the on-screen toast of the last presentation key (--no-toast never sets it).
+    toast: Option<(String, Instant)>,
     /// Saved style and placement while fullscreen.
     saved: Option<(isize, WINDOWPLACEMENT)>,
     stat_start: Instant,
@@ -176,6 +184,7 @@ fn main() {
         let (brush, brush_dib) = make_brush(o.bg, o.bars_pattern);
         let now = Instant::now();
         let (borderless, fixed_size) = (o.borderless, o.fixed_size);
+        let mode0 = o.mode;
         let (fullscreen, maximised, no_round, fps, exit_after, stats) = (
             o.fullscreen,
             o.maximised,
@@ -202,6 +211,8 @@ fn main() {
                 brush,
                 brush_dib,
                 requested_scale: None,
+                remembered_mode: ScaleState::new(mode0, None).remembered,
+                toast: None,
                 saved: None,
                 stat_start: now,
                 stat_ticks: 0,
@@ -532,26 +543,17 @@ fn set_native(a: &mut App, size: (usize, usize)) {
     render_into(a);
 }
 
-/// Keys legend shown at the end of the title.
-const TITLE_KEYS: &str = "keys 1-0 scale, M present, F filter, B bars, P pattern, C content, N native, K counter, \
-                          X markers, A align, Alt+Enter fullscreen, Esc";
+/// Keys legend shown at the end of the title (the state comes first).
+const TITLE_KEYS: &str = "keys 1-0/+/-/Up/Down scale, PgUp/PgDn +-2, Home x1, End or T autofit, Z fit family, \
+                          M present, F filter, B bars, P pattern, C content, N native, K counter, X markers, \
+                          A align, Alt+Enter fullscreen, Esc";
 
 fn update_title(hwnd: HWND) {
     let (cw, ch) = client_size(hwnd);
     let title = APP.with(|a| {
         let a = a.borrow();
         let a = a.as_ref()?;
-        let mode = match a.o.mode {
-            ScaleMode::Native => "1to1".to_string(),
-            ScaleMode::Integer(n) => layout::integer_label(a.requested_scale, n),
-            ScaleMode::Fit => match current_layout(a, cw, ch).scale {
-                Some(n) => format!("autofit x{n}"),
-                None => "autofit".to_string(),
-            },
-            ScaleMode::FitFree | ScaleMode::Stretch => {
-                format!("{} {}", a.o.mode.present_name(), a.o.filter.name())
-            }
-        };
+        let mode = keys::mode_label(a.o.mode, a.requested_scale, fit_scale(a, cw, ch), a.o.filter.name());
         let par = if a.o.par == Par::SQUARE {
             String::new()
         } else {
@@ -636,6 +638,9 @@ unsafe fn tick(hwnd: HWND, stats: bool) -> u64 {
             a.stat_ticks += 1;
             render_into(a);
         }
+        if a.toast.as_ref().is_some_and(|(_, t)| !keys::toast_active(t.elapsed())) {
+            a.toast = None;
+        }
         let win = a.stat_start.elapsed().as_secs_f64();
         let report = if win >= 1.0 {
             a.rate = a.stat_ticks as f64 / win;
@@ -665,6 +670,29 @@ unsafe fn tick(hwnd: HWND, stats: bool) -> u64 {
 
 fn current_layout(a: &App, cw: u32, ch: u32) -> Layout {
     layout::layout(cw, ch, a.nw as u32, a.nh as u32, a.o.par, a.o.mode, a.o.align)
+}
+
+/// Integer scale that auto-fit picks for a client of `cw x ch`; `None` in the other modes.
+fn fit_scale(a: &App, cw: u32, ch: u32) -> Option<u32> {
+    if a.o.mode == ScaleMode::Fit {
+        current_layout(a, cw, ch).scale
+    } else {
+        None
+    }
+}
+
+/// Shows the toast of the current presentation (unless `--no-toast`), for `keys::TOAST_DURATION`.
+fn show_toast(hwnd: HWND) {
+    let (cw, ch) = client_size(hwnd);
+    APP.with(|a| {
+        let mut a = a.borrow_mut();
+        let Some(a) = a.as_mut() else { return };
+        if a.o.no_toast {
+            return;
+        }
+        let text = keys::toast_text(a.o.mode, a.requested_scale, fit_scale(a, cw, ch), a.o.filter.name());
+        a.toast = Some((text, Instant::now()));
+    });
 }
 
 /// Client size that exactly shows the picture (no bars) in the current mode, if the mode has one.
@@ -765,6 +793,7 @@ unsafe fn on_dpi_changed(hwnd: HWND, wparam: WPARAM, lparam: LPARAM) {
 
 unsafe fn on_key(hwnd: HWND, key: u32) {
     let mut resize: Option<(u32, u32)> = None;
+    let mut toast = false;
     match key {
         VK_ESCAPE => {
             let _ = DestroyWindow(hwnd);
@@ -807,25 +836,26 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
             a.o.markers = Some(!on);
             render_into(a);
         }),
-        0x30..=0x39 => APP.with(|a| {
-            let mut a = a.borrow_mut();
-            let a = a.as_mut().unwrap();
-            let n = if key == 0x30 { 10 } else { key - 0x30 };
-            a.o.mode = ScaleMode::Integer(n);
-            a.requested_scale = Some(n);
-            resize = exact_client(a);
-        }),
-        0x4D => APP.with(|a| {
-            // M: 1to1 -> integer -> autofit -> fit -> stretch -> 1to1
-            let mut a = a.borrow_mut();
-            let a = a.as_mut().unwrap();
-            a.o.mode = a.o.mode.next(3);
-            if let ScaleMode::Integer(n) = a.o.mode {
-                a.requested_scale = Some(n);
-            }
-            a.scaled_valid = false;
-            resize = exact_client(a);
-        }),
+        // Presentation keys (digits, + - arrows, Page Up and Down, Home, End, T, Tab, Z, M): `keys.rs`.
+        _ if keys::scale_key(key).is_some() => {
+            let (cw, ch) = client_size(hwnd);
+            APP.with(|a| {
+                let mut a = a.borrow_mut();
+                let a = a.as_mut().unwrap();
+                let state = ScaleState {
+                    mode: a.o.mode,
+                    requested: a.requested_scale,
+                    remembered: a.remembered_mode,
+                };
+                let next = keys::apply(state, keys::scale_key(key).unwrap(), fit_scale(a, cw, ch));
+                a.o.mode = next.mode;
+                a.requested_scale = next.requested;
+                a.remembered_mode = next.remembered;
+                a.scaled_valid = false;
+                resize = exact_client(a);
+            });
+            toast = true;
+        }
         0x46 => APP.with(|a| {
             // F: next filter (used by fit and stretch).
             let mut a = a.borrow_mut();
@@ -836,6 +866,7 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
                 Filter::Bicubic => Filter::Nearest,
             };
             a.scaled_valid = false;
+            toast = a.o.mode.is_free();
         }),
         0x41 => APP.with(|a| {
             // A
@@ -861,6 +892,10 @@ unsafe fn on_key(hwnd: HWND, key: u32) {
         let (cw, ch) = clamp_to_work_area(hwnd).unwrap_or((cw, ch));
         fit_window_to_client(hwnd, cw, ch);
         keep_in_work_area(hwnd);
+    }
+    if toast {
+        // After the clamp, so that it reports the scale that is displayed.
+        show_toast(hwnd);
     }
     update_title(hwnd);
     let _ = InvalidateRect(Some(hwnd), None, false);
@@ -929,7 +964,61 @@ unsafe fn paint(hwnd: HWND) {
             );
         }
     });
+    // The toast goes last, at the bottom centre of the client area: clear of the frame counter (top-left)
+    // and of the corner markers, so it never hides what the capture tests decode.
+    let toast = APP.with(|a| {
+        let a = a.borrow();
+        let (text, t) = a.as_ref()?.toast.as_ref()?;
+        keys::toast_active(t.elapsed()).then(|| text.clone())
+    });
+    if let Some(text) = toast {
+        draw_toast(hdc, cw, ch, &text);
+    }
     let _ = EndPaint(hwnd, &ps);
+}
+
+/// One line of white text on a dark box, bottom centre of a `cw x ch` client area.
+unsafe fn draw_toast(hdc: HDC, cw: u32, ch: u32, text: &str) {
+    const PAD: i32 = 8;
+    const MARGIN: i32 = 12;
+    let wide: Vec<u16> = text.encode_utf16().collect();
+    let font = CreateFontW(
+        -18,
+        0,
+        0,
+        0,
+        FW_BOLD.0 as i32,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET,
+        OUT_DEFAULT_PRECIS,
+        CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY,
+        0,
+        w!("Segoe UI"),
+    );
+    let old = SelectObject(hdc, HGDIOBJ(font.0));
+    let mut size = SIZE::default();
+    let _ = GetTextExtentPoint32W(hdc, &wide, &mut size);
+    let box_w = size.cx + 2 * PAD;
+    let box_h = size.cy + PAD;
+    let left = ((cw as i32 - box_w) / 2).max(0);
+    let top = (ch as i32 - box_h - MARGIN).max(0);
+    let rect = RECT {
+        left,
+        top,
+        right: left + box_w,
+        bottom: top + box_h,
+    };
+    let back = CreateSolidBrush(COLORREF(0x0020_2020));
+    FillRect(hdc, &rect, back);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, COLORREF(0x00FF_FFFF));
+    let _ = TextOutW(hdc, left + PAD, top + PAD / 2, &wide);
+    SelectObject(hdc, old);
+    let _ = DeleteObject(HGDIOBJ(back.0));
+    let _ = DeleteObject(HGDIOBJ(font.0));
 }
 
 /// Top-down 32 bit DIB header.
