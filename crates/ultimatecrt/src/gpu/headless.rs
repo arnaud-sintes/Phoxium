@@ -888,6 +888,65 @@ impl HostBuffer {
     }
 }
 
+/// Device-local buffer (no mapping): for data the GPU writes with atomics or reads often. A storage buffer in
+/// host memory turns every atomic into a bus round trip (the `encode` clip counters cost up to 3.5 ms per frame
+/// at 1920 x 1080 there, performance work 2026-11-20).
+#[derive(Default)]
+pub(super) struct DeviceBuffer {
+    pub buffer: vk::Buffer,
+    pub memory: vk::DeviceMemory,
+}
+
+impl DeviceBuffer {
+    /// Creates a buffer of `size` bytes in device-local memory. On error, the partly created objects are
+    /// destroyed.
+    ///
+    /// # Safety
+    /// `ctx` must be live; the caller destroys the result with [`DeviceBuffer::destroy`] once the GPU no longer
+    /// uses it.
+    pub unsafe fn create(ctx: &Context, size: usize, usage: vk::BufferUsageFlags) -> Res<Self> {
+        let d = &ctx.device;
+        let mut b = Self {
+            buffer: d.create_buffer(
+                &vk::BufferCreateInfo::default()
+                    .size(size as u64)
+                    .usage(usage)
+                    .sharing_mode(vk::SharingMode::EXCLUSIVE),
+                None,
+            )?,
+            ..Self::default()
+        };
+        let r = (|| -> Res<()> {
+            let req = d.get_buffer_memory_requirements(b.buffer);
+            b.memory = d.allocate_memory(
+                &vk::MemoryAllocateInfo::default()
+                    .allocation_size(req.size)
+                    .memory_type_index(ctx.memory_type(req.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?),
+                None,
+            )?;
+            d.bind_buffer_memory(b.buffer, b.memory, 0)?;
+            Ok(())
+        })();
+        match r {
+            Ok(()) => Ok(b),
+            Err(e) => {
+                b.destroy(d);
+                Err(e)
+            }
+        }
+    }
+
+    /// Destroys the buffer and frees its memory; null handles are no-ops.
+    ///
+    /// # Safety
+    /// The GPU must have finished every use of the buffer.
+    pub unsafe fn destroy(&mut self, d: &ash::Device) {
+        d.destroy_buffer(self.buffer, None);
+        d.free_memory(self.memory, None);
+        *self = Self::default();
+    }
+}
+
 /// Converts an IEEE 754 binary16 value to `f32` (exact: every half value is an `f32` value).
 pub(super) fn f16_to_f32(h: u16) -> f32 {
     let negative = h & 0x8000 != 0;

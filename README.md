@@ -131,6 +131,18 @@ Only the client area of the target window is captured, so a 256×240 source at 3
 - The menu and the overlay are drawn over the finished picture, after the CRT chain (never dithered or tone-mapped), and cost nothing while hidden (no pass at all). `--stats` and `--log` show their GPU time as the `ui` segment (`gpu_ui_ms`).
 - `scripts\check-menu.ps1` is the live check of the focus hand-off (needs a hands-off desktop; see its header). It judges each open and close cycle against the independent foreground poll (not a count of all the changes, which depends on the startup state), and `scripts\check-menu.ps1 -SelfTest` tests that criterion on recorded sequences without opening anything. Not re-run live since that change.
 
+## Quality tiers and the automatic quality drop (T-48)
+
+The menu panel **Performance** chooses how exactly the CRT model is computed. A tier never changes the look parameters (the tube, the mask, the beam), only how much work is spent evaluating them; a preset change keeps the tier.
+
+- `quality_tier` = **standard** (default): the beam of a flat tube is computed once per scanline and column, the method the curved tubes already used, instead of once per screen tile. The picture is within one FP16 step of `exact` (measured mean 0.012 %, max 0.2 % of white) and the `screen` pass costs about 2.5 times less on a flat tube.
+- **exact**: the evaluation as written, with nothing approximated beyond the model itself; the same picture, bit for bit, as before the tiers existed. The slowest.
+- **fast**: standard, plus no more amplifier sub-samples per source pixel than the output has pixels per source pixel (at least 4). Within 1 % of white on average (worst case a 1-pixel checker, 0.8 %), at most 2.7 % on one pixel. Mostly helps the presets with 16 sub-samples (PVM, BVM, the TVs).
+- **low**: fast, plus a beam reach of 3 instead of 4 spot widths and a coarser sampling grid on curved tubes. About 5 to 15 % cheaper than fast; within 1 % of white on average (worst 0.86 %), 2.7 % at most.
+- `quality_auto` (off by default, so the picture never changes unasked): when the GPU frame time stays above the refresh period of the output's monitor for 3 seconds, the next lower tier is used; it goes back one tier after 10 seconds with at least 35 % headroom (waiting twice as long after each relapse, up to 160 s). The console, the window title and the overlay (`Ctrl+Alt+O`, row "Quality") show the tier in force while it is lowered.
+
+The measured cost and error of each tier are in ARCHITECTURE.md, section 3.7 "Quality tiers".
+
 ## Ageing and burn-in (T-42, T-43, optional)
 
 Both are off by default; the picture is then exactly the same as without them. They are in the menu panel "Ageing and burn-in".

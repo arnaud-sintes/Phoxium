@@ -24,9 +24,14 @@
 //! error bound): `screen_lines.comp` writes the standard beam's pass-1 entries of every raster line at raster
 //! columns on a uniform grid into the stage's line images, `screen_warp.comp` evaluates each host pixel from
 //! them through the geometry, then the mask and the opening. The decision is the CPU's, per frame, from the
-//! parameters and constants ([`warp_plan`], in [`Stage::prepare`]): the identity and the separable geometries
-//! (margin, overscan, `raster_scale`, convergence) keep the single `screen.comp` pass, bit for bit and at the
-//! same cost, and nothing of the warp path is recorded or allocated for them. This is the per-stage form of
+//! parameters and constants ([`warp_plan`], in [`Stage::prepare`]). In the `exact` quality tier the identity and
+//! the separable geometries (margin, overscan, `raster_scale`, convergence) keep the single `screen.comp` pass, bit
+//! for bit, and nothing of the warp path is recorded or allocated for them. Quality tiers (T-48, `crate::quality`):
+//! from `standard` on, an unscaled separable raster (no overscan, no running ABL breathing) also takes the two
+//! passes, on a grid aligned with the host columns (ox 1, every host pixel on a grid column, Catmull-Rom weights
+//! (0, 1, 0, 0)): the entries are the tile path's, computed once per (line, column) instead of once per tile, at
+//! about 0.4 times the cost, within one FP16 step of `exact`; from `fast` on, a scaled separable raster too
+//! (interpolated, within the warp path's contract). This is the per-stage form of
 //! `Stage::is_identity`: `screen` changes domain, so the pipeline never skips it, and a slot `warp` between
 //! beam and mask would need a raster-space domain the image contract does not have (and would cut the slot
 //! `screen` that every test and timing names). So the slot stays one slot; like `abl` it records two passes and
@@ -41,7 +46,8 @@
 //! `interlace_mode` off the driver compiles the progressive raster alone and the picture is bit-identical to the
 //! build without the module (a branch on the parameter alone changed the driver's code enough to flip a few FP16
 //! results, about 12 values of 3.7 million). The variants with the constant true (the three shaders) are created
-//! by `prepare` the first time a frame needs them and kept until `destroy`.
+//! by `prepare` the first time a frame needs them and kept until `destroy`; the same holds for the `low` tier's
+//! beam reach (constant 1 `BEAM_REACH_SIGMAS`, 3 instead of 4, T-48), alone or with the interlace ([`VariantKey`]).
 
 use std::cell::Cell;
 
@@ -54,6 +60,7 @@ use super::{
 use crate::gpu::headless::GpuImage;
 use crate::gpu::{barrier, Context, FrameConstants};
 use crate::params::{Params, BEAM_QUALITY_STANDARD, GEOMETRY_CURVATURE_FLAT, INTERLACE_MODE_OFF};
+use crate::quality::{self, Tier};
 use crate::Res;
 
 const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/screen.comp.spv"));
@@ -141,11 +148,20 @@ fn raster_lines(fc: &FrameConstants) -> u32 {
 /// raster px, overscan included) is at least [`WARP_SIGMA_STEPS`] grid steps at some `ox` of 1, 2 or 4 (the
 /// smallest is taken). Below 0.3 raster px the standard quality keeps the per-pixel reference form.
 pub fn warp_plan(fc: &FrameConstants, params: &Params) -> Option<WarpPlan> {
+    warp_plan_with(fc, params, true)
+}
+
+/// [`warp_plan`] knowing whether the `abl` slot runs in the frame (`abl_runs`): the ABL breathing scales the
+/// raster only then (`geometry_raster_scale`), so without it a breathing setting leaves the raster unscaled.
+pub fn warp_plan_with(fc: &FrameConstants, params: &Params, abl_runs: bool) -> Option<WarpPlan> {
     let positive = |v: f32| v > 0.0; // false for NaN
+    let sep = separable(params);
+    // T-48: the `exact` tier keeps the tile path of `screen.comp` for the separable geometries (the output before
+    // the tiers, bit for bit); the other tiers take the line-image path for them too (2.5 times cheaper).
     if !positive(fc.px_per_mm)
         || !positive(fc.line_pitch_mm)
         || params.beam_quality != BEAM_QUALITY_STANDARD
-        || separable(params)
+        || (sep && quality::tier(params) == Tier::Exact)
     {
         return None;
     }
@@ -159,9 +175,26 @@ pub fn warp_plan(fc: &FrameConstants, params: &Params) -> Option<WarpPlan> {
     // range) taken as 1 for the sampling rule and as up to 1.1 for the reach.
     let im = |ov: f32| 1.0 / f64::from(1.0 + ov).max(0.5);
     let sigma_peak = growth.fwhm(1.0) / 2.354_820_045 * ppm * im(params.geometry_overscan_x);
-    let ox = WARP_OVERSAMPLING
-        .into_iter()
-        .find(|&o| sigma_peak * f64::from(o) >= WARP_SIGMA_STEPS)?;
+    // A separable geometry whose raster is not scaled (no overscan, no ABL breathing: raster px = host px) puts
+    // every host pixel's footprint on a grid column at ox 1 (Catmull-Rom weights (0, 1, 0, 0)): no interpolation,
+    // whatever the spot size, so the line images hold exactly the tile path's entries (to their FP16 storage).
+    let aligned = sep
+        && params.geometry_overscan_x == 0.0
+        && params.geometry_overscan_y == 0.0
+        && (params.abl_breathing == 0.0 || !abl_runs);
+    // A scaled separable raster (overscan, breathing) needs the horizontal interpolation, an approximation: only
+    // from the `fast` tier on (`standard` keeps the tile path there, so it stays within one FP16 step of `exact`).
+    if sep && !aligned && quality::tier(params) < Tier::Fast {
+        return None;
+    }
+    let steps = quality::warp_sigma_steps(params, WARP_SIGMA_STEPS);
+    let ox = if aligned {
+        1
+    } else {
+        WARP_OVERSAMPLING
+            .into_iter()
+            .find(|&o| sigma_peak * f64::from(o) >= steps)?
+    };
     // Reach of pass 1 (beam_warp.glsl): 4 sigma at twice the peak current (the tail's when on) plus the largest
     // misconvergence, in raster px, as the skirt margin (FrameConstants::with_skirt_margin).
     let mut sigma_mm = growth.fwhm(2.0).max(growth.fwhm(0.0)) / 2.354_820_045;
@@ -198,18 +231,44 @@ pub fn warp_plan(fc: &FrameConstants, params: &Params) -> Option<WarpPlan> {
     })
 }
 
-/// The interlace variant of a pipeline (T-32): `spv` with the specialization constant 0 (`UCRT_INTERLACE` of
-/// `shaders/include/interlace.glsl`, a bool) set to true.
+/// Which specialized variant of the three pipelines a frame needs: the interlace raster (T-32, constant 0
+/// `UCRT_INTERLACE` of `shaders/include/interlace.glsl`) and the beam reach of the `low` quality tier (T-48,
+/// constant 1 `BEAM_REACH_SIGMAS` of `shaders/include/beam.glsl`, 3 instead of 4). The plain pipelines (neither)
+/// are created unspecialized, so the progressive full-reach code is compiled exactly as before the constants.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct VariantKey {
+    interlace: bool,
+    short_reach: bool,
+}
+
+/// A variant of a pipeline: `spv` with the specialization constants of `key`.
 ///
 /// # Safety
 /// As [`compute_pipeline`].
-unsafe fn interlace_pipeline(d: &ash::Device, layout: vk::PipelineLayout, spv: &[u8]) -> Res<vk::Pipeline> {
+unsafe fn variant_pipeline(
+    d: &ash::Device,
+    layout: vk::PipelineLayout,
+    spv: &[u8],
+    key: VariantKey,
+) -> Res<vk::Pipeline> {
     let module = shader_module(d, spv)?;
-    let data = vk::TRUE.to_ne_bytes();
-    let entries = [vk::SpecializationMapEntry::default()
+    let interlace = if key.interlace { vk::TRUE } else { vk::FALSE };
+    let reach: f32 = if key.short_reach { 3.0 } else { 4.0 };
+    let mut data = [0u8; 8];
+    data[..4].copy_from_slice(&interlace.to_ne_bytes());
+    data[4..].copy_from_slice(&reach.to_ne_bytes());
+    let mut entries = vec![vk::SpecializationMapEntry::default()
         .constant_id(0)
         .offset(0)
         .size(size_of::<vk::Bool32>())];
+    if key.short_reach {
+        entries.push(
+            vk::SpecializationMapEntry::default()
+                .constant_id(1)
+                .offset(4)
+                .size(size_of::<f32>()),
+        );
+    }
     let spec = vk::SpecializationInfo::default().map_entries(&entries).data(&data);
     let info = vk::ComputePipelineCreateInfo::default()
         .stage(
@@ -225,9 +284,9 @@ unsafe fn interlace_pipeline(d: &ash::Device, layout: vk::PipelineLayout, spv: &
     Ok(result.map_err(|(_, e)| e)?[0])
 }
 
-/// The interlace variants of the stage's three pipelines (T-32).
+/// A specialized variant of the stage's three pipelines ([`VariantKey`]).
 #[derive(Clone, Copy)]
-struct InterlacePipelines {
+struct VariantPipelines {
     screen: vk::Pipeline,
     lines: vk::Pipeline,
     warp: vk::Pipeline,
@@ -235,9 +294,10 @@ struct InterlacePipelines {
 
 #[derive(Default)]
 struct Screen {
-    /// T-32: the interlace variants, created on first use; whether the frame being recorded uses them.
-    interlace_pipelines: Option<InterlacePipelines>,
-    interlace: bool,
+    /// T-32, T-48: the specialized variants (interlace, short reach), created on first use; the variant the
+    /// frame being recorded uses (the default key: the plain pipelines).
+    variant_pipelines: Vec<(VariantKey, VariantPipelines)>,
+    variant: VariantKey,
     /// The pass; its pipeline layout has the standard set 0 and the ABL state set 1.
     pass: ComputePass,
     state_layout: vk::DescriptorSetLayout,
@@ -397,9 +457,16 @@ impl Screen {
         d.cmd_dispatch(cb, size.0.div_ceil(WARP_GROUP.0), size.1.div_ceil(WARP_GROUP.1), 1);
     }
 
-    /// The interlace variants when the frame being recorded draws fields (T-32), else `None`.
-    fn variants(&self) -> Option<InterlacePipelines> {
-        self.interlace_pipelines.filter(|_| self.interlace)
+    /// The specialized variant the frame being recorded uses (T-32 fields, T-48 low tier), `None` for the plain
+    /// pipelines.
+    fn variants(&self) -> Option<VariantPipelines> {
+        if self.variant == VariantKey::default() {
+            return None;
+        }
+        self.variant_pipelines
+            .iter()
+            .find(|(k, _)| *k == self.variant)
+            .map(|(_, v)| *v)
     }
 }
 
@@ -497,17 +564,27 @@ impl Stage for Screen {
 
     unsafe fn prepare(&mut self, ctx: &Context, fc: &FrameConstants, params: &Params, runs: bool) -> Res<()> {
         self.transition = false;
-        // T-32: the interlace variants of the pipelines, created the first time a frame draws fields.
-        self.interlace = runs && params.interlace_mode != INTERLACE_MODE_OFF;
-        if self.interlace && self.interlace_pipelines.is_none() {
+        // T-32, T-48: the specialized variants of the pipelines (fields, the low tier's reach), created the first
+        // time a frame needs them.
+        self.variant = VariantKey {
+            interlace: runs && params.interlace_mode != INTERLACE_MODE_OFF,
+            short_reach: runs && quality::beam_reach_sigmas(params) < 4.0,
+        };
+        let key = self.variant;
+        if key != VariantKey::default() && !self.variant_pipelines.iter().any(|(k, _)| *k == key) {
             let d = &ctx.device;
-            self.interlace_pipelines = Some(InterlacePipelines {
-                screen: interlace_pipeline(d, self.pass.layout, SPV)?,
-                lines: interlace_pipeline(d, self.warp_layout, LINES_SPV)?,
-                warp: interlace_pipeline(d, self.warp_layout, WARP_SPV)?,
-            });
+            let v = VariantPipelines {
+                screen: variant_pipeline(d, self.pass.layout, SPV, key)?,
+                lines: variant_pipeline(d, self.warp_layout, LINES_SPV, key)?,
+                warp: variant_pipeline(d, self.warp_layout, WARP_SPV, key)?,
+            };
+            self.variant_pipelines.push((key, v));
         }
-        self.warp = if runs { warp_plan(fc, params) } else { None };
+        self.warp = if runs {
+            warp_plan_with(fc, params, self.abl_runs.get())
+        } else {
+            None
+        };
         match self.warp {
             None => {
                 if self.lines_size != (0, 0) {
@@ -557,7 +634,7 @@ impl Stage for Screen {
 
     unsafe fn destroy(&mut self, d: &ash::Device) {
         self.free_lines(d);
-        if let Some(v) = self.interlace_pipelines.take() {
+        for (_, v) in self.variant_pipelines.drain(..) {
             d.destroy_pipeline(v.screen, None);
             d.destroy_pipeline(v.lines, None);
             d.destroy_pipeline(v.warp, None);
@@ -594,30 +671,86 @@ mod tests {
         }
     }
 
-    /// The CPU's separability test is the shader's: the warp path is chosen exactly for the non-separable
-    /// geometries with the standard quality, never for the identity or the separable ones, and the
-    /// oversampling follows the spot (PVM-20M4U at 1440 lines: sigma 1.69 px at peak, ox 1; FWHM 0.6 mm at 2 px
-    /// per mm: sigma 0.51 px, ox 4 (0.51 x 2 = 1.02 < 1.2); FWHM 0.1 mm at 2 px per mm: 0.085 px, reference).
+    /// The CPU's separability test is the shader's: in the `exact` tier the warp path is chosen exactly for the
+    /// non-separable geometries with the standard quality, never for the identity or the separable ones (T-48:
+    /// the other tiers take the line-image path for those too, on the aligned grid ox 1 when the raster is not
+    /// scaled), and the oversampling follows the spot (PVM-20M4U at 1440 lines: sigma 1.69 px at peak, ox 1;
+    /// FWHM 0.6 mm at 2 px per mm: sigma 0.51 px, ox 4 (0.51 x 2 = 1.02 < 1.2); FWHM 0.1 mm at 2 px per mm:
+    /// 0.085 px, reference).
     #[test]
     fn warp_plan_follows_the_geometry_and_the_spot() {
         let mut fc = FrameConstants::new((320, 240), (1920, 1440), false);
         fc.px_per_mm = 1440.0 / 290.0;
         fc.line_pitch_mm = 290.0 / 240.0;
-        let d = Params::default();
-        assert_eq!(warp_plan(&fc, &d), None, "identity");
-        for p in [
+        let exact = Params {
+            quality_tier: crate::params::QUALITY_TIER_EXACT,
+            ..Params::default()
+        };
+        assert_eq!(warp_plan(&fc, &exact), None, "identity");
+        let separable = [
             Params {
                 geometry_overscan_x: 0.05,
                 geometry_conv_red_radial_mm: 1.0,
-                ..d
+                ..exact
             },
             Params {
                 geometry_radius_mm: 900.0,
-                ..d
+                ..exact
             },
-        ] {
+        ];
+        for p in separable {
             assert_eq!(warp_plan(&fc, &p), None, "separable");
         }
+        // Standard tier: the line-image path for the identity (aligned, ox 1 whatever the spot) and for the
+        // separable geometries (the sampling rule where the raster is scaled).
+        let d = Params::default();
+        let tiny = Params {
+            beam_fwhm_mid_mm: 0.05,
+            beam_fwhm_peak_mm: 0.05,
+            ..d
+        };
+        assert_eq!(warp_plan(&fc, &d).map(|w| w.ox), Some(1), "identity, standard");
+        assert_eq!(warp_plan(&fc, &tiny).map(|w| w.ox), Some(1), "aligned grid, tiny spot");
+        // Overscan scales the raster: the line path would interpolate, so standard keeps the tile path and fast
+        // takes the line path; the unscaled one (a radius without curvature) is aligned in both.
+        let tier = |p: Params, t: u32| Params { quality_tier: t, ..p };
+        let fast = crate::params::QUALITY_TIER_FAST;
+        assert_eq!(
+            warp_plan(&fc, &tier(separable[0], d.quality_tier)),
+            None,
+            "scaled, standard"
+        );
+        assert_eq!(
+            warp_plan(&fc, &tier(separable[0], fast)).map(|w| w.ox),
+            Some(1),
+            "scaled, fast"
+        );
+        assert_eq!(
+            warp_plan(&fc, &tier(separable[1], d.quality_tier)).map(|w| w.ox),
+            Some(1),
+            "unscaled, standard"
+        );
+        // The ABL breathing scales the raster only while the abl slot runs.
+        let breathing = Params {
+            abl_breathing: 0.03,
+            ..d
+        };
+        assert_eq!(warp_plan_with(&fc, &breathing, true), None, "breathing, abl runs");
+        assert_eq!(
+            warp_plan_with(&fc, &breathing, false).map(|w| w.ox),
+            Some(1),
+            "breathing, abl off"
+        );
+        let scaled_tiny = Params {
+            geometry_overscan_x: 0.05,
+            quality_tier: fast,
+            ..tiny
+        };
+        assert_eq!(
+            warp_plan(&fc, &scaled_tiny),
+            None,
+            "scaled raster, spot under the grid rule"
+        );
         for p in [
             Params {
                 geometry_curvature: GEOMETRY_CURVATURE_SPHERICAL,

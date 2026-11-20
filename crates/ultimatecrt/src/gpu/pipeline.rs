@@ -30,7 +30,7 @@ use ash::vk;
 
 use super::barrier;
 use super::context::Context;
-use super::headless::{GpuImage, HostBuffer, ImageF32};
+use super::headless::{DeviceBuffer, GpuImage, HostBuffer, ImageF32};
 use super::stages::{self, decode, decode::Decode, encode, encode::Encode, ComputePass, Domain, Registration, Stage};
 use super::timing::{self, FrameTimings, GpuTimer, TimingAverager};
 use super::ui_render::{self, UiPass};
@@ -444,8 +444,12 @@ struct Slot {
     decode_set: vk::DescriptorSet,
     encode_set: vk::DescriptorSet,
     encode_bound: vk::ImageView,
-    /// Clip counters written by `encode` (`encode::CLIP_BYTES` bytes), cleared by the CPU at record time.
+    /// Clip counters as the CPU reads them (`encode::CLIP_BYTES` bytes): a copy of `clip_dev` made at the end of
+    /// the frame.
     clip_buf: HostBuffer,
+    /// The clip counters `encode` increments, in device-local memory (atomics on host memory cross the bus
+    /// one by one), cleared on the GPU before `encode`.
+    clip_dev: DeviceBuffer,
     links: Vec<LinkSets>,
 }
 
@@ -671,7 +675,14 @@ impl Pipeline {
                 s.frame_ubo =
                     HostBuffer::create(ctx, size_of::<FrameConstants>(), vk::BufferUsageFlags::UNIFORM_BUFFER)?;
                 s.params_ubo = HostBuffer::create(ctx, PARAMS_STD140_SIZE, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
-                s.clip_buf = HostBuffer::create(ctx, encode::CLIP_BYTES, vk::BufferUsageFlags::STORAGE_BUFFER)?;
+                s.clip_buf = HostBuffer::create(ctx, encode::CLIP_BYTES, vk::BufferUsageFlags::TRANSFER_DST)?;
+                s.clip_dev = DeviceBuffer::create(
+                    ctx,
+                    encode::CLIP_BYTES,
+                    vk::BufferUsageFlags::STORAGE_BUFFER
+                        | vk::BufferUsageFlags::TRANSFER_SRC
+                        | vk::BufferUsageFlags::TRANSFER_DST,
+                )?;
                 let sets = d.allocate_descriptor_sets(
                     &vk::DescriptorSetAllocateInfo::default()
                         .descriptor_pool(self.desc_pool)
@@ -730,7 +741,7 @@ impl Pipeline {
             }
             // The clip counters of the slot, in its `encode` set.
             let clip = [vk::DescriptorBufferInfo::default()
-                .buffer(s.clip_buf.buffer)
+                .buffer(s.clip_dev.buffer)
                 .range(encode::CLIP_BYTES as u64)];
             writes.push(
                 vk::WriteDescriptorSet::default()
@@ -1173,6 +1184,9 @@ impl Pipeline {
         let mut abl_runs = false;
         for i in 0..self.chain.len() {
             let runs = have_source && self.plan.iter().any(|&(j, m, _)| j == i && m == Mode::Run);
+            // `screen` decides its beam path in `prepare` (T-48: an unscaled raster when `abl` does not run),
+            // so every stage learns whether an earlier `abl` runs before its own `prepare`.
+            self.chain[i].stage.set_abl_runs(abl_runs);
             self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
             abl_runs |= runs && self.chain[i].stage.abl_state().is_some();
         }
@@ -1488,8 +1502,27 @@ impl Pipeline {
         // T-84: the output transform of the headroom mode, from the readout computed above.
         let xf = OutputTransform::new(params, &h);
         let s = &self.slots[cur];
-        // The slot's previous frame is done (`wait_slot`): clear the counters `encode` increments.
-        std::ptr::write_bytes(s.clip_buf.mapped, 0, encode::CLIP_BYTES);
+        // Clear the counters `encode` increments, on the GPU: after the previous frames' encode and copy of
+        // this buffer (queue order), before this encode.
+        clip_barrier(
+            d,
+            cb,
+            s.clip_dev.buffer,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER | vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::SHADER_STORAGE_WRITE | vk::AccessFlags2::SHADER_STORAGE_READ,
+            vk::PipelineStageFlags2::ALL_TRANSFER,
+            vk::AccessFlags2::TRANSFER_WRITE,
+        );
+        d.cmd_fill_buffer(cb, s.clip_dev.buffer, 0, vk::WHOLE_SIZE, 0);
+        clip_barrier(
+            d,
+            cb,
+            s.clip_dev.buffer,
+            vk::PipelineStageFlags2::ALL_TRANSFER,
+            vk::AccessFlags2::TRANSFER_WRITE,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE,
+        );
         self.encode.record(
             d,
             cb,
@@ -1503,6 +1536,23 @@ impl Pipeline {
             xf,
             target.format,
         );
+        // The counters to the host-visible copy the CPU reads after the fence.
+        let s = &self.slots[cur];
+        clip_barrier(
+            d,
+            cb,
+            s.clip_dev.buffer,
+            vk::PipelineStageFlags2::FRAGMENT_SHADER,
+            vk::AccessFlags2::SHADER_STORAGE_WRITE,
+            vk::PipelineStageFlags2::COPY,
+            vk::AccessFlags2::TRANSFER_READ,
+        );
+        d.cmd_copy_buffer(
+            cb,
+            s.clip_dev.buffer,
+            s.clip_buf.buffer,
+            &[vk::BufferCopy::default().size(encode::CLIP_BYTES as u64)],
+        );
         self.timer.mark(d, cb, cur, self.timer.encode(), false);
         // T-52a: the settings menu and the overlay, in display space over what `encode` wrote. Nothing is
         // recorded when the UI has nothing to draw (bit-exact output, empty `ui` segment).
@@ -1510,9 +1560,9 @@ impl Pipeline {
             ui_render::record(d, cb, target, ui)?;
             self.timer.mark(d, cb, cur, self.timer.ui(), false);
         }
-        // A fence wait does not make device writes visible to the host: the clip counters `encode`
-        // wrote are read on the CPU after the frame (windowed `Renderer::render` and headless alike).
-        barrier_to_host(d, cb, false);
+        // A fence wait does not make device writes visible to the host: the clip counters copied above
+        // are read on the CPU after the frame (windowed `Renderer::render` and headless alike).
+        barrier_to_host(d, cb, true);
         Ok(cb)
     }
 
@@ -1668,6 +1718,7 @@ impl Pipeline {
         for mut s in self.slots.drain(..) {
             s.params_ubo.destroy(d);
             s.clip_buf.destroy(d);
+            s.clip_dev.destroy(d);
             s.frame_ubo.destroy(d);
             s.staging.destroy(d);
             s.inject_staging.destroy(d);
@@ -1731,9 +1782,34 @@ pub(super) fn full_copy(size: (u32, u32)) -> vk::BufferImageCopy {
         })
 }
 
-/// Records the barrier that makes the shader storage writes (the clip counters of `encode`), and with
-/// `copies` the transfer writes (readbacks), visible to the host reads that follow the frame's fence
-/// wait. Shared by the windowed and the headless paths.
+/// One buffer memory barrier on the whole of `buffer` (the clip counters).
+///
+/// # Safety
+/// `cb` is a command buffer in the recording state of `d`; `buffer` is live.
+unsafe fn clip_barrier(
+    d: &ash::Device,
+    cb: vk::CommandBuffer,
+    buffer: vk::Buffer,
+    src_stage: vk::PipelineStageFlags2,
+    src_access: vk::AccessFlags2,
+    dst_stage: vk::PipelineStageFlags2,
+    dst_access: vk::AccessFlags2,
+) {
+    let b = [vk::BufferMemoryBarrier2::default()
+        .src_stage_mask(src_stage)
+        .src_access_mask(src_access)
+        .dst_stage_mask(dst_stage)
+        .dst_access_mask(dst_access)
+        .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+        .buffer(buffer)
+        .size(vk::WHOLE_SIZE)];
+    d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().buffer_memory_barriers(&b));
+}
+
+/// Records the barrier that makes the shader storage writes, and with `copies` the transfer writes (the clip
+/// counters' copy, readbacks), visible to the host reads that follow the frame's fence wait. Shared by the
+/// windowed and the headless paths.
 ///
 /// # Safety
 /// `cb` is a command buffer in the recording state of `d`.

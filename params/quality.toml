@@ -1,0 +1,28 @@
+# Quality and performance settings (PLAN T-48, QUESTIONS PRF-2 and OUT-6; src/quality.rs). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. These are not tube parameters:
+# they choose how exactly the model is evaluated, never the physics, and a preset change keeps them
+# (controls::keep_session_params). The tier table (cost and measured error per tier) is in ARCHITECTURE 3.7
+# "Quality tiers".
+
+[[param]]
+id = "quality_tier"
+stage = "quality"
+type = "enum"
+unit = "1"
+default = "standard"
+values = ["exact", "standard", "fast", "low"]
+tag = "D"
+source = "PLAN T-48 (tiers change only approximation, never physics), QUESTIONS PRF-2; measured cost and error per tier: ARCHITECTURE 3.7 Quality tiers"
+description = "How exactly the CRT model is evaluated; the look parameters are never changed, only the work spent. exact: every stage as written, nothing approximated beyond the model (the slowest; the picture of the build before the tiers, bit for bit). standard (default): the beam of an unscaled flat tube is computed once per scanline and column (the curved tubes' method) on a grid aligned with the output pixels, and the ABL level is summed in parallel; within one FP16 step of exact, the beam about 2.5 times cheaper on a flat tube. fast: also no more amplifier sub-samples per source pixel than the output has pixels per source pixel (at least 4), and the per-scanline method on a flat tube with overscan or ABL breathing too; within 1 % of white on average (measured 0.82 %), 2.7 % at most. low: also a beam reach of 3 instead of 4 spot sigmas and a coarser sampling grid on curved tubes; within 1 % on average (0.87 %), 2.7 % at most, 5 to 15 % cheaper than fast."
+group = "Performance"
+
+[[param]]
+id = "quality_auto"
+stage = "quality"
+type = "bool"
+unit = "1"
+default = false
+tag = "D"
+source = "QUESTIONS OUT-6 (on overrun, drop to a lower quality tier and report it), PRF-2; off by default so the picture never changes unasked"
+description = "Automatic quality drop on sustained overrun. On: when the GPU frame time stays above the refresh period for 3 s, the next lower tier is used (shown in the title and the overlay); it comes back one tier at a time after 10 s with at least 35 % headroom, waiting longer after each drop. Off (default): the selected tier is always used."
+group = "Performance"

@@ -213,6 +213,72 @@ fn gain_follows_apl() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// T-48: the parallel reduce of the quality tiers above `exact` (`reduce_partial.comp`, `reduce_final.comp`)
+/// gives the frame APL of the one-workgroup `reduce.comp` of `exact`, on the windows and on an amp-sized image
+/// (5000 x 241: 1,205,000 texels, 295 partial sums, the last one partial), within the FP16 readout of the probe.
+#[test]
+fn parallel_reduce_matches_the_exact_one() {
+    let test = "stage_abl parallel reduce";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut p = Params::default();
+    on(&mut p, "abl_enable", true);
+    on(&mut p, "abl_probe", true);
+    f32p(&mut p, "abl_tau_s", 0.0);
+    let (w, h) = (5000_u32, 241_u32);
+    let mut sum = 0.0_f64;
+    let rgba: Vec<f32> = (0..w * h)
+        .flat_map(|i| {
+            let v = |s: u32| ((i.wrapping_mul(s) >> 7) % 1021) as f32 / 1020.0;
+            let px = [v(2_654_435_761), v(40_503), v(97), 1.0];
+            sum += f64::from(px[0]) + f64::from(px[1]) + f64::from(px[2]);
+            px
+        })
+        .collect();
+    let big = (
+        ImageF32 {
+            width: w,
+            height: h,
+            rgba,
+        },
+        sum / (3.0 * f64::from(w * h)),
+    );
+    for (name, (img, a)) in [
+        ("window 10 %", window(10)),
+        ("window 50 %", window(50)),
+        ("5000 x 241", big),
+    ] {
+        let mut got = Vec::new();
+        for tier in [
+            ultimatecrt::params::QUALITY_TIER_EXACT,
+            ultimatecrt::params::QUALITY_TIER_STANDARD,
+        ] {
+            let q = Params {
+                quality_tier: tier,
+                ..p
+            };
+            frame(&mut gpu, &q, &img, DT_MS);
+            let s = probe(&frame(&mut gpu, &q, &img, DT_MS));
+            got.push(s[3]);
+        }
+        eprintln!(
+            "{test}: {name}: APL exact {} parallel {} analytic {a:.6}",
+            got[0], got[1]
+        );
+        for g in &got {
+            assert!((g - a).abs() <= a * 1e-3, "{test} {name}: {g} vs {a}");
+        }
+        assert!(
+            (got[0] - got[1]).abs() <= got[0] * 2f64.powi(-10),
+            "{test} {name}: {got:?}"
+        );
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// Channel handling: a coloured field (1, 0.5, 0.25). The APL is the mean of the three currents and the
 /// same gain scales all three channels (a variant limiting red only, or measuring red only, fails).
 #[test]

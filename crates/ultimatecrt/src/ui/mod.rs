@@ -76,6 +76,9 @@ pub struct UiState {
     pub timings: Option<FrameTimings>,
     pub capture_fps: f64,
     pub render_fps: f64,
+    /// The quality tier in force when the automatic drop lowered it (T-48, OUT-6), e.g. `fast (auto, selected
+    /// standard)`; shown by the overlay. `None` while the selected tier is in force.
+    pub quality: Option<String>,
     /// The source as the menu's Source section shows it (A23).
     pub source: SourceView,
 }

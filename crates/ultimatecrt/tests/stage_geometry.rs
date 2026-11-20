@@ -904,13 +904,19 @@ fn abl_state_is_well_defined() {
     fc.frame_time_ms = 0.0;
     let value = |x: u32, y: u32| (1 + (x * 5 + y * 3) % 11) as f32 / 16.0;
     let amp = currents(&fc, |x, y| [value(x, y), value(y, x), value(x + 1, y)]);
-    let reference = run(&mut gpu, &["screen"], fc, &base(), &amp);
+    // The exact tier: one beam path for both (T-48: the standard tier takes the line images for an unscaled
+    // raster and the tile path once the breathing may scale it, which differ by up to one FP16 step).
+    let exact = Params {
+        quality_tier: ultimatecrt::params::QUALITY_TIER_EXACT,
+        ..base()
+    };
+    let reference = run(&mut gpu, &["screen"], fc, &exact, &amp);
     let breathing = Params {
         abl_enable: false,
         abl_breathing: 0.03,
         abl_breathing_ref: 0.5,
         abl_tau_s: 0.1,
-        ..base()
+        ..exact
     };
     // abl disabled: its state is not current, raster_scale 1.
     let off = run(&mut gpu, &["screen"], fc, &breathing, &amp);

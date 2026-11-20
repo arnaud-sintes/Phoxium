@@ -28,8 +28,10 @@
 // Full width at half maximum of a Gaussian in sigmas, 2 sqrt(2 ln 2) [K] (CRT.md, Spot profile: 2.355).
 const float BEAM_FWHM_PER_SIGMA = 2.3548200;
 // Lines and samples are summed within +/- 4 sigma_max of the host pixel (PLAN T-36a); the Gaussian mass
-// beyond 4 sigma is 3.2e-5 per side [K].
-const float BEAM_REACH_SIGMAS = 4.0;
+// beyond 4 sigma is 3.2e-5 per side [K]. Specialization constant 1 (T-48): the `low` quality tier sets 3 (mass
+// beyond 3 sigma 1.3e-3 per side; src/gpu/stages/screen.rs VariantKey); every other tier leaves the pipeline
+// unspecialized, so this is the literal 4.
+layout(constant_id = 1) const float BEAM_REACH_SIGMAS = 4.0;
 // Upper bounds on the lines and on the amp samples per line summed for one host pixel, guards against
 // out-of-range parameters (a sigma of 32 line pitches or of 64 samples); in range far fewer are reached.
 const int BEAM_MAX_LINES = 256;

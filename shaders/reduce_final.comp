@@ -1,0 +1,59 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `abl`, parallel reduce, pass 2 of 2 (T-48; reduce_partial.comp is pass 1, src/gpu/stages/abl.rs): one
+// workgroup of 256 adds the partial sums (each invocation every 256th, then a tree in shared memory), and updates
+// the state exactly as reduce.comp does: a = sum / (3 n), apl_f += (1 - exp(-dt / tau)) (a - apl_f), apl_frame = a;
+// with neither the limiter nor the breathing on, the state is reset to 0.
+
+#include "params.glsl"
+#include "common.glsl"
+#define ABL_STATE_QUALIFIER
+#include "abl.glsl"
+
+#define REDUCE_SIZE 256u
+#define ABL_REDUCE_CHUNK 4096u
+#define ABL_MAX_PARTIALS 65536u
+
+layout(local_size_x = 256) in;
+
+layout(set = 0, binding = 2) uniform sampler2D current_in;
+layout(set = 1, binding = 1, std430) readonly buffer AblPartials {
+    float partials[];
+} abl_partials;
+
+shared float partial[REDUCE_SIZE];
+
+void main() {
+    uint t = gl_LocalInvocationIndex;
+    if (!params.abl_enable && params.abl_breathing == 0.0) {
+        if (t == 0u) {
+            abl_state.apl_f = 0.0;
+            abl_state.apl_frame = 0.0;
+        }
+        return;
+    }
+    ivec2 size = textureSize(current_in, 0);
+    uint n = uint(size.x) * uint(size.y);
+    uint chunk = max(ABL_REDUCE_CHUNK, ((n + ABL_MAX_PARTIALS - 1u) / ABL_MAX_PARTIALS + 255u) / 256u * 256u);
+    uint groups = (n + chunk - 1u) / chunk;
+    float s = 0.0;
+    for (uint i = t; i < groups; i += REDUCE_SIZE) {
+        s += abl_partials.partials[i];
+    }
+    partial[t] = s;
+    barrier();
+    for (uint h = REDUCE_SIZE / 2u; h > 0u; h >>= 1u) {
+        if (t < h) {
+            partial[t] += partial[t + h];
+        }
+        barrier();
+    }
+    if (t == 0u) {
+        float a = n == 0u ? 0.0 : partial[0] / (3.0 * float(n));
+        float dt = max(frame.frame_time_ms, 0.0) * 0.001;
+        float alpha = params.abl_tau_s <= 0.0 ? 1.0 : 1.0 - exp(-dt / params.abl_tau_s);
+        abl_state.apl_f += alpha * (a - abl_state.apl_f);
+        abl_state.apl_frame = a;
+    }
+}

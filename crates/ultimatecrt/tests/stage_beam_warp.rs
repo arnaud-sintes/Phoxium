@@ -503,8 +503,9 @@ fn flat_field_keeps_its_luminance() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// The identity and the separable geometries never take the warp path (bit-exact `screen.comp`, the T-36c
-/// and T-37 tests); a spot under 0.3 raster px keeps the reference form (bit for bit).
+/// A scaled separable geometry (overscan) never takes the warp path in the standard tier (`screen.comp`, the T-36c
+/// and T-37 tests; T-48: the unscaled identity takes the line images on the aligned grid, the exact tier never);
+/// a spot under 0.3 raster px keeps the reference form (bit for bit).
 #[test]
 fn warp_path_is_chosen_only_where_it_applies() {
     let test = "stage_beam_warp choice";
@@ -535,7 +536,14 @@ fn warp_path_is_chosen_only_where_it_applies() {
         ..Params::default()
     };
     assert_eq!(warp_plan(&fc, &separable), None);
-    assert_eq!(warp_plan(&fc, &Params::default()), None);
+    // T-48: the identity takes the line-image path on the aligned grid in the standard tier (ox 1, no
+    // interpolation), and screen.comp in the exact tier.
+    assert_eq!(warp_plan(&fc, &Params::default()).map(|w| w.ox), Some(1));
+    let exact = Params {
+        quality_tier: ultimatecrt::params::QUALITY_TIER_EXACT,
+        ..Params::default()
+    };
+    assert_eq!(warp_plan(&fc, &exact), None);
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

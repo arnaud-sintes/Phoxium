@@ -49,6 +49,8 @@ pub const OPTICS: &str = "Optics";
 /// Ageing and burn-in (T-42, T-43): the menu adds the "Burn in now" and "New tube" buttons under its rows.
 pub const AGEING: &str = "Ageing and burn-in";
 pub const OUTPUT: &str = "Output and headroom";
+/// Quality tier and automatic quality drop (T-48).
+pub const PERFORMANCE: &str = "Performance";
 /// The panel of parameters whose stage no panel lists (none in the product; the test table's entries).
 pub const OTHER: &str = "Other";
 
@@ -113,6 +115,13 @@ pub const PANELS: &[PanelDef] = &[
         name: OUTPUT,
         stages: &["output"],
         first: &["output_headroom_mode", "exposure"],
+        empty_note: None,
+    },
+    PanelDef {
+        // T-48: the quality tier and its automatic drop (params/quality.toml).
+        name: PERFORMANCE,
+        stages: &["quality"],
+        first: &["quality_tier", "quality_auto"],
         empty_note: None,
     },
     PanelDef {

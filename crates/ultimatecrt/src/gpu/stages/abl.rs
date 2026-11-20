@@ -7,7 +7,11 @@
 //!    low-passed APL the reduce pass left at the end of the previous frame (one frame of latency);
 //!    `abl_enable` off copies the texel unchanged (exact identity);
 //! 2. reduce (`reduce.comp`, one workgroup of 256): the frame APL of the input (unlimited current) in FP32,
-//!    then the low-pass with the real frame time `FrameConstants::frame_time_ms`, into the state.
+//!    then the low-pass with the real frame time `FrameConstants::frame_time_ms`, into the state. In every
+//!    quality tier but `exact` (T-48) the sum is parallel instead: `reduce_partial.comp` (one workgroup per
+//!    4096 texels, partial sums in the state buffer from byte [`PARTIALS_OFFSET`], set 1 binding 1) then
+//!    `reduce_final.comp` (adds the partials, same state update). One workgroup walking a 1.2 Mtexel amp image
+//!    (K = 16) cost about 0.35 ms; the same sum in another order differs by the FP32 rounding only.
 //!
 //! Design (PHY-13 "a reduction pass, a frame of latency or an estimate"): the state lives on the GPU, in
 //! a 16-byte storage buffer owned by this stage (set 1, `ABL_STATE_SET` of `abl.glsl`). No CPU readback
@@ -38,13 +42,31 @@ use ash::vk;
 use super::{binding, compute_pipeline, standard_set_layout, ComputePass, Domain, Registration, Stage, GROUP};
 use crate::gpu::FrameConstants;
 use crate::params::Params;
+use crate::quality::{self, Tier};
 use crate::Res;
 
 const APPLY_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/abl.comp.spv"));
 const REDUCE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reduce.comp.spv"));
+/// Parallel reduce (T-48): partial sums, then the final sum and the state update.
+const PARTIAL_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reduce_partial.comp.spv"));
+const FINAL_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/reduce_final.comp.spv"));
 
-/// Size of the state buffer (`AblState` of `abl.glsl`: four floats).
+/// Size of the state (`AblState` of `abl.glsl`: four floats).
 const STATE_BYTES: u64 = 16;
+/// The partial sums of the parallel reduce follow the state in the same buffer, from this offset (the largest
+/// `minStorageBufferOffsetAlignment` Vulkan allows), at most [`MAX_PARTIALS`] floats.
+const PARTIALS_OFFSET: u64 = 256;
+/// Texels per partial sum and the largest number of partials (`ABL_REDUCE_CHUNK`, `ABL_MAX_PARTIALS` of
+/// `reduce_partial.comp` and `reduce_final.comp`).
+const REDUCE_CHUNK: u64 = 4096;
+const MAX_PARTIALS: u64 = 65536;
+
+/// Workgroups of `reduce_partial.comp` for `n` texels (the shaders' chunk rule: 4096 texels, more in steps of 256
+/// when `n` needs more than [`MAX_PARTIALS`] groups).
+fn partial_groups(n: u64) -> u32 {
+    let chunk = REDUCE_CHUNK.max(n.div_ceil(MAX_PARTIALS).div_ceil(256) * 256);
+    n.div_ceil(chunk).max(1) as u32
+}
 
 /// Registration of the slot (see [`super::CHAIN`]).
 pub(in crate::gpu) const SLOT: Registration = Registration {
@@ -63,6 +85,10 @@ struct Abl {
     /// The apply pass; its pipeline layout has the standard set 0 and the state set 1.
     pass: ComputePass,
     reduce: vk::Pipeline,
+    /// The parallel reduce (T-48) and whether the frame being recorded uses it (every tier but `exact`).
+    reduce_partial: vk::Pipeline,
+    reduce_final: vk::Pipeline,
+    parallel: Cell<bool>,
     state_layout: vk::DescriptorSetLayout,
     pool: vk::DescriptorPool,
     state_set: vk::DescriptorSet,
@@ -85,7 +111,10 @@ impl Stage for Abl {
     unsafe fn create(&mut self, d: &ash::Device) -> Res<()> {
         let s = vk::ShaderStageFlags::COMPUTE;
         self.pass.set_layout = standard_set_layout(d)?;
-        let state = [binding(0, vk::DescriptorType::STORAGE_BUFFER, s)];
+        let state = [
+            binding(0, vk::DescriptorType::STORAGE_BUFFER, s),
+            binding(1, vk::DescriptorType::STORAGE_BUFFER, s),
+        ];
         self.state_layout =
             d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&state), None)?;
         let set_layouts = [self.pass.set_layout, self.state_layout];
@@ -93,10 +122,12 @@ impl Stage for Abl {
             d.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&set_layouts), None)?;
         self.pass.pipeline = compute_pipeline(d, self.pass.layout, APPLY_SPV)?;
         self.reduce = compute_pipeline(d, self.pass.layout, REDUCE_SPV)?;
+        self.reduce_partial = compute_pipeline(d, self.pass.layout, PARTIAL_SPV)?;
+        self.reduce_final = compute_pipeline(d, self.pass.layout, FINAL_SPV)?;
 
         self.buffer = d.create_buffer(
             &vk::BufferCreateInfo::default()
-                .size(STATE_BYTES)
+                .size(PARTIALS_OFFSET + 4 * MAX_PARTIALS)
                 .usage(vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST)
                 .sharing_mode(vk::SharingMode::EXCLUSIVE),
             None,
@@ -115,7 +146,7 @@ impl Stage for Abl {
 
         let sizes = [vk::DescriptorPoolSize::default()
             .ty(vk::DescriptorType::STORAGE_BUFFER)
-            .descriptor_count(1)];
+            .descriptor_count(2)];
         self.pool = d.create_descriptor_pool(
             &vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes),
             None,
@@ -129,12 +160,23 @@ impl Stage for Abl {
         let info = [vk::DescriptorBufferInfo::default()
             .buffer(self.buffer)
             .range(STATE_BYTES)];
+        let partials = [vk::DescriptorBufferInfo::default()
+            .buffer(self.buffer)
+            .offset(PARTIALS_OFFSET)
+            .range(4 * MAX_PARTIALS)];
         d.update_descriptor_sets(
-            &[vk::WriteDescriptorSet::default()
-                .dst_set(self.state_set)
-                .dst_binding(0)
-                .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
-                .buffer_info(&info)],
+            &[
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.state_set)
+                    .dst_binding(0)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&info),
+                vk::WriteDescriptorSet::default()
+                    .dst_set(self.state_set)
+                    .dst_binding(1)
+                    .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+                    .buffer_info(&partials),
+            ],
             &[],
         );
         Ok(())
@@ -185,7 +227,20 @@ impl Stage for Abl {
             (compute, vk::AccessFlags2::SHADER_STORAGE_READ),
             (compute, vk::AccessFlags2::SHADER_STORAGE_WRITE),
         );
-        d.cmd_bind_pipeline(cb, bind, self.reduce);
+        if self.parallel.get() {
+            d.cmd_bind_pipeline(cb, bind, self.reduce_partial);
+            d.cmd_dispatch(cb, partial_groups(u64::from(size.0) * u64::from(size.1)), 1, 1);
+            // The partial sums before the final pass reads them.
+            self.state_barrier(
+                d,
+                cb,
+                (compute, vk::AccessFlags2::SHADER_STORAGE_WRITE),
+                (compute, vk::AccessFlags2::SHADER_STORAGE_READ),
+            );
+            d.cmd_bind_pipeline(cb, bind, self.reduce_final);
+        } else {
+            d.cmd_bind_pipeline(cb, bind, self.reduce);
+        }
         d.cmd_dispatch(cb, 1, 1, 1);
         // T-37: the reduce writes before the later compute stages (`screen`, raster_scale) read the state.
         self.state_barrier(
@@ -217,6 +272,7 @@ impl Stage for Abl {
         runs: bool,
     ) -> Res<()> {
         self.clearing.set(false);
+        self.parallel.set(quality::tier(params) != Tier::Exact);
         let breathing = params.abl_breathing != 0.0 && params.abl_breathing_ref.is_finite();
         self.seed.set(if breathing { params.abl_breathing_ref } else { 0.0 });
         if !runs {
@@ -241,6 +297,8 @@ impl Stage for Abl {
 
     unsafe fn destroy(&mut self, d: &ash::Device) {
         d.destroy_pipeline(self.reduce, None);
+        d.destroy_pipeline(self.reduce_partial, None);
+        d.destroy_pipeline(self.reduce_final, None);
         d.destroy_descriptor_pool(self.pool, None);
         d.destroy_descriptor_set_layout(self.state_layout, None);
         d.destroy_buffer(self.buffer, None);
