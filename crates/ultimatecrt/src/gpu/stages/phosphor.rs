@@ -12,6 +12,14 @@
 //! the f32 constants the GPU receives, so the gain is 1 for the values actually used. The fits are
 //! recomputed only when the fit rate or a tail strength changes; the real-time step is applied per frame.
 //!
+//! **Artistic controls** (owner feedback 2026-11-20, QUESTIONS PHY-17): `phosphor_decay_scale` (every time
+//! constant of the measured decay multiplied, I(t) -> I(t / s)) and `phosphor_extra_afterglow_rgb` /
+//! `phosphor_extra_afterglow_time_ms` (the response becomes the mixture (phosphor + g e^(-t / tau)) / (1 + g)) enter
+//! only the CPU fit ([`DecayFit::controlled_feedback`]); the shader and the push block are unchanged, they run
+//! whatever four terms the fit gives. At their defaults the fit is the previous one bit for bit. A change of a
+//! control or of a tail strength restarts the history (primed to the picture), so a slider move never flashes
+//! a static picture.
+//!
 //! History: three RGBA32F storage images of the tube size (12 floats per texel: 4 terms x 3 channels),
 //! owned by the stage (ARCHITECTURE 3.7), in their own descriptor set (set 1), read and written in
 //! place by the shader, allocated on first use and on a tube size change, freed while persistence is
@@ -73,8 +81,8 @@ use std::collections::HashMap;
 
 use ash::vk;
 use crt_model::phosphor::{
-    frame_step_ms, is_rate_sample, DecayFit, FrameFeedback, FEEDBACK_TERMS, KUHN_BLUE, KUHN_GREEN, KUHN_RED,
-    TRAIL_HORIZON_MS,
+    frame_step_ms, is_rate_sample, DecayControls, DecayFit, FrameFeedback, FEEDBACK_TERMS, KUHN_BLUE, KUHN_GREEN,
+    KUHN_RED, TRAIL_HORIZON_MS,
 };
 
 use super::{binding, compute_pipeline, push, ComputePass, Domain, Registration, Stage, GROUP};
@@ -122,16 +130,16 @@ pub(in crate::gpu) struct Push {
     pub mode: u32,
 }
 
-/// The push constants (mode 0) of a frame rate and per-channel tail strengths, decaying per frame of
-/// period 1 / rate (the manual mode): the recurrence of [`DecayFit::frame_feedback`] per channel, rounded
-/// to f32, with w0 recomputed from the rounded values (exact steady-state gain 1 of the recurrence the GPU
-/// runs). The rate is clamped to [1, 1000] Hz and the strengths to [0, 10] (the soft ranges of
-/// `params/phosphor.toml` are narrower).
+/// The push constants (mode 0) of a frame rate, per-channel tail strengths and the artistic controls,
+/// decaying per frame of period 1 / rate (the manual mode): the recurrence of
+/// [`DecayFit::controlled_feedback`] per channel, rounded to f32, with w0 recomputed from the rounded values
+/// (exact steady-state gain 1 of the recurrence the GPU runs). The rate is clamped to [1, 1000] Hz, the
+/// strengths to [0, 10] and the controls to their hard ranges ([`Controls::decay`]).
 #[cfg(test)]
-fn weights(rate_hz: f32, tail: [f32; 3]) -> Push {
+fn weights(rate_hz: f32, tail: [f32; 3], ctl: Controls) -> Push {
     let mut p = Push::default();
     for (ch, &s) in tail.iter().enumerate() {
-        set_channel(&mut p, ch, per_frame_f32(&channel_fit(rate_hz, ch, s)));
+        set_channel(&mut p, ch, per_frame_f32(&channel_fit(rate_hz, ch, s, ctl)));
     }
     p
 }
@@ -139,11 +147,61 @@ fn weights(rate_hz: f32, tail: [f32; 3]) -> Push {
 /// (w0, rho, c) of one channel.
 type ChannelWeights = (f32, [f32; 4], [f32; 4]);
 
+/// The artistic persistence controls of the parameters (owner feedback 2026-11-20, QUESTIONS PHY-17;
+/// `params/phosphor.toml`): `phosphor_decay_scale`, `phosphor_extra_afterglow_rgb`,
+/// `phosphor_extra_afterglow_time_ms`. [`Controls::PHYSICAL`] (the defaults) is the measured phosphor and
+/// gives exactly the fit of [`DecayFit::frame_feedback`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Controls {
+    scale: f32,
+    extra: [f32; 3],
+    extra_ms: f32,
+}
+
+impl Controls {
+    #[cfg(test)]
+    const PHYSICAL: Self = Self {
+        scale: 1.0,
+        extra: [0.0; 3],
+        extra_ms: 100.0,
+    };
+
+    fn of(params: &Params) -> Self {
+        Self {
+            scale: params.phosphor_decay_scale,
+            extra: params.phosphor_extra_afterglow_rgb,
+            extra_ms: params.phosphor_extra_afterglow_time_ms,
+        }
+    }
+
+    /// The oracle controls of channel `ch`, clamped to the hard ranges of `params/phosphor.toml` (scale 0.1 to
+    /// 100, share 0 to 10, time 5 to 1000 ms; a NaN reads as the physical value), so any input gives a valid fit.
+    fn decay(&self, ch: usize) -> DecayControls {
+        let clamp = |v: f32, lo: f64, hi: f64, nan: f64| {
+            if v.is_nan() {
+                nan
+            } else {
+                f64::from(v).clamp(lo, hi)
+            }
+        };
+        DecayControls {
+            time_scale: clamp(self.scale, 0.1, 100.0, 1.0),
+            extra_share: clamp(self.extra[ch], 0.0, 10.0, 0.0),
+            extra_tau_ms: clamp(self.extra_ms, 5.0, 1000.0, 100.0),
+        }
+    }
+
+    /// The bits of channel `ch`'s controls (cache key).
+    fn key(&self, ch: usize) -> [u32; 3] {
+        [self.scale.to_bits(), self.extra[ch].to_bits(), self.extra_ms.to_bits()]
+    }
+}
+
 /// The f64 fit of one channel at a frame rate. The four-term fit (a grid search when the channel has a
 /// power-law tail) depends on the rate and on the tail strength s: s changes the shape of the trail
 /// r_k = (X_k + s T_k) / (X_0 + s T_0) (exponential part X, tail part T), not only its scale, so the
-/// rates must be refitted; the stage caches the result per (rate, channel, strength) instead.
-fn channel_fit(rate_hz: f32, ch: usize, tail: f32) -> FrameFeedback {
+/// rates must be refitted; the stage caches the result per (rate, channel, strength, controls) instead.
+fn channel_fit(rate_hz: f32, ch: usize, tail: f32, ctl: Controls) -> FrameFeedback {
     let scale = if tail.is_finite() {
         f64::from(tail).clamp(0.0, 10.0)
     } else {
@@ -151,7 +209,7 @@ fn channel_fit(rate_hz: f32, ch: usize, tail: f32) -> FrameFeedback {
     };
     FITS[ch]
         .with_tail_scale(scale)
-        .frame_feedback(fit_period_ms(rate_hz), TRAIL_HORIZON_MS)
+        .controlled_feedback(fit_period_ms(rate_hz), TRAIL_HORIZON_MS, ctl.decay(ch))
 }
 
 /// The frame period, ms, of a fit rate (clamped to [1, 1000] Hz).
@@ -282,6 +340,9 @@ fn trail_rate_hz(manual_hz: f32, frame_ms: f32, auto: &mut AutoRate) -> f32 {
     }
     auto.fit_rate_hz()
 }
+/// What the channel fits of a frame depend on: rate bits, tail strength bits, control bits per channel.
+type FitsKey = (u32, [u32; 3], [[u32; 3]; 3]);
+
 #[derive(Default)]
 struct Phosphor {
     /// The copy pass (persistence off); its set layout is the standard set 0 of both pipelines.
@@ -299,11 +360,12 @@ struct Phosphor {
     history_size: (u32, u32),
     /// The history must not be read by the next run.
     reset: bool,
-    /// The fits of the current frame and the inputs they were computed from (rate bits, tail bits).
+    /// The fits of the current frame and the inputs they were computed from (rate bits, tail bits, control
+    /// bits per channel).
     fits: [FrameFeedback; 3],
-    fits_key: Option<(u32, [u32; 3])>,
-    /// Channel fits per (rate bits, channel, tail strength bits).
-    fit_cache: HashMap<(u32, usize, u32), FrameFeedback>,
+    fits_key: Option<FitsKey>,
+    /// Channel fits per (rate bits, channel, tail strength bits, control bits).
+    fit_cache: HashMap<(u32, usize, u32, [u32; 3]), FrameFeedback>,
     /// Number of channel fits computed (cache misses), for the tests.
     fits_computed: usize,
     /// The automatic rate (measured frame periods, rate of the fit).
@@ -322,40 +384,47 @@ struct Phosphor {
 impl Phosphor {
     /// The channel fits through the per-channel cache: a change of one tail strength refits that channel
     /// only, and a rate or strength seen before costs no fit.
-    fn cached_fits(&mut self, rate_hz: f32, tail: [f32; 3]) -> [FrameFeedback; 3] {
+    fn cached_fits(&mut self, rate_hz: f32, tail: [f32; 3], ctl: Controls) -> [FrameFeedback; 3] {
         std::array::from_fn(|ch| {
             let fits = &mut self.fits_computed;
             *self
                 .fit_cache
-                .entry((rate_hz.to_bits(), ch, tail[ch].to_bits()))
+                .entry((rate_hz.to_bits(), ch, tail[ch].to_bits(), ctl.key(ch)))
                 .or_insert_with(|| {
                     *fits += 1;
-                    channel_fit(rate_hz, ch, tail[ch])
+                    channel_fit(rate_hz, ch, tail[ch], ctl)
                 })
         })
     }
 
     /// `weights` through the cache (manual mode, per frame of period 1 / rate).
     #[cfg(test)]
-    fn cached_weights(&mut self, rate_hz: f32, tail: [f32; 3]) -> Push {
+    fn cached_weights(&mut self, rate_hz: f32, tail: [f32; 3], ctl: Controls) -> Push {
         let mut p = Push::default();
-        for (ch, fb) in self.cached_fits(rate_hz, tail).iter().enumerate() {
+        for (ch, fb) in self.cached_fits(rate_hz, tail, ctl).iter().enumerate() {
             set_channel(&mut p, ch, per_frame_f32(fb));
         }
         p
     }
 
     /// The push constants (mode 0) of a frame whose measured period is `frame_ms` (time base in the module
-    /// doc), and whether the automatic mode refitted for a new rate (the history must restart: its terms
-    /// belong to the old fit). Manual (`manual_hz` > 0): the fit of that rate, per frame. Automatic: the fit
-    /// of the automatic rate for this frame's step, clamped ([`frame_step_ms`]; no measurement, the first
-    /// frame, steps by the fit period).
-    fn frame_weights(&mut self, manual_hz: f32, tail: [f32; 3], frame_ms: f32) -> (Push, bool) {
+    /// doc), and whether the history must restart: the automatic mode refitted for a new rate, or a tail
+    /// strength or an artistic control changed (the history's terms belong to the old fit; restarting it primes
+    /// it to the picture, so a static picture keeps its brightness while a slider moves instead of flashing).
+    /// Manual (`manual_hz` > 0): the fit of that rate, per frame. Automatic: the fit of the automatic rate for
+    /// this frame's step, clamped ([`frame_step_ms`]; no measurement, the first frame, steps by the fit period).
+    fn frame_weights(&mut self, manual_hz: f32, tail: [f32; 3], ctl: Controls, frame_ms: f32) -> (Push, bool) {
         let rate = trail_rate_hz(manual_hz, frame_ms, &mut self.auto);
-        let key = (rate.to_bits(), tail.map(f32::to_bits));
-        let refit = self.fits_key.is_some_and(|k| k.0 != key.0) && manual_hz <= 0.0;
+        let key: FitsKey = (
+            rate.to_bits(),
+            tail.map(f32::to_bits),
+            std::array::from_fn(|ch| ctl.key(ch)),
+        );
+        let refit = self
+            .fits_key
+            .is_some_and(|k| (k.0 != key.0 && manual_hz <= 0.0) || k.1 != key.1 || k.2 != key.2);
         if self.fits_key != Some(key) {
-            self.fits = self.cached_fits(rate, tail);
+            self.fits = self.cached_fits(rate, tail, ctl);
             self.fits_key = Some(key);
         }
         let mut p = Push::default();
@@ -498,6 +567,7 @@ impl Stage for Phosphor {
         let (weights, refit) = self.frame_weights(
             params.phosphor_frame_rate_hz,
             params.phosphor_tail_strength_rgb,
+            Controls::of(params),
             fc.frame_time_ms,
         );
         self.reset |= refit;
@@ -605,7 +675,7 @@ mod tests {
     #[test]
     fn weights_have_unit_steady_state_gain() {
         for rate in [50.0, 60.0, 120.0] {
-            let p = weights(rate, [1.0; 3]);
+            let p = weights(rate, [1.0; 3], Controls::PHYSICAL);
             for ch in 0..3 {
                 let sum: f64 = (0..4)
                     .map(|j| f64::from(p.c[ch][j]) / (1.0 - f64::from(p.rho[ch][j])))
@@ -621,15 +691,15 @@ mod tests {
     #[test]
     fn cached_weights_match_and_refit_one_channel() {
         let mut s = Phosphor::default();
-        let a = s.cached_weights(60.0, [1.0; 3]);
-        assert_eq!(a, weights(60.0, [1.0; 3]));
+        let a = s.cached_weights(60.0, [1.0; 3], Controls::PHYSICAL);
+        assert_eq!(a, weights(60.0, [1.0; 3], Controls::PHYSICAL));
         assert_eq!(s.fits_computed, 3);
-        let b = s.cached_weights(60.0, [1.0, 0.5, 1.0]);
-        assert_eq!(b, weights(60.0, [1.0, 0.5, 1.0]));
+        let b = s.cached_weights(60.0, [1.0, 0.5, 1.0], Controls::PHYSICAL);
+        assert_eq!(b, weights(60.0, [1.0, 0.5, 1.0], Controls::PHYSICAL));
         assert_eq!(s.fits_computed, 4, "only green refitted");
-        assert_eq!(s.cached_weights(60.0, [1.0; 3]), a);
+        assert_eq!(s.cached_weights(60.0, [1.0; 3], Controls::PHYSICAL), a);
         assert_eq!(s.fits_computed, 4, "seen values: no fit");
-        let _ = s.cached_weights(50.0, [1.0; 3]);
+        let _ = s.cached_weights(50.0, [1.0; 3], Controls::PHYSICAL);
         assert_eq!(s.fits_computed, 7, "a new rate refits every channel");
     }
 
@@ -690,14 +760,14 @@ mod tests {
     fn long_gap_is_not_a_rate_sample() {
         let mut s = Phosphor::default();
         for _ in 0..RATE_WINDOW {
-            let _ = s.frame_weights(0.0, [1.0; 3], 1000.0 / 144.0);
+            let _ = s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, 1000.0 / 144.0);
         }
         let before = s.auto;
-        let (gap, refit) = s.frame_weights(0.0, [1.0; 3], 600_000.0);
+        let (gap, refit) = s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, 600_000.0);
         assert!(!refit);
         assert_eq!(s.auto.periods_ms, before.periods_ms, "the pause is not a sample");
         assert!((s.auto.estimate_hz() - 144.0).abs() <= 1.0 && s.auto.fit_hz == 144.0);
-        let (clamped, _) = s.frame_weights(0.0, [1.0; 3], 250.0);
+        let (clamped, _) = s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, 250.0);
         assert_eq!(gap, clamped, "a 10 minute gap decays like 250 ms");
     }
 
@@ -710,7 +780,7 @@ mod tests {
         let mut s = [0.0_f64; 4];
         let mut primed = false;
         let mut run = |st: &mut Phosphor, s: &mut [f64; 4], dt: f32, x: f64| {
-            let (p, refit) = st.frame_weights(manual_hz, [1.0; 3], dt);
+            let (p, refit) = st.frame_weights(manual_hz, [1.0; 3], Controls::PHYSICAL, dt);
             // The constants the GPU receives, as the oracle recurrence.
             let fb = FrameFeedback {
                 w0: f64::from(p.w0[ch]),
@@ -785,7 +855,7 @@ mod tests {
     fn real_time_weights_have_unit_gain() {
         for rate in [60.0, 144.0] {
             for ch in 0..3 {
-                let fb = channel_fit(rate, ch, 1.0);
+                let fb = channel_fit(rate, ch, 1.0, Controls::PHYSICAL);
                 for step in [1e-4, 0.5, 6.0, 16.7, 40.0, 250.0] {
                     let (w0, rho, c) = real_time_f32(&fb, fit_period_ms(rate), step);
                     let g: f64 = (0..4)
@@ -802,6 +872,104 @@ mod tests {
                     assert!((gain - 1.0).abs() < 1e-6, "{rate} Hz ch {ch} step {step}: {gain}");
                     assert!(rho.iter().chain(&c).all(|v| v.is_finite() && *v >= 0.0));
                 }
+            }
+        }
+    }
+
+    /// Owner feedback 2026-11-20 (QUESTIONS PHY-17): the default controls (the parameter defaults) are the
+    /// physical ones, and with them every channel fit is the previous fit bit for bit (tail strengths 1 and 0.07,
+    /// 10 to 240 Hz), so the default output does not change.
+    #[test]
+    fn default_controls_are_bit_exact() {
+        assert_eq!(Controls::of(&Params::default()), Controls::PHYSICAL);
+        for rate in [10.0, 60.0, 144.0, 240.0] {
+            for (ch, fit) in FITS.iter().enumerate() {
+                for tail in [1.0_f32, 0.07] {
+                    let old = fit
+                        .with_tail_scale(f64::from(tail))
+                        .frame_feedback(fit_period_ms(rate), TRAIL_HORIZON_MS);
+                    assert_eq!(
+                        channel_fit(rate, ch, tail, Controls::PHYSICAL),
+                        old,
+                        "{rate} Hz ch {ch} tail {tail}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Owner feedback 2026-11-20 (the trail missing live): a history restart drops the trail, so count them in the
+    /// automatic mode. A steady 60 Hz display with frame pacing jitter (16.3 / 17.1 ms) and a dropped frame
+    /// (33.4 ms) every 50 frames: one restart while the first estimate settles, none after. A display rate change (60 to 144 Hz): restarts only while the
+    /// estimate moves, all within the first window of the new rate (31 frames), then none.
+    #[test]
+    fn rate_change_restarts_the_trail_only_while_it_settles() {
+        let mut s = Phosphor::default();
+        let ctl = Controls::PHYSICAL;
+        let mut restarts = Vec::new();
+        for k in 0..600 {
+            let ms = if k % 50 == 49 {
+                33.4
+            } else if k % 2 == 0 {
+                16.3
+            } else {
+                17.1
+            };
+            if s.frame_weights(0.0, [1.0; 3], ctl, ms).1 {
+                restarts.push(k);
+            }
+        }
+        // The first sample alone reads 61 Hz; the 60 Hz estimate is within the hysteresis, so it is taken once it
+        // held for a full window: one restart at the start, none after.
+        println!("steady 60 Hz with jitter: history restarts at frames {restarts:?}");
+        assert!(restarts.iter().all(|&k| k <= 2 * RATE_WINDOW), "{restarts:?}");
+        assert!(restarts.len() <= 1, "{restarts:?}");
+        let at: Vec<usize> = (0..300)
+            .filter(|_| s.frame_weights(0.0, [1.0; 3], ctl, 1000.0 / 144.0).1)
+            .collect();
+        println!("60 to 144 Hz: history restarts at frames {at:?} of the new rate");
+        assert!(!at.is_empty() && at.iter().all(|&k| k < RATE_WINDOW), "{at:?}");
+        assert_eq!(s.auto.fit_hz, 144.0);
+    }
+
+    /// A change of a control or a tail strength restarts the history (primed to the picture), an unchanged frame
+    /// does not; any control value (NaN, infinite, negative, beyond the hard range) gives finite non-negative
+    /// weights with steady-state gain 1.
+    #[test]
+    fn controls_restart_the_history_and_stay_valid() {
+        let mut s = Phosphor::default();
+        let dt = 1000.0 / 60.0;
+        let slow = Controls {
+            scale: 5.0,
+            ..Controls::PHYSICAL
+        };
+        let (_, r) = s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, dt);
+        assert!(!r, "first frame");
+        assert!(!s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, dt).1, "unchanged");
+        assert!(s.frame_weights(0.0, [1.0; 3], slow, dt).1, "scale changed");
+        assert!(!s.frame_weights(0.0, [1.0; 3], slow, dt).1, "unchanged");
+        assert!(s.frame_weights(0.0, [1.0, 2.0, 1.0], slow, dt).1, "tail changed");
+        let glow = Controls {
+            extra: [0.0, 0.5, 0.0],
+            ..slow
+        };
+        assert!(s.frame_weights(0.0, [1.0, 2.0, 1.0], glow, dt).1, "afterglow changed");
+        for bad in [f32::NAN, f32::INFINITY, -1.0, 0.0, 1e9] {
+            let ctl = Controls {
+                scale: bad,
+                extra: [bad; 3],
+                extra_ms: bad,
+            };
+            for ch in 0..3 {
+                let d = ctl.decay(ch);
+                assert!(d.time_scale >= 0.1 && d.time_scale <= 100.0 && d.extra_share >= 0.0 && d.extra_share <= 10.0);
+                let (w0, rho, c) = per_frame_f32(&channel_fit(60.0, ch, 1.0, ctl));
+                let sum: f64 = (0..4).map(|j| f64::from(c[j]) / (1.0 - f64::from(rho[j]))).sum();
+                assert!(
+                    rho.iter().chain(&c).all(|v| v.is_finite() && *v >= 0.0),
+                    "{bad} ch {ch}"
+                );
+                assert!((f64::from(w0) * (1.0 + sum) - 1.0).abs() < 1e-6, "{bad} ch {ch}");
             }
         }
     }

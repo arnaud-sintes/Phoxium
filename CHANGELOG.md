@@ -7,6 +7,16 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- Phosphor persistence controls for a clearly visible trail, beyond the measured P22 phosphor and off by default (the picture is unchanged until they are moved; owner feedback "the trail is too short", QUESTIONS PHY-17): `phosphor_extra_afterglow_rgb` and `phosphor_extra_afterglow_time_ms`, an exponential glow per channel mixed into the phosphor's decay (red included, real time, a still picture keeps its brightness), and `phosphor_decay_scale`, a multiplier of every time constant of the measured decay. The menu's Phosphor panel opens with a short explanation of the trail and of its physical default; the README has a section with recommended values.
+- `tests/persistence_chain.rs`: the persistence trail checked through the whole chain (defaults and all ten presets, 60 and 144 Hz frame periods) and the trail of a moving bar in the display output; `Headless::set_frame_time_ms` gives headless frames a fixed frame period.
+
+### Changed
+
+- `phosphor_tail_strength_rgb` goes up to 10 (log slider; above 1 is beyond the measured P22, and changes little at 60 Hz).
+- Changing a tail strength now restarts the persistence history primed to the picture, like the new controls, so a still picture does not flash while a slider moves.
+
 ## [0.2.0] - 2026-11-20
 
 ultimateCRT v0.2.0 is the first public release (MIT licence, binaries not code-signed). It captures the window of a game or a program, runs it through a virtual CRT tube on the GPU and shows the result in a second window that can go fullscreen over the source without taking its keyboard focus; nothing is injected into the captured program. What is in it:

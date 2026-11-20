@@ -920,6 +920,40 @@ fn search_and_the_advanced_toggle_choose_the_rows() {
     rig.finish();
 }
 
+/// Owner feedback 2026-11-20 (QUESTIONS PHY-17): the persistence decay scale is reachable from the menu and a
+/// typed value is clamped to its slider range (1 to 30): 500 gives 30, 0.5 gives 1, 20 stays 20.
+#[test]
+fn the_decay_scale_takes_a_typed_value() {
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config("the_decay_scale_takes_a_typed_value", 1280, 1080, tall_config()) else {
+        return;
+    };
+    rig.state.params = Params::default();
+    rig.open_menu();
+    rig.click_item("search");
+    rig.type_text("decay scale");
+    let (lo, hi) = ultimatecrt::params::meta("phosphor_decay_scale")
+        .unwrap()
+        .soft_range
+        .unwrap();
+    for (text, want) in [("500", hi as f32), ("0.5", lo as f32), ("20", 20.0)] {
+        let p = MenuRects::at(rig.item("widget:phosphor_decay_scale"), 0.5, 0.5);
+        let l = mouse_lparam(p[0] as i16, p[1] as i16);
+        rig.frame(&[(WM_KEYDOWN, 0x11, key_lparam(0x1D, false, false))]);
+        rig.frame(&[(WM_MOUSEMOVE, 0, l)]);
+        rig.frame(&[(WM_LBUTTONDOWN, 1, l)]);
+        rig.frame(&[(WM_LBUTTONUP, 0, l)]);
+        rig.frame(&[(WM_KEYUP, 0x11, key_lparam(0x1D, false, true))]);
+        rig.type_text(text);
+        rig.key(0x0D, 0x1C, false); // Enter
+        rig.frame(&[]);
+        let got = rig.state.params.phosphor_decay_scale;
+        eprintln!("typed {text}: decay scale {got}");
+        assert_eq!(got, want, "typed {text}");
+    }
+    rig.finish();
+}
+
 #[test]
 fn every_panel_draws_every_parameter_once() {
     let _g = lock();

@@ -553,6 +553,10 @@ pub struct Pipeline {
     plan: Vec<(usize, Mode, ImgRef)>,
     frame_index: u32,
     last_frame: Option<Instant>,
+    /// Frame period, ms, given to every recorded frame instead of the measured one (headless tests of the
+    /// real-time stages through the whole chain, `Headless::set_frame_time_ms`); `None` (the window loop):
+    /// measured.
+    frame_time_override: Option<f32>,
     /// Access state of `src`, `native`, `inject` and every chain output before the frame being
     /// recorded; restored when that frame is abandoned or its submission fails.
     saved: Vec<Track>,
@@ -659,6 +663,7 @@ impl Pipeline {
             plan: Vec::with_capacity(chain.len()),
             frame_index: 0,
             last_frame: None,
+            frame_time_override: None,
             saved: Vec::with_capacity(chain.len() + 3),
             recorded: false,
             uploads: false,
@@ -941,6 +946,12 @@ impl Pipeline {
         for l in &mut self.chain {
             l.stage.clear_history();
         }
+    }
+
+    /// Gives every frame recorded from now on the period `ms` instead of the measured one (`None`: measured
+    /// again).
+    pub(super) fn set_frame_time_override(&mut self, ms: Option<f32>) {
+        self.frame_time_override = ms;
     }
 
     /// The burn-in wear map of the `wear` slot (T-43), `None` in a chain without it.
@@ -1246,9 +1257,10 @@ impl Pipeline {
         let now = Instant::now();
         let mut fc = self.live_constants(view, settings, params, target.extent);
         fc.frame_index = self.frame_index;
-        fc.frame_time_ms = self
-            .last_frame
-            .map_or(0.0, |t| now.duration_since(t).as_secs_f32() * 1000.0);
+        fc.frame_time_ms = self.frame_time_override.unwrap_or_else(|| {
+            self.last_frame
+                .map_or(0.0, |t| now.duration_since(t).as_secs_f32() * 1000.0)
+        });
         self.last_frame = Some(now);
         self.record_frame(ctx, view, fc, settings, params, target, ui)
     }

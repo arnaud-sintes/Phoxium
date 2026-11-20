@@ -60,7 +60,7 @@
 
 mod common;
 
-use crt_model::phosphor::{DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED, TRAIL_HORIZON_MS};
+use crt_model::phosphor::{DecayControls, DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED, TRAIL_HORIZON_MS};
 use crt_model::units::frame_period_ms;
 use ultimatecrt::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use ultimatecrt::params::Params;
@@ -532,6 +532,171 @@ fn real_time_static_picture_and_long_gap() {
     assert_eq!(after[0], after[1], "a 10 minute gap decays like 250 ms");
     assert!(after[0].1 > 0.0, "a pause does not decay the trail by hours");
     assert!(after[0].1 < after[2].1, "the gap decays more than a 60 Hz frame");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+// ---------------------------------------------------------------------------------------------------------
+// Artistic controls (owner feedback 2026-11-20, QUESTIONS PHY-17): `phosphor_decay_scale`,
+// `phosphor_extra_afterglow_rgb`, `phosphor_extra_afterglow_time_ms`; oracle `DecayFit::controlled_feedback` and
+// `controlled_trail_ratios` (crt-model, which also checks that the scale multiplies every time constant exactly).
+
+/// Persistence on with the artistic controls: decay scale `scale`, extra afterglow share `extra` per channel at
+/// `extra_ms`.
+fn controlled(rate_hz: f32, scale: f32, extra: [f32; 3], extra_ms: f32) -> Params {
+    Params {
+        phosphor_decay_scale: scale,
+        phosphor_extra_afterglow_rgb: extra,
+        phosphor_extra_afterglow_time_ms: extra_ms,
+        ..params(true, rate_hz, [1.0; 3])
+    }
+}
+
+/// The oracle controls of a [`controlled`] parameter set, channel `ch`.
+fn decay_controls(p: &Params, ch: usize) -> DecayControls {
+    DecayControls {
+        time_scale: f64::from(p.phosphor_decay_scale),
+        extra_share: f64::from(p.phosphor_extra_afterglow_rgb[ch]),
+        extra_tau_ms: f64::from(p.phosphor_extra_afterglow_time_ms),
+    }
+}
+
+/// GPU against the oracle with the controls, manual 60 Hz: a single excitation then 60 black frames. Per
+/// channel y_k / y_0 equals the closed-form trail of the time-scaled response plus the extra afterglow
+/// (`controlled_trail_ratios`) at k = 1, 2, 3 within FP16 (red at every k where it is above 1e-4: its terms are
+/// exact), follows the realised recurrence (`controlled_feedback`, what the GPU runs) at every k within FP16 plus
+/// 1e-6 of y_0, and y_0 / x is its w0. Scales 1, 5 and 20 without extra afterglow, scale 1 and 5 with one.
+#[test]
+fn controls_follow_the_oracle() {
+    let Some(mut gpu) = common::gpu_or_skip("controls_follow_the_oracle") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let t = frame_period_ms(60.0);
+    let pic = image(W, H, |_, _| [1.0, 1.0, 1.0]);
+    let zero = black(W, H);
+    let cases = [
+        controlled(60.0, 1.0, [0.0; 3], 100.0),
+        controlled(60.0, 5.0, [0.0; 3], 100.0),
+        controlled(60.0, 20.0, [0.0; 3], 100.0),
+        controlled(60.0, 1.0, [1.0, 0.5, 0.25], 200.0),
+        controlled(60.0, 5.0, [0.5, 1.0, 2.0], 50.0),
+    ];
+    for p in &cases {
+        gpu.clear_history();
+        assert_eq!(run(&mut gpu, p, &zero), zero);
+        let mut out = vec![run(&mut gpu, p, &pic)];
+        for _ in 1..60 {
+            out.push(run(&mut gpu, p, &zero));
+        }
+        for (ch, (name, fit)) in fits().into_iter().enumerate() {
+            let ctl = decay_controls(p, ch);
+            let r = fit.controlled_trail_ratios(t, TRAIL_HORIZON_MS, ctl);
+            let fb = fit.controlled_feedback(t, TRAIL_HORIZON_MS, ctl);
+            let y0 = f64::from(out[0].rgba[ch]);
+            let what = format!("{name} scale {} extra {}", ctl.time_scale, ctl.extra_share);
+            assert!(rel(y0, fb.w0) <= FP16 + 1e-5, "{what}: y0 {y0} vs w0 {}", fb.w0);
+            let exact = if ch == 0 { 59 } else { 3 };
+            for k in 1..60usize {
+                let yk = f64::from(out[k].rgba[ch]);
+                let realised = fb.trail(k as u32);
+                assert!(
+                    (yk / y0 - realised).abs() <= (FP16 + 1e-5) * realised + 1e-6 / y0,
+                    "{what} k {k}: {} vs recurrence {realised}",
+                    yk / y0
+                );
+                if k <= exact && r[k - 1] > 1e-4 {
+                    assert!(
+                        rel(yk / y0, r[k - 1]) <= FP16 + 1e-5,
+                        "{what} k {k}: {} vs closed form {}",
+                        yk / y0,
+                        r[k - 1]
+                    );
+                }
+            }
+            println!(
+                "{what}: w0 {:.4}, y1..3 / y0 = {:.4} {:.4} {:.4} (closed form {:.4} {:.4} {:.4}), y30 / y0 = {:.5}",
+                y0,
+                out[1].rgba[ch] / out[0].rgba[ch],
+                out[2].rgba[ch] / out[0].rgba[ch],
+                out[3].rgba[ch] / out[0].rgba[ch],
+                r[0],
+                r[1],
+                r[2],
+                out[30].rgba[ch] / out[0].rgba[ch],
+            );
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// A static picture keeps its brightness (within FP16) whatever the controls, in real time with jittered
+/// frame periods, from the first frame and after a control change (the change restarts the history primed to
+/// the picture, so nothing flashes).
+#[test]
+fn static_picture_at_any_control() {
+    let Some(mut gpu) = common::gpu_or_skip("static_picture_at_any_control") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let pic = picture(W, H);
+    let cases = [
+        controlled(0.0, 1.0, [0.0; 3], 100.0),
+        controlled(0.0, 5.0, [0.0; 3], 100.0),
+        controlled(0.0, 30.0, [0.0; 3], 100.0),
+        controlled(0.0, 1.0, [1.0; 3], 300.0),
+        controlled(0.0, 30.0, [2.0, 0.5, 10.0], 1000.0),
+        controlled(0.0, 100.0, [10.0; 3], 5.0),
+    ];
+    let periods = [16.7_f32, 6.9, 13.9, 8.3, 16.6, 7.0];
+    for (i, p) in cases.iter().enumerate() {
+        for (k, dt) in periods.iter().cycle().take(30).enumerate() {
+            let y = run_at(&mut gpu, p, &pic, *dt);
+            for (j, (&got, &x)) in y.rgba.iter().zip(&pic.rgba).enumerate() {
+                assert!(
+                    rel(f64::from(got), f64::from(x)) <= FP16 / 2.0 + 1e-5,
+                    "case {i} frame {k} ({dt} ms): texel {} channel {}: {got} vs {x}",
+                    j / 4,
+                    j % 4
+                );
+            }
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Review R-11 with the controls: in the default real-time mode the green trail after a static white picture
+/// is switched off agrees, at the same time since the last lit frame began (83.3 and 250 ms), within 1 % of the
+/// steady state (plus FP16) at 60 Hz and at 144 Hz, with decay scale 5 and with an extra afterglow (0.5 at
+/// 200 ms); and the controls lengthen the trail (decay scale 5 above scale 1, the afterglow above both).
+#[test]
+fn controlled_trail_is_real_time_at_60_and_144_hz() {
+    let Some(mut gpu) = common::gpu_or_skip("controlled_trail_is_real_time_at_60_and_144_hz") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (p60, p144) = (1000.0_f32 / 60.0, 1000.0_f32 / 144.0);
+    let mut at250 = Vec::new();
+    for p in [
+        controlled(0.0, 1.0, [0.0; 3], 100.0),
+        controlled(0.0, 5.0, [0.0; 3], 100.0),
+        controlled(0.0, 1.0, [0.5; 3], 200.0),
+    ] {
+        let c60 = trail_in_time(&mut gpu, &p, &[p60; 80], &[p60; 16]);
+        let c144 = trail_in_time(&mut gpu, &p, &[p144; 80], &[p144; 36]);
+        for ms in [1000.0 / 12.0, 250.0] {
+            let (a, b) = (sample_at(&c60, ms), sample_at(&c144, ms));
+            println!(
+                "scale {} extra {}: green trail at {ms:.1} ms: 60 Hz {a:.5}, 144 Hz {b:.5}",
+                p.phosphor_decay_scale, p.phosphor_extra_afterglow_rgb[1]
+            );
+            assert!((a - b).abs() < 0.01 + FP16 * a, "{ms} ms: 60 Hz {a} vs 144 Hz {b}");
+        }
+        at250.push(sample_at(&c60, 250.0));
+    }
+    assert!(at250[1] > at250[0] && at250[2] > at250[1], "{at250:?}");
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }

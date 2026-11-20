@@ -15,7 +15,9 @@
 // so a single excitation x at frame 0 gives y_k / y_0 = sum_j c_j rho_j^(k - 1) = E_k / E_0 for k >= 1, and a
 // constant x gives y = w0 (1 + sum_j c_j / (1 - rho_j)) x = x (w0 is chosen for that). In the default real-time
 // mode the CPU recomputes rho_j and c_j every frame from the measured frame period (review R-11:
-// rho_j = exp(-dt / tau_j), c_j / (1 - rho_j) kept), so the same recurrence decays by real time.
+// rho_j = exp(-dt / tau_j), c_j / (1 - rho_j) kept), so the same recurrence decays by real time. The artistic
+// controls (phosphor_decay_scale, phosphor_extra_afterglow_*; QUESTIONS PHY-17) change only the CPU fit, so they
+// arrive here as other rho_j, c_j and w0.
 //
 // History: three RGBA32F storage images owned by the stage (set 1), read and written in place by the same
 // invocation (each texel by one invocation only). Term j < 3 is in image j (rgb), term 3 in the alpha of

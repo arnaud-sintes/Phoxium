@@ -141,6 +141,21 @@ pub const PANELS: &[PanelDef] = &[
 /// control (`output_headroom_mode = mask_depth`).
 pub const MOVED: &[(&str, &str)] = &[("mask_depth", OUTPUT)];
 
+/// A short plain explanation shown at the top of a panel (not while searching), as (panel, text).
+pub const INTROS: &[(&str, &str)] = &[(
+    "Phosphor",
+    "Persistence is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a \
+     fading trail. The default is the measured colour-TV phosphor (P22): a faint green and blue trail of about \
+     5, 3 and 2 % of a frame over the next frames at 60 Hz, none for red. That is physically right but easy to \
+     miss. For a clearly visible trail, raise Extra afterglow (for example 0.5 to 1 at 100 to 300 ms) or Decay \
+     scale; both go beyond the real tube. A still picture keeps its brightness either way.",
+)];
+
+/// The intro text of the panel `name` ([`INTROS`]).
+pub fn intro(name: &str) -> Option<&'static str> {
+    INTROS.iter().find(|(p, _)| *p == name).map(|(_, t)| *t)
+}
+
 /// The panel definition called `name`.
 pub fn panel(name: &str) -> Option<&'static PanelDef> {
     PANELS.iter().find(|p| p.name == name)
@@ -192,7 +207,7 @@ pub fn panel_params(name: &str) -> Vec<&'static ParamMeta> {
 // Labels and values.
 
 /// Unit suffixes left out of labels (the unit is shown with the value).
-const UNIT_SUFFIXES: &[&str] = &["_mm", "_deg", "_mhz", "_hz", "_ma", "_s", "_xy", "_rgb"];
+const UNIT_SUFFIXES: &[&str] = &["_mm", "_deg", "_mhz", "_hz", "_ma", "_ms", "_s", "_xy", "_rgb"];
 
 /// A word as the menu writes it (abbreviations and names spelled as usual), `None` for a plain word.
 fn special(word: &str) -> Option<&'static str> {
@@ -751,6 +766,11 @@ pub fn panel_body(
         g
     };
     let searching = !query.trim().is_empty();
+    if let Some(text) = intro(name).filter(|_| !searching) {
+        let wrap = ui.push_text_wrap_pos(0.0);
+        ui.text_colored(PALETTE.text_faint, text);
+        drop(wrap);
+    }
     let mut last_group = None;
     let mut hidden = 0;
     for m in &all {
@@ -1085,5 +1105,24 @@ mod tests {
             let e = check_new_preset(&p.id, &lib).unwrap_err();
             assert!(e.contains("shipped"), "{e}");
         }
+    }
+
+    /// Every intro names a real panel; the Phosphor panel explains the trail and its physical default, and the
+    /// persistence controls get distinct labels without their unit suffix.
+    #[test]
+    fn phosphor_intro_and_labels() {
+        for (name, text) in INTROS {
+            assert!(panel(name).is_some(), "{name}");
+            assert!(!text.trim().is_empty());
+        }
+        let text = intro("Phosphor").expect("phosphor intro");
+        assert!(text.contains("P22") && text.contains("Extra afterglow") && text.contains("Decay scale"));
+        let m = |id| crate::params::meta(id).unwrap();
+        assert_eq!(label(m("phosphor_decay_scale")), "Decay scale");
+        assert_eq!(label(m("phosphor_extra_afterglow_rgb")), "Extra afterglow");
+        assert_eq!(label(m("phosphor_extra_afterglow_time_ms")), "Extra afterglow time");
+        assert!(is_log(m("phosphor_decay_scale")) && is_log(m("phosphor_extra_afterglow_time_ms")));
+        assert!(is_log(m("phosphor_tail_strength_rgb")));
+        assert!(intro("Mask").is_none());
     }
 }
