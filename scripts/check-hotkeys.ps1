@@ -2,8 +2,8 @@
 .SYNOPSIS
     Live check of the hotkeys and the output modes (T-54, T-57): NOT RUN by the build agent.
 .DESCRIPTION
-    NEEDS A HANDS-OFF DESKTOP. The script sends real key presses with SendInput (F11, Ctrl+Alt+B,
-    Ctrl+Alt+PageDown, Ctrl+Alt+PageUp, Ctrl+Alt+Q), so any key you press or any window you activate while it
+    NEEDS A HANDS-OFF DESKTOP. The script sends real key presses with SendInput (F11, Ctrl+Alt+F7,
+    Ctrl+Alt+PageDown, Ctrl+Alt+PageUp, Ctrl+Alt+End), so any key you press or any window you activate while it
     runs falsifies the result. It refuses to start unless the desktop was idle for -MinIdle seconds, and it
     reports ABORTED if it sees user input between its own injections. It opens windows (pixel-demo and the
     ultimatecrt output, fullscreen on the source's monitor), so do not run it while working.
@@ -17,11 +17,12 @@
          and the window style must match (framed windowed, borderless fullscreen). The monitor CSV must show NO
          foreground or focus event for the output in the 1.5 s after a press, except the documented T-07
          hand-back (the output becomes foreground and the source gets it back within 1 s: counted separately).
-      4. Ctrl+Alt+B twice (bypass on, then off), Ctrl+Alt+PageDown and Ctrl+Alt+PageUp (next and previous
+      4. Ctrl+Alt+F7 twice (bypass on, then off), Ctrl+Alt+PageDown and Ctrl+Alt+PageUp (next and previous
          preset): the console must print the bypass state and the preset names. The menu key (F10 by default)
          is NOT pressed: with the settings menu wired in (T-52a) it activates the output on purpose. Check it
          by hand.
-      5. Ctrl+Alt+Q: ultimatecrt must exit within 3 s.
+      5. Ctrl+Alt+End: ultimatecrt must exit within 3 s. (The default chords since review D-01; the Ctrl+Alt+letter
+         chords of earlier builds also fired on AltGr. A settings.toml that rebinds them makes this check fail.)
     Prints PASS (exit 0), MITIGATED (exit 4: only T-07 hand-backs seen), FAIL (exit 1), NOT RUN (exit 2: desktop
     not idle) or ABORTED (exit 3: user input during the run). Every process it started is stopped at the end.
     The monitor CSV holds window titles: delete the output folder after review.
@@ -76,8 +77,8 @@ public static class UcrtKeys {
 }
 
 # Virtual keys of the chords used here (PageUp and PageDown are extended keys).
-$VK = @{ Ctrl = 0x11; Alt = 0x12; Shift = 0x10; F10 = 0x79; F11 = 0x7A; B = 0x42; Q = 0x51; PageUp = 0x21; PageDown = 0x22 }
-$EXT = @('PageUp', 'PageDown')
+$VK = @{ Ctrl = 0x11; Alt = 0x12; Shift = 0x10; F7 = 0x76; F9 = 0x78; F10 = 0x79; F11 = 0x7A; End = 0x23; PageUp = 0x21; PageDown = 0x22 }
+$EXT = @('PageUp', 'PageDown', 'End')
 $script:lastInject = Get-Date
 function Send-Chord([string]$text) {
     $names = $text -split '\+'
@@ -148,8 +149,8 @@ try {
     # 4. bypass and presets
     if (-not $aborted) {
         foreach ($step in @(
-            @{ keys = 'Ctrl+Alt+B'; pattern = 'bypass: on' },
-            @{ keys = 'Ctrl+Alt+B'; pattern = 'bypass: off' },
+            @{ keys = 'Ctrl+Alt+F7'; pattern = 'bypass: on' },
+            @{ keys = 'Ctrl+Alt+F7'; pattern = 'bypass: off' },
             @{ keys = 'Ctrl+Alt+PageDown'; pattern = 'preset next:' },
             @{ keys = 'Ctrl+Alt+PageUp'; pattern = 'preset previous:' })) {
             Send-Chord $step.keys
@@ -160,10 +161,10 @@ try {
     }
 
     # 5. quit
-    Send-Chord 'Ctrl+Alt+Q'
+    Send-Chord 'Ctrl+Alt+End'
     $null = $ucrt.WaitForExit(3000)
     $quitOk = $ucrt.HasExited
-    if (-not $quitOk) { $fail += 'Ctrl+Alt+Q did not end ultimatecrt within 3 s' }
+    if (-not $quitOk) { $fail += 'Ctrl+Alt+End did not end ultimatecrt within 3 s' }
     $ucrtEnd = Get-Date
     Start-Sleep -Seconds 2
 } finally {

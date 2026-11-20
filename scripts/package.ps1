@@ -149,7 +149,7 @@ ultimateCRT $version
 1. Start the program to capture (any window; pixel-demo.exe is a demo source).
 2. Start ultimatecrt.exe (double-click) and choose that window in the list it shows (Enter or double-click).
 3. F11: fullscreen over the source, never taking focus. F10: settings (Change source, Detach, every parameter).
-   Quit with Ctrl+Alt+Q or the close button. Developer options: ultimatecrt.exe --help from a terminal.
+   Quit with Ctrl+Alt+End or the close button. Developer options: ultimatecrt.exe --help from a terminal.
    F10 and F11 are registered system-wide while the program runs (no other program gets these keys meanwhile);
    both can be rebound in the settings menu.
 
