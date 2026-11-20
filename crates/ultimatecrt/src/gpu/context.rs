@@ -378,6 +378,15 @@ impl Context {
         self.external_memory
     }
 
+    /// Whether the physical device offers `VK_KHR_external_memory_win32` (a query, whatever was enabled).
+    pub fn external_memory_offered(&self) -> bool {
+        // SAFETY: `physical` belongs to the live `instance`.
+        unsafe { self.instance.enumerate_device_extension_properties(self.physical) }
+            .unwrap_or_default()
+            .iter()
+            .any(|e| e.extension_name_as_c_str() == Ok(khr::external_memory_win32::NAME))
+    }
+
     /// Whether the device was created for the zero-copy path (the extension asked for, whether or not offered).
     pub fn external_memory_requested(&self) -> bool {
         self.external_requested

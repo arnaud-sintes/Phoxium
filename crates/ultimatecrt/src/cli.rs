@@ -21,6 +21,9 @@ Usage: ultimatecrt [options]
   --gpu <index>        Vulkan device (see --list-gpus) that runs the chain, capture included; wins over the
                        settings file's [global.gpu] adapter (default auto: the adapter driving the monitor the
                        output covers)
+  --capture-path <cpu|zero-copy>  how frames reach the renderer: the simple CPU copy (default, any adapter pair)
+                       or zero-copy GPU sharing (experimental, capture and rendering on one adapter; falls back to
+                       the CPU copy with a notice); wins over [global.capture] path
   --fullscreen         borderless, topmost, non-activating output covering the source's monitor
   --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
   --no-activate        accepted for older scripts, no effect: every output is non-activating
@@ -87,6 +90,8 @@ pub struct Args {
     pub list_gpus: bool,
     pub list_adapters: bool,
     pub gpu: Option<usize>,
+    /// `--capture-path`: wins over `[global.capture] path` (A29).
+    pub capture_path: Option<crate::zerocopy::CapturePath>,
     pub fullscreen: bool,
     pub monitor: Option<usize>,
     /// `--no-activate`: kept for older scripts, no effect (every output is non-activating, OUT-2).
@@ -248,6 +253,13 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             "--list-gpus" => a.list_gpus = true,
             "--list-adapters" | "--adapters" => a.list_adapters = true,
             "--gpu" => a.gpu = Some(number("--gpu", &value("--gpu")?)?),
+            "--capture-path" => {
+                let v = value("--capture-path")?;
+                a.capture_path = Some(
+                    crate::zerocopy::CapturePath::parse(&v)
+                        .ok_or_else(|| format!("--capture-path expects cpu or zero-copy, got \"{v}\""))?,
+                );
+            }
             "--fullscreen" => a.fullscreen = true,
             "--monitor" => a.monitor = Some(number("--monitor", &value("--monitor")?)?),
             "--no-activate" => a.no_activate = true,
@@ -335,6 +347,28 @@ mod tests {
 
     fn parse(s: &str) -> Res<Args> {
         parse_from(s.split_whitespace().map(String::from))
+    }
+
+    /// A29: `--capture-path` takes the two path names (`zero_copy` too), anything else is an error.
+    #[test]
+    fn capture_path_flag() {
+        use crate::zerocopy::CapturePath;
+        assert_eq!(parse("").unwrap().capture_path, None);
+        assert_eq!(
+            parse("--capture-path cpu").unwrap().capture_path,
+            Some(CapturePath::Cpu)
+        );
+        assert_eq!(
+            parse("--capture-path zero-copy").unwrap().capture_path,
+            Some(CapturePath::ZeroCopy)
+        );
+        assert_eq!(
+            parse("--capture-path zero_copy").unwrap().capture_path,
+            Some(CapturePath::ZeroCopy)
+        );
+        assert!(parse("--capture-path shared").is_err());
+        assert!(parse("--capture-path").is_err());
+        assert!(USAGE.contains("--capture-path <cpu|zero-copy>"));
     }
 
     /// A23: `--wait-source` wins over the settings only when given; `--window` stays a developer option.

@@ -92,6 +92,23 @@ pub struct UiState {
     pub source: SourceView,
     /// The per-game profiles of the settings ("Saved profiles", `crate::profiles::rows`).
     pub profiles: Vec<crate::profiles::ProfileRow>,
+    /// The capture path (A29): asked, in force, why not zero-copy, the copy cost.
+    pub capture: CaptureView,
+}
+
+/// The capture path as the Performance and About sections show it (A29).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct CaptureView {
+    /// What the setting (or `--capture-path`) asks.
+    pub requested: crate::zerocopy::CapturePath,
+    /// The path the frames take now.
+    pub active: crate::zerocopy::CapturePath,
+    /// Why the CPU copy runs although zero-copy is asked (`zerocopy::Refusal`), `None` otherwise.
+    pub reason: Option<String>,
+    /// Zero-copy was asked after the start: the GPU device was made without it, it applies at the next start.
+    pub restart_needed: bool,
+    /// The capture thread's copy cost per frame over the last second (mean ms), `None` without frames.
+    pub copy_ms: Option<f64>,
 }
 
 /// The captured window as the menu shows it (A23): what was attached and what the automatic handling found.
@@ -241,6 +258,8 @@ pub struct UiOutput {
     pub library: Option<Library>,
     /// The `[global.gpu] adapter` value chosen in the menu, for the settings (used at the next start).
     pub gpu_adapter: Option<String>,
+    /// The `[global.capture] path` chosen in the menu (A29), applied at once when the device allows it.
+    pub capture_path: Option<crate::zerocopy::CapturePath>,
     /// A burn-in action (T-43), for `tube_state::TubeState`.
     pub wear_action: Option<WearAction>,
     /// A source request (A23): attach, cancel, detach, change source, refresh.
@@ -1266,6 +1285,8 @@ impl UiPass for Ui {
             picked = Some(picker::build(ui, &mut self.picker, &self.fonts, &self.menu_key));
         } else if open {
             let focus = std::mem::take(&mut self.focus_menu);
+            // About: the capture path in force (A29).
+            self.extras.capture_path = Some(menu::capture_path_status(&self.state.capture));
             result = Some(menu::build(
                 ui,
                 MenuModel {
@@ -1320,6 +1341,11 @@ impl UiPass for Ui {
             }
             if r.gpu_adapter.is_some() {
                 self.out.gpu_adapter = r.gpu_adapter;
+            }
+            if let Some(p) = r.capture_path {
+                self.out.capture_path = Some(p);
+                // Shown at once; the app's next state says what is in force.
+                self.state.capture.requested = p;
             }
             if r.wear_action.is_some() {
                 self.out.wear_action = r.wear_action;

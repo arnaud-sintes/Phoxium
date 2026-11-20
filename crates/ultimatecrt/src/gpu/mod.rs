@@ -212,6 +212,8 @@ pub struct Renderer {
     shared: InFlight<SharedFrame, FRAMES_IN_FLIGHT>,
     /// Why a shared frame could not be used (import or staging failed), until [`Renderer::take_external_failure`].
     external_failure: Option<String>,
+    /// The device offers `VK_KHR_external_memory_win32` (queried once).
+    zero_copy_offered: bool,
     /// Destroyed last: `Drop for Renderer` releases every child object above first, then the
     /// field drop of `ctx` destroys the device and the instance.
     ctx: Context,
@@ -251,6 +253,7 @@ impl Renderer {
                 lost: None,
                 shared: InFlight::default(),
                 external_failure: None,
+                zero_copy_offered: ctx.external_memory_offered(),
                 ctx,
             };
             for s in &mut r.image_available {
@@ -451,6 +454,20 @@ impl Renderer {
     /// Whether the device was created for the zero-copy path (the setting was on at start).
     pub fn zero_copy_requested(&self) -> bool {
         self.ctx.external_memory_requested()
+    }
+
+    /// What the zero-copy decision needs from the renderer (`zerocopy::decide`): the extension offered, the handle kind
+    /// imported (when enabled at start), and whether `capture` (the capture device's adapter) is the renderer's.
+    pub fn zero_copy_check(&self, capture: Option<crate::adapters::Luid>) -> crate::zerocopy::Support {
+        let render = self.ctx.gpu.luid.map(crate::adapters::Luid::from_vulkan);
+        crate::zerocopy::Support {
+            extension: self.zero_copy_offered,
+            handle: self.ctx.external_memory(),
+            same_adapter: match (capture, render) {
+                (Some(c), Some(r)) => Some(c == r),
+                _ => None,
+            },
+        }
     }
 
     /// Why the last shared frames could not be used (once), `None` when they could.

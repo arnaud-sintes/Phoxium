@@ -145,6 +145,9 @@ impl Rig {
         if out.gpu_adapter.is_some() {
             self.out.gpu_adapter = out.gpu_adapter;
         }
+        if out.capture_path.is_some() {
+            self.out.capture_path = out.capture_path;
+        }
         let params = if self.live_params {
             self.state.params
         } else {
@@ -702,6 +705,7 @@ fn preview_state() -> UiState {
         quality: None,
         source: Default::default(),
         profiles: Vec::new(),
+        capture: Default::default(),
     }
 }
 
@@ -1129,6 +1133,44 @@ fn the_adapter_combo_returns_the_setting_for_the_next_start() {
     let want = fake_gpu().adapters[0].setting_value();
     assert_eq!(rig.out.gpu_adapter.as_deref(), Some(want.as_str()));
     assert_eq!(rig.out.params, None, "the adapter choice changed parameters");
+    rig.finish();
+}
+
+/// A29: the Performance section's capture path combo returns the path chosen (the app stores and applies it), shows the
+/// path in force, and the reason when zero-copy is refused.
+#[test]
+fn the_capture_path_combo_returns_the_path_and_shows_the_fallback() {
+    use ultimatecrt::ui::CaptureView;
+    use ultimatecrt::zerocopy::CapturePath;
+    let _g = lock();
+    let Some(mut rig) = Rig::with_config(
+        "the_capture_path_combo_returns_the_path_and_shows_the_fallback",
+        1280,
+        1080,
+        system_config(),
+    ) else {
+        return;
+    };
+    rig.open_menu();
+    rig.click_item("header:Output and headroom");
+    rig.click_item("header:Performance and diagnostics");
+    rig.click_item("capture_path");
+    rig.key(0x28, 0x50, true); // Down: from the CPU copy to zero-copy
+    rig.key(0x0D, 0x1C, false);
+    rig.frame(&[]);
+    assert_eq!(rig.out.capture_path, Some(CapturePath::ZeroCopy));
+    assert_eq!(rig.out.params, None, "the capture path changed parameters");
+    // The app's answer: zero-copy asked, refused (another adapter), the CPU copy in force.
+    rig.state.capture = CaptureView {
+        requested: CapturePath::ZeroCopy,
+        active: CapturePath::Cpu,
+        reason: Some("capture and rendering run on different adapters".into()),
+        restart_needed: false,
+        copy_ms: Some(1.25),
+    };
+    rig.frame(&[]);
+    rig.item("capture_path:active");
+    rig.item("capture_path:reason");
     rig.finish();
 }
 

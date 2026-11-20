@@ -408,13 +408,16 @@ impl Worker {
 
     /// Leaves the zero-copy path for the CPU copy, with the reason for [`Capture::take_failure`].
     fn fail(&mut self, why: &str) {
+        // The reason first: whoever reads the path back as zero-copy and asks again sees the failure as well.
+        {
+            let mut f = self.shared.failure.lock().unwrap();
+            if f.is_none() {
+                *f = Some(format!("capture side: {why}"));
+            }
+        }
         self.shared.path.store(0, Ordering::Release);
         self.shared_pool = None;
         self.pending = None;
-        let mut f = self.shared.failure.lock().unwrap();
-        if f.is_none() {
-            *f = Some(format!("capture side: {why}"));
-        }
     }
 
     /// Copies the client area into a free slot of the pool (made for this size when needed), waits for the copy

@@ -3,10 +3,10 @@
 //! - **Interface**: the UI scale (`[global.ui] scale`: Automatic follows the monitor's DPI, or 75 % to 300 %),
 //!   applied at once (the theme rewrites every size from its tokens); "Reset look overrides" (the look parameters
 //!   back to the preset in force, quality settings kept) and "Reset everything to defaults" (parameter overrides,
-//!   hotkeys, interface size and GPU choice; a copy of `settings.toml` is kept first; presets, game profiles and
+//!   hotkeys, interface size, GPU choice and capture path; a copy of `settings.toml` is kept first; presets, game profiles and
 //!   burn-in untouched), each behind a confirmation step.
 //! - **About**: name, version and commit, licence, project address (plain selectable text, no link opened), the
-//!   GPU in use and the Vulkan device, the settings folder with a Copy button, the third-party table and the note on
+//!   GPU in use, the Vulkan device and the capture path, the settings folder with a Copy button, the third-party table and the note on
 //!   unsigned binaries.
 
 use dear_imgui_rs::{TableColumnFlags, TableFlags, Ui as Frame};
@@ -25,7 +25,7 @@ pub const SCALE_STEPS: [f32; 8] = [0.75, 1.0, 1.25, 1.5, 1.75, 2.0, 2.5, 3.0];
 pub enum ResetKind {
     /// The look parameter overrides only (quality kept).
     Look,
-    /// Overrides, hotkeys, UI scale, GPU choice.
+    /// Overrides, hotkeys, UI scale, GPU choice, capture path.
     Everything,
 }
 
@@ -40,6 +40,8 @@ pub struct ExtrasModel {
     pub monitor_scale: f32,
     /// The Vulkan device the renderer runs on.
     pub vulkan_device: Option<String>,
+    /// The capture path in force (A29), as the Performance section words it.
+    pub capture_path: Option<String>,
     /// The outcome of the last Copy: (good news, text).
     pub copy_message: Option<(bool, String)>,
     /// The third-party list is open.
@@ -134,7 +136,7 @@ pub fn interface(ui: &Frame, fonts: &Fonts, scale: UiScale, m: &mut ExtrasModel,
                 "Reset look",
             ),
             ResetKind::Everything => (
-                "Reset the parameter changes, the hotkeys, the interface size and the GPU choice? Kept: your presets, \
+                "Reset the parameter changes, the hotkeys, the interface size, the GPU choice and the capture path? Kept: your presets, \
                  the game profiles, burn-in and the preset in force. A copy of settings.toml is kept as \
                  settings.toml.bak first.",
                 "Reset everything",
@@ -204,6 +206,12 @@ pub fn about_section(ui: &Frame, fonts: &Fonts, m: &mut ExtrasModel, system: &Sy
         ui,
         "Vulkan device",
         m.vulkan_device.as_deref().unwrap_or("not known yet"),
+        PALETTE.text,
+    );
+    theme::kv_row(
+        ui,
+        "Capture path",
+        m.capture_path.as_deref().unwrap_or("not known yet"),
         PALETTE.text,
     );
     record(ui, r, "about:gpu");
