@@ -86,6 +86,9 @@ pub fn effective(p: &Params, drop: u32) -> Params {
     }
 }
 
+/// The parameter ids of the quality settings ([`keep`] copies them; "Reset look overrides" keeps them).
+pub const PARAM_IDS: [&str; 2] = ["quality_tier", "quality_auto"];
+
 /// Copies the quality settings of `old` into `new`: a preset change (hotkey or menu) keeps them, as they describe
 /// the machine, not the tube.
 pub fn keep(new: &mut Params, old: &Params) {

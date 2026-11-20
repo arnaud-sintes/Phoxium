@@ -54,6 +54,12 @@ pub struct UiState {
     pub menu_h: f32,
     pub menu_opacity: f32,
     pub menu_collapsed: bool,
+    /// `[global.ui] scale`: `"auto"` (the DPI of the output's monitor, the default) or a factor from 0.75 to 3.0.
+    pub scale: UiScale,
+    /// `[global.ui] first_run_done`: the first-run hint was dismissed with "Do not show again" (`true`), or is
+    /// still due (`false`, written by a first run). Absent (a file from before the hint): never shown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_run_done: Option<bool>,
 }
 
 impl Default for UiState {
@@ -65,7 +71,72 @@ impl Default for UiState {
             menu_h: 560.0,
             menu_opacity: 0.9,
             menu_collapsed: false,
+            scale: UiScale::Auto,
+            first_run_done: None,
         }
+    }
+}
+
+impl UiState {
+    /// Whether the first-run hint is shown: only when a first run asked for it and it was not dismissed for good.
+    pub fn first_run_due(&self) -> bool {
+        self.first_run_done == Some(false)
+    }
+}
+
+/// Smallest and largest manual UI scale.
+pub const UI_SCALE_RANGE: (f32, f32) = (0.75, 3.0);
+
+/// The UI scale setting (`[global.ui] scale`): the monitor's DPI, or a fixed factor.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub enum UiScale {
+    /// The DPI scale of the output's monitor (1 at 96 dpi), followed when it changes.
+    #[default]
+    Auto,
+    /// A fixed factor within [`UI_SCALE_RANGE`].
+    Manual(f32),
+}
+
+impl UiScale {
+    /// A manual factor clamped to [`UI_SCALE_RANGE`] (a non-finite value gives `Auto`).
+    pub fn manual(v: f32) -> UiScale {
+        if v.is_finite() {
+            UiScale::Manual(v.clamp(UI_SCALE_RANGE.0, UI_SCALE_RANGE.1))
+        } else {
+            UiScale::Auto
+        }
+    }
+
+    /// The scale in effect on a monitor of DPI scale `monitor`.
+    pub fn effective(self, monitor: f32) -> f32 {
+        match self {
+            UiScale::Auto if monitor.is_finite() && monitor > 0.0 => monitor,
+            UiScale::Auto => 1.0,
+            UiScale::Manual(v) => v.clamp(UI_SCALE_RANGE.0, UI_SCALE_RANGE.1),
+        }
+    }
+}
+
+impl Serialize for UiScale {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        match self {
+            UiScale::Auto => s.serialize_str("auto"),
+            // Two decimals: 1.25 stays 1.25 in the file.
+            UiScale::Manual(v) => s.serialize_f64((f64::from(*v) * 100.0).round() / 100.0),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for UiScale {
+    /// `"auto"` (any case) or a number (clamped); anything else reads as `auto`, so a bad value never makes the
+    /// whole file unusable.
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let v = toml::Value::deserialize(d)?;
+        Ok(match v {
+            toml::Value::Float(f) => UiScale::manual(f as f32),
+            toml::Value::Integer(i) => UiScale::manual(i as f32),
+            _ => UiScale::Auto,
+        })
     }
 }
 
@@ -410,6 +481,26 @@ impl Settings {
             .find(|p| p.exe.eq_ignore_ascii_case(exe) && p.class.eq_ignore_ascii_case(class))
     }
 
+    /// Removes the profile of `exe` and `class` (case insensitive). Returns whether one was removed.
+    pub fn remove_source(&mut self, exe: &str, class: &str) -> bool {
+        let n = self.sources.len();
+        self.sources
+            .retain(|p| !(p.exe.eq_ignore_ascii_case(exe) && p.class.eq_ignore_ascii_case(class)));
+        self.sources.len() != n
+    }
+
+    /// "Reset everything to defaults" (menu, owner definition 2026-11-20): the parameter overrides cleared (the
+    /// preset in force stays, with its own values), the hotkeys, the UI scale and the GPU adapter back to their
+    /// defaults. Kept: the per-game profiles, the source choice and its preferences, the window rectangle, the menu
+    /// layout, the first-run state; user presets and burn-in maps are files this never touches.
+    pub fn reset_everything(&mut self) {
+        let g = &mut self.global;
+        g.overrides.clear();
+        g.hotkeys = default_hotkeys();
+        g.ui.scale = UiScale::Auto;
+        g.gpu = GpuSettings::default();
+    }
+
     /// Inserts or replaces the profile with the same executable and class.
     pub fn upsert_source(&mut self, profile: SourceProfile) {
         match self
@@ -527,6 +618,21 @@ pub fn record_edit(
         }
     }
     changed
+}
+
+/// "Reset look overrides" (menu): every parameter override goes, except the quality ones (`quality_tier`,
+/// `quality_auto`: they describe the machine, not the look). Returns whether something was removed.
+pub fn reset_look_overrides(overrides: &mut BTreeMap<String, toml::Value>) -> bool {
+    let n = overrides.len();
+    overrides.retain(|id, _| crate::quality::PARAM_IDS.contains(&id.as_str()));
+    overrides.len() != n
+}
+
+/// Keeps a copy of `dir\settings.toml` before a reset ([`BACKUP_FILE`], or the first free `settings.toml.bak.<n>`
+/// when an older different copy is there). `None` when there is no file or it cannot be copied.
+pub fn backup_current(dir: &Path) -> Option<PathBuf> {
+    let path = dir.join(SETTINGS_FILE);
+    path.exists().then(|| backup(dir, &path)).flatten()
 }
 
 /// Applies the overrides of `settings.toml` onto `params` through [`crate::presets::apply_overrides_checked`]:
@@ -1337,5 +1443,121 @@ mod tests {
         assert_eq!(s.global.output.windowed, None);
         let s = Settings::from_toml("version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n").unwrap();
         assert_eq!(s.global.output.windowed, Some([10, 20, 1290, 740]));
+    }
+
+    /// The menu's UI scale and first-run keys (`[global.ui] scale`, `first_run_done`) round-trip; a file without
+    /// them loads with `auto` and no first-run hint; a bad scale reads as `auto` and never makes the file invalid.
+    #[test]
+    fn ui_scale_and_first_run_round_trip_and_old_files_still_load() {
+        let d = Settings::default().global.ui;
+        assert_eq!(
+            (d.scale, d.first_run_done, d.first_run_due()),
+            (UiScale::Auto, None, false)
+        );
+        let text = Settings::default().to_toml().unwrap();
+        assert!(
+            text.contains("scale = \"auto\"") && !text.contains("first_run_done"),
+            "{text}"
+        );
+        let mut s = Settings::default();
+        s.global.ui.scale = UiScale::manual(1.25);
+        s.global.ui.first_run_done = Some(false);
+        let text = s.to_toml().unwrap();
+        assert!(
+            text.contains("scale = 1.25") && text.contains("first_run_done = false"),
+            "{text}"
+        );
+        let back = Settings::from_toml(&text).unwrap();
+        assert_eq!(back.global.ui, s.global.ui);
+        assert!(back.global.ui.first_run_due());
+        s.global.ui.first_run_done = Some(true);
+        let back = Settings::from_toml(&s.to_toml().unwrap()).unwrap();
+        assert!(!back.global.ui.first_run_due());
+        // A file of the previous build: no scale, no first-run key.
+        let old =
+            "version = 1\n[global.ui]\nmenu_x = 30.0\nmenu_y = 40.0\nmenu_w = 500.0\nmenu_h = 600.0\nmenu_opacity \
+                   = 0.8\nmenu_collapsed = false\n";
+        let s = Settings::from_toml(old).unwrap();
+        assert_eq!((s.global.ui.menu_x, s.global.ui.scale), (30.0, UiScale::Auto));
+        assert!(
+            !s.global.ui.first_run_due(),
+            "an existing file never shows the first-run hint"
+        );
+        // Odd values: clamped, or `auto`.
+        for (v, want) in [
+            ("9.0", UiScale::Manual(3.0)),
+            ("0.1", UiScale::Manual(0.75)),
+            ("2", UiScale::Manual(2.0)),
+            ("\"AUTO\"", UiScale::Auto),
+            ("\"huge\"", UiScale::Auto),
+            ("[1, 2]", UiScale::Auto),
+        ] {
+            let s = Settings::from_toml(&format!("version = 1\n[global.ui]\nscale = {v}\n")).unwrap();
+            assert_eq!(s.global.ui.scale, want, "{v}");
+        }
+        assert_eq!(UiScale::manual(f32::NAN), UiScale::Auto);
+        assert_eq!(UiScale::Auto.effective(1.5), 1.5);
+        assert_eq!(UiScale::Auto.effective(0.0), 1.0);
+        assert_eq!(UiScale::Manual(2.0).effective(1.0), 2.0);
+    }
+
+    /// "Reset everything" clears the overrides, the hotkeys, the UI scale and the adapter, and keeps the per-game
+    /// profiles, the preset, the source choice and the window; "Reset look overrides" keeps the quality ones.
+    #[test]
+    fn resets_clear_what_they_say_and_keep_the_rest() {
+        let mut s = Settings::default();
+        s.global.preset = "pvm-20m4u".into();
+        s.global.overrides.insert("exposure".into(), toml::Value::Float(1.5));
+        s.global
+            .overrides
+            .insert("quality_tier".into(), toml::Value::Integer(2));
+        s.global.hotkeys.insert("toggle_menu".into(), "Ctrl+Alt+M".into());
+        s.global.ui.scale = UiScale::manual(2.0);
+        s.global.ui.menu_opacity = 0.5;
+        s.global.gpu.adapter = "Intel".into();
+        s.global.output.windowed = Some([10, 20, 1290, 740]);
+        s.global.source.ask_at_start = false;
+        s.upsert_source(SourceProfile {
+            exe: "game.exe".into(),
+            class: "C".into(),
+            divisor: Some(3),
+            ..SourceProfile::default()
+        });
+        let mut look = s.global.overrides.clone();
+        assert!(reset_look_overrides(&mut look));
+        assert_eq!(look.keys().collect::<Vec<_>>(), ["quality_tier"]);
+        assert!(!reset_look_overrides(&mut look), "nothing left to remove");
+        let mut r = s.clone();
+        r.reset_everything();
+        assert!(r.global.overrides.is_empty());
+        assert_eq!(r.global.hotkeys, default_hotkeys());
+        assert_eq!(r.global.ui.scale, UiScale::Auto);
+        assert_eq!(r.global.gpu.adapter, GPU_ADAPTER_AUTO);
+        assert_eq!(r.global.preset, "pvm-20m4u");
+        assert_eq!(r.sources, s.sources);
+        assert_eq!(r.global.source, s.global.source);
+        assert_eq!(r.global.output, s.global.output);
+        assert_eq!(r.global.ui.menu_opacity, 0.5);
+        // Profiles: removal by program and class, case insensitive.
+        assert!(!r.remove_source("game.exe", "other"));
+        assert!(r.remove_source("GAME.EXE", "c"));
+        assert!(r.sources.is_empty());
+    }
+
+    /// The reset writes a copy of the file first; no file, no copy.
+    #[test]
+    fn a_reset_keeps_a_backup_of_the_file() {
+        let dir = temp_dir("resetbak");
+        assert_eq!(backup_current(&dir), None);
+        let mut s = Settings::default();
+        s.global.preset = "mine".into();
+        save(&dir, &s).unwrap();
+        let bak = backup_current(&dir).unwrap();
+        assert_eq!(bak, dir.join(BACKUP_FILE));
+        assert_eq!(
+            fs::read_to_string(&bak).unwrap(),
+            fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap()
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }

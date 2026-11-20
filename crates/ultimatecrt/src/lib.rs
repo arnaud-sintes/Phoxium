@@ -1,5 +1,6 @@
 //! ultimatecrt library: capture, GPU pipeline, output window and application logic.
 
+pub mod about;
 pub mod adapters;
 pub mod ageing;
 pub mod app;
@@ -20,11 +21,14 @@ pub mod params;
 pub mod patterns;
 pub mod picker;
 pub mod placement;
+pub mod preset_files;
 pub mod presets;
+pub mod profiles;
 pub mod quality;
 pub mod render_cmd;
 pub mod scaling;
 pub mod settings;
+pub mod shell;
 pub mod source;
 pub mod sources;
 pub mod tube_state;

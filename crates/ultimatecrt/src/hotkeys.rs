@@ -29,6 +29,11 @@ impl Mods {
     pub fn bits(self) -> u32 {
         u32::from(self.0)
     }
+
+    /// From Win32 `MOD_*` flags (the low word of `WM_HOTKEY`'s `LPARAM`); other bits are ignored.
+    pub fn from_bits(bits: u32) -> Mods {
+        Mods((bits & 0xF) as u8)
+    }
 }
 
 impl std::ops::BitOr for Mods {
@@ -309,7 +314,11 @@ impl Action {
         self as i32 + 1
     }
 
+    /// The action of a `RegisterHotKey` id; [`MENU_FALLBACK_ID`] is the settings menu too.
     pub fn from_hotkey_id(id: i32) -> Option<Action> {
+        if id == MENU_FALLBACK_ID {
+            return Some(Action::ToggleMenu);
+        }
         Action::ALL.into_iter().find(|a| a.hotkey_id() == id)
     }
 }
@@ -498,12 +507,55 @@ impl Outcome {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Registration {
     pub outcomes: Vec<Outcome>,
+    /// The settings menu's safety chord ([`update_menu_fallback`]): registered under [`MENU_FALLBACK_ID`] while
+    /// the menu key in force is not its default, so the menu can always be opened.
+    pub menu_fallback: Option<Chord>,
 }
 
 impl Registration {
     /// The chord registered for `action`.
     pub fn bound(&self, action: Action) -> Option<Chord> {
         self.outcomes.iter().find(|o| o.action == action).and_then(|o| o.bound)
+    }
+
+    /// What happened for `action`.
+    pub fn outcome(&self, action: Action) -> Option<&Outcome> {
+        self.outcomes.iter().find(|o| o.action == action)
+    }
+
+    /// The chords asked for, as `[global.hotkeys]` text by action id (the default for an action not planned).
+    pub fn to_settings(&self) -> BTreeMap<String, String> {
+        Action::ALL
+            .into_iter()
+            .map(|a| {
+                let text = self
+                    .outcome(a)
+                    .map_or_else(|| a.default_text().to_string(), |o| o.wanted.to_string());
+                (a.id().to_string(), text)
+            })
+            .collect()
+    }
+
+    /// Whether `chord` may become the chord of `action`: Quit is fixed, and a chord another action asks for or
+    /// holds is refused. The message is for the menu.
+    pub fn check(&self, action: Action, chord: Chord) -> Result<(), String> {
+        if action == Action::Quit {
+            return Err(format!("Quit is fixed ({}).", Action::Quit.default_text()));
+        }
+        match self
+            .outcomes
+            .iter()
+            .find(|o| o.action != action && (o.bound == Some(chord) || o.wanted == chord))
+        {
+            Some(o) => Err(format!("{chord} is already used for {}.", o.action.describe())),
+            None => Ok(()),
+        }
+    }
+
+    /// The line the menu shows about the menu's safety chord, when one is registered.
+    pub fn fallback_note(&self) -> Option<String> {
+        self.menu_fallback
+            .map(|c| format!("{c} also opens the menu (kept as a fallback while the menu key is changed)."))
     }
 
     /// One message per action whose wanted chord could not be registered (empty when all went through).
@@ -528,18 +580,230 @@ impl Registration {
             .join(", ")
     }
 
-    /// Unregisters every chord that is registered.
+    /// Unregisters every chord that is registered (the menu's safety chord included).
     pub fn unregister_all(&self, reg: &mut dyn Registrar) {
         for o in self.outcomes.iter().filter(|o| o.bound.is_some()) {
             reg.unregister(o.action.hotkey_id());
         }
+        if self.menu_fallback.is_some() {
+            reg.unregister(MENU_FALLBACK_ID);
+        }
     }
 }
 
+// ---------------------------------------------------------------------------------------------------------
+// Rebinding from the settings menu (owner request 2026-11-20).
+
+/// `RegisterHotKey` id of the menu's safety chord ([`update_menu_fallback`]); [`Action::from_hotkey_id`] maps it
+/// to the settings menu.
+pub const MENU_FALLBACK_ID: i32 = 64;
+
+/// What a key press means while the menu waits for a new chord ([`capture_key`]).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Captured {
+    /// A modifier alone (Ctrl, Alt, Shift, Win): keep waiting for the key.
+    Waiting,
+    /// Esc: stop waiting, nothing changes.
+    Cancel,
+    /// Backspace, or Delete without a modifier: back to the action's default chord.
+    Default,
+    /// A valid chord.
+    Chord(Chord),
+    /// A key that cannot be a hotkey (the reason, for the menu); keep waiting.
+    Invalid(String),
+}
+
+/// Virtual keys that are modifiers on their own (Shift, Ctrl, Alt, left and right, the Windows keys).
+fn is_modifier_key(vk: u16) -> bool {
+    matches!(vk, 0x10..=0x12 | 0xA0..=0xA5 | 0x5B | 0x5C)
+}
+
+/// The meaning of key `vk` pressed with `mods` held while a new chord is awaited. Pure.
+pub fn capture_key(vk: u16, mods: Mods) -> Captured {
+    match vk {
+        _ if is_modifier_key(vk) => Captured::Waiting,
+        0x1B => Captured::Cancel,
+        0x08 => Captured::Default,
+        0x2E if mods == Mods::NONE => Captured::Default,
+        _ => {
+            let name = key_name(vk);
+            if key_from_name(&name) != Some(vk) {
+                return Captured::Invalid(
+                    "That key cannot be a hotkey: use F1 to F24, a letter, a digit, an arrow or a named key such as \
+                     Home or PageUp."
+                        .to_string(),
+                );
+            }
+            match Chord::new(mods, vk) {
+                Ok(c) => Captured::Chord(c),
+                Err(_) => Captured::Invalid(format!("{name} needs Ctrl, Alt or Win (only F1 to F24 work alone).")),
+            }
+        }
+    }
+}
+
+/// The chords that may serve as the menu's safety chord, in order: none while the menu key in force is its
+/// default (F10); else the documented menu fallbacks (F10, Ctrl+Alt+F10, Ctrl+Alt+F12) that are neither the menu
+/// key itself nor a chord another action asks for or holds.
+pub fn menu_fallback_candidates(state: &Registration) -> Vec<Chord> {
+    let menu = state.bound(Action::ToggleMenu);
+    if menu == Some(Action::ToggleMenu.default_chord()) {
+        return Vec::new();
+    }
+    let others: Vec<Chord> = state
+        .outcomes
+        .iter()
+        .filter(|o| o.action != Action::ToggleMenu)
+        .flat_map(|o| [Some(o.wanted), o.bound])
+        .flatten()
+        .collect();
+    Action::ToggleMenu
+        .fallbacks()
+        .iter()
+        .map(|t| t.parse::<Chord>().expect("the fallback chords are valid"))
+        .filter(|c| Some(*c) != menu && !others.contains(c))
+        .collect()
+}
+
+/// Keeps the menu reachable (owner requirement: changing the menu key must never leave the user without a way
+/// to open the menu): while the menu key in force is not its default, the first free documented fallback
+/// ([`menu_fallback_candidates`]) stays registered under [`MENU_FALLBACK_ID`]. A safety chord still valid is kept;
+/// one no longer needed or now taken by an action is released.
+pub fn update_menu_fallback(reg: &mut dyn Registrar, state: &mut Registration) {
+    let candidates = menu_fallback_candidates(state);
+    if let Some(c) = state.menu_fallback {
+        if candidates.contains(&c) {
+            return;
+        }
+        reg.unregister(MENU_FALLBACK_ID);
+        state.menu_fallback = None;
+    }
+    for c in candidates {
+        if reg.register(MENU_FALLBACK_ID, &c).is_ok() {
+            state.menu_fallback = Some(c);
+            break;
+        }
+    }
+}
+
+/// Rebinds `action` to `chord` at once: checks it ([`Registration::check`]), releases the old chord, registers
+/// the new one; when the system refuses it (another program owns it) the old chord is registered again and kept.
+/// The menu's safety chord follows ([`update_menu_fallback`]). Returns the message for the menu: `Ok` when the
+/// new chord is in force, `Err` when nothing changed (or, rarely, the old chord could not be taken back either,
+/// which the message says).
+pub fn rebind(
+    reg: &mut dyn Registrar,
+    state: &mut Registration,
+    action: Action,
+    chord: Chord,
+) -> Result<String, String> {
+    state.check(action, chord)?;
+    let id = action.hotkey_id();
+    let i = match state.outcomes.iter().position(|o| o.action == action) {
+        Some(i) => i,
+        None => {
+            state.outcomes.push(Outcome {
+                action,
+                wanted: chord,
+                bound: None,
+                failures: Vec::new(),
+            });
+            state.outcomes.sort_by_key(|o| o.action);
+            state
+                .outcomes
+                .iter()
+                .position(|o| o.action == action)
+                .expect("just added")
+        }
+    };
+    let old = state.outcomes[i].bound;
+    let what = capitalise(action.describe());
+    if old == Some(chord) {
+        let o = &mut state.outcomes[i];
+        o.wanted = chord;
+        o.failures.clear();
+        update_menu_fallback(reg, state);
+        return Ok(format!("{what}: {chord} (unchanged)."));
+    }
+    if state.menu_fallback == Some(chord) {
+        // The safety chord gives way; another one is chosen below.
+        reg.unregister(MENU_FALLBACK_ID);
+        state.menu_fallback = None;
+    }
+    if old.is_some() {
+        reg.unregister(id);
+    }
+    let result = match reg.register(id, &chord) {
+        Ok(()) => {
+            state.outcomes[i] = Outcome {
+                action,
+                wanted: chord,
+                bound: Some(chord),
+                failures: Vec::new(),
+            };
+            Ok(format!("{what}: {chord}."))
+        }
+        Err(code) => {
+            let why = describe_win32(code);
+            match old {
+                Some(o) if reg.register(id, &o).is_ok() => Err(format!("{chord} cannot be used ({why}); {o} is kept.")),
+                Some(o) => {
+                    state.outcomes[i].bound = None;
+                    state.outcomes[i].failures = vec![(chord, code)];
+                    Err(format!(
+                        "{chord} cannot be used ({why}), and {o} could not be taken back: {what} has no hotkey now."
+                    ))
+                }
+                None => Err(format!("{chord} cannot be used ({why}).")),
+            }
+        }
+    };
+    update_menu_fallback(reg, state);
+    result
+}
+
+/// Every action except Quit back to its default chord (with the documented fallbacks when a default is taken by
+/// another program), registered at once. Returns the registration problems (empty when every default went
+/// through).
+pub fn reset_all(reg: &mut dyn Registrar, state: &mut Registration) -> Vec<String> {
+    for o in state
+        .outcomes
+        .iter()
+        .filter(|o| o.action != Action::Quit && o.bound.is_some())
+    {
+        reg.unregister(o.action.hotkey_id());
+    }
+    if state.menu_fallback.take().is_some() {
+        reg.unregister(MENU_FALLBACK_ID);
+    }
+    let plan: Vec<Attempt> = plan_registration(&Bindings::default())
+        .into_iter()
+        .filter(|a| a.action != Action::Quit)
+        .collect();
+    let fresh = register_plan(reg, &plan, state.bound(Action::Quit).into_iter().collect());
+    state.outcomes.retain(|o| o.action == Action::Quit);
+    state.outcomes.extend(fresh.outcomes);
+    state.outcomes.sort_by_key(|o| o.action);
+    update_menu_fallback(reg, state);
+    state.problems()
+}
+
+fn capitalise(s: &str) -> String {
+    let mut c = s.chars();
+    c.next()
+        .map(|f| f.to_uppercase().chain(c).collect())
+        .unwrap_or_default()
+}
+
 /// Runs the plan: for each action, the candidates in order until one registers. A candidate already registered
-/// for another action is skipped without asking the system (it would fail with error 1409 anyway).
+/// for another action is skipped without asking the system (it would fail with error 1409 anyway). The menu's
+/// safety chord is not set here: the output registers it after ([`update_menu_fallback`]).
 pub fn register_all(reg: &mut dyn Registrar, plan: &[Attempt]) -> Registration {
-    let mut taken: Vec<Chord> = Vec::new();
+    register_plan(reg, plan, Vec::new())
+}
+
+/// [`register_all`] with chords already registered elsewhere in this process (`taken`).
+fn register_plan(reg: &mut dyn Registrar, plan: &[Attempt], mut taken: Vec<Chord>) -> Registration {
     let mut outcomes = Vec::new();
     for attempt in plan {
         let mut failures = Vec::new();
@@ -566,7 +830,10 @@ pub fn register_all(reg: &mut dyn Registrar, plan: &[Attempt]) -> Registration {
             failures,
         });
     }
-    Registration { outcomes }
+    Registration {
+        outcomes,
+        menu_fallback: None,
+    }
 }
 
 #[cfg(test)]
@@ -987,6 +1254,166 @@ mod tests {
             "the overlay fell back to its fallback chord and is registered too"
         );
         assert!(fake.registered.is_empty());
+    }
+
+    // ---- rebinding from the menu ----
+
+    fn started(fake: &mut Fake) -> Registration {
+        let mut reg = register_all(fake, &plan_registration(&Bindings::default()));
+        update_menu_fallback(fake, &mut reg);
+        reg
+    }
+
+    #[test]
+    fn a_key_press_while_waiting_becomes_a_chord_a_cancel_or_a_reset() {
+        let ctrl_alt = Mods::CTRL | Mods::ALT;
+        assert_eq!(capture_key(0x11, Mods::CTRL), Captured::Waiting, "Ctrl alone");
+        assert_eq!(capture_key(0xA4, Mods::ALT), Captured::Waiting, "left Alt alone");
+        assert_eq!(capture_key(0x5B, Mods::WIN), Captured::Waiting);
+        assert_eq!(capture_key(0x1B, Mods::NONE), Captured::Cancel);
+        assert_eq!(capture_key(0x1B, Mods::CTRL), Captured::Cancel);
+        assert_eq!(capture_key(0x08, Mods::NONE), Captured::Default);
+        assert_eq!(capture_key(0x2E, Mods::NONE), Captured::Default);
+        assert_eq!(
+            capture_key(0x2E, ctrl_alt),
+            Captured::Chord(chord("Ctrl+Alt+Delete")),
+            "Delete with modifiers is a chord"
+        );
+        assert_eq!(capture_key(b'M' as u16, ctrl_alt), Captured::Chord(chord("Ctrl+Alt+M")));
+        assert_eq!(capture_key(0x78, Mods::NONE), Captured::Chord(chord("F9")));
+        assert_eq!(capture_key(0x78, Mods::SHIFT), Captured::Chord(chord("Shift+F9")));
+        let Captured::Invalid(m) = capture_key(b'Q' as u16, Mods::SHIFT) else {
+            panic!("a bare letter")
+        };
+        assert!(m.contains("Q needs Ctrl, Alt or Win"), "{m}");
+        let Captured::Invalid(m) = capture_key(0xBA, Mods::CTRL) else {
+            panic!("an OEM key")
+        };
+        assert!(m.contains("cannot be a hotkey"), "{m}");
+    }
+
+    #[test]
+    fn a_rebind_registers_the_new_chord_at_once_and_writes_it_back() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        assert_eq!(reg.menu_fallback, None, "the default menu key needs no safety chord");
+        let msg = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap();
+        assert!(msg.contains("Overlay: Ctrl+Alt+F9"), "{msg}");
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
+        assert_eq!(
+            fake.registered[&Action::ToggleOverlay.hotkey_id()],
+            chord("Ctrl+Alt+F9")
+        );
+        assert!(
+            !fake.registered.values().any(|c| *c == chord("Ctrl+Alt+O")),
+            "the old chord is released"
+        );
+        let text = reg.to_settings();
+        assert_eq!(text["toggle_overlay"], "Ctrl+Alt+F9");
+        assert_eq!(text["quit"], "Ctrl+Alt+Q");
+        // The written text reads back as the same bindings, without a warning.
+        let (b, w) = Bindings::from_settings(&text);
+        assert!(w.is_empty(), "{w:?}");
+        assert_eq!(b.get(Action::ToggleOverlay), Some(chord("Ctrl+Alt+F9")));
+        // The same chord again: nothing to do.
+        let msg = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap();
+        assert!(msg.contains("unchanged"), "{msg}");
+    }
+
+    #[test]
+    fn a_chord_another_program_owns_is_refused_and_the_old_one_kept() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        fake.owned_elsewhere
+            .insert(chord("Ctrl+Alt+F9"), ERROR_HOTKEY_ALREADY_REGISTERED);
+        let e = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+F9")).unwrap_err();
+        assert!(
+            e.contains("Ctrl+Alt+F9 cannot be used") && e.contains("1409") && e.contains("Ctrl+Alt+O is kept"),
+            "{e}"
+        );
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("Ctrl+Alt+O")));
+        assert_eq!(
+            fake.registered[&Action::ToggleOverlay.hotkey_id()],
+            chord("Ctrl+Alt+O"),
+            "registered again"
+        );
+        assert_eq!(
+            reg.to_settings()["toggle_overlay"],
+            "Ctrl+Alt+O",
+            "the settings keep the old chord"
+        );
+    }
+
+    #[test]
+    fn conflicts_between_our_own_actions_and_quit_are_refused_without_a_system_call() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        let calls = fake.calls.len();
+        let e = rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("F11")).unwrap_err();
+        assert!(e.contains("F11 is already used for fullscreen"), "{e}");
+        let e = rebind(&mut fake, &mut reg, Action::ToggleBypass, chord("Ctrl+Alt+Q")).unwrap_err();
+        assert!(e.contains("already used for quit"), "{e}");
+        let e = rebind(&mut fake, &mut reg, Action::Quit, chord("Ctrl+Q")).unwrap_err();
+        assert!(e.contains("Quit is fixed"), "{e}");
+        assert_eq!(fake.calls.len(), calls);
+        assert_eq!(reg, started(&mut Fake::default()));
+    }
+
+    #[test]
+    fn changing_the_menu_key_keeps_the_documented_fallback_registered() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("Ctrl+Alt+M")).unwrap();
+        assert_eq!(reg.bound(Action::ToggleMenu), Some(chord("Ctrl+Alt+M")));
+        assert_eq!(reg.menu_fallback, Some(chord("F10")), "F10 still opens the menu");
+        assert_eq!(fake.registered[&MENU_FALLBACK_ID], chord("F10"));
+        assert_eq!(Action::from_hotkey_id(MENU_FALLBACK_ID), Some(Action::ToggleMenu));
+        assert!(reg.fallback_note().unwrap().contains("F10 also opens the menu"));
+        // Another action takes F10: the safety chord moves to the next documented fallback.
+        rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("F10")).unwrap();
+        assert_eq!(reg.bound(Action::ToggleOverlay), Some(chord("F10")));
+        assert_eq!(reg.menu_fallback, Some(chord("Ctrl+Alt+F10")));
+        assert_eq!(fake.registered[&MENU_FALLBACK_ID], chord("Ctrl+Alt+F10"));
+        // F10 back for the menu (the overlay first gives it up): no safety chord any more.
+        rebind(&mut fake, &mut reg, Action::ToggleOverlay, chord("Ctrl+Alt+O")).unwrap();
+        rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("F10")).unwrap();
+        assert_eq!(reg.menu_fallback, None);
+        assert!(!fake.registered.contains_key(&MENU_FALLBACK_ID));
+        // A menu key read from the settings at start gets its safety chord too; unregister_all releases it.
+        let (b, _) = Bindings::from_settings(&map(&[("toggle_menu", "Ctrl+Alt+F12")]));
+        let mut fake = Fake::default();
+        let mut reg = register_all(&mut fake, &plan_registration(&b));
+        update_menu_fallback(&mut fake, &mut reg);
+        assert_eq!(reg.menu_fallback, Some(chord("F10")));
+        reg.unregister_all(&mut fake);
+        assert!(fake.registered.is_empty());
+    }
+
+    #[test]
+    fn the_safety_chord_skips_fallbacks_owned_by_other_programs() {
+        let mut fake = Fake::taking(&["F10"]);
+        let reg = started(&mut fake);
+        // The dev machine case with F10 taken: the menu is on Ctrl+Alt+F10, the safety on Ctrl+Alt+F12.
+        assert_eq!(reg.bound(Action::ToggleMenu), Some(chord("Ctrl+Alt+F10")));
+        assert_eq!(reg.menu_fallback, Some(chord("Ctrl+Alt+F12")));
+    }
+
+    #[test]
+    fn reset_all_brings_every_default_back_and_drops_the_safety_chord() {
+        let mut fake = Fake::default();
+        let mut reg = started(&mut fake);
+        rebind(&mut fake, &mut reg, Action::ToggleMenu, chord("Ctrl+Alt+M")).unwrap();
+        rebind(&mut fake, &mut reg, Action::NextPreset, chord("Ctrl+Alt+N")).unwrap();
+        assert!(reg.menu_fallback.is_some());
+        let problems = reset_all(&mut fake, &mut reg);
+        assert!(problems.is_empty(), "{problems:?}");
+        for a in Action::ALL {
+            assert_eq!(reg.bound(a), Some(a.default_chord()), "{a:?}");
+            assert_eq!(fake.registered[&a.hotkey_id()], a.default_chord(), "{a:?}");
+        }
+        assert_eq!(reg.menu_fallback, None);
+        assert_eq!(reg.to_settings(), crate::settings::default_hotkeys());
+        assert_eq!(fake.registered.len(), Action::ALL.len());
     }
 
     #[test]
