@@ -50,7 +50,7 @@ function Add-Line([string]$s) { [void]$sb.Append($s).Append("`n") }
 Add-Line '# Third-party licences'
 Add-Line ''
 Add-Line 'ultimateCRT itself is MIT-licensed (LICENSE). This file carries the licence texts of the third-party code that is'
-Add-Line 'built into or with the executables: first every Rust crate (the licence expression it declares, from `cargo metadata`)'
+Add-Line 'built into or with the executables: first every Rust crate (the licence expression it declares, from `cargo metadata`,'
 Add-Line 'then the licence and notice files of its package, unmodified), then the notices of the C and C++ sources and the'
 Add-Line 'font that the crates do not carry.'
 Add-Line ''

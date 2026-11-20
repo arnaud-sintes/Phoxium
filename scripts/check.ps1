@@ -11,7 +11,9 @@
 
     With -Full it exits 0 only when every step passes. The licence check runs `cargo deny check licenses`
     (deny.toml) when cargo-deny is installed, and always runs the declared-licence check of cargo metadata
-    (same policy as scripts/package.ps1: a licence field is required, GPL is refused).
+    (same filter as scripts/package.ps1, scripts/licence-policy.ps1: a licence field is required, GPL, LGPL and AGPL
+    are refused unless deny.toml allows the licence). -Full also runs the self tests of scripts/impact.ps1 and
+    scripts/licence-policy.ps1.
 .PARAMETER Smoke
     Also run the live smoke test: `ultimatecrt --pattern ramp --exit-after 10 --validation`. It opens
     an output window for 10 s, so it is opt-in. It fails on a non-zero exit or on any validation line
@@ -29,8 +31,15 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 $root = Split-Path $PSScriptRoot -Parent
 Set-Location $root
-# Same shared build cache and no incremental cache as scripts\impact.ps1 (ENV.md, Test policy).
-if (-not $env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR = 'C:\projects\personal\ultimateCRT-wt\target-shared' }
+# Same shared build cache and no incremental cache as scripts\impact.ps1 (ENV.md, Test policy). The shared folder
+# exists only when the repository has a <name>-wt worktree folder next to it (scripts\shared-paths.ps1); otherwise
+# cargo's own target folder is used.
+. (Join-Path $PSScriptRoot 'shared-paths.ps1')
+. (Join-Path $PSScriptRoot 'licence-policy.ps1')
+if (-not $env:CARGO_TARGET_DIR) {
+    $shared = Get-SharedTargetDir $root
+    if ($shared) { $env:CARGO_TARGET_DIR = $shared }
+}
 if (-not $env:CARGO_INCREMENTAL) { $env:CARGO_INCREMENTAL = '0' }
 
 # Windows PowerShell 5.1 turns native stderr into errors under 'Stop': check the exit code instead.
@@ -43,7 +52,7 @@ function Invoke-Checked([string]$what, [scriptblock]$block) {
 
 function Step([string]$name) { Write-Host "== $name" -ForegroundColor Cyan }
 
-# The declared-licence check of cargo metadata (same policy as scripts/package.ps1).
+# The declared-licence check of cargo metadata (same filter as scripts/package.ps1: scripts/licence-policy.ps1).
 function Invoke-DeclaredLicences {
     Step 'declared licences'
     $meta = (Invoke-Checked 'cargo metadata' { cargo metadata --format-version 1 --locked --filter-platform x86_64-pc-windows-msvc } | Out-String) | ConvertFrom-Json
@@ -51,10 +60,7 @@ function Invoke-DeclaredLicences {
     $used = @{}
     foreach ($node in $meta.resolve.nodes) { $used[$node.id] = $true }
     $rows = @($meta.packages | Where-Object { $used.ContainsKey($_.id) -and ($members -notcontains $_.id) })
-    $missing = @($rows | Where-Object { -not $_.license })
-    if ($missing.Count -gt 0) { throw "Dependencies without a licence field: $(($missing | ForEach-Object { $_.name }) -join ', ')" }
-    $gpl = @($rows | Where-Object { $_.license -match 'GPL' -and $_.license -notmatch 'LGPL' })
-    if ($gpl.Count -gt 0) { throw "GPL dependency found: $(($gpl | ForEach-Object { $_.name }) -join ', ') (see DESIGN.md 11)" }
+    Assert-DeclaredLicences $rows (Join-Path $root 'deny.toml')
     Write-Host "declared licences OK ($($rows.Count) crates)"
 }
 
@@ -89,6 +95,10 @@ if (-not $Full) {
     else { Write-Host 'check OK (impact plan only: run with -Full before a merge to main, a push or a release)' -ForegroundColor Green }
     return
 }
+
+Step 'script self tests (impact.ps1, licence-policy.ps1)'
+Invoke-Checked 'impact self test' { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'impact.ps1') -SelfTest }
+Invoke-Checked 'licence policy self test' { & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot 'licence-policy.ps1') -SelfTest }
 
 Step 'cargo fmt'
 Invoke-Checked 'cargo fmt' { cargo fmt --all --check }
