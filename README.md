@@ -281,6 +281,32 @@ Everything in the **Optics** panel is behind its master switch **Enable** (the f
   - Black corners, clean centre: corner 0, start 0.5, exponent 2, softness 0.4, roundness 0.5.
 - The other groups: **Glass halo and glare** (the thin halation ring at about 1.75 times the glass thickness and the veiling glare), **Phosphor diffusion** (a short glow of a fraction of a mm) and **Tint and room** (glass tint, room light on the screen).
 - Cost (headless measurements at 1920 x 1080 on the shared laptop GPU, in units of one full-resolution read and write pass, `glow_cost_study` in `tests/stage_optics.rs`): the vignette alone about 1.8, the glow with three lobes about 3.4 more, with a threshold about 7 more; the `low` quality tier runs each glow lobe on a coarser level (about half the glow's cost, a softer approximation).
+
+## Phosphor persistence: getting a visible trail
+
+Persistence (`phosphor_persistence`, on in every shipped preset, off in the bare defaults) is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a fading trail. The menu panel **Phosphor** explains it in one paragraph.
+
+**Why the default trail is subtle.** The default is the measured colour-TV phosphor (P22, one measured monitor, Kuhn 2002): green and blue keep about 5, 3 and 2 % of a frame's light in the next three frames at 60 Hz (6.3, 3.5, 2.4 % at 144 Hz), then a long faint tail; red has no visible trail at all. In the display output a white bar moving on black over 60 Hz frames leaves a green-blue smear of about 57, 44, 37 and 33 (8-bit codes, the bar 212) one to four frames behind it, measured headlessly through the whole chain (`tests/persistence_chain.rs`). That is physically right, but at 60 frames per second, with the eye following the object and the host LCD's own hold blur on top, it is easy to miss; a bright object over a bright background shows almost nothing. A real colour CRT looks the same: its trails are short.
+
+**Controls beyond the real tube** (all non-physical, their defaults leave the picture exactly as before; a still picture keeps its brightness with any of them):
+
+| Parameter | Default | What it does |
+|---|---|---|
+| `phosphor_extra_afterglow_rgb` | 0, 0, 0 | An added exponential glow per channel holding this many times the phosphor's own light. The control that gives a long, clearly visible trail, also for red. 1 at 100 ms: a moving green object shows 0.46 of a still picture's level instead of 0.76 and its next 60 Hz frame still 18 % of that. |
+| `phosphor_extra_afterglow_time_ms` | 100 ms | How long that glow lasts (37 % left after this time, 5 % after three times it), in real time: the same at 60 and 144 Hz. 5 to 1000 ms. |
+| `phosphor_decay_scale` | 1 | Multiplies every time constant of the measured decay (1 to 30 on the slider). The P22 tail is a power law, nearly scale free, so this mainly doubles the first trail frames (green 5.4 to 11 % at 30) and gives red a short trail (24 % of a frame at 30). |
+| `phosphor_tail_strength_rgb` | 1, 1, 1 | Strength of the measured tail. 0.07 to 1 is physical (Ni-killed phosphors have a shorter trail); above 1 it changes little at 60 Hz (10 gives 5.44 % instead of 5.36 %), because the tail already carries 98 % of a frame's own light. |
+
+Recommended starting points (the moving-bar codes four frames behind, 60 Hz; physical 33):
+
+- **Visible but still CRT-like:** extra afterglow 0.3 to 0.5 on all three channels at 100 to 200 ms.
+- **Long-persistence look** (radar, oscilloscope or old monochrome tubes, which used other phosphors): extra afterglow 1 to 2 at 200 to 500 ms (1 at 200 ms: 51; 2 at 300 ms: 52, with the moving object at 141 instead of 212). For a green-only trail raise only the G component.
+- `phosphor_decay_scale` 10 to 30 for a slightly longer and redder P22 trail (20: 40 four frames behind).
+
+There is no phosphor-type selector (P1, P7, P31, P39 long-persistence phosphors): the project's research (`CRT.md`) has decay constants for P22 only, and the presets stay P22.
+
+Keep `phosphor_frame_rate_hz` (Advanced) at 0, the default: it follows the real time between frames, so the trail lasts as long at 144 Hz as at 60 Hz. A positive value is a manual override for tests, which decays the trail by 1 / value per output frame whatever time passed (397 Hz on a 60 Hz output: each frame decays the trail by only 2.5 ms of phosphor time).
+
 ## Ageing and burn-in (T-42, T-43, optional)
 
 Both are off by default; the picture is then exactly the same as without them. They are in the menu panel "Ageing and burn-in".

@@ -699,6 +699,14 @@ impl Headless {
         self.pipeline.clear_history();
     }
 
+    /// Gives every frame of [`Headless::render`] and its variants the frame period `ms` (the time since the
+    /// previous frame that the real-time stages, persistence and ABL, use) instead of the wall-clock time
+    /// between the headless calls; `None`: measured again. [`Headless::render_stages`] takes it from its
+    /// `FrameConstants` instead.
+    pub fn set_frame_time_ms(&mut self, ms: Option<f32>) {
+        self.pipeline.set_frame_time_override(ms);
+    }
+
     /// Enables exactly the chain slots of `names` (the stage subset under test), every other slot off.
     pub fn enable_only(&mut self, names: &[&str]) -> Res<()> {
         for n in names {

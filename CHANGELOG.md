@@ -17,12 +17,16 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 - Vignette controls in the Optics panel: on or off on its own, corner brightness now down to 0 (black corners), start radius, falloff exponent, soft onset, round or following the picture's shape, floor, and an offset centre. At their defaults the vignette is the 0.2.0 one, bit for bit.
 - The Optics panel is grouped (Glow (bloom), Vignette, Glass halo and glare, Phosphor diffusion, Tint and room), with the master switch as its first row and one sentence at its top saying that everything in it needs that switch (still off by default).
 - Tests: the glow and vignette model against the f64 oracle (energy, radius, threshold, falloff, exact defaults, monotonic falloff, black corners, centre offset), the GPU against the oracle, a recorded fingerprint of the 0.2.0 vignette, the hard-bound sweep with the glow on, a typed value on the glow slider, and a cost study run by hand (`glow_cost_study`).
+- Phosphor persistence controls for a clearly visible trail, beyond the measured P22 phosphor and off by default (the picture is unchanged until they are moved; owner feedback "the trail is too short", QUESTIONS PHY-18): `phosphor_extra_afterglow_rgb` and `phosphor_extra_afterglow_time_ms`, an exponential glow per channel mixed into the phosphor's decay (red included, real time, a still picture keeps its brightness), and `phosphor_decay_scale`, a multiplier of every time constant of the measured decay. The menu's Phosphor panel opens with a short explanation of the trail and of its physical default; the README has a section with recommended values.
+- `tests/persistence_chain.rs`: the persistence trail checked through the whole chain (defaults and all ten presets, 60 and 144 Hz frame periods) and the trail of a moving bar in the display output; `Headless::set_frame_time_ms` gives headless frames a fixed frame period.
 
 ### Changed
 
 - The default capture path is now zero-copy, with an automatic fallback to the CPU copy: the session uses zero-copy when the PC allows it (capture and rendering on one adapter whose driver imports the shared textures), else the CPU copy without a title notice (the console prints one line, the menu says why); any failure during the session falls back to the CPU copy by itself, with a notice in the console, the window title and the menu. A `settings.toml` without the key (every file written by v0.2.0) gets the new default; `path = "cpu"` stays the CPU copy. To go back to the CPU copy: choose "CPU copy (most compatible)" in the Source section, or set `[global.capture] path = "cpu"`, or run with `--capture-path cpu`.
 - The Vulkan device now enables `VK_KHR_external_memory_win32` whenever the GPU can import the shared textures, whatever capture path is chosen, so that the path can be switched live. The CPU copy does not use it: its output is bit-identical with or without it (tested).
 - "Reset everything to defaults" also puts the capture path back to the default (zero-copy).
+- `phosphor_tail_strength_rgb` goes up to 10 (log slider; above 1 is beyond the measured P22, and changes little at 60 Hz).
+- Changing a tail strength now restarts the persistence history primed to the picture, like the new controls, so a still picture does not flash while a slider moves.
 
 ## [0.2.0] - 2026-11-20
 

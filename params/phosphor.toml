@@ -37,10 +37,67 @@ type = "vec3"
 unit = "1"
 default = [1.0, 1.0, 1.0]
 min = 0.07
-max = 1.0
+max = 10.0
+hard_min = 0.0
+hard_max = 10.0
+hard_why = "a non-negative multiplier of the measured tail (0 removes it); 0.07 to 1 is the physical range (Ni-killed to plain P22 sulfides), above 1 is an artistic extension beyond the measured P22, and above 10 the trail no longer changes (the tail already carries almost all of a frame's energy)"
+widget = "log"
 tag = "E"
-source = "CRT.md Research pass T-63, preset values item 1: 0.07 to 1 times the power-law term follows the Sony patent Ni-killer residual ratios (0.072 / 0.966, US 5,825,124); applying the ratio to the power-law term alone is an assumption"
-description = "Strength of the long power-law afterglow tail per channel (red, green, blue), relative to the measured P22 tail (1). Low values model Ni-killed sulfide phosphors with a shorter trail. Red has no power-law tail, so its value has no effect."
+source = "CRT.md Research pass T-63, preset values item 1: 0.07 to 1 times the power-law term follows the Sony patent Ni-killer residual ratios (0.072 / 0.966, US 5,825,124); applying the ratio to the power-law term alone is an assumption. Above 1: artistic, not measured (owner feedback 2026-11-20, QUESTIONS PHY-17)"
+description = "Strength of the long power-law afterglow tail per channel (red, green, blue), relative to the measured P22 tail (1). 0.07 to 1 is physical: low values model Ni-killed sulfide phosphors with a shorter trail. Above 1 is beyond the measured P22 (non-physical) and changes little: at 60 Hz the tail already carries 98 % of a frame's own light, so 10 raises the green trail from 5.36 % to only 5.44 % of a frame. For a longer, clearly visible trail use Decay scale or Extra afterglow. Red has no power-law tail, so its value has no effect."
+group = "Phosphor"
+
+# Owner feedback 2026-11-20 (QUESTIONS PHY-17): the measured P22 trail (green and blue about 5, 3, 2 % of a frame
+# at 60 Hz, red none) is physically right but hard to see. Two artistic controls, both identities at their
+# defaults (the output does not change by one bit): a time-constant multiplier of the measured decay and an extra
+# exponential afterglow per channel. Oracle crates/crt-model/src/phosphor.rs (`DecayControls`,
+# `DecayFit::controlled_feedback`). CRT.md has decay constants for P22 only (Kuhn 2002), none for the
+# long-persistence phosphors (P1, P7, P31, P39), so there is no phosphor-type selector.
+
+[[param]]
+id = "phosphor_decay_scale"
+stage = "phosphor"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 1.0
+max = 30.0
+hard_min = 0.1
+hard_max = 100.0
+hard_why = "a time-constant multiplier must be positive; beyond 100 the decay outlasts the 1 s window the trail is fitted over by far, and the fit no longer follows it"
+widget = "log"
+tag = "E"
+source = "Owner feedback 2026-11-20 (QUESTIONS PHY-17): artistic control, not a measurement. Every time constant of the Kuhn (2002) P22 fit (CRT.md Decay and persistence: the exponential taus and the power-law t0) is multiplied by it, I(t) -> I(t / s); 1 is the measured phosphor"
+description = "Slows the phosphor decay: every time constant of the measured P22 decay multiplied by this factor. 1 (default) is the measured phosphor; above 1 is non-physical (artistic). The green and blue tail is a power law, nearly scale free, so this mostly lengthens the fast parts: at 60 Hz, 30 raises the green trail from 5.4 % to 11 % of a frame in the next one, and gives red a short trail (24 % of a frame, then 29 % of that per frame). For a long, clearly visible trail use Extra afterglow."
+group = "Phosphor"
+
+[[param]]
+id = "phosphor_extra_afterglow_rgb"
+stage = "phosphor"
+type = "vec3"
+unit = "1"
+default = [0.0, 0.0, 0.0]
+min = 0.0
+max = 2.0
+hard_min = 0.0
+hard_max = 10.0
+hard_why = "a share of light cannot be negative; at 10 nearly all the light of a moving object goes into its trail"
+tag = "E"
+source = "Owner feedback 2026-11-20 (QUESTIONS PHY-17): artistic control, not a measurement (CRT.md has no decay constants for long-persistence phosphors such as P7 or P39). The impulse response becomes the mixture (phosphor + g exp(-t / tau)) / (1 + g), the exponential holding g times the phosphor's light within 1 s; the static picture keeps its brightness (crt_model::phosphor::DecayControls)"
+description = "Extra afterglow per channel (red, green, blue), beyond the measured P22 (non-physical, artistic): an added glow that fades exponentially with Extra afterglow time and holds this many times the light of the phosphor itself. 0 (default): none, the measured phosphor. 1 at 100 ms: a moving green object shows 0.46 of a still picture's level instead of 0.76, and the next 60 Hz frame still shows 18 % of that where it was (5 % without). A static picture keeps its brightness. Works for red too (which has no measured trail)."
+group = "Phosphor"
+
+[[param]]
+id = "phosphor_extra_afterglow_time_ms"
+stage = "phosphor"
+type = "f32"
+unit = "ms"
+default = 100.0
+min = 5.0
+max = 1000.0
+tag = "E"
+source = "Owner feedback 2026-11-20 (QUESTIONS PHY-17): artistic control, not a measurement; the time constant tau of the extra afterglow exp(-t / tau), in real time (the same at any display rate)"
+description = "Time constant of the extra afterglow: it falls to 37 % after this time, 5 % after three times it. Real time, so the trail lasts as long at 144 Hz as at 60 Hz. Used only when Extra afterglow is above 0."
 group = "Phosphor"
 
 # T-40: phosphor saturation (efficiency droop at high current density; CRT.md "Saturation and ageing"; QUESTIONS

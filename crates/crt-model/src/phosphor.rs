@@ -170,6 +170,112 @@ impl DecayFit<'_> {
         }
     }
 
+    /// Whether the response has a power-law tail of positive amplitude (the frame feedback then fits the
+    /// trail; otherwise every exponential term is exact).
+    fn has_tail(&self) -> bool {
+        self.tail.is_some_and(|p| p.b > 0.0)
+    }
+
+    /// Energy over [t1_ms, t2_ms] of the time-scaled response I_s(t) = I(t / s), `scale` = s > 0: every
+    /// exponential tau and the power-law t0 multiplied by s, the amplitudes (I_s(0) = 1) unchanged. Closed
+    /// form: s E[t1 / s, t2 / s] (substitution u = t / s). [D]
+    ///
+    /// # Panics
+    /// If `scale` is not finite and positive, or as [`Self::energy`].
+    pub fn time_scaled_energy(&self, t1_ms: f64, t2_ms: f64, scale: f64) -> f64 {
+        assert!(scale.is_finite() && scale > 0.0, "time scale {scale}");
+        scale * self.energy(t1_ms / scale, t2_ms / scale)
+    }
+
+    /// Trail ratios r_k (k = 1 .. K - 1, index 0 holds k = 1) of this response under the artistic controls
+    /// `ctl`, for a frame period `frame_ms` and a truncation horizon `horizon_ms` (real time, both):
+    /// - time scale s: the ratios of I(t / s), which are those of I at the period T / s within the horizon
+    ///   H / s (energies of I_s over [k T, (k + 1) T] are s times those of I over [k T / s, (k + 1) T / s],
+    ///   the factor s cancels in the ratio); the window stays `horizon_ms` of real time;
+    /// - extra afterglow (share g, time constant tau): the impulse response becomes the mixture (phosphor +
+    ///   g afterglow) / (1 + g), the phosphor normalised to its light within the window (frame and trail, 1 + P
+    ///   relative to E_0, P = sum_k r_k) and the afterglow a e^(-t / tau) of unit energy, whose frame k holds
+    ///   (1 - rho) rho^k of it, rho = exp(-T / tau). Relative to the mixture's frame 0:
+    ///   R_k = (r_k + q rho^k) / (1 + q), q = g (1 + P) (1 - rho).
+    ///   A static picture holds the afterglow's share g / (1 + g) at any rate, and after a step off it decays by
+    ///   exp(-t / tau) in real time (frame k covers [k T, (k + 1) T] of the impulse). [D][E]
+    ///
+    /// # Panics
+    /// As [`Self::trail_ratios`], or if a control is invalid ([`DecayControls`]).
+    pub fn controlled_trail_ratios(&self, frame_ms: f64, horizon_ms: f64, ctl: DecayControls) -> Vec<f64> {
+        ctl.check();
+        let s = ctl.time_scale;
+        let mut r = self.trail_ratios(frame_ms / s, horizon_ms / s);
+        if ctl.extra_share > 0.0 {
+            let (rho, q, _) = ctl.extra_term(frame_ms, r.iter().sum());
+            let mut p = rho;
+            for v in &mut r {
+                *v = (*v + q * p) / (1.0 + q);
+                p *= rho;
+            }
+        }
+        r
+    }
+
+    /// [`Self::frame_feedback`] under the artistic controls `ctl` (owner feedback 2026-11-20: the measured
+    /// P22 trail is physically right but hard to see; QUESTIONS PHY-17). [D] for the transformation, [E] for
+    /// the controls themselves (they leave the measured phosphor).
+    ///
+    /// - [`DecayControls::PHYSICAL`] (scale 1, no extra afterglow) is exactly [`Self::frame_feedback`] (same
+    ///   computation, bit for bit).
+    /// - Scale s, no extra afterglow: [`Self::frame_feedback`] at the period T / s with the horizon H / s, which
+    ///   is the response I(t / s) at the period T within H (see [`Self::controlled_trail_ratios`]).
+    /// - Extra afterglow, purely exponential response (red, or a tail strength 0): every term stays exact; the
+    ///   scaled terms divided by 1 + q and the extra term (rho, q rho / (1 + q)) (see
+    ///   [`Self::controlled_trail_ratios`]), the [`FEEDBACK_TERMS`] largest amplitudes kept.
+    /// - Extra afterglow with a power-law tail: two candidates, both exact at k = 1, 2, 3 of the summed trail
+    ///   ([`Self::controlled_trail_ratios`]): four free terms fitted to the sum like the tail alone, or the extra
+    ///   term pinned exactly and three terms on the power law; the smaller mean squared relative error over k >= 4
+    ///   wins (worst measured 16 % relative, 1.6 % of the first trail frame: `controlled_feedback_follows_its_trail`).
+    ///
+    /// w0 = 1 / (1 + sum_j c_j / (1 - rho_j)) in every case: a static picture keeps its brightness.
+    ///
+    /// # Panics
+    /// As [`Self::frame_feedback`], or if a control is invalid.
+    pub fn controlled_feedback(&self, frame_ms: f64, horizon_ms: f64, ctl: DecayControls) -> FrameFeedback {
+        ctl.check();
+        let s = ctl.time_scale;
+        let base = self.frame_feedback(frame_ms / s, horizon_ms / s);
+        if ctl.extra_share <= 0.0 {
+            return base;
+        }
+        let mut phys = self.trail_ratios(frame_ms / s, horizon_ms / s);
+        let (_, q, extra) = ctl.extra_term(frame_ms, phys.iter().sum());
+        // The phosphor's part of the mixture's trail.
+        phys.iter_mut().for_each(|v| *v /= 1.0 + q);
+        let mut fb = FrameFeedback::IDENTITY;
+        if self.has_tail() {
+            if phys.len() >= 3 && phys[0] > 0.0 {
+                let r = self.controlled_trail_ratios(frame_ms, horizon_ms, ctl);
+                let free = fit_trail(&r);
+                let pinned = fit_trail_pinned(&phys, extra);
+                let total: f64 = r.iter().sum();
+                let cost = |(rho, c): ([f64; 4], [f64; 4])| trail_cost(rho, c, &r, total);
+                (fb.rho, fb.c) = if cost(pinned) < cost(free) { pinned } else { free };
+            } else {
+                (fb.rho[0], fb.c[0]) = extra;
+            }
+        } else {
+            let mut terms: Vec<(f64, f64)> = (0..FEEDBACK_TERMS)
+                .filter(|&j| base.c[j] > 0.0)
+                .map(|j| (base.rho[j], base.c[j] / (1.0 + q)))
+                .collect();
+            terms.push(extra);
+            terms.sort_by(|a, b| b.1.total_cmp(&a.1));
+            for (j, &(rho, c)) in terms.iter().take(FEEDBACK_TERMS).enumerate() {
+                fb.rho[j] = rho;
+                fb.c[j] = c;
+            }
+        }
+        fb.w0 = 1.0 / (1.0 + fb.trail_sum());
+        fb
+    }
+
     /// Per-frame trail ratios r_k = E_k / E_0 for k = 1 .. K - 1, K = round(`horizon_ms` /
     /// `frame_ms`) frames in the truncation horizon (index 0 holds k = 1). [D]
     ///
@@ -213,9 +319,8 @@ impl DecayFit<'_> {
     /// Unless 0 < `frame_ms` <= `horizon_ms` < inf, or if a term is invalid.
     pub fn frame_feedback(&self, frame_ms: f64, horizon_ms: f64) -> FrameFeedback {
         let r = self.trail_ratios(frame_ms, horizon_ms);
-        let has_tail = self.tail.is_some_and(|p| p.b > 0.0);
         let mut fb = FrameFeedback::IDENTITY;
-        if !has_tail {
+        if !self.has_tail() {
             let e0 = self.energy(0.0, frame_ms);
             let mut terms: Vec<(f64, f64)> = self
                 .exp_terms
@@ -244,6 +349,74 @@ impl DecayFit<'_> {
 /// Number of geometric terms of the frame-feedback recurrence (on the GPU: 4 terms x 3 channels in
 /// three RGBA32F history images).
 pub const FEEDBACK_TERMS: usize = 4;
+
+/// Artistic controls of the persistence beyond the measured phosphor (owner feedback 2026-11-20: the
+/// measured P22 trail, about 5, 3, 2 % of a frame for green and blue at 60 Hz and none for red, is
+/// physically right but hard to see; QUESTIONS PHY-17). [E]
+///
+/// Neither control is a phosphor measurement: CRT.md has decay data for P22 only (Kuhn 2002), no constants
+/// for long-persistence phosphors (P1, P7, P31, P39), so a "long persistence" look is made from these two
+/// knobs, not from a phosphor table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DecayControls {
+    /// Time-constant multiplier s > 0: the impulse response becomes I(t / s) (every exponential tau and the
+    /// power-law t0 multiplied by s, amplitudes unchanged). 1 is the measured phosphor. The power law is
+    /// nearly scale free, so s mostly lengthens the exponential parts (red, the fast green and blue terms):
+    /// at 60 Hz s = 30 raises the green E_1 / E_0 from 5.4 % to about 11 % and gives red a short trail.
+    pub time_scale: f64,
+    /// Extra afterglow share g >= 0: an added exponential afterglow holding g times the light the phosphor
+    /// emits (its frame and its trail within the 1 s window), 0: none. The response is the mixture
+    /// (phosphor + g afterglow) / (1 + g): a static picture keeps its brightness, a moving object keeps
+    /// 1 / (1 + g) of the phosphor's own first frame plus the afterglow's first-frame part, the rest goes into its
+    /// trail.
+    pub extra_share: f64,
+    /// Time constant of the extra afterglow, ms > 0 (exp(-t / tau) in real time).
+    pub extra_tau_ms: f64,
+}
+
+impl DecayControls {
+    /// The measured phosphor: scale 1, no extra afterglow.
+    pub const PHYSICAL: Self = Self {
+        time_scale: 1.0,
+        extra_share: 0.0,
+        extra_tau_ms: 100.0,
+    };
+
+    fn check(&self) {
+        assert!(
+            self.time_scale.is_finite() && self.time_scale > 0.0,
+            "time scale {}",
+            self.time_scale
+        );
+        assert!(
+            self.extra_share.is_finite() && self.extra_share >= 0.0,
+            "extra afterglow share {}",
+            self.extra_share
+        );
+        assert!(
+            self.extra_tau_ms.is_finite() && self.extra_tau_ms > 0.0,
+            "extra afterglow time {} ms",
+            self.extra_tau_ms
+        );
+    }
+
+    /// The extra afterglow for the frame period `frame_ms` and the phosphor's own trail sum `phys_trail` (P,
+    /// within the window), as (rho, q, term): rho = exp(-T / tau); q = g (1 + P) (1 - rho), the afterglow's
+    /// energy in the excitation's own frame relative to the phosphor's E_0; and its geometric term
+    /// (rho, q rho / (1 + q)) of the trail ratios, whose phosphor part is divided by 1 + q (see
+    /// [`DecayFit::controlled_trail_ratios`]). [D]
+    fn extra_term(&self, frame_ms: f64, phys_trail: f64) -> (f64, f64, (f64, f64)) {
+        let rho = (-frame_ms / self.extra_tau_ms).exp();
+        let q = self.extra_share * (1.0 + phys_trail) * (1.0 - rho);
+        (rho, q, (rho, q * rho / (1.0 + q)))
+    }
+}
+
+impl Default for DecayControls {
+    fn default() -> Self {
+        Self::PHYSICAL
+    }
+}
 
 // ---------------------------------------------------------------------------------------------------
 // Time base (review R-10, R-11)
@@ -523,6 +696,90 @@ fn fit_trail(r: &[f64]) -> ([f64; 4], [f64; 4]) {
     }
     let (_, c) = eval(kappa).expect("the refined fit is valid");
     (kappa.map(|k| (-1.0 / k).exp()), c)
+}
+
+/// Fit of a power-law trail `phys` (r[0] = t_1) plus a pinned exact geometric term `pinned` = (rho, c) (the
+/// extra afterglow, [`DecayControls`]): the pinned term takes the last of the [`FEEDBACK_TERMS`] slots as it
+/// is, three geometric terms fit `phys` exactly at k = 1, 2, 3 ([`vandermonde3`], non-negative amplitudes),
+/// their rates chosen by a grid search then a coordinate refinement (as [`fit_trail`]) that minimises the mean
+/// squared relative error of the SUM (fit + pinned against `phys` + pinned) over k = 4 .. K - 1. The summed
+/// trail is then exact at k = 1, 2, 3 and the extra afterglow exact at every k. Without a non-negative
+/// solution: one geometric term through t_1 and t_2 of `phys`, plus the pinned term. [D]
+fn fit_trail_pinned(phys: &[f64], pinned: (f64, f64)) -> ([f64; 4], [f64; 4]) {
+    let (rho_x, c_x) = pinned;
+    let cost = |rho: [f64; 3]| -> Option<f64> {
+        for i in 0..3 {
+            for j in i + 1..3 {
+                if (rho[i] - rho[j]).abs() < 1e-9 {
+                    return None;
+                }
+            }
+        }
+        let c = vandermonde3(rho, [phys[0], phys[1], phys[2]]);
+        if c.iter().any(|x| !x.is_finite() || *x < 0.0) {
+            return None;
+        }
+        let mut pow = rho.map(|x| x * x * x);
+        let mut px = rho_x * rho_x * rho_x;
+        let mut err = 0.0;
+        for &target in &phys[3..] {
+            let want = target + c_x * px;
+            let fit: f64 = (0..3).map(|j| c[j] * pow[j]).sum::<f64>() + c_x * px;
+            err += ((fit - want) / want).powi(2);
+            for j in 0..3 {
+                pow[j] *= rho[j];
+            }
+            px *= rho_x;
+        }
+        Some(err / (phys.len().saturating_sub(3).max(1) as f64))
+    };
+    let k_max = 2.0 * (phys.len() + 1) as f64;
+    const N: usize = 24;
+    let grid: Vec<f64> = (0..N)
+        .map(|i| 0.1 * (k_max / 0.1).powf(i as f64 / (N - 1) as f64))
+        .collect();
+    let rates = |kappa: [f64; 3]| kappa.map(|k| (-1.0 / k).exp());
+    let mut best: Option<(f64, [f64; 3])> = None;
+    for a in 0..N {
+        for b in a + 1..N {
+            for c in b + 1..N {
+                let kappa = [grid[a], grid[b], grid[c]];
+                if let Some(e) = cost(rates(kappa)) {
+                    if best.is_none_or(|(b, _)| e < b) {
+                        best = Some((e, kappa));
+                    }
+                }
+            }
+        }
+    }
+    let Some((mut err, mut kappa)) = best else {
+        let rho = (phys[1] / phys[0]).clamp(0.0, 0.999);
+        return ([rho, 0.0, 0.0, rho_x], [phys[0], 0.0, 0.0, c_x]);
+    };
+    let mut step = (k_max / 0.1).powf(1.0 / (N - 1) as f64);
+    for _ in 0..200 {
+        let mut improved = false;
+        for j in 0..3 {
+            for f in [step, 1.0 / step] {
+                let mut k = kappa;
+                k[j] *= f;
+                if let Some(e) = cost(rates(k)) {
+                    if e < err {
+                        (err, kappa, improved) = (e, k, true);
+                    }
+                }
+            }
+        }
+        if !improved {
+            step = step.sqrt();
+            if step < 1.0 + 1e-6 {
+                break;
+            }
+        }
+    }
+    let rho = rates(kappa);
+    let c = vandermonde3(rho, [phys[0], phys[1], phys[2]]);
+    ([rho[0], rho[1], rho[2], rho_x], [c[0], c[1], c[2], c_x])
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -1054,6 +1311,233 @@ mod tests {
         let gap = fb.at_step(t, frame_step_ms(600_000.0).unwrap());
         let quarter = fb.at_step(t, 250.0);
         assert_eq!(gap, quarter);
+    }
+
+    /// The fit with every time constant multiplied by `s` written out term by term (independent of the
+    /// substitution used by `time_scaled_energy` and `controlled_trail_ratios`).
+    fn scaled_fit(fit: &DecayFit<'static>, s: f64) -> (Vec<ExpTerm>, Option<PowerTail>) {
+        let terms = fit
+            .exp_terms
+            .iter()
+            .map(|e| ExpTerm {
+                a: e.a,
+                tau_ms: e.tau_ms * s,
+            })
+            .collect();
+        let tail = fit.tail.map(|p| PowerTail {
+            t0_ms: p.t0_ms * s,
+            ..p
+        });
+        (terms, tail)
+    }
+
+    /// Owner feedback 2026-11-20 (QUESTIONS PHY-17): the time scale multiplies every time constant exactly.
+    /// Against the fit written out with tau x s and t0 x s: I_s(t) = I(t / s) (1e-12), energies over frame
+    /// intervals (1e-12 relative), and the trail ratios at 60 and 144 Hz over the 1 s window (1e-10 relative);
+    /// scale 1 is the measured fit bit for bit.
+    #[test]
+    fn time_scale_scales_every_constant() {
+        for (name, fit) in [("red", KUHN_RED), ("green", KUHN_GREEN), ("blue", KUHN_BLUE)] {
+            for s in [0.5, 1.0, 5.0, 20.0, 30.0] {
+                let (terms, tail) = scaled_fit(&fit, s);
+                let explicit = DecayFit {
+                    exp_terms: &terms,
+                    tail,
+                };
+                for t in [0.0, 1e-4, 0.01, 0.5, 3.0, 16.7, 100.0] {
+                    assert!(
+                        close(explicit.intensity(t), fit.intensity(t / s), 1e-12),
+                        "{name} s {s} t {t}"
+                    );
+                }
+                for hz in [60.0, 144.0] {
+                    let tp = frame_period_ms(hz);
+                    for k in 0..5 {
+                        let (a, b) = (f64::from(k) * tp, f64::from(k + 1) * tp);
+                        let (want, got) = (explicit.energy(a, b), fit.time_scaled_energy(a, b, s));
+                        if want > 1e-300 {
+                            assert!(
+                                rel(got, want) < 1e-12,
+                                "{name} s {s} {hz} Hz frame {k}: {got} vs {want}"
+                            );
+                        }
+                    }
+                    let ctl = DecayControls {
+                        time_scale: s,
+                        ..DecayControls::PHYSICAL
+                    };
+                    let got = fit.controlled_trail_ratios(tp, TRAIL_HORIZON_MS, ctl);
+                    let want = explicit.trail_ratios(tp, TRAIL_HORIZON_MS);
+                    assert_eq!(got.len(), want.len());
+                    for (k, (g, w)) in got.iter().zip(&want).enumerate() {
+                        if *w > 1e-200 {
+                            assert!(rel(*g, *w) < 1e-10, "{name} s {s} {hz} Hz k {}: {g} vs {w}", k + 1);
+                        } else {
+                            assert!(g.abs() < 1e-200, "{name} s {s} {hz} Hz k {}: {g}", k + 1);
+                        }
+                    }
+                }
+            }
+            // Scale 1: the measured fit, bit for bit.
+            let t = frame_period_ms(60.0);
+            assert_eq!(
+                fit.controlled_trail_ratios(t, TRAIL_HORIZON_MS, DecayControls::PHYSICAL),
+                fit.trail_ratios(t, TRAIL_HORIZON_MS)
+            );
+        }
+    }
+
+    /// The physical controls give exactly today's frame feedback (every channel, tail strength 1 and 0.07, 50 to
+    /// 240 Hz), so the default output does not change by one bit.
+    #[test]
+    fn physical_controls_are_the_measured_feedback() {
+        for fit in [KUHN_RED, KUHN_GREEN, KUHN_BLUE] {
+            for s in [1.0, 0.07] {
+                let f = fit.with_tail_scale(s);
+                for hz in [50.0, 60.0, 144.0, 240.0] {
+                    let t = frame_period_ms(hz);
+                    assert_eq!(
+                        f.controlled_feedback(t, TRAIL_HORIZON_MS, DecayControls::PHYSICAL),
+                        f.frame_feedback(t, TRAIL_HORIZON_MS)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The controlled frame feedback against its own oracle trail (`controlled_trail_ratios`): exact at k = 1,
+    /// 2, 3 for the tail channels (1e-9 relative), exact at every k for red (pure exponentials plus the extra
+    /// term), steady-state gain 1, and the fitted trail within a bound beyond k = 3 over the 1 s window
+    /// (measured worst printed; bound 6 %). Scales 1, 5, 20, 30; extra afterglow 0, 0.5, 2 with 5 to 1000 ms; 60
+    /// and 144 Hz.
+    #[test]
+    fn controlled_feedback_follows_its_trail() {
+        let (mut worst, mut worst_abs) = (0.0_f64, 0.0_f64);
+        for hz in [60.0, 144.0] {
+            let t = frame_period_ms(hz);
+            for (name, fit) in [("red", KUHN_RED), ("green", KUHN_GREEN), ("blue", KUHN_BLUE)] {
+                for s in [1.0, 5.0, 20.0, 30.0] {
+                    for (g, tau) in [(0.0, 100.0), (0.5, 5.0), (0.5, 100.0), (2.0, 30.0), (2.0, 1000.0)] {
+                        let ctl = DecayControls {
+                            time_scale: s,
+                            extra_share: g,
+                            extra_tau_ms: tau,
+                        };
+                        let fb = fit.controlled_feedback(t, TRAIL_HORIZON_MS, ctl);
+                        let r = fit.controlled_trail_ratios(t, TRAIL_HORIZON_MS, ctl);
+                        let what = format!("{name} {hz} Hz s {s} g {g} tau {tau}");
+                        assert!(close(fb.w0 * (1.0 + fb.trail_sum()), 1.0, 1e-12), "{what}");
+                        assert!(fb.rho.iter().all(|r| (0.0..1.0).contains(r)) && fb.c.iter().all(|c| *c >= 0.0));
+                        let exact = if fit.has_tail() { 3 } else { r.len() };
+                        for k in 1..=exact {
+                            let want = r[k - 1];
+                            let got = fb.trail(k as u32);
+                            if want > 1e-12 {
+                                assert!(rel(got, want) < 1e-9, "{what} k {k}: {got} vs {want}");
+                            } else {
+                                assert!((got - want).abs() < 1e-12, "{what} k {k}: {got} vs {want}");
+                            }
+                        }
+                        let err = (exact + 1..=r.len())
+                            .filter(|&k| r[k - 1] > 1e-9)
+                            .map(|k| rel(fb.trail(k as u32), r[k - 1]))
+                            .fold(0.0, f64::max);
+                        // The visible error: the largest deviation relative to the first trail frame.
+                        let abs = (exact + 1..=r.len())
+                            .map(|k| (fb.trail(k as u32) - r[k - 1]).abs() / r[0])
+                            .fold(0.0, f64::max);
+                        if err > 0.03 {
+                            println!("{what}: fit error beyond k = 3 {err:.4} (of the first trail frame {abs:.5})");
+                        }
+                        worst = worst.max(err);
+                        worst_abs = worst_abs.max(abs);
+                        let bound = if g > 0.0 { 0.2 } else { 0.05 };
+                        assert!(err < bound, "{what}: fit error {err}");
+                        assert!(abs < 0.03, "{what}: fit error {abs} of the first trail frame");
+                    }
+                }
+            }
+        }
+        println!("worst fitted-trail error beyond k = 3: {worst:.4} relative, {worst_abs:.5} of the first trail frame");
+    }
+
+    /// The numbers the controls give at 60 Hz (recorded for the README and QUESTIONS PHY-17): scale 30 doubles the
+    /// green E_1 / E_0 (5.36 % to about 11 %; the power law is nearly scale free) and gives red a trail
+    /// (about 24 % of the frame in the next one, decaying by 0.29 per frame); an extra afterglow of share 1 and
+    /// 100 ms gives red (no trail of its own) 11.3 % of the frame in the next one, decaying by exp(-16.67 / 100)
+    /// per frame, and green 18.3 % (a moving object's first frame 0.46 of the static level instead of 0.76). A tail
+    /// strength of 10 changes the green E_1 / E_0 by under 2 %
+    /// relative: at 60 Hz the tail already carries 98 % of the frame's own energy.
+    #[test]
+    fn control_numbers_at_60_hz() {
+        let t = frame_period_ms(60.0);
+        let h = TRAIL_HORIZON_MS;
+        let ctl = |s: f64, g: f64, tau: f64| DecayControls {
+            time_scale: s,
+            extra_share: g,
+            extra_tau_ms: tau,
+        };
+        for (name, fit) in [("red", KUHN_RED), ("green", KUHN_GREEN), ("blue", KUHN_BLUE)] {
+            for (s, g) in [(1.0, 0.0), (5.0, 0.0), (30.0, 0.0), (1.0, 1.0)] {
+                let c = ctl(s, g, 100.0);
+                let r = fit.controlled_trail_ratios(t, h, c);
+                let fb = fit.controlled_feedback(t, h, c);
+                println!(
+                    "{name} s {s} extra {g}: r1..3 = {:.4} {:.4} {:.4}, w0 {:.4}, first trail frame {:.4} of the lit level",
+                    r[0],
+                    r[1],
+                    r[2],
+                    fb.w0,
+                    fb.w0 * r[0]
+                );
+            }
+        }
+        let g = |s| KUHN_GREEN.controlled_trail_ratios(t, h, ctl(s, 0.0, 100.0))[0];
+        assert!(close(g(1.0), 0.0536, 1e-4));
+        assert!((0.10..0.12).contains(&g(30.0)), "green scale 30: {}", g(30.0));
+        let red = KUHN_RED.controlled_trail_ratios(t, h, ctl(30.0, 0.0, 100.0));
+        assert!((0.2..0.3).contains(&red[0]), "red scale 30: {}", red[0]);
+        assert!(
+            close(red[1] / red[0], (-t / (0.442 * 30.0)).exp(), 0.01),
+            "red decay per frame"
+        );
+        // Red (own trail P about 0) with share 1 at 100 ms: q = 1 - rho, R_k = q rho^k / (1 + q), the step-off
+        // decay exactly rho per frame.
+        let extra = KUHN_RED.controlled_trail_ratios(t, h, ctl(1.0, 1.0, 100.0));
+        let rho = (-t / 100.0_f64).exp();
+        let q = 1.0 - rho;
+        assert!(close(extra[0], q * rho / (1.0 + q), 1e-6), "{}", extra[0]);
+        assert!(close(extra[5] / extra[4], rho, 1e-9));
+        // Share 1: a single frame of the mixture (phosphor + afterglow) / 2 keeps half the phosphor's own first
+        // frame plus half the afterglow's (1 - rho), within the 1 to 4 % the fitted phosphor total differs from its
+        // 1 s truncated sum: green 0.46 against 0.76 without it.
+        let w0 = KUHN_GREEN.controlled_feedback(t, h, ctl(1.0, 1.0, 100.0)).w0;
+        let w0_phys = KUHN_GREEN.frame_feedback(t, h).w0;
+        let want = (w0_phys + (1.0 - rho)) / 2.0;
+        assert!(rel(w0, want) < 0.04, "green w0 with extra 1: {w0} vs {want}");
+        let strong = KUHN_GREEN.with_tail_scale(10.0).frame_energy_ratios(t)[0];
+        println!("green E1/E0 at tail strength 10: {strong:.5} (1: {:.5})", g(1.0));
+        assert!(rel(strong, g(1.0)) < 0.02);
+    }
+
+    #[test]
+    #[should_panic(expected = "time scale")]
+    fn zero_time_scale_panics() {
+        let ctl = DecayControls {
+            time_scale: 0.0,
+            ..DecayControls::PHYSICAL
+        };
+        KUHN_GREEN.controlled_feedback(16.0, TRAIL_HORIZON_MS, ctl);
+    }
+
+    #[test]
+    #[should_panic(expected = "extra afterglow share")]
+    fn negative_extra_share_panics() {
+        let ctl = DecayControls {
+            extra_share: -0.1,
+            ..DecayControls::PHYSICAL
+        };
+        KUHN_GREEN.controlled_feedback(16.0, TRAIL_HORIZON_MS, ctl);
     }
 
     #[test]
