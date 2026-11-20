@@ -14,7 +14,7 @@ use windows::Win32::{
 };
 
 use crate::{
-    adapters, bars, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output,
+    adapters, analysis, bars, capture, cli, diag, gpu, hotkeys, lifecycle, live, modes, output,
     picker::{self, Event, Phase},
     placement, presets, scaling, settings, source, sources,
     ui::{AttachedView, SourceAction, SourcePrefs, SourceView},
@@ -51,13 +51,11 @@ const NO_FRAME: &str =
 const IDLE_SIZE: (u32, u32) = (320, 240);
 
 fn idle_frame() -> capture::Frame {
-    capture::Frame {
-        width: IDLE_SIZE.0,
-        height: IDLE_SIZE.1,
-        data: [0u8, 0, 0, 255].repeat((IDLE_SIZE.0 * IDLE_SIZE.1) as usize),
-        seq: 0,
-        ..capture::Frame::default()
-    }
+    capture::Frame::cpu(
+        IDLE_SIZE.0,
+        IDLE_SIZE.1,
+        [0u8, 0, 0, 255].repeat((IDLE_SIZE.0 * IDLE_SIZE.1) as usize),
+    )
 }
 
 fn hwnd_of(h: isize) -> HWND {
@@ -661,7 +659,10 @@ pub fn run() -> Res<()> {
         bars_state.auto.start(
             start.elapsed().as_secs_f64(),
             bars::Trigger::Attach,
-            Some((&frame.data, frame.width, frame.height)),
+            frame
+                .last_sample()
+                .and_then(|s| s.packed())
+                .map(|d| (d, frame.width, frame.height)),
         );
         println!("picture area: detecting (auto, at attach)");
     }
@@ -945,7 +946,8 @@ pub fn run() -> Res<()> {
                 if let Some((h, c)) = &thumb_capture {
                     let h = *h;
                     let mut f = capture::Frame::default();
-                    if c.take_frame(&mut f) {
+                    // The preview capture runs the CPU copy (its path is never switched): every frame has its pixels.
+                    if c.take_frame(&mut f) && f.last_sample().is_some() {
                         let (w, th, px) = picker::thumbnail(&f.data, f.width, f.height, 480, 270);
                         ui.set_thumbnail(h, w, th, &px);
                         thumbs.finished(h, now, true);
@@ -996,17 +998,13 @@ pub fn run() -> Res<()> {
                     println!("source size changed: {}x{}", frame.width, frame.height);
                 }
                 if capture.is_some() {
-                    // Zero-copy (A29): `frame.data` may be an earlier sample; the analyses take new pixels only.
-                    let black =
-                        (!frame.pixels_old && health.wants_sample(now)).then(|| lifecycle::is_black(&frame.data));
-                    health.note_frame(now, black);
+                    // Zero-copy (A29): a frame may carry no pixels of its own (an earlier sample, or none yet); the
+                    // analyses read only a sample consistent with the frame (`analysis`).
+                    analysis::note_health(&mut health, now, &frame);
                     // Auto picture area (or stale stored manual limits): every frame while a detection runs, else a
                     // few sampled frames per second.
-                    if !frame.pixels_old
-                        && bars::detects(&params, &profile, cli_crop, (frame.width, frame.height))
-                        && map.client_area
-                    {
-                        bars_state.auto.feed(now, &frame.data, frame.width, frame.height);
+                    if bars::detects(&params, &profile, cli_crop, (frame.width, frame.height)) && map.client_area {
+                        analysis::feed_area(&mut bars_state.auto, now, &frame);
                     }
                 }
                 fresh = true;
@@ -1077,8 +1075,7 @@ pub fn run() -> Res<()> {
                 if detect {
                     // The area in force stays on screen until the detection (about one second) gives its answer.
                     bars_state.auto.seed((in_force != whole).then_some(in_force), client);
-                    let shown =
-                        (map.client_area && frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
+                    let shown = analysis::shown(&frame).filter(|_| map.client_area);
                     bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
                     bars_state.message = None;
                     println!("picture area: auto, detecting now");
@@ -1089,8 +1086,9 @@ pub fn run() -> Res<()> {
             let auto_on = capture.is_some() && bars::detects(&params, &profile, cli_crop, client) && map.client_area;
             if auto_on && !std::mem::replace(&mut auto_was_on, true) && !bars_state.auto.running() {
                 // Auto came back another way (the crop mode of the "Source and placement" panel, a reattach): detect.
-                let shown = (frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
-                bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
+                bars_state
+                    .auto
+                    .start(now, bars::Trigger::DetectNow, analysis::shown(&frame));
             }
             auto_was_on = auto_on;
             if auto_on {
@@ -1201,10 +1199,10 @@ pub fn run() -> Res<()> {
                 let fixed = map.divisor.or((synthetic || capture.is_none()).then_some((1, 1)));
                 // A capture is always analysed (until the detection locks), also under a forced multiplier, so the
                 // Source section shows what was detected next to the forced value.
-                if capture.is_some() && !(got && frame.pixels_old) {
-                    let was_locked = detector.is_locked();
-                    detector.feed(&frame.data, frame.width, region);
-                    if detector.is_locked() && !was_locked {
+                if capture.is_some() {
+                    // A frame just taken counts only with its own pixels (zero-copy: a sample), the frame on screen
+                    // analysed again (a map change) with the newest picture of its size (`analysis::feed_scale`).
+                    if analysis::feed_scale(&mut detector, &frame, got, region) {
                         let d = detector.divisor();
                         if d == (1, 1) {
                             println!("source scaling: native (x1), {}x{}", region.w, region.h);
@@ -1232,7 +1230,7 @@ pub fn run() -> Res<()> {
                 // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
                 // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
                 let eligible = capture.is_some() && map.divisor.is_none() && detector.is_locked() && div == (1, 1);
-                if got && !frame.pixels_old && smoothing.feed(&frame.data, frame.width, region, eligible) {
+                if analysis::feed_smoothing(&mut smoothing, &frame, got, region, eligible) {
                     println!("warning: {}", lifecycle::SMOOTHED_WARNING);
                 }
             }
@@ -1246,7 +1244,13 @@ pub fn run() -> Res<()> {
             } else if zerocopy::already_held(shared_seq, (frame.session, frame.seq), renderer.source_is_shared()) {
                 None
             } else {
-                Some(gpu::Upload::Cpu(frame.width, frame.height, frame.data.as_slice()))
+                // Only a picture consistent with the frame's size (never a zero-copy frame without its sample), as
+                // `Frame::last_sample` checks it (spelled out: the upload borrows only `frame.data`).
+                let (w, h) = (frame.width, frame.height);
+                capture::Sample::new(&frame.data, w, h)
+                    .filter(|_| frame.data_size == (w, h))
+                    .and_then(|s| s.packed())
+                    .map(|d| gpu::Upload::Cpu(w, h, d))
             };
             // SRC-8: a source size change or a new capture session clears the persistence history (T-41).
             if size_watch.take_history_clear() {
@@ -1579,6 +1583,11 @@ pub fn run() -> Res<()> {
             if let Some(layout) = ui.take_layout_change() {
                 live.set_ui_layout(layout);
             }
+            // A first frame that does not come within a second (nothing to draw, a skipped swapchain): the output
+            // window is shown anyway, black (`output::reveal` acts once).
+            if start.elapsed() >= Duration::from_secs(1) {
+                output::reveal(win.hwnd);
+            }
             if idle {
                 // R-04: no busy loop while minimised; any message (a hotkey, the restore) wakes it at once.
                 output::wait_messages(IDLE_WAIT);
@@ -1599,6 +1608,10 @@ pub fn run() -> Res<()> {
                     // The swapchain or the surface is recreated before the next call, which draws normally.
                     gpu::FrameStatus::Skipped => false,
                 };
+                // The output window appears with its first frame (no empty white client area at start; it acts once).
+                if presented {
+                    output::reveal(win.hwnd);
+                }
                 if presented {
                     // T-96: the resolved placement, printed with --stats when the native raster or the output
                     // changes.
@@ -2230,13 +2243,19 @@ pub fn detect_bars_report(path: &str, cfg: &bars::Config) -> Res<String> {
 }
 
 fn save_png(path: &str, frame: &capture::Frame) -> Res<()> {
+    // The capture runs the CPU copy here (the zero-copy path is chosen later, in the loop), so the frame carries
+    // its pixels; a frame that does not is refused rather than written short.
+    let data = frame
+        .last_sample()
+        .and_then(|s| s.packed())
+        .ok_or("the captured frame carries no pixels of its size")?;
     let file = std::io::BufWriter::new(std::fs::File::create(path)?);
     let mut enc = png::Encoder::new(file, frame.width, frame.height);
     enc.set_color(png::ColorType::Rgba);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header()?;
-    let mut rgba = Vec::with_capacity(frame.data.len());
-    for px in frame.data.as_chunks::<4>().0 {
+    let mut rgba = Vec::with_capacity(data.len());
+    for px in data.as_chunks::<4>().0 {
         rgba.extend_from_slice(&[px[2], px[1], px[0], 255]);
     }
     writer.write_image_data(&rgba)?;

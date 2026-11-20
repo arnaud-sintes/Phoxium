@@ -45,11 +45,8 @@ impl Source {
         Ok(match self {
             Source::Capture => None,
             Source::Pattern { pattern, size } => Some(Frame {
-                width: size.0,
-                height: size.1,
-                data: patterns::generate(pattern, size.0, size.1, n),
                 seq: n + 1,
-                ..Frame::default()
+                ..Frame::cpu(size.0, size.1, patterns::generate(pattern, size.0, size.1, n))
             }),
             Source::Image(path) => {
                 let bytes = std::fs::read(path).map_err(|e| format!("{}: {e}", path.display()))?;
@@ -99,13 +96,7 @@ pub fn decode_png(bytes: &[u8]) -> Res<Frame> {
     if data.len() != n * 4 {
         return Err("unexpected PNG sample count".into());
     }
-    Ok(Frame {
-        width: w,
-        height: h,
-        data,
-        seq: 0,
-        ..Frame::default()
-    })
+    Ok(Frame::cpu(w, h, data))
 }
 
 #[cfg(test)]

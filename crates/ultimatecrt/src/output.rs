@@ -49,8 +49,8 @@ use windows::{
     Win32::{
         Foundation::{E_INVALIDARG, HWND, LPARAM, LRESULT, RECT, WPARAM},
         Graphics::Gdi::{
-            EnumDisplayMonitors, GetMonitorInfoW, MonitorFromWindow, HDC, HMONITOR, MONITORINFO,
-            MONITOR_DEFAULTTONEAREST,
+            EnumDisplayMonitors, FillRect, GetMonitorInfoW, GetStockObject, MonitorFromWindow, BLACK_BRUSH, HBRUSH,
+            HDC, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
         },
         System::LibraryLoader::GetModuleHandleW,
         UI::{
@@ -91,6 +91,11 @@ static CLICK_THROUGH: AtomicBool = AtomicBool::new(false);
 static MENU_CURSOR: AtomicU32 = AtomicU32::new(32512);
 /// `WM_MOUSELEAVE` is requested (`TrackMouseEvent`) for the current stay of the mouse over the window.
 static MOUSE_TRACKED: AtomicBool = AtomicBool::new(false);
+/// The output window was shown ([`reveal`]): [`create`] leaves it hidden until the first frame is presented, so
+/// the desktop never shows its empty (white) client area. Until then `WM_ERASEBKGND` fills it black.
+static REVEALED: AtomicBool = AtomicBool::new(false);
+/// `WM_ERASEBKGND` fills the client area black: from [`create`] up to the first erase after [`reveal`].
+static ERASE_BLACK: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     /// Input messages of the output window for the UI (message, `WPARAM`, `LPARAM`), queued by the window
@@ -703,6 +708,8 @@ pub fn create(opts: &Options) -> Result<Output> {
             // Title bar, taskbar button and Alt+Tab: the executable's icon (assets/icon, embedded by build.rs).
             hIcon: app_icon(hinstance.into(), false),
             hIconSm: app_icon(hinstance.into(), true),
+            // Black, never the default white: what the client area shows before the first frame is presented.
+            hbrBackground: HBRUSH(GetStockObject(BLACK_BRUSH).0),
             lpszClassName: w!("ultimatecrt_output"),
             ..Default::default()
         };
@@ -809,19 +816,35 @@ pub fn create(opts: &Options) -> Result<Output> {
         FULLSCREEN.store(opts.fullscreen, Ordering::Relaxed);
         OWN.store(hwnd.0 as isize, Ordering::Relaxed);
         sync_activation(hwnd);
-        let _ = ShowWindow(
-            hwnd,
-            if NO_ACTIVATE.load(Ordering::Relaxed) {
-                SW_SHOWNOACTIVATE
-            } else {
-                SW_SHOW
-            },
-        );
+        // Not shown yet: the application shows it once its first frame is presented ([`reveal`]), so no empty
+        // client area flashes at start.
+        REVEALED.store(false, Ordering::Relaxed);
+        ERASE_BLACK.store(true, Ordering::Relaxed);
         Ok(Output {
             hwnd,
             hinstance: hinstance.0 as isize,
             hotkeys: registration,
         })
+    }
+}
+
+/// Shows the output window the first time it is called (later calls do nothing): after the first presented frame,
+/// so the window appears with a picture and never with an empty client area. Non-activating as every mode
+/// ([`sync_activation`] already set the styles): `SW_SHOWNOACTIVATE` unless the output may take the foreground.
+pub fn reveal(hwnd: HWND) {
+    if REVEALED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+    // SAFETY: plain Win32 calls on our own window handle.
+    unsafe {
+        if NO_ACTIVATE.load(Ordering::Relaxed) {
+            let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+        } else {
+            // The menu (or the picker) opened before the first frame and asked for the keyboard while the window
+            // was hidden: shown active, and the foreground asked again now that it can be given.
+            let _ = ShowWindow(hwnd, SW_SHOW);
+            let _ = SetForegroundWindow(hwnd);
+        }
     }
 }
 
@@ -1057,7 +1080,25 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
             }
             DefWindowProcW(hwnd, msg, wparam, lparam)
         }
-        WM_ERASEBKGND => LRESULT(1),
+        // Until the first frame is shown the client area is filled black (never the white of an unpainted window),
+        // and once more at the first erase after the window was shown (whatever the compositor shows before the
+        // swapchain's frame is black); after that the renderer covers it and erasing would only flicker.
+        WM_ERASEBKGND => {
+            if ERASE_BLACK.load(Ordering::Relaxed) {
+                if REVEALED.load(Ordering::Relaxed) {
+                    ERASE_BLACK.store(false, Ordering::Relaxed);
+                }
+                let mut rc = RECT::default();
+                if GetClientRect(hwnd, &mut rc).is_ok() {
+                    FillRect(
+                        HDC(wparam.0 as *mut std::ffi::c_void),
+                        &rc,
+                        HBRUSH(GetStockObject(BLACK_BRUSH).0),
+                    );
+                }
+            }
+            LRESULT(1)
+        }
         // The close button (and Alt+F4 while the menu has the focus): the same path as the Quit hotkey.
         WM_CLOSE => {
             request_quit(hwnd);
