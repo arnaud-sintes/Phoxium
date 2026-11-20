@@ -554,17 +554,21 @@ pub fn run() -> Res<()> {
     output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
     ui.set_picker_message(start_message.take());
     let mut source_request: Option<SourceAction> = None;
-    // The Source section's black-bar detection, crop and multiplier edits; `remap` recomputes the view (native
-    // size, placement, readouts) at the next frame even when the source sends none.
-    let mut bars_state = BarsState::default();
+    // The Source section's picture area (Auto detection, manual limits) and multiplier edits; `remap` recomputes
+    // the view (native size, placement, readouts) at the next frame even when the source sends none.
+    let mut bars_state = BarsState::new(live.settings().global.source.bars_config());
     let mut remap = false;
-    if capture.is_some() && live.settings().global.source.detect_bars_at_attach {
-        bars_state.session = Some(bars::Session::new(
+    if capture.is_some() && bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+        // The first frame is already here: it counts (a game that redraws rarely still gives one).
+        bars_state.auto.start(
             start.elapsed().as_secs_f64(),
-            live.settings().global.source.bars_config(),
-        ));
-        println!("black bars: detecting (detect at attach)");
+            bars::Trigger::Attach,
+            Some((&frame.data, frame.width, frame.height)),
+        );
+        println!("picture area: detecting (auto, at attach)");
     }
+    // Auto was in force at the previous loop (a switch to Auto by any path starts a detection).
+    let mut auto_was_on = bars_state.auto.running();
     let mut list_due = 0.0f64; // next enumeration of the picker's list
     let mut thumbs = picker::ThumbPlan::default();
     let mut thumb_capture: Option<(isize, capture::Capture)> = None;
@@ -590,13 +594,17 @@ pub fn run() -> Res<()> {
 
         // ---- A23: source requests of the picker and the menu ----
         let mut attach_request = None;
-        let mut start_bars = false;
-        let mut crop_request: Option<SourceAction> = None;
+        let mut area_request: Option<SourceAction> = None;
         let mut multiplier_request: Option<scaling::Multiplier> = None;
         match source_request.take() {
             None => {}
-            Some(SourceAction::DetectBars) => start_bars = true,
-            Some(a @ (SourceAction::ResetCrop | SourceAction::UndoCrop)) => crop_request = Some(a),
+            Some(
+                a @ (SourceAction::DetectNow
+                | SourceAction::SetAreaMode(_)
+                | SourceAction::SetLimits(_)
+                | SourceAction::ResetCrop
+                | SourceAction::UndoCrop),
+            ) => area_request = Some(a),
             Some(SourceAction::SetMultiplier(m)) => multiplier_request = Some(m),
             Some(SourceAction::Attach(h)) => attach_request = Some(h),
             Some(SourceAction::Cancel) => phase = picker::next(phase, Event::Cancel),
@@ -683,11 +691,12 @@ pub fn run() -> Res<()> {
                     detector.reset();
                     detect_key = (0, 0, None);
                     remap = true;
-                    // A new window: the command-line crop and divisor stay, the last detection is forgotten.
+                    // A new window: the command-line crop and divisor stay, the last detection is forgotten; in Auto
+                    // the picture area is detected on its first frames.
                     bars_state.forget();
-                    if live.settings().global.source.detect_bars_at_attach {
-                        bars_state.session = Some(bars::Session::new(now, live.settings().global.source.bars_config()));
-                        println!("black bars: detecting (detect at attach)");
+                    if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+                        bars_state.auto.start(now, bars::Trigger::Attach, None);
+                        println!("picture area: detecting (auto, at attach)");
                     }
                     size_watch.request_history_clear();
                     output::set_source(hwnd_of(h));
@@ -853,87 +862,130 @@ pub fn run() -> Res<()> {
             if capture.is_some() {
                 let black = health.wants_sample(now).then(|| lifecycle::is_black(&frame.data));
                 health.note_frame(now, black);
-                // The black-bar detection accumulates only while it runs (about one second).
-                if let Some(s) = bars_state.session.as_mut() {
-                    s.feed(&frame.data, frame.width, frame.height);
+                // Auto picture area: every frame while a detection runs, else a few sampled frames per second.
+                if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+                    bars_state.auto.feed(now, &frame.data, frame.width, frame.height);
                 }
             }
             fresh = true;
         }
 
-        // ---- The Source section: black-bar detection, crop reset and undo, scaling multiplier ----
-        if capture.is_none() {
-            bars_state.session = None;
-        }
+        // ---- The Source section: picture area (Auto, manual limits, reset, undo), scaling multiplier ----
         let mut edited = false;
-        if start_bars && capture.is_some() && bars_state.session.is_none() {
-            let mut session = bars::Session::new(now, live.settings().global.source.bars_config());
-            if !map.client_area {
-                // The detection works on the client area (the manual crop lies in it): the capture follows first.
-                params.source_crop_mode = crate::params::SOURCE_CROP_MODE_AUTO;
-                renderer.set_params(params);
-                let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
-                if switch_map(
-                    new_map,
-                    &mut map,
-                    &mut capture,
-                    reattach.as_ref().map(|r| r.hwnd()),
-                    &mut captured_base,
-                    &mut frame.seq,
-                    capture_luid,
-                ) {
-                    detect_key = (0, 0, None);
-                    remap = true;
+        let mut debounced = false;
+        let client = (frame.width, frame.height);
+        let whole = scaling::Rect {
+            x: 0,
+            y: 0,
+            w: client.0,
+            h: client.1,
+        };
+        if let Some(req) = area_request.filter(|_| capture.is_some()) {
+            let before = bars::CropState::capture(&params, &profile, cli_crop);
+            // The picture area in force (what Manual starts from): the manual crop, else the Auto one.
+            let in_force = map
+                .crop
+                .or(bars_state
+                    .auto
+                    .rect()
+                    .filter(|_| bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto))
+                .map_or(whole, |c| c.clamp(client.0, client.1));
+            let was_limits = std::mem::replace(&mut bars_state.limits_edit, matches!(req, SourceAction::SetLimits(_)));
+            let mut detect = false;
+            match req {
+                SourceAction::DetectNow | SourceAction::SetAreaMode(bars::AreaMode::Auto) => {
+                    bars::set_area_mode(&mut params, &mut profile, &mut cli_crop, bars::AreaMode::Auto);
+                    detect = true;
                 }
-            } else if frame.seq > 0 {
-                // The frame on screen counts: a game that redraws rarely still gives one.
-                session.feed(&frame.data, frame.width, frame.height);
-            }
-            bars_state.session = Some(session);
-            bars_state.message = None;
-            println!("black bars: detecting");
-        }
-        if let Some(outcome) = bars_state
-            .session
-            .as_ref()
-            .filter(|s| s.done(now))
-            .map(|s| s.outcome(view.div))
-        {
-            bars_state.session = None;
-            let (_, text) = outcome.message();
-            println!("black bars: {text}");
-            if let bars::Outcome::Found(found) = outcome {
-                let (b, p) = (found.bars, found.picture);
-                println!(
-                    "black bars: left {}, top {}, right {}, bottom {} px; crop {}, {}, {}x{}",
-                    b.left, b.top, b.right, b.bottom, p.x, p.y, p.w, p.h
-                );
-                bars_state.undo = Some(bars::CropState::capture(&params, &profile, cli_crop));
-                bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, found.picture);
-                bars_state.found = Some(found);
-                edited = true;
-            }
-            bars_state.message = Some(outcome.message());
-        }
-        match crop_request {
-            Some(SourceAction::ResetCrop) => {
-                bars_state.undo = Some(bars::CropState::capture(&params, &profile, cli_crop));
-                bars::reset_crop(&mut params, &mut profile, &mut cli_crop);
-                bars_state.found = None;
-                bars_state.message = Some((true, "Crop reset: the whole client area is captured.".to_string()));
-                println!("source: crop reset to the client area");
-                edited = true;
-            }
-            Some(SourceAction::UndoCrop) => {
-                if let Some(u) = bars_state.undo.take() {
-                    u.restore(&mut params, &mut profile, &mut cli_crop);
-                    bars_state.found = None;
-                    bars_state.message = Some((true, "The last crop change was undone.".to_string()));
-                    println!("source: crop change undone");
-                    edited = true;
+                SourceAction::SetAreaMode(bars::AreaMode::Manual) => {
+                    bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, in_force, client);
+                    bars_state.message = Some((
+                        true,
+                        "Manual: the limits in force are kept; adjust them below (stored for this program)."
+                            .to_string(),
+                    ));
+                    println!("picture area: manual");
                 }
+                SourceAction::SetAreaMode(bars::AreaMode::Client) | SourceAction::ResetCrop => {
+                    bars::reset_crop(&mut params, &mut profile, &mut cli_crop);
+                    bars_state.message = Some((true, "The whole client area is captured (no crop).".to_string()));
+                    println!("picture area: whole client area");
+                }
+                SourceAction::SetLimits(b) => {
+                    if let Some(rect) = b.picture(client) {
+                        bars::set_manual_crop(&mut params, &mut profile, &mut cli_crop, rect, client);
+                        debounced = true;
+                        bars_state.message = None;
+                        println!(
+                            "picture area: manual limits left {}, top {}, right {}, bottom {} px",
+                            b.left, b.top, b.right, b.bottom
+                        );
+                    }
+                }
+                SourceAction::UndoCrop => {
+                    if let Some(u) = bars_state.undo.take() {
+                        u.restore(&mut params, &mut profile, &mut cli_crop);
+                        bars_state.message = Some((true, "The last picture-area change was undone.".to_string()));
+                        println!("picture area: last change undone");
+                        detect = bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto;
+                    }
+                }
+                _ => {}
             }
-            _ => {}
+            if !matches!(req, SourceAction::UndoCrop) && !(was_limits && bars_state.limits_edit) {
+                bars_state.undo = Some(before);
+            }
+            if detect {
+                // The area in force stays on screen until the detection (about one second) gives its answer.
+                bars_state.auto.seed((in_force != whole).then_some(in_force), client);
+                let shown = (map.client_area && frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
+                bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
+                bars_state.message = None;
+                println!("picture area: auto, detecting now");
+            }
+            edited = true;
+        }
+        // Auto: the detections (attach, resize, Detect now) and the periodic check.
+        let auto_on =
+            capture.is_some() && bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area;
+        if auto_on && !std::mem::replace(&mut auto_was_on, true) && !bars_state.auto.running() {
+            // Auto came back another way (the crop mode of the "Source and placement" panel, a reattach): detect.
+            let shown = (frame.seq > 0).then_some((frame.data.as_slice(), client.0, client.1));
+            bars_state.auto.start(now, bars::Trigger::DetectNow, shown);
+        }
+        auto_was_on = auto_on;
+        if auto_on {
+            let before = bars_state.auto.rect();
+            match bars_state.auto.tick(now, view.div) {
+                Some(bars::AutoEvent::Detected(trigger, outcome)) => {
+                    let (_, text) = outcome.message();
+                    println!("picture area ({trigger:?}): {text}");
+                    if let bars::Outcome::Found(f) = outcome {
+                        bars_state.found = Some(f);
+                    }
+                    bars_state.message = Some(outcome.message());
+                }
+                Some(bars::AutoEvent::Followed(how, r)) => {
+                    let text = format!(
+                        "The picture area followed the game ({}): {} \u{00D7} {} at {}, {}.",
+                        match how {
+                            bars::Follow::Grew => "larger or moved",
+                            bars::Follow::Shrank => "the bars stayed dark",
+                            bars::Follow::Found => "a picture appeared",
+                        },
+                        r.w,
+                        r.h,
+                        r.x,
+                        r.y
+                    );
+                    println!("picture area: {text}");
+                    bars_state.message = Some((true, text));
+                }
+                None => {}
+            }
+            if bars_state.auto.rect() != before {
+                remap = true;
+            }
         }
         if let Some(m) = multiplier_request {
             m.apply(&mut params, &mut profile);
@@ -952,7 +1004,7 @@ pub fn run() -> Res<()> {
             // Live, and stored in the profile of this program and class.
             renderer.set_params(params);
             profile = keyed_profile(&profile, reattach.as_ref().map(|r| r.target()));
-            live.save_source_profile(&profile);
+            live.save_source_profile(&profile, debounced);
             baseline = baseline_of(live.library(), live.current_preset(), &profile);
             let (new_map, warnings) = resolve_map(&params, &profile, cli_crop, cli_divisor);
             for w in &warnings {
@@ -975,6 +1027,15 @@ pub fn run() -> Res<()> {
         if std::mem::take(&mut remap) {
             fresh = true;
         }
+        // The source map in force: in Auto, the detected picture area is the crop.
+        let area_mode = bars::AreaMode::of(&params, &profile);
+        let eff_map = scaling::SourceMap {
+            crop: map.crop.or(bars_state
+                .auto
+                .rect()
+                .filter(|_| area_mode == bars::AreaMode::Auto && map.client_area)),
+            ..map
+        };
         if fresh {
             let full = scaling::Rect {
                 x: 0,
@@ -982,8 +1043,8 @@ pub fn run() -> Res<()> {
                 w: frame.width,
                 h: frame.height,
             };
-            let region = map.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
-            let key = (frame.width, frame.height, map.crop);
+            let region = eff_map.crop.map_or(full, |c| c.clamp(frame.width, frame.height));
+            let key = (frame.width, frame.height, eff_map.crop);
             if key != detect_key {
                 detect_key = key;
                 detector.reset();
@@ -1049,17 +1110,19 @@ pub fn run() -> Res<()> {
             ui_state.baseline = Some(baseline);
             ui_state.headroom = renderer.headroom();
             ui_state.placement = Some(placement::readout(&params, view.native, out_size, args.integer));
+            let area = area_view(area_mode, &eff_map, &profile, &detector, (frame.width, frame.height));
             ui_state.source = source_view(
                 capture.is_some(),
                 reattach.as_ref().map(|r| r.target()),
                 &profile,
-                &map,
+                &eff_map,
                 &detector,
                 (frame.width, frame.height),
                 view,
                 lost_at.map(|t| (now - t, lost_watch.policy().wait_s)),
                 scaling::Multiplier::of(&params, cli_divisor.or(profile.divisor_pair())),
                 bars_state.view(),
+                area,
             );
         }
         // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
@@ -1111,12 +1174,12 @@ pub fn run() -> Res<()> {
         if let Some(SourcePrefs {
             ask_at_start,
             wait_s,
-            detect_bars_at_attach,
             bars: bars_config,
         }) = changes.source_prefs
         {
             live.set_source_prefs(ask_at_start, wait_s);
-            live.set_bars_prefs(detect_bars_at_attach, bars_config);
+            live.set_bars_prefs(bars_config);
+            bars_state.auto.set_config(bars_config);
             if !args.wait_source_set {
                 lost_watch.set_wait(wait_s);
             }
@@ -1223,6 +1286,14 @@ pub fn run() -> Res<()> {
                     println!("  {}", g.stats_line());
                 }
             }
+            // The Auto picture area's periodic check: frames sampled and CPU time spent in the last second.
+            let (samples, spent) = bars_state.auto.take_cost();
+            if args.stats && samples > 0 {
+                println!(
+                    "  picture area (auto): {samples} frames sampled, {:.2} ms",
+                    spent * 1000.0
+                );
+            }
             stat_time = Instant::now();
             renders = 0;
             last_captured = captured;
@@ -1282,32 +1353,78 @@ fn switch_map(
     true
 }
 
-/// The black-bar detection state the Source section shows and the Undo it offers.
-#[derive(Default)]
+/// The picture-area state the Source section shows and the Undo it offers.
 struct BarsState {
-    /// The running detection, if any.
-    session: Option<bars::Session>,
-    /// The crop before the last detection or reset (Undo).
+    /// The Auto mode's tracker (detections and periodic check).
+    auto: bars::Auto,
+    /// The picture area before the user's last change (Undo).
     undo: Option<bars::CropState>,
-    /// The last detection that found bars (cleared by a reset or an undo).
+    /// The last detection that found bars.
     found: Option<bars::Found>,
-    /// The last outcome, reset or undo, in words.
+    /// The last outcome, change, reset or undo, in words.
     message: Option<(bool, String)>,
+    /// The last change was a manual limit (a drag or nudges make one Undo step).
+    limits_edit: bool,
 }
 
 impl BarsState {
+    fn new(config: bars::Config) -> BarsState {
+        BarsState {
+            auto: bars::Auto::new(config),
+            undo: None,
+            found: None,
+            message: None,
+            limits_edit: false,
+        }
+    }
+
     fn view(&self) -> crate::ui::BarsView {
         crate::ui::BarsView {
-            running: self.session.is_some(),
+            running: self.auto.running(),
             found: self.found,
             message: self.message.clone(),
             can_undo: self.undo.is_some(),
         }
     }
 
-    /// A new window: nothing to undo, no outcome to show.
+    /// A new window: nothing to undo, no outcome to show, the Auto tracker starts over.
     fn forget(&mut self) {
-        *self = BarsState::default();
+        self.auto.reset();
+        self.undo = None;
+        self.found = None;
+        self.message = None;
+        self.limits_edit = false;
+    }
+}
+
+/// The picture area as the Source section shows it: the mode, the limits in force (from the source map in force
+/// `map`, the Auto crop included), the client size, the multiplier known for snapping and, for manual limits set
+/// for another client size, that size.
+fn area_view(
+    mode: bars::AreaMode,
+    map: &scaling::SourceMap,
+    profile: &settings::SourceProfile,
+    detector: &scaling::Detector,
+    client: (u32, u32),
+) -> crate::ui::AreaView {
+    let limits = map.crop.map_or(bars::Bars::default(), |c| {
+        bars::Bars::around(c.clamp(client.0, client.1), client)
+    });
+    let divisor = map
+        .divisor
+        .or(detector.is_locked().then(|| detector.divisor()))
+        .unwrap_or((1, 1));
+    let set_for = profile
+        .crop_client
+        .map(|[w, h]| (w, h))
+        .filter(|&s| mode == bars::AreaMode::Manual && s != client);
+    crate::ui::AreaView {
+        mode,
+        whole_window: !map.client_area,
+        limits,
+        client,
+        divisor,
+        set_for,
     }
 }
 
@@ -1335,6 +1452,7 @@ fn source_view(
     lost: Option<(f64, f64)>,
     multiplier: scaling::Multiplier,
     bars: crate::ui::BarsView,
+    area: crate::ui::AreaView,
 ) -> SourceView {
     let waiting = match (target, lost) {
         (Some(t), Some((since, wait))) => Some(if wait > 0.0 {
@@ -1361,6 +1479,7 @@ fn source_view(
         detected: detector.is_locked().then(|| detector.divisor()),
         crop_manual: map.crop.is_some() || !map.client_area,
         bars,
+        area,
     });
     SourceView { attached, waiting }
 }

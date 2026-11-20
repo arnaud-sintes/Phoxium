@@ -321,34 +321,32 @@ impl Live {
         }
     }
 
-    /// The menu changed the black-bar detection preferences of `[global.source]` (detect at attach, thresholds):
-    /// written with the next [`Live::flush_settings`] (debounced).
-    pub fn set_bars_prefs(&mut self, at_attach: bool, config: crate::bars::Config) {
+    /// The menu changed the picture-area detection thresholds of `[global.source]`: written with the next
+    /// [`Live::flush_settings`] (debounced).
+    pub fn set_bars_prefs(&mut self, config: crate::bars::Config) {
         let s = &mut self.settings.global.source;
         let (tolerance, min, max_crop) = (config.tolerance, config.min_bar.max(1), config.max_crop);
-        if s.detect_bars_at_attach != at_attach
-            || s.bars_tolerance != tolerance
-            || s.bars_min != min
-            || s.bars_max_crop != max_crop
-        {
-            s.detect_bars_at_attach = at_attach;
+        if s.bars_tolerance != tolerance || s.bars_min != min || s.bars_largest_crop != max_crop {
             s.bars_tolerance = tolerance;
             s.bars_min = min;
-            s.bars_max_crop = max_crop;
+            s.bars_largest_crop = max_crop;
             self.mark_dirty();
         }
     }
 
-    /// The Source section changed the source profile of the attached program and class (a detected crop, a
+    /// The Source section changed the source profile of the attached program and class (the picture area mode, a
     /// reset or undo, the scaling multiplier): stored in `[[source]]` (replacing the profile of the same
-    /// executable and class) and written at once. A profile without an executable is not stored.
-    pub fn save_source_profile(&mut self, profile: &settings::SourceProfile) {
+    /// executable and class) and written at once, or with the next [`Live::flush_settings`] when `debounced` (a
+    /// manual limit dragged or nudged). A profile without an executable is not stored.
+    pub fn save_source_profile(&mut self, profile: &settings::SourceProfile, debounced: bool) {
         if profile.exe.is_empty() || self.settings.find_source(&profile.exe, &profile.class) == Some(profile) {
             return;
         }
         self.settings.upsert_source(profile.clone());
         self.mark_dirty();
-        self.flush_settings(true);
+        if !debounced {
+            self.flush_settings(true);
+        }
     }
 
     /// At exit: remembers where the framed window is and writes it to the settings.
@@ -469,10 +467,9 @@ mod tests {
             min_bar: 4,
             max_crop: 0.4,
         };
-        live.set_bars_prefs(true, cfg);
+        live.set_bars_prefs(cfg);
         assert!(live.flush_settings(true));
         let s = settings::load(&dir).settings.global.source;
-        assert!(s.detect_bars_at_attach);
         assert_eq!(s.bars_config(), cfg);
         let mut profile = settings::SourceProfile {
             exe: "snes9x.exe".into(),
@@ -489,13 +486,26 @@ mod tests {
                 w: 768,
                 h: 672,
             },
+            (768, 704),
         );
         crate::scaling::Multiplier::Manual(3, 3).apply(&mut Params::default(), &mut profile);
-        live.save_source_profile(&profile);
+        live.save_source_profile(&profile, false);
         let saved = settings::load(&dir).settings;
         assert_eq!(saved.find_source("SNES9X.EXE", "snes9x"), Some(&profile));
+        // A manual limit edit: debounced, written with the next flush.
+        profile.crop = Some([2, 16, 770, 688]);
+        live.save_source_profile(&profile, true);
+        assert_ne!(
+            settings::load(&dir).settings.find_source("snes9x.exe", "Snes9X"),
+            Some(&profile)
+        );
+        assert!(live.flush_settings(true));
+        assert_eq!(
+            settings::load(&dir).settings.find_source("snes9x.exe", "Snes9X"),
+            Some(&profile)
+        );
         // Without an executable nothing is stored.
-        live.save_source_profile(&settings::SourceProfile::default());
+        live.save_source_profile(&settings::SourceProfile::default(), false);
         assert_eq!(settings::load(&dir).settings.sources.len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }

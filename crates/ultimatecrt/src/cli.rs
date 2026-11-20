@@ -24,11 +24,13 @@ Usage: ultimatecrt [options]
   --monitor <index>    monitor to cover with --fullscreen (see --list-windows; default: the source's)
   --no-activate        accepted for older scripts, no effect: every output is non-activating
   --no-crop            capture the whole window instead of its client area
-  --crop <x,y,w,h>     part of the captured client area that is the source (default: all of it)
+  --crop <x,y,w,h>     part of the captured client area that is the source (default: the picture area found
+                       inside black bars, see the Source section)
   --divisor <N|NxM>    the source is an integer upscale by N (or N horizontally, M vertically);
                        1 means native. Default: detected from the first informative frames
   --integer            tube scale mode: whole host pixels per source row only (letterboxed)
-  --crop-mode <auto|manual|none>  source area: the client area (auto), the --crop rectangle or the source
+  --crop-mode <auto|manual|none>  source area: the client area with its picture area (auto: found inside
+                       black bars, or all of it when the profile says so), the --crop rectangle or the source
                        profile's (manual), or the whole window (none). --crop implies manual, --no-crop none
   --divisor-mode <auto|manual|none>  native raster: detected (auto), --divisor or the profile's (manual),
                        or the captured pixels (none, divisor 1). --divisor implies manual
