@@ -201,6 +201,8 @@ pub fn run() -> Res<()> {
         .as_ref()
         .and_then(|l| live::writable_dir(settings_dir.as_deref(), l));
     let settings_notice = loaded.as_ref().and_then(|l| l.warning.clone());
+    // No settings file yet: a first start, the first-run hint is due (shown on the window picker).
+    let first_start = loaded.as_ref().is_some_and(|l| l.state == settings::FileState::Missing);
     let stored = loaded.map(|l| l.settings).unwrap_or_default();
     // A23: the windows recently in the foreground come first in the picker (the z-order seeds the list).
     let mut recent = picker::Recent::default();
@@ -378,7 +380,7 @@ pub fn run() -> Res<()> {
         .as_ref()
         .filter(|_| capture.is_some())
         .map_or(HWND::default(), |e| hwnd_of(e.hwnd));
-    let win = output::create(&output::Options {
+    let mut win = output::create(&output::Options {
         fullscreen: args.fullscreen,
         monitor: args.monitor,
         follow,
@@ -522,18 +524,19 @@ pub fn run() -> Res<()> {
     // T-52a: the settings menu and the stats overlay, drawn over the output, reached by the hotkeys through
     // `controls::UiHook`. Created after the renderer's device, dropped before it (declared after it, and
     // dropped explicitly at the end of `run`). Its layout, menu key and presets come from `live`.
-    let mut ui = crate::ui::Ui::new(
-        renderer.context(),
-        renderer.output_format(),
-        crate::ui::UiConfig::live(
-            win.hwnd.0 as isize,
-            follow.0 as isize,
-            live.settings(),
-            ui_settings_dir,
-            live.library().clone(),
-            &win.hotkeys,
-        ),
-    )?;
+    if first_start {
+        live.mark_first_run();
+    }
+    let mut ui_config = crate::ui::UiConfig::live(
+        win.hwnd.0 as isize,
+        follow.0 as isize,
+        live.settings(),
+        ui_settings_dir,
+        live.library().clone(),
+        &win.hotkeys,
+    );
+    ui_config.vulkan_device = Some(renderer.gpu_name.clone());
+    let mut ui = crate::ui::Ui::new(renderer.context(), renderer.output_format(), ui_config)?;
     let mut ui_state = crate::ui::UiState::default();
     let mut stepped_preset = live.current_preset().map(str::to_string);
 
@@ -1166,6 +1169,13 @@ pub fn run() -> Res<()> {
                     bars_state.view(),
                     area,
                 );
+                // "Saved profiles": the per-game profiles, the program captured now marked.
+                let current = reattach
+                    .as_ref()
+                    .filter(|_| capture.is_some())
+                    .map(|r| (r.target().exe.clone().unwrap_or_default(), r.target().class.clone()));
+                ui_state.profiles =
+                    crate::profiles::rows(live.settings(), current.as_ref().map(|(e, c)| (e.as_str(), c.as_str())));
             }
             // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
             // (applied live, recorded in the shared settings, written debounced), the adapter for the next start.
@@ -1231,6 +1241,186 @@ pub fn run() -> Res<()> {
             }
             if changes.source.is_some() {
                 source_request = changes.source;
+            }
+            // Hotkeys changed in the menu: registered at once, the old chord kept when the system refuses.
+            if let Some(edit) = changes.hotkey {
+                let outcome = match edit {
+                    crate::ui::hotkeys_panel::HotkeyEdit::Set(action, chord) => win.rebind(action, chord),
+                    crate::ui::hotkeys_panel::HotkeyEdit::ResetAll => {
+                        let problems = win.reset_hotkeys();
+                        if problems.is_empty() {
+                            Ok("Every hotkey is back to its default.".to_string())
+                        } else {
+                            Err(problems.join(" "))
+                        }
+                    }
+                };
+                match &outcome {
+                    Ok(m) => println!("hotkeys: {m}"),
+                    Err(m) => eprintln!("warning: hotkeys: {m}"),
+                }
+                println!("hotkeys: {}", win.hotkeys.summary());
+                ui.set_hotkeys(&win.hotkeys, Some((outcome.is_ok(), outcome.unwrap_or_else(|e| e))));
+                live.set_hotkeys(win.hotkeys.to_settings());
+            }
+            // "Saved profiles": delete, use for the current source, reset the attached program's profile.
+            if let Some(action) = changes.profile {
+                let key = reattach
+                    .as_ref()
+                    .filter(|_| capture.is_some())
+                    .map(|r| r.target().clone());
+                let is_current = |exe: &str, class: &str| {
+                    key.as_ref().is_some_and(|t| {
+                        t.exe.as_deref().is_some_and(|e| e.eq_ignore_ascii_case(exe))
+                            && t.class.eq_ignore_ascii_case(class)
+                    })
+                };
+                let mut apply: Option<settings::SourceProfile> = None;
+                match action {
+                    crate::profiles::ProfileAction::Delete { exe, class } => {
+                        if live.remove_source_profile(&exe, &class) {
+                            println!("source profile deleted: {exe} ({class})");
+                        }
+                        if is_current(&exe, &class) {
+                            apply = Some(settings::SourceProfile::default());
+                        }
+                    }
+                    crate::profiles::ProfileAction::UseForCurrent { exe, class } => {
+                        let from = live.settings().find_source(&exe, &class).cloned();
+                        if let (Some(t), Some(from)) = (&key, from) {
+                            let copy = crate::profiles::copy_to(&from, t.exe.as_deref().unwrap_or_default(), &t.class);
+                            live.save_source_profile(&copy, false);
+                            println!("source profile of {exe} ({class}) used for {}", t.describe());
+                            apply = Some(copy);
+                        }
+                    }
+                    crate::profiles::ProfileAction::ResetCurrent => {
+                        if let Some(t) = &key {
+                            live.remove_source_profile(t.exe.as_deref().unwrap_or_default(), &t.class);
+                            println!("source profile reset: {}", t.describe());
+                            apply = Some(settings::SourceProfile::default());
+                        }
+                    }
+                }
+                if let Some(new_profile) = apply {
+                    // As at an attach: the profile parameters back to the preset in force, then the new profile.
+                    let mut p = params;
+                    for w in new_profile.switch_to(&mut p, &base_params(&live)) {
+                        eprintln!("warning: {w}");
+                    }
+                    if let Err(e) = args.apply_source(&mut p) {
+                        eprintln!("warning: {e}");
+                    }
+                    profile = keyed_profile(&new_profile, key.as_ref());
+                    params = p;
+                    renderer.set_params(params);
+                    baseline = baseline_of(live.library(), live.current_preset(), &profile);
+                    bars_state.forget();
+                    let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+                    if switch_map(
+                        new_map,
+                        &mut map,
+                        &mut capture,
+                        reattach.as_ref().map(|r| r.hwnd()),
+                        &mut captured_base,
+                        &mut frame.seq,
+                        capture_luid,
+                    ) {
+                        detect_key = (0, 0, None);
+                    }
+                    if bars::AreaMode::of(&params, &profile) == bars::AreaMode::Auto && map.client_area {
+                        bars_state.auto.start(now, bars::Trigger::Attach, None);
+                    }
+                    detector.reset();
+                    detect_key = (0, 0, None);
+                    remap = true;
+                }
+            }
+            // The resets of the Interface section.
+            match changes.reset {
+                Some(crate::ui::system_panels::ResetKind::Look) => {
+                    let mut p = baseline;
+                    crate::quality::keep(&mut p, &params);
+                    params = p;
+                    renderer.set_params(params);
+                    live.reset_look_overrides();
+                    println!("reset: look parameters back to the preset in force");
+                    ui.set_reset_message((true, "The look parameters are back to the preset in force.".to_string()));
+                    remap = true;
+                }
+                Some(crate::ui::system_panels::ResetKind::Everything) => {
+                    let copy = live.reset_everything();
+                    let problems = win.reset_hotkeys();
+                    let hotkeys_text = if problems.is_empty() {
+                        "Every hotkey is back to its default.".to_string()
+                    } else {
+                        problems.join(" ")
+                    };
+                    ui.set_hotkeys(&win.hotkeys, Some((problems.is_empty(), hotkeys_text)));
+                    let mut p = baseline;
+                    let defaults = crate::params::Params::default();
+                    for id in crate::quality::PARAM_IDS {
+                        if let Some(v) = defaults.get(id) {
+                            p.set(id, v);
+                        }
+                    }
+                    params = p;
+                    renderer.set_params(params);
+                    let kept = copy.map_or_else(String::new, |c| {
+                        format!(" The old settings are kept in {}.", c.display())
+                    });
+                    println!("reset: everything to defaults.{kept}");
+                    ui.set_reset_message((
+                        true,
+                        format!("Everything is back to its default; the GPU choice applies at the next start.{kept}"),
+                    ));
+                    remap = true;
+                }
+                None => {}
+            }
+            if changes.reset.is_some() {
+                // The source modes may have changed with the parameters: the capture area follows.
+                let (new_map, _) = resolve_map(&params, &profile, cli_crop, cli_divisor);
+                if switch_map(
+                    new_map,
+                    &mut map,
+                    &mut capture,
+                    reattach.as_ref().map(|r| r.hwnd()),
+                    &mut captured_base,
+                    &mut frame.seq,
+                    capture_luid,
+                ) {
+                    detect_key = (0, 0, None);
+                }
+            }
+            // A native dialog of the Preset files section, between two frames (modal, owned by the output).
+            if let Some(request) = changes.dialog {
+                let owner = win.hwnd.0 as isize;
+                let folder = |sub: fn(&std::path::Path) -> std::path::PathBuf| {
+                    let f = settings_dir.as_deref().map_or_else(std::env::temp_dir, sub);
+                    let _ = std::fs::create_dir_all(&f);
+                    f
+                };
+                ui.begin_dialog();
+                let result = match request {
+                    crate::ui::files_panel::DialogRequest::Export(id) => crate::ui::files_panel::DialogResult::Export {
+                        path: crate::shell::save_dialog(
+                            owner,
+                            &folder(crate::preset_files::export_dir),
+                            &format!("{id}.toml"),
+                        ),
+                        id,
+                    },
+                    crate::ui::files_panel::DialogRequest::Import => crate::ui::files_panel::DialogResult::Import(
+                        crate::shell::open_dialog(owner, &folder(crate::preset_files::import_dir)),
+                    ),
+                };
+                // The activation changes of the dialog do not close the menu.
+                for (m, w, l) in output::take_ui_messages() {
+                    ui.handle_win32_message(m, w, l);
+                }
+                ui.end_dialog();
+                ui.dialog_result(result);
             }
             // T-43: burn-in map of the preset in force (load, periodic save off the render thread), menu actions.
             tube.tick(&mut renderer, &params, live.current_preset(), Instant::now());

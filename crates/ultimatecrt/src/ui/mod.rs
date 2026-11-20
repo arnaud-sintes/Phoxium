@@ -29,11 +29,15 @@
 //! and take it back ([`Ui::take_layout_change`]); parameter edits, the preset, a new preset library and the
 //! adapter choice go back through [`UiOutput`] (T-53, the panels in [`panels`]).
 
+pub mod files_panel;
+pub mod hotkeys_panel;
 pub mod input;
 pub mod menu;
 pub mod overlay;
 pub mod panels;
 pub mod picker;
+pub mod profiles_panel;
+pub mod system_panels;
 pub mod theme;
 
 use std::path::PathBuf;
@@ -48,8 +52,13 @@ use crate::params::Params;
 use crate::presets::Library;
 use crate::{settings, Res};
 
+use crate::hotkeys::{Action, Chord, Registration};
+use files_panel::{DialogRequest, DialogResult, FilesModel};
+use hotkeys_panel::{HotkeyEdit, HotkeyModel};
 use input::{UiEvent, Win32Input};
 use menu::{CloseReason, HotkeyRow, Menu, MenuModel, MenuRects, PresetForm, SystemModel};
+use profiles_panel::ProfilesModel;
+use system_panels::{ExtrasModel, ResetKind};
 
 /// Default menu key (D-17: F10, since F12 is registered system-wide by another program on the dev machine).
 pub const DEFAULT_MENU_KEY: &str = "F10";
@@ -81,6 +90,8 @@ pub struct UiState {
     pub quality: Option<String>,
     /// The source as the menu's Source section shows it (A23).
     pub source: SourceView,
+    /// The per-game profiles of the settings ("Saved profiles", `crate::profiles::rows`).
+    pub profiles: Vec<crate::profiles::ProfileRow>,
 }
 
 /// The captured window as the menu shows it (A23): what was attached and what the automatic handling found.
@@ -236,6 +247,14 @@ pub struct UiOutput {
     pub source: Option<SourceAction>,
     /// `[global.source]` changed in the picker or the menu (A23).
     pub source_prefs: Option<SourcePrefs>,
+    /// A hotkey change to register now (`output::Output::rebind`, then [`Ui::set_hotkeys`]).
+    pub hotkey: Option<HotkeyEdit>,
+    /// A request of the "Saved profiles" list.
+    pub profile: Option<crate::profiles::ProfileAction>,
+    /// A confirmed reset (look overrides, or everything), then [`Ui::set_reset_message`].
+    pub reset: Option<ResetKind>,
+    /// A native dialog to open between frames (`crate::shell`), then [`Ui::dialog_result`].
+    pub dialog: Option<DialogRequest>,
 }
 
 /// A burn-in action of the menu's ageing panel (T-43).
@@ -274,6 +293,13 @@ pub struct UiConfig {
     pub gpu_setting: String,
     /// `[global.source]` ask at start and lost-source wait (A23).
     pub source_prefs: SourcePrefs,
+    /// The hotkey registration in force: the Hotkeys rows can then change the chords (the menu key, the problems
+    /// and the rows are taken from it). `None`: the read-only `hotkeys` rows.
+    pub registration: Option<Registration>,
+    /// The Vulkan device the renderer runs on (About).
+    pub vulkan_device: Option<String>,
+    /// Offer the native Save and Open dialogs of the preset files (the live app).
+    pub dialogs: bool,
 }
 
 impl UiConfig {
@@ -303,6 +329,9 @@ impl UiConfig {
             gpu: crate::adapters::current().cloned(),
             gpu_setting: settings.global.gpu.adapter.clone(),
             source_prefs: SourcePrefs::of(&settings.global.source),
+            registration: Some(hotkeys.clone()),
+            vulkan_device: None,
+            dialogs: true,
         }
     }
 
@@ -321,8 +350,33 @@ impl UiConfig {
             gpu: None,
             gpu_setting: settings::GPU_ADAPTER_AUTO.to_string(),
             source_prefs: SourcePrefs::default(),
+            registration: None,
+            vulkan_device: None,
+            dialogs: false,
         }
     }
+}
+
+/// The menu key text of a registration (`(no menu hotkey)` when none registered).
+fn menu_key_of(reg: &Registration) -> String {
+    reg.bound(Action::ToggleMenu)
+        .map_or_else(|| "(no menu hotkey)".to_string(), |c| c.to_string())
+}
+
+/// The first-run hint from a registration (or the defaults without one).
+fn first_run_text(reg: Option<&Registration>, menu_key: &str) -> String {
+    let chord = |a: Action| match reg {
+        Some(r) => r.bound(a).map(|c| c.to_string()),
+        None => Some(a.default_text().to_string()),
+    };
+    let menu = reg.map_or(Some(menu_key.to_string()), |r| {
+        r.bound(Action::ToggleMenu).map(|c| c.to_string())
+    });
+    crate::about::first_run_text(
+        menu.as_deref(),
+        chord(Action::ToggleFullscreen).as_deref(),
+        chord(Action::Quit).as_deref(),
+    )
 }
 
 /// The hotkey rows of the menu from the registration outcome.
@@ -381,8 +435,22 @@ pub struct Ui {
     items: Vec<(String, [[f32; 2]; 2])>,
     overlay_rect: [[f32; 2]; 2],
     cursor: Option<MouseCursor>,
-    /// UI scale: the DPI scale of the output's monitor (1 at 96 dpi).
+    /// UI scale in effect: the `[global.ui] scale` setting, or the monitor's DPI scale for Automatic.
     dpi: f32,
+    /// The DPI scale of the output's monitor (1 at 96 dpi).
+    monitor_scale: f32,
+    /// The hotkeys and their rebinding.
+    hotkeys: HotkeyModel,
+    /// The "Preset files" section.
+    files: FilesModel,
+    /// "Saved profiles" confirmations.
+    profiles: ProfilesModel,
+    /// Interface (scale, resets) and About.
+    extras: ExtrasModel,
+    /// A native dialog is open: the output's deactivation does not close the menu.
+    dialog_open: bool,
+    /// The text of the last Copy (About), also in a headless UI where the clipboard is not touched.
+    copied: Option<String>,
     fonts: theme::Fonts,
     last: Option<Instant>,
     /// A fixed frame time for ImGui instead of the measured one ([`Ui::set_frame_time`]).
@@ -455,6 +523,15 @@ impl Ui {
                 return Err(e.into());
             }
         };
+        let (menu_key, hotkey_problems) = match &config.registration {
+            Some(r) => (menu_key_of(r), r.problems()),
+            None => (config.menu_key, config.hotkey_problems),
+        };
+        let settings_dir = config.settings_dir.clone();
+        let first_run = config
+            .layout
+            .first_run_due()
+            .then(|| first_run_text(config.registration.as_ref(), &menu_key));
         let mut ui = Ui {
             renderer: Some(renderer),
             pool,
@@ -469,8 +546,8 @@ impl Ui {
             saved_layout: config.layout.clone(),
             layout: config.layout,
             presets: config.presets,
-            menu_key: config.menu_key,
-            hotkey_problems: config.hotkey_problems,
+            menu_key,
+            hotkey_problems,
             state: UiState::default(),
             out: UiOutput::default(),
             filter: String::new(),
@@ -483,7 +560,6 @@ impl Ui {
             system: SystemModel {
                 gpu: config.gpu,
                 gpu_setting: config.gpu_setting,
-                hotkeys: config.hotkeys,
                 settings_dir: config.settings_dir,
             },
             focus_menu: false,
@@ -492,6 +568,26 @@ impl Ui {
             overlay_rect: [[0.0; 2]; 2],
             cursor: None,
             dpi: 1.0,
+            monitor_scale: 1.0,
+            hotkeys: HotkeyModel {
+                registration: config.registration,
+                rows: config.hotkeys,
+                ..HotkeyModel::default()
+            },
+            files: FilesModel {
+                export_dir: settings_dir.as_deref().map(crate::preset_files::export_dir),
+                import_dir: settings_dir.as_deref().map(crate::preset_files::import_dir),
+                dialogs: config.dialogs,
+                ..FilesModel::default()
+            },
+            profiles: ProfilesModel::default(),
+            extras: ExtrasModel {
+                monitor_scale: 1.0,
+                vulkan_device: config.vulkan_device,
+                ..ExtrasModel::default()
+            },
+            dialog_open: false,
+            copied: None,
             fonts,
             last: None,
             fixed_dt: None,
@@ -499,6 +595,7 @@ impl Ui {
             needs_source: false,
             picker: picker::Picker {
                 ask_at_start: config.source_prefs.ask_at_start,
+                first_run,
                 ..picker::Picker::default()
             },
             prefs: config.source_prefs,
@@ -516,6 +613,8 @@ impl Ui {
             };
             ui.set_dpi_scale(input::dpi_scale(dpi.max(96)));
         }
+        // A manual `[global.ui] scale` applies from the start.
+        ui.apply_scale();
         Ok(ui)
     }
 
@@ -653,6 +752,13 @@ impl Ui {
                 self.prefs.ask_at_start = on;
                 self.out.source_prefs = Some(self.prefs);
             }
+            A::FirstRunDone(never) => {
+                // Gone for this session; "Do not show again" keeps it gone (written with the layout).
+                self.picker.first_run = None;
+                if never {
+                    self.layout.first_run_done = Some(true);
+                }
+            }
         }
     }
 
@@ -707,8 +813,9 @@ impl Ui {
     pub fn handle_win32_message(&mut self, msg: u32, wparam: usize, lparam: isize) -> bool {
         if msg == input::WM_ACTIVATE {
             // Without a source the picker stays when the user goes to another window (A23): there is nothing
-            // else to show, and closing would bring it back at once, taking the foreground again.
-            let closable = !self.needs_source;
+            // else to show, and closing would bring it back at once, taking the foreground again. A native dialog
+            // of the menu (owned by the output) takes the activation too: the menu stays.
+            let closable = !self.needs_source && !self.dialog_open;
             if let Some(reason) =
                 menu::on_activate(self.menu.is_open() && closable, wparam & 0xFFFF != input::WA_INACTIVE)
             {
@@ -720,6 +827,32 @@ impl Ui {
             return false;
         }
         let open = self.menu.is_open();
+        // A new hotkey chord is awaited (Hotkeys rows): the key messages are the chord, Dear ImGui sees only the
+        // modifiers (Esc cancels the wait instead of closing the menu).
+        if open && self.view == View::Settings && self.hotkeys.capturing.is_some() && is_key_message(msg) {
+            let mut events = Vec::new();
+            self.input.translate(msg, wparam, lparam, &mut events);
+            for e in events {
+                if let UiEvent::Key(k, _) = e {
+                    if matches!(
+                        k,
+                        dear_imgui_rs::Key::ModCtrl
+                            | dear_imgui_rs::Key::ModShift
+                            | dear_imgui_rs::Key::ModAlt
+                            | dear_imgui_rs::Key::ModSuper
+                    ) {
+                        input::apply(self.imgui.io_mut(), e);
+                    }
+                }
+            }
+            if msg == input::WM_KEYDOWN || msg == input::WM_SYSKEYDOWN {
+                let mods = hotkeys_panel::mods_of(self.input.modifiers());
+                if let Some(e) = self.hotkeys.on_key((wparam & 0xFFFF) as u16, mods) {
+                    self.out.hotkey = Some(e);
+                }
+            }
+            return true;
+        }
         // The picker's keys and its search text (A23): handled here, Dear ImGui never sees them.
         if open && self.view == View::Picker {
             if msg == input::WM_KEYDOWN {
@@ -870,6 +1003,9 @@ impl Ui {
 
     fn close(&mut self, reason: CloseReason) {
         self.menu.close(self.output, self.source, reason);
+        // A chord wait ends with the menu; the confirmations too.
+        self.hotkeys.capturing = None;
+        self.extras.confirm = None;
         let mut events = Vec::new();
         self.input.set_modifiers(input::Modifiers::default(), &mut events);
         events.extend([UiEvent::MousePos([-f32::MAX, -f32::MAX]), UiEvent::Focus(false)]);
@@ -879,10 +1015,22 @@ impl Ui {
         self.cursor = None;
     }
 
-    /// Sets the UI scale (sizes and fonts; 1 at 96 dpi). The live app follows the output's monitor DPI by
-    /// itself (`GetDpiForWindow` at creation, `WM_DPICHANGED`); headless callers (tests, previews) set it here.
+    /// Sets the monitor's DPI scale as the live app reads it (1 at 96 dpi): the UI follows it while
+    /// `[global.ui] scale` is Automatic. The live app follows the output's monitor by itself (`GetDpiForWindow` at
+    /// creation, `WM_DPICHANGED`); headless callers (tests, previews) set it here.
     pub fn set_ui_scale(&mut self, scale: f32) {
         self.set_dpi_scale(scale);
+    }
+
+    /// The `[global.ui] scale` setting in force (part of the layout handed back to the app).
+    pub fn scale_setting(&self) -> settings::UiScale {
+        self.layout.scale
+    }
+
+    /// Sets `[global.ui] scale` and applies it at once.
+    pub fn set_scale_setting(&mut self, scale: settings::UiScale) {
+        self.layout.scale = scale;
+        self.apply_scale();
     }
 
     /// Makes every UI frame last `dt` seconds for ImGui (double-click and tooltip timing) instead of the measured
@@ -897,12 +1045,129 @@ impl Ui {
     }
 
     fn set_dpi_scale(&mut self, scale: f32) {
-        if scale > 0.0 && scale.is_finite() && (scale - self.dpi).abs() > 1e-3 {
+        if scale > 0.0 && scale.is_finite() {
+            self.monitor_scale = scale;
+            self.extras.monitor_scale = scale;
+            self.apply_scale();
+        }
+    }
+
+    /// Applies the scale in effect ([`settings::UiScale::effective`]) when it changed.
+    fn apply_scale(&mut self) {
+        let scale = self.layout.scale.effective(self.monitor_scale);
+        if (scale - self.dpi).abs() > 1e-3 {
             // The theme writes every size from its tokens at the new scale (nothing accumulates).
             theme::apply(self.imgui.style_mut(), scale);
             self.dpi = scale;
         }
     }
+
+    // ---- Hotkeys, dialogs, resets (owner request 2026-11-20) ----
+
+    /// The hotkey registration after a change (`output::Output::rebind`, `reset_hotkeys`) and its outcome for
+    /// the menu: the rows, the menu key, the problems and the first-run hint follow it.
+    pub fn set_hotkeys(&mut self, reg: &Registration, message: Option<(bool, String)>) {
+        self.menu_key = menu_key_of(reg);
+        self.hotkey_problems = reg.problems();
+        self.hotkeys.registration = Some(reg.clone());
+        if message.is_some() {
+            self.hotkeys.message = message;
+        }
+        if self.picker.first_run.is_some() {
+            self.picker.first_run = Some(first_run_text(Some(reg), &self.menu_key));
+        }
+    }
+
+    /// The action waiting for its new chord in the Hotkeys rows, if any.
+    pub fn capturing_hotkey(&self) -> Option<Action> {
+        self.hotkeys.capturing.filter(|_| self.menu.is_open())
+    }
+
+    /// The last message of the Hotkeys rows.
+    pub fn hotkey_message(&self) -> Option<&(bool, String)> {
+        self.hotkeys.message.as_ref()
+    }
+
+    /// A registered hotkey (`WM_HOTKEY`, `pressed` its action and `chord` its keys) arrived while the Hotkeys rows
+    /// wait for a new chord: the chord is taken as the new one (our own hotkeys never reach the window as key
+    /// messages). Returns whether it was used; Quit always passes (the escape path).
+    pub fn capture_chord(&mut self, pressed: Action, chord: Chord) -> bool {
+        if pressed == Action::Quit || self.capturing_hotkey().is_none() {
+            return false;
+        }
+        if let Some(e) = self.hotkeys.on_captured(crate::hotkeys::Captured::Chord(chord)) {
+            self.out.hotkey = Some(e);
+        }
+        true
+    }
+
+    /// A native dialog is about to open (the app, between two frames): the output's deactivation while it is
+    /// open does not close the menu.
+    pub fn begin_dialog(&mut self) {
+        self.dialog_open = true;
+    }
+
+    /// The dialog closed (after the app fed the messages queued meanwhile).
+    pub fn end_dialog(&mut self) {
+        self.dialog_open = false;
+    }
+
+    /// What a dialog of [`UiOutput::dialog`] gave: the export is written or the file imported, the message shown
+    /// in the Preset files section; a new library goes to the app with the next [`Ui::frame`].
+    pub fn dialog_result(&mut self, result: DialogResult) {
+        let lib = self.presets.clone();
+        match result {
+            DialogResult::Export { path: None, .. } | DialogResult::Import(None) => {}
+            DialogResult::Export { id, path: Some(p) } => files_panel::export_path(&mut self.files, &lib, &id, &p),
+            DialogResult::Import(Some(p)) => {
+                let Some(dir) = self.preset_form.dir.clone() else {
+                    return;
+                };
+                if let Some(new_lib) = files_panel::import_path(&mut self.files, &lib, &dir, &p) {
+                    self.presets = new_lib.clone();
+                    self.out.library = Some(new_lib);
+                }
+            }
+        }
+    }
+
+    /// The last message of the Preset files section.
+    pub fn files_message(&self) -> Option<&(bool, String)> {
+        self.files.message.as_ref()
+    }
+
+    /// The outcome of a reset (the app did it): shown under the reset buttons.
+    pub fn set_reset_message(&mut self, message: (bool, String)) {
+        self.extras.reset_message = Some(message);
+    }
+
+    /// The last message of the resets.
+    pub fn reset_message(&self) -> Option<&(bool, String)> {
+        self.extras.reset_message.as_ref()
+    }
+
+    /// The text of the last Copy of the About section.
+    pub fn copied(&self) -> Option<&str> {
+        self.copied.as_deref()
+    }
+
+    /// The `[global.gpu] adapter` value the menu shows (the app resets it to automatic with "Reset everything").
+    pub fn set_gpu_setting(&mut self, value: &str) {
+        self.system.gpu_setting = value.to_string();
+    }
+
+    /// The first-run hint shown on the picker, if any.
+    pub fn first_run_hint(&self) -> Option<&str> {
+        self.picker.first_run.as_deref()
+    }
+}
+
+/// `WM_KEYDOWN`, `WM_KEYUP`, `WM_SYSKEYDOWN`, `WM_SYSKEYUP`, `WM_CHAR` and `WM_SYSCHAR`.
+fn is_key_message(msg: u32) -> bool {
+    matches!(
+        msg,
+        input::WM_KEYDOWN | input::WM_KEYUP | input::WM_SYSKEYDOWN | input::WM_SYSKEYUP | input::WM_CHAR | 0x0106
+    )
 }
 
 /// Modifier keys held now (`GetKeyState`), for the menu opening while the chord is still down.
@@ -937,6 +1202,10 @@ impl crate::controls::UiHook for Ui {
 
     fn wants_input(&self) -> bool {
         Ui::wants_input(self)
+    }
+
+    fn capture_chord(&mut self, pressed: Action, chord: Chord) -> bool {
+        Ui::capture_chord(self, pressed, chord)
     }
 }
 
@@ -1002,6 +1271,10 @@ impl UiPass for Ui {
                     prefs: &mut self.prefs,
                     split_multiplier: &mut self.split_multiplier,
                     snap_limits: &mut self.snap_limits,
+                    hotkeys: &mut self.hotkeys,
+                    files: &mut self.files,
+                    profiles: &mut self.profiles,
+                    extras: &mut self.extras,
                 },
             ));
         }
@@ -1047,6 +1320,38 @@ impl UiPass for Ui {
                     // The picker replaces the settings at once; the app learns it from the action.
                     self.show_picker(!self.needs_source);
                 }
+            }
+            if r.hotkey.is_some() {
+                self.out.hotkey = r.hotkey;
+            }
+            if r.profile.is_some() {
+                self.out.profile = r.profile;
+            }
+            if let Some(kind) = r.reset {
+                if kind == ResetKind::Everything {
+                    // The menu's own part: the interface size back to Automatic, the adapter shown as automatic.
+                    self.set_scale_setting(settings::UiScale::Auto);
+                    self.system.gpu_setting = settings::GPU_ADAPTER_AUTO.to_string();
+                }
+                self.out.reset = Some(kind);
+            }
+            if r.dialog.is_some() {
+                self.out.dialog = r.dialog;
+            }
+            if let Some(s) = r.scale {
+                // Between frames: the next frame is built at the new scale.
+                self.set_scale_setting(s);
+            }
+            if let Some(text) = r.copy {
+                self.extras.copy_message = Some(match self.output {
+                    // Headless (tests): the clipboard of the PC is never touched.
+                    None => (true, "Copied.".to_string()),
+                    Some(owner) => match crate::shell::copy_text(owner, &text) {
+                        Ok(()) => (true, "Copied to the clipboard.".to_string()),
+                        Err(e) => (false, format!("Cannot copy: {e}")),
+                    },
+                });
+                self.copied = Some(text);
             }
         }
         if let Some(r) = picked {

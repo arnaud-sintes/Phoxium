@@ -244,6 +244,24 @@ fn file_value(id: &str, v: ParamValue) -> toml::Value {
     }
 }
 
+/// Longest user preset name, in characters.
+pub const MAX_PRESET_NAME: usize = 60;
+
+/// The file id of a user preset called `name`: lower case ASCII letters and digits, every other run of
+/// characters one `-` (`My Trinitron 2` -> `my-trinitron-2`). `None` when nothing is left.
+pub fn preset_id_for(name: &str) -> Option<String> {
+    let mut id = String::new();
+    for c in name.trim().chars() {
+        if c.is_ascii_alphanumeric() {
+            id.push(c.to_ascii_lowercase());
+        } else if !id.ends_with('-') && !id.is_empty() {
+            id.push('-');
+        }
+    }
+    let id = id.trim_end_matches('-').to_string();
+    (!id.is_empty()).then_some(id)
+}
+
 fn is_valid_id(id: &str) -> bool {
     !id.is_empty()
         && id

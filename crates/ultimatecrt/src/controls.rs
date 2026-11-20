@@ -24,6 +24,11 @@ pub trait UiHook {
     /// The UI wants the mouse and the keyboard (the menu is open, or ImGui captured the input). The host
     /// cursor is shown when this is true and hidden over the output otherwise.
     fn wants_input(&self) -> bool;
+    /// A registered hotkey was pressed (`pressed`, with its `chord`) while the menu may be waiting for a new chord
+    /// (the Hotkeys rows): true when the UI took it as the new chord, then the action is not run. Quit always runs.
+    fn capture_chord(&mut self, _pressed: Action, _chord: crate::hotkeys::Chord) -> bool {
+        false
+    }
 }
 
 /// A stand-in for the UI (tests, code without a window): the menu never opens and the overlay does nothing.

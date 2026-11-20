@@ -50,6 +50,8 @@ pub enum PickerAction {
     RefreshPreview,
     /// The "ask at every start" check box changed.
     AskAtStart(bool),
+    /// The first-run hint was dismissed; `true`: "Do not show again" was ticked.
+    FirstRunDone(bool),
 }
 
 /// A preview texture.
@@ -84,6 +86,10 @@ pub struct Picker {
     pub thumb_failed: Option<isize>,
     /// Icons by executable path: `None` when the file has none (a placeholder is drawn).
     pub icons: HashMap<String, Option<ManagedTextureId>>,
+    /// The first-run hint (the keys in force), shown on the card until dismissed; `None`: not shown.
+    pub first_run: Option<String>,
+    /// The hint's "Do not show again" box.
+    pub first_run_never: bool,
 }
 
 impl Picker {
@@ -288,6 +294,7 @@ fn card(ui: &Frame, p: &mut Picker, fonts: &Fonts, menu_key: &str, r: &mut Picke
         drop(wrap);
     });
     ui.dummy([0.0, 4.0 * s]);
+    first_run(ui, p, fonts, r);
     if let Some((ok, text)) = &p.message {
         theme::callout(
             ui,
@@ -393,6 +400,41 @@ fn card(ui: &Frame, p: &mut Picker, fonts: &Fonts, menu_key: &str, r: &mut Picke
             format!("Type to search  \u{00B7}  Up and Down choose  \u{00B7}  Enter or double-click captures  \u{00B7}  {esc}  \u{00B7}  {menu_key} settings"),
         );
     });
+}
+
+/// The first-run hint (owner request 2026-11-20): the keys in force, "Do not show again" and "Got it". Shown only
+/// on a first start (no settings file) until dismissed.
+fn first_run(ui: &Frame, p: &mut Picker, fonts: &Fonts, r: &mut PickerResult) {
+    let Some(text) = p.first_run.clone() else {
+        return;
+    };
+    let s = theme::scale_of(ui);
+    let lines = [
+        "First start".to_string(),
+        text,
+        "Settings, presets and hotkeys are all in the menu.".to_string(),
+    ];
+    let top = ui.cursor_screen_pos();
+    theme::callout(ui, PALETTE.accent, &lines);
+    let bottom = ui.item_rect_max()[1];
+    let _ = fonts;
+    r.items.push((
+        "picker:first_run".into(),
+        [top, [top[0] + ui.content_region_avail()[0], bottom]],
+    ));
+    let mut never = p.first_run_never;
+    if ui.checkbox("Do not show again", &mut never) {
+        p.first_run_never = never;
+    }
+    r.items.push(("picker:first_run_never".into(), rect(ui)));
+    let ok_w = ui.calc_text_size("Got it")[0] + 28.0 * s;
+    let right = ui.cursor_pos()[0] + ui.content_region_avail()[0];
+    ui.same_line_with_pos((right - ok_w).max(ui.cursor_pos()[0]));
+    if ui.button_with_size("Got it", [ok_w, ui.frame_height()]) {
+        r.action = Some(PickerAction::FirstRunDone(p.first_run_never));
+    }
+    r.items.push(("picker:first_run_ok".into(), rect(ui)));
+    ui.dummy([0.0, 2.0 * s]);
 }
 
 /// The search field: a frame with the query (or a hint) and a caret; the text comes from [`Picker::on_char`].

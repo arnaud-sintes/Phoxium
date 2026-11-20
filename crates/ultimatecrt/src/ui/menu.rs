@@ -18,7 +18,10 @@
 //! the parameter table ([`super::panels`], closed by default, each header with its count of changed
 //! parameters; the source panel starts with the placement readout of T-96); performance (GPU milliseconds per
 //! stage, T-21); GPU and system (adapter in use and the `[global.gpu] adapter` choice for the next start,
-//! hotkeys, settings folder). With a search, the body lists only the matching parameters of every panel.
+//! the hotkeys and their rebinding, `super::hotkeys_panel`, settings folder); Interface and About
+//! (`super::system_panels`). The Source section ends with the saved per-game profiles (`super::profiles_panel`),
+//! the preset tools open the preset files tools ("Manage files", `super::files_panel`). With a search, the body
+//! lists only the matching parameters of every panel.
 //! Position, size, opacity and the collapsed state persist in `settings.toml` (`[global.ui]`); the parameters,
 //! the preset and the adapter go back to the app through [`MenuResult`] (`super::UiOutput`).
 //!
@@ -241,7 +244,6 @@ pub struct SystemModel {
     pub gpu: Option<crate::adapters::Current>,
     /// `[global.gpu] adapter` as it is in the settings now (changed by the combo).
     pub gpu_setting: String,
-    pub hotkeys: Vec<HotkeyRow>,
     /// The settings folder, shown for reference.
     pub settings_dir: Option<PathBuf>,
 }
@@ -275,6 +277,14 @@ pub struct MenuModel<'a> {
     pub split_multiplier: &'a mut bool,
     /// Manual limits move in whole source pixels when a multiplier is known.
     pub snap_limits: &'a mut bool,
+    /// The hotkeys and their rebinding (GPU and system panel).
+    pub hotkeys: &'a mut super::hotkeys_panel::HotkeyModel,
+    /// The "Preset files" section.
+    pub files: &'a mut super::files_panel::FilesModel,
+    /// "Saved profiles" in the Source section.
+    pub profiles: &'a mut super::profiles_panel::ProfilesModel,
+    /// The Interface and About sections.
+    pub extras: &'a mut super::system_panels::ExtrasModel,
 }
 
 /// What the menu window did in one frame.
@@ -297,6 +307,18 @@ pub struct MenuResult {
     pub prefs_changed: bool,
     /// The layout (position, size, opacity, collapsed) changed.
     pub layout_changed: bool,
+    /// A hotkey change to register (Hotkeys rows).
+    pub hotkey: Option<super::hotkeys_panel::HotkeyEdit>,
+    /// A request of the "Saved profiles" list.
+    pub profile: Option<crate::profiles::ProfileAction>,
+    /// A confirmed reset (Interface section).
+    pub reset: Option<super::system_panels::ResetKind>,
+    /// A native dialog to open (Preset files).
+    pub dialog: Option<super::files_panel::DialogRequest>,
+    /// The UI scale chosen (Interface section).
+    pub scale: Option<crate::settings::UiScale>,
+    /// A text to put on the clipboard (About: the settings folder).
+    pub copy: Option<String>,
     pub rects: MenuRects,
     /// Widget rectangles by key: `label:<id>`, `widget:<id>` (`widget:<id>.<k>` for a vector component),
     /// `header:<panel>`, `reset:<panel>`, `search`, `advanced`, `revert`, `reload`, `preset_name`,
@@ -408,7 +430,8 @@ fn rect(ui: &Frame) -> [[f32; 2]; 2] {
     [ui.item_rect_min(), ui.item_rect_max()]
 }
 
-fn record(ui: &Frame, r: &mut MenuResult, key: &str) {
+/// Records the rectangle of the last item under `key` ([`MenuResult::items`]).
+pub(super) fn record(ui: &Frame, r: &mut MenuResult, key: &str) {
     r.items.push((key.to_string(), rect(ui)));
 }
 
@@ -486,6 +509,10 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     if open {
         system_rows(ui, m, r);
     }
+
+    // Interface (UI scale, resets) and About.
+    super::system_panels::interface(ui, &fonts, m.layout.scale, m.extras, r);
+    super::system_panels::about_section(ui, &fonts, m.extras, m.system, r);
 }
 
 /// The rectangle recorded under `key` in this frame (zero when absent).
@@ -675,6 +702,15 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
             "Read the preset files again (the shipped ones and the user folder).",
         );
     }
+    // The preset files tools (rename, delete, duplicate, export, import) open below the preset tools.
+    ui.same_line();
+    if theme::button(ui, if m.files.open { "Hide files" } else { "Manage files" }) {
+        m.files.open = !m.files.open;
+    }
+    record(ui, r, "files:toggle");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, "Rename, delete, duplicate, export and import preset files.");
+    }
     let changed = panels::PANELS
         .iter()
         .map(|p| panels::modified_count(m.params, reference, p.name))
@@ -730,6 +766,17 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
             ui.text_colored(if *ok { PALETTE.ok } else { PALETTE.problem }, text);
             drop(wrap);
         });
+    }
+    if m.files.open {
+        super::files_panel::section(
+            ui,
+            &fonts,
+            m.files,
+            m.library,
+            m.presets.dir.as_deref(),
+            m.state.preset.as_deref(),
+            r,
+        );
     }
 }
 
@@ -846,6 +893,9 @@ fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     }
     ui.same_line();
     theme::text_right(ui, PALETTE.text, &value);
+    let attached = m.state.source.attached.as_ref().and_then(|a| a.exe.clone());
+    let profiles = m.state.profiles.clone();
+    super::profiles_panel::rows(ui, &fonts, m.profiles, &profiles, attached.as_deref(), r);
 }
 
 /// A labelled slider row of a source preference (the lost-source wait style): the value text on the right.
@@ -896,7 +946,7 @@ pub fn picture_text(limits: &crate::bars::Bars, client: (u32, u32)) -> String {
 
 /// Places the next button of a row of [`theme::button`]s on the same line when `label` still fits in the content
 /// width, else on the next line (a narrow menu wraps the row instead of clipping it).
-fn same_line_if_fits(ui: &Frame, label: &str) {
+pub(super) fn same_line_if_fits(ui: &Frame, label: &str) {
     let s = theme::scale_of(ui);
     let spacing = ui.clone_style().item_spacing()[0];
     let width = ui.calc_text_size(label.split("##").next().unwrap_or(label))[0] + 20.0 * s;
@@ -1553,23 +1603,7 @@ fn system_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
         }
     }
 
-    theme::subheading(ui, &fonts, "Hotkeys");
-    for h in &m.system.hotkeys {
-        let (value, colour) = match &h.bound {
-            Some(b) if *b == h.wanted => (b.clone(), text),
-            Some(b) => (format!("{b}  ({} taken)", h.wanted), PALETTE.accent),
-            None => ("none".to_string(), PALETTE.problem),
-        };
-        theme::kv_row(ui, &h.action, &value, colour);
-    }
-    theme::with_font(ui, None, METRICS.font_small, || {
-        let wrap = ui.push_text_wrap_pos(0.0);
-        ui.text_colored(
-            PALETTE.text_faint,
-            "Chords are set in [global.hotkeys] of settings.toml and registered at start.",
-        );
-        drop(wrap);
-    });
+    super::hotkeys_panel::rows(ui, &fonts, m.hotkeys, r);
 
     theme::subheading(ui, &fonts, "Files");
     let dir = m

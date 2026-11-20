@@ -87,7 +87,11 @@ impl Live {
         params: &mut Params,
         lost: &mut LostWatch,
     ) {
-        for action in output::take_actions() {
+        for (action, chord) in output::take_actions() {
+            // The menu waiting for a new hotkey takes a registered chord as that new chord (Quit always runs).
+            if ui.capture_chord(action, chord) {
+                continue;
+            }
             if let Some(command) = controls::dispatch(action, &mut self.controls, ui) {
                 self.run(command, hwnd, renderer, params, lost);
             }
@@ -237,6 +241,64 @@ impl Live {
 
     fn mark_dirty(&mut self) {
         self.dirty_since = Some(std::time::Instant::now());
+    }
+
+    /// The hotkeys after a change in the menu (`[global.hotkeys]`, the chords asked for): written at once.
+    pub fn set_hotkeys(&mut self, chords: std::collections::BTreeMap<String, String>) {
+        if self.settings.global.hotkeys != chords {
+            self.settings.global.hotkeys = chords;
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    /// No settings file was found at start: the first-run hint is due (`[global.ui] first_run_done = false`,
+    /// written with the next write). The menu shows it until it is dismissed.
+    pub fn mark_first_run(&mut self) {
+        if self.settings.global.ui.first_run_done.is_none() {
+            self.settings.global.ui.first_run_done = Some(false);
+        }
+    }
+
+    /// "Reset look overrides": the look parameter overrides cleared (quality kept), written at once.
+    pub fn reset_look_overrides(&mut self) {
+        // The settings follow the preset in force first (a preset stepped by a hotkey).
+        let current = self.current_preset.clone().unwrap_or_default();
+        let g = &mut self.settings.global;
+        let mut changed = g.preset != current;
+        g.preset = current;
+        changed |= settings::reset_look_overrides(&mut g.overrides);
+        if changed {
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    /// "Reset everything to defaults" (`Settings::reset_everything`): the pending writes finish, a copy of
+    /// `settings.toml` is kept (`settings.toml.bak`), then the reset settings are written at once. Returns the
+    /// copy's path (`None`: no file, or the settings are never written).
+    pub fn reset_everything(&mut self) -> Option<PathBuf> {
+        self.flush_settings(true);
+        let _ = self.wait_saved();
+        let backup = self.settings_dir.as_deref().and_then(settings::backup_current);
+        if let Some(current) = self.current_preset.clone() {
+            self.settings.global.preset = current;
+        }
+        self.settings.reset_everything();
+        self.mark_dirty();
+        self.flush_settings(true);
+        backup
+    }
+
+    /// Removes the per-game profile of `exe` and `class` (the menu's "Saved profiles"): written at once. Returns
+    /// whether one was removed.
+    pub fn remove_source_profile(&mut self, exe: &str, class: &str) -> bool {
+        let removed = self.settings.remove_source(exe, class);
+        if removed {
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+        removed
     }
 
     /// Writes the settings when the menu changed them: once no change came for [`SAVE_DEBOUNCE`] (a slider
@@ -525,6 +587,70 @@ mod tests {
             .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
             .collect();
         assert_eq!(names, [settings::SETTINGS_FILE]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The menu's hotkeys, profile deletions and resets reach the settings file at once; "Reset everything" keeps
+    /// a copy of the file first and keeps the per-game profiles.
+    #[test]
+    fn hotkeys_profiles_and_resets_are_written_at_once() {
+        let dir = std::env::temp_dir().join(format!("ucrt-live-resets-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let lib = Library::embedded();
+        let id = lib.list()[0].id.clone();
+        let mut live = Live::new(
+            false,
+            Settings::default(),
+            Some(dir.clone()),
+            lib.clone(),
+            Some(id.clone()),
+            (800, 600),
+        );
+        // First run: due in memory, written with the next write.
+        live.mark_first_run();
+        assert!(live.settings().global.ui.first_run_due());
+        let mut chords = settings::default_hotkeys();
+        chords.insert("toggle_menu".into(), "Ctrl+Alt+M".into());
+        live.set_hotkeys(chords.clone());
+        let saved = stored(&live, &dir);
+        assert_eq!(saved.global.hotkeys, chords);
+        assert!(saved.global.ui.first_run_due());
+        // Profiles: removal written at once.
+        let profile = settings::SourceProfile {
+            exe: "game.exe".into(),
+            class: "C".into(),
+            divisor: Some(2),
+            ..settings::SourceProfile::default()
+        };
+        live.save_source_profile(&profile, false);
+        assert_eq!(stored(&live, &dir).sources.len(), 1);
+        assert!(!live.remove_source_profile("other.exe", "C"));
+        assert!(live.remove_source_profile("GAME.EXE", "c"));
+        assert!(stored(&live, &dir).sources.is_empty());
+        live.save_source_profile(&profile, false);
+        // Look overrides: cleared, quality kept.
+        let reference = lib.list()[0].params();
+        let mut after = reference;
+        after.exposure = 1.7;
+        after.quality_tier = crate::params::QUALITY_TIER_FAST;
+        live.note_params_edit(&reference, &after, &reference);
+        live.flush_settings(true);
+        live.reset_look_overrides();
+        let o = stored(&live, &dir).global.overrides;
+        assert_eq!(o.keys().collect::<Vec<_>>(), ["quality_tier"]);
+        // Everything: a copy first, then the defaults; the profile and the preset stay.
+        live.set_gpu_adapter("Intel".into());
+        let bak = live.reset_everything().expect("a copy of the file");
+        let before = settings::Settings::from_toml(&std::fs::read_to_string(&bak).unwrap()).unwrap();
+        assert_eq!(before.global.gpu.adapter, "Intel");
+        assert_eq!(before.global.hotkeys, chords);
+        let after = stored(&live, &dir);
+        assert_eq!(after.global.gpu.adapter, settings::GPU_ADAPTER_AUTO);
+        assert_eq!(after.global.hotkeys, settings::default_hotkeys());
+        assert!(after.global.overrides.is_empty());
+        assert_eq!(after.global.preset, id);
+        assert_eq!(after.sources, vec![profile]);
+        live.finish(HWND::default());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

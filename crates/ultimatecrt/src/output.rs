@@ -69,8 +69,8 @@ use crate::{
     ui::input as ui_input,
 };
 
-/// Hotkey actions received since the last [`take_actions`], in order.
-static ACTIONS: Mutex<Vec<Action>> = Mutex::new(Vec::new());
+/// Hotkey actions received since the last [`take_actions`], in order, with the chord pressed.
+static ACTIONS: Mutex<Vec<(Action, Chord)>> = Mutex::new(Vec::new());
 /// Set by `WM_DISPLAYCHANGE` (monitor layout or resolution changed), cleared by [`take_display_changed`].
 static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
 /// The host cursor is hidden over the client area (menu closed, output not click-through, T-57 and CAP-6).
@@ -420,8 +420,9 @@ pub fn default_outer_size(client: (i32, i32)) -> (i32, i32) {
     (r.right - r.left, r.bottom - r.top)
 }
 
-/// Hotkey actions received since the last call, in order (drained by the application loop).
-pub fn take_actions() -> Vec<Action> {
+/// Hotkey actions received since the last call, in order, each with the chord pressed (`WM_HOTKEY`'s `LPARAM`:
+/// the menu takes it as a new chord while it waits for one). Drained by the application loop.
+pub fn take_actions() -> Vec<(Action, Chord)> {
     std::mem::take(&mut *ACTIONS.lock().unwrap_or_else(|e| e.into_inner()))
 }
 
@@ -645,7 +646,9 @@ pub fn create(opts: &Options) -> Result<Output> {
         // T-54: every hotkey through one plan (wanted chord, then the documented fallbacks); each failure is
         // reported with its chord and Win32 error code, and kept in `Output::hotkeys` for the UI.
         let mut registrar = Win32Registrar { hwnd };
-        let registration = hotkeys::register_all(&mut registrar, &hotkeys::plan_registration(&opts.hotkeys));
+        let mut registration = hotkeys::register_all(&mut registrar, &hotkeys::plan_registration(&opts.hotkeys));
+        // A menu key other than its default keeps the documented fallback registered too.
+        hotkeys::update_menu_fallback(&mut registrar, &mut registration);
         for problem in registration.problems() {
             eprintln!("warning: {problem}");
         }
@@ -681,6 +684,25 @@ pub fn create(opts: &Options) -> Result<Output> {
             hinstance: hinstance.0 as isize,
             hotkeys: registration,
         })
+    }
+}
+
+impl Output {
+    /// Rebinds `action` to `chord` now (the menu's Hotkeys rows): `hotkeys::rebind` on this window's
+    /// registrations. `Ok`: the new chord is in force; `Err`: the old one is kept (the message says why, with the
+    /// Win32 reason when the system refused the chord).
+    pub fn rebind(&mut self, action: Action, chord: Chord) -> std::result::Result<String, String> {
+        hotkeys::rebind(
+            &mut Win32Registrar { hwnd: self.hwnd },
+            &mut self.hotkeys,
+            action,
+            chord,
+        )
+    }
+
+    /// Every action back to its default chord now ("Reset all hotkeys", "Reset everything"). Returns the problems.
+    pub fn reset_hotkeys(&mut self) -> Vec<String> {
+        hotkeys::reset_all(&mut Win32Registrar { hwnd: self.hwnd }, &mut self.hotkeys)
     }
 }
 
@@ -875,7 +897,12 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     // The window disappears at once, also when the loop is busy; the loop then shuts down.
                     request_quit(hwnd);
                 }
-                ACTIONS.lock().unwrap_or_else(|e| e.into_inner()).push(action);
+                // LPARAM: the MOD_* flags in the low word, the virtual key in the high word.
+                let chord = Chord {
+                    mods: hotkeys::Mods::from_bits(lparam.0 as u32 & 0xFFFF),
+                    vk: ((lparam.0 as usize >> 16) & 0xFFFF) as u16,
+                };
+                ACTIONS.lock().unwrap_or_else(|e| e.into_inner()).push((action, chord));
             }
             LRESULT(0)
         }
