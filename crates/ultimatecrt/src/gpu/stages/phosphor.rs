@@ -35,18 +35,25 @@
 //!
 //! **Time base (review R-10, R-11).** `phosphor_frame_rate_hz` 0, the default, is real time: the trail
 //! decays by the time that really passed between two output frames, so it lasts as long on a 144 Hz
-//! display as on a 60 Hz one. The fit is made for the automatic rate, the trimmed mean of the last
-//! [`RATE_WINDOW`] measured frame periods (`FrameConstants::frame_time_ms`; periods above
-//! [`crt_model::phosphor::MAX_FRAME_STEP_MS`] are pauses, dropped from the estimate, and the trim drops
-//! stalls and dropped frames), clamped to 10 to 240 Hz, whole hertz, and refitted only when the estimate
-//! moves by more than [`RATE_HYSTERESIS`] or settles on a new value (a refit restarts the history, primed
-//! to the picture). Each frame then applies the fit for its own
-//! measured period, clamped to `MAX_FRAME_STEP_MS` ([`FrameFeedback::at_step`]: rho_j' = rho_j^(dt / T),
-//! c_j' keeps each term's share of the steady state, so a static picture keeps its brightness under any
-//! frame jitter). The step of frame m (its measured period, the time since frame m - 1) decays the history
-//! that frame m leaves to frame m + 1: the period of frame m + 1 is not known yet, so the decay lags the
-//! measured periods by one frame, which changes the time of a trail by at most one frame's jitter. A
-//! positive value is the manual override and the previous behaviour: the trail decays per output frame
+//! display as on a 60 Hz one. The measured frame period (`FrameConstants::frame_time_ms`) is the CPU time
+//! between two recorded frames, not the display's: with frames in flight and a vsync-locked present the
+//! window loop's intervals are uneven around the display period (live review 2026-11-20: 0.3 to 2 ms then
+//! about 33 ms at 60 Hz), but their sum follows the display. So the automatic period is the plain mean of
+//! the last [`RATE_WINDOW`] measured periods (periods above [`crt_model::phosphor::MAX_FRAME_STEP_MS`] are
+//! pauses, dropped; a sample above [`SAMPLE_CAP`] times the current mean, a stall, counts as that much), and
+//! the fit is made for it, clamped to 10 to 240 Hz, whole hertz. The fit changes only once a new whole-hertz
+//! estimate has held for [`RATE_SETTLE`] frames in a row when it is more than [`RATE_HYSTERESIS`] away, for a
+//! full window otherwise (a refit restarts the history, primed to the picture, so it must stay rare). The
+//! earlier trimmed mean (the middle half of 31 sorted periods) jumped by about 13 % with every new sample under
+//! alternating short and long intervals and refitted, so restarted the history, at nearly every frame: no
+//! trail at all (the live A/B bypass report: the bypass changed the loop's pacing, and the trail stayed 0).
+//! Each frame then applies the fit for a step of the mean period ([`FrameFeedback::at_step`]: rho_j' =
+//! rho_j^(dt / T), c_j' keeps each term's share of the steady state, so a static picture keeps its brightness
+//! under any step); a measured period above [`STEP_GAP`] times the mean (a real pause or stall) steps by
+//! itself instead, clamped to `MAX_FRAME_STEP_MS`, so the trail still decays by the time that really passed.
+//! Stepping by the mean instead of each uneven interval keeps the trail even from frame to frame (the time a
+//! frame is shown is the display period, whatever the CPU interval); over a window it is the same total time.
+//! A positive value is the manual override and the previous behaviour: the trail decays per output frame
 //! with a fixed period 1 / rate, whatever time really passed (deterministic; the stage tests use it). The
 //! fits are cached per (rate, channel, tail strength).
 //!
@@ -255,20 +262,30 @@ fn set_channel(p: &mut Push, ch: usize, (w0, rho, c): ChannelWeights) {
 const AUTO_RATE_HZ: (f32, f32) = (10.0, 240.0);
 /// Rate of the automatic mode before a frame period was measured, Hz.
 const AUTO_RATE_DEFAULT_HZ: f32 = 60.0;
-/// Number of measured frame periods the automatic rate is estimated from.
-const RATE_WINDOW: usize = 31;
-/// Periods dropped at each end of the sorted window (a full window): the estimate is the mean of the middle
-/// 15, so up to 8 stalls or dropped frames in the window do not move it, and a period that alternates
-/// between two values (frame pacing) gives their mean, not one of them.
-const RATE_TRIM: usize = 8;
-/// Relative change of the automatic rate estimate that refits the trail at once. A smaller change refits
-/// only once the estimate has held the same whole-hertz value for a full window (a settled new rate). The
-/// per-frame real-time step already follows the measured period, so the fit rate only needs to be close;
-/// a refit (a grid search, up to a few ms, and a history restart) must not happen on frame-time jitter.
+/// Number of measured frame periods the automatic period is the mean of (about 1 s at 60 Hz). Under uneven
+/// pacing whose intervals span 0 to 2 display periods, one new sample moves the mean by at most 2 / 64 of a
+/// period (3 %), below [`RATE_HYSTERESIS`].
+const RATE_WINDOW: usize = 64;
+/// A sample above this many times the current mean period (a stall) enters the mean as that much, once the window
+/// is full, so one stall moves a window's mean by a few percent at most; a dropped frame (2 periods) or the long
+/// half of uneven pacing counts in full. A real rate drop still gets through: the cap follows the mean up window
+/// after window (and the frame step follows the measured period at once, [`STEP_GAP`]).
+const SAMPLE_CAP: f32 = 2.5;
+/// A measured period above this many times the mean period is a gap (a stall or a pause): the frame steps by
+/// that period (clamped to `MAX_FRAME_STEP_MS`) instead of the mean, so the trail decays by the time that really
+/// passed. Below it, the period is pacing jitter and the frame steps by the mean.
+const STEP_GAP: f64 = 3.0;
+/// Relative distance between the estimate and the fit rate beyond which a new estimate is taken once it held
+/// [`RATE_SETTLE`] frames; a closer one must hold a full [`RATE_WINDOW`]. The per-frame step already follows the
+/// mean period, so the fit rate only needs to be close; a refit (a grid search, up to a few ms, and a history
+/// restart) must never follow frame-time jitter.
 const RATE_HYSTERESIS: f32 = 0.05;
+/// Frames a new whole-hertz estimate more than [`RATE_HYSTERESIS`] away must hold before it is taken (a display
+/// rate change: the mean moves over a window, then settles).
+const RATE_SETTLE: usize = 16;
 
 /// The automatic rate: the last [`RATE_WINDOW`] valid frame periods and the rate the fit was made for.
-#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 struct AutoRate {
     periods_ms: [f32; RATE_WINDOW],
     len: usize,
@@ -280,54 +297,88 @@ struct AutoRate {
     candidate_frames: usize,
 }
 
+impl Default for AutoRate {
+    fn default() -> Self {
+        Self {
+            periods_ms: [0.0; RATE_WINDOW],
+            len: 0,
+            next: 0,
+            fit_hz: 0.0,
+            candidate_hz: 0.0,
+            candidate_frames: 0,
+        }
+    }
+}
+
 impl AutoRate {
     /// Adds a measured frame period when it is a rate sample ([`is_rate_sample`]: a measurement no longer
-    /// than `MAX_FRAME_STEP_MS`); pauses and missing measurements are dropped.
+    /// than `MAX_FRAME_STEP_MS`), capped at [`SAMPLE_CAP`] times the current mean; pauses and missing
+    /// measurements are dropped.
     fn observe(&mut self, frame_ms: f32) {
         if is_rate_sample(f64::from(frame_ms)) {
-            self.periods_ms[self.next] = frame_ms;
+            // The cap applies once the window is full: during the first window a mean of a few samples (the short
+            // half of uneven pacing, say) would cap the long half and bias the mean for many windows.
+            let v = match self.mean_period_ms() {
+                Some(m) if self.len == RATE_WINDOW => frame_ms.min(SAMPLE_CAP * m as f32),
+                _ => frame_ms,
+            };
+            self.periods_ms[self.next] = v;
             self.next = (self.next + 1) % RATE_WINDOW;
             self.len = (self.len + 1).min(RATE_WINDOW);
         }
     }
 
-    /// The trimmed mean period (a quarter of the samples dropped at each end, [`RATE_TRIM`] in a full
-    /// window) as a rate, clamped to [`AUTO_RATE_HZ`] and rounded to whole hertz; [`AUTO_RATE_DEFAULT_HZ`]
-    /// before any sample.
-    fn estimate_hz(&self) -> f32 {
-        if self.len == 0 {
-            return AUTO_RATE_DEFAULT_HZ;
-        }
-        let mut v = self.periods_ms;
-        let v = &mut v[..self.len];
-        v.sort_by(f32::total_cmp);
-        let trim = (self.len * RATE_TRIM) / RATE_WINDOW;
-        let mid = &v[trim..self.len - trim];
-        let mean = mid.iter().map(|&x| f64::from(x)).sum::<f64>() / mid.len() as f64;
-        ((1000.0 / mean) as f32).clamp(AUTO_RATE_HZ.0, AUTO_RATE_HZ.1).round()
+    /// The mean of the periods in the window, ms; `None` before any sample.
+    fn mean_period_ms(&self) -> Option<f64> {
+        (self.len > 0).then(|| self.periods_ms[..self.len].iter().map(|&x| f64::from(x)).sum::<f64>() / self.len as f64)
     }
 
-    /// The fit rate after this frame's estimate: the estimate when there is no fit yet, when it moved by
-    /// more than [`RATE_HYSTERESIS`], or when it held one other value for [`RATE_WINDOW`] frames in a row;
-    /// otherwise the current fit rate.
+    /// The mean period as a rate, clamped to [`AUTO_RATE_HZ`] and rounded to whole hertz;
+    /// [`AUTO_RATE_DEFAULT_HZ`] before any sample.
+    fn estimate_hz(&self) -> f32 {
+        self.mean_period_ms().map_or(AUTO_RATE_DEFAULT_HZ, |mean| {
+            ((1000.0 / mean) as f32).clamp(AUTO_RATE_HZ.0, AUTO_RATE_HZ.1).round()
+        })
+    }
+
+    /// The fit rate after this frame's estimate: the estimate when there is no fit yet, or, once the window is
+    /// full, when the estimate stayed other than the fit rate and within half the hysteresis of one value (it
+    /// settled: the mean of uneven intervals wanders by a hertz or so) for [`RATE_SETTLE`] frames in a row (more
+    /// than [`RATE_HYSTERESIS`] away from the fit) or for [`RATE_WINDOW`] frames (closer); otherwise the current
+    /// fit rate.
     fn fit_rate_hz(&mut self) -> f32 {
         let est = self.estimate_hz();
         if est == self.fit_hz {
             self.candidate_frames = 0;
-        } else if est == self.candidate_hz {
+        } else if (est - self.candidate_hz).abs() <= 0.5 * RATE_HYSTERESIS * self.candidate_hz {
             self.candidate_frames += 1;
         } else {
             self.candidate_hz = est;
             self.candidate_frames = 1;
         }
-        if self.fit_hz <= 0.0
-            || (est - self.fit_hz).abs() > RATE_HYSTERESIS * self.fit_hz
-            || self.candidate_frames >= RATE_WINDOW
-        {
+        let hold = if (est - self.fit_hz).abs() > RATE_HYSTERESIS * self.fit_hz {
+            RATE_SETTLE
+        } else {
+            RATE_WINDOW
+        };
+        // Before the window is full the mean of a few uneven intervals moves too much to refit on (the first
+        // fit comes from the first sample; the frame step already follows the mean).
+        if self.fit_hz <= 0.0 || (self.len == RATE_WINDOW && self.candidate_frames >= hold) {
             self.fit_hz = est;
             self.candidate_frames = 0;
         }
         self.fit_hz
+    }
+
+    /// The real-time step of a frame whose measured period is `frame_ms`: the mean period, or the measured
+    /// period clamped to `MAX_FRAME_STEP_MS` when it is a gap (above [`STEP_GAP`] times the mean); `fit_ms` when
+    /// nothing was measured (the first frame).
+    fn step_ms(&self, frame_ms: f32, fit_ms: f64) -> f64 {
+        match (frame_step_ms(f64::from(frame_ms)), self.mean_period_ms()) {
+            (None, _) => fit_ms,
+            (Some(_), Some(mean)) if f64::from(frame_ms) <= STEP_GAP * mean => mean,
+            (Some(step), _) => step,
+        }
     }
 }
 /// The trail frame rate of a frame: `manual_hz` when positive; else (automatic, value 0) the fit rate of
@@ -412,7 +463,8 @@ impl Phosphor {
     /// strength or an artistic control changed (the history's terms belong to the old fit; restarting it primes
     /// it to the picture, so a static picture keeps its brightness while a slider moves instead of flashing).
     /// Manual (`manual_hz` > 0): the fit of that rate, per frame. Automatic: the fit of the automatic rate for
-    /// this frame's step, clamped ([`frame_step_ms`]; no measurement, the first frame, steps by the fit period).
+    /// this frame's step ([`AutoRate::step_ms`]: the mean period, or the measured one for a gap; no measurement,
+    /// the first frame, steps by the fit period).
     fn frame_weights(&mut self, manual_hz: f32, tail: [f32; 3], ctl: Controls, frame_ms: f32) -> (Push, bool) {
         let rate = trail_rate_hz(manual_hz, frame_ms, &mut self.auto);
         let key: FitsKey = (
@@ -429,11 +481,11 @@ impl Phosphor {
         }
         let mut p = Push::default();
         let fit_ms = fit_period_ms(rate);
+        let step = self.auto.step_ms(frame_ms, fit_ms);
         for (ch, fb) in self.fits.iter().enumerate() {
             let w = if manual_hz > 0.0 {
                 per_frame_f32(fb)
             } else {
-                let step = frame_step_ms(f64::from(frame_ms)).unwrap_or(fit_ms);
                 real_time_f32(fb, fit_ms, step)
             };
             set_channel(&mut p, ch, w);
@@ -703,23 +755,27 @@ mod tests {
         assert_eq!(s.fits_computed, 7, "a new rate refits every channel");
     }
 
-    /// Automatic rate: manual values win, 0 follows the median measured period (clamped, whole hertz),
-    /// 60 Hz before any measurement; a lone dropped frame does not move it, a real rate change does after
-    /// half the window, jitter within the hysteresis does not refit.
+    /// Automatic rate: manual values win, 0 follows the mean measured period (clamped, whole hertz),
+    /// 60 Hz before any measurement; a dropped frame and a stall move it by less than the hysteresis and do not
+    /// refit, a real rate change does once settled, jitter within the hysteresis does not refit.
     #[test]
     fn automatic_rate() {
         let mut a = AutoRate::default();
         assert_eq!(trail_rate_hz(0.0, 0.0, &mut a), AUTO_RATE_DEFAULT_HZ);
         let mut a = AutoRate::default();
         assert_eq!(trail_rate_hz(0.0, 1000.0 / 144.0, &mut a), 144.0);
-        // Dropped frames (13.9 ms) and a stall (200 ms) do not move a 144 Hz estimate.
+        // A dropped frame (13.9 ms) and a stall (200 ms, capped once the window is full) do not refit a 144 Hz fit.
+        for _ in 0..RATE_WINDOW {
+            assert_eq!(trail_rate_hz(0.0, 1000.0 / 144.0, &mut a), 144.0);
+        }
         for k in 0..60 {
-            let ms = match k % 10 {
+            let ms = match k {
                 3 => 2000.0 / 144.0,
-                7 if k == 37 => 200.0,
+                37 => 200.0,
                 _ => 1000.0 / 144.0,
             };
             assert_eq!(trail_rate_hz(0.0, ms, &mut a), 144.0, "frame {k}");
+            assert!((a.estimate_hz() - 144.0).abs() <= RATE_HYSTERESIS * 144.0, "frame {k}");
         }
         assert_eq!(trail_rate_hz(75.0, 20.0, &mut a), 75.0, "manual override");
         // The display goes to 60 Hz: followed, and settled on exactly 60 Hz.
@@ -742,7 +798,8 @@ mod tests {
             let ms = if k % 2 == 0 { 0.8 * p } else { 1.2 * p };
             fits.push(trail_rate_hz(0.0, ms, &mut b));
         }
-        let settled = &fits[RATE_WINDOW..];
+        // The first sample (0.8 p) gives the first fit; the mean settles on 144 Hz over the window, then the fit.
+        let settled = &fits[RATE_WINDOW + 2 * RATE_SETTLE..];
         assert!(
             settled.windows(2).all(|w| w[0] == w[1]),
             "refits under jitter: {fits:?}"
@@ -836,7 +893,8 @@ mod tests {
         let jitter: Vec<f32> = (0..80)
             .map(|k| if k % 2 == 0 { 0.8 * p144 } else { 1.2 * p144 })
             .collect();
-        let lit: Vec<f32> = (0..40)
+        // Long enough for the first fit (made from the first sample) to settle before the trail is measured.
+        let lit: Vec<f32> = (0..2 * RATE_WINDOW)
             .map(|k| if k % 2 == 0 { 0.8 * p144 } else { 1.2 * p144 })
             .collect();
         let cj = simulate(0.0, &lit, &jitter);
@@ -900,8 +958,9 @@ mod tests {
 
     /// Owner feedback 2026-11-20 (the trail missing live): a history restart drops the trail, so count them in the
     /// automatic mode. A steady 60 Hz display with frame pacing jitter (16.3 / 17.1 ms) and a dropped frame
-    /// (33.4 ms) every 50 frames: one restart while the first estimate settles, none after. A display rate change (60 to 144 Hz): restarts only while the
-    /// estimate moves, all within the first window of the new rate (31 frames), then none.
+    /// (33.4 ms) every 50 frames: at most one restart while the first estimate settles, none after. A display rate
+    /// change (60 to 144 Hz): at most two restarts, all within the first window of the new rate plus the settling
+    /// time, then none.
     #[test]
     fn rate_change_restarts_the_trail_only_while_it_settles() {
         let mut s = Phosphor::default();
@@ -919,8 +978,8 @@ mod tests {
                 restarts.push(k);
             }
         }
-        // The first sample alone reads 61 Hz; the 60 Hz estimate is within the hysteresis, so it is taken once it
-        // held for a full window: one restart at the start, none after.
+        // The first sample alone reads 61 Hz; the mean (59 Hz with the dropped frames) is within the hysteresis, so
+        // it is taken only once it held for a full window: at most one restart at the start, none after.
         println!("steady 60 Hz with jitter: history restarts at frames {restarts:?}");
         assert!(restarts.iter().all(|&k| k <= 2 * RATE_WINDOW), "{restarts:?}");
         assert!(restarts.len() <= 1, "{restarts:?}");
@@ -928,8 +987,82 @@ mod tests {
             .filter(|_| s.frame_weights(0.0, [1.0; 3], ctl, 1000.0 / 144.0).1)
             .collect();
         println!("60 to 144 Hz: history restarts at frames {at:?} of the new rate");
-        assert!(!at.is_empty() && at.iter().all(|&k| k < RATE_WINDOW), "{at:?}");
+        assert!(
+            !at.is_empty() && at.len() <= 2 && at.iter().all(|&k| k < RATE_WINDOW + 2 * RATE_SETTLE),
+            "{at:?}"
+        );
         assert_eq!(s.auto.fit_hz, 144.0);
+    }
+
+    /// Live review 2026-11-20 (the trail lost after the A/B bypass, and "no trail at all"): the window loop's CPU
+    /// intervals are uneven around the display period (with frames in flight a record can follow the previous one
+    /// within a millisecond, then wait for the next vertical blank). Strictly alternating 1 / 32.3 ms (mean 16.67)
+    /// and phase-locked random intervals (record time m T + a random phase in [0, T), so each interval is
+    /// T plus a phase difference, 0 to 2 T): at most one history restart in 10 s (the old trimmed-mean estimate
+    /// restarted it at 599 of 600 frames), the fit settles on 60 Hz, and every frame steps by the mean period, so
+    /// the push constants are those of a steady 60 Hz within 3 % of the step (the trail does not flicker with the
+    /// pacing).
+    #[test]
+    fn uneven_pacing_keeps_the_trail() {
+        let t = 1000.0_f32 / 60.0;
+        let mut seed = 0x2545_f491_u32;
+        let mut rnd = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 17;
+            seed ^= seed << 5;
+            f64::from(seed) / f64::from(u32::MAX)
+        };
+        let mut phase_prev = 0.0;
+        let random: Vec<f32> = (0..600)
+            .map(|_| {
+                let phase = rnd() * f64::from(t);
+                let dt = f64::from(t) + phase - phase_prev;
+                phase_prev = phase;
+                dt.max(0.05) as f32
+            })
+            .collect();
+        let alternating: Vec<f32> = (0..600).map(|k| if k % 2 == 0 { 1.0 } else { 2.0 * t - 1.0 }).collect();
+        let steady = {
+            let mut s = Phosphor::default();
+            let mut p = Push::default();
+            for _ in 0..200 {
+                p = s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, t).0;
+            }
+            p
+        };
+        for (name, periods) in [("alternating", &alternating), ("phase-locked random", &random)] {
+            let mut s = Phosphor::default();
+            let mut restarts = Vec::new();
+            let mut worst = 0.0_f64;
+            let mut worst_c = 0.0_f32;
+            for (k, &ms) in periods.iter().enumerate() {
+                let (p, refit) = s.frame_weights(0.0, [1.0; 3], Controls::PHYSICAL, ms);
+                if refit {
+                    restarts.push(k);
+                }
+                if k >= 2 * RATE_WINDOW {
+                    let step = s.auto.step_ms(ms, fit_period_ms(s.auto.fit_hz));
+                    worst = worst.max((step / f64::from(t) - 1.0).abs());
+                    // The green and blue trail one frame after an excitation, w0 sum_j c_j (relative to the
+                    // excitation), against a steady 60 Hz: the trail does not flicker with the pacing.
+                    for ch in 1..3 {
+                        let trail = |q: &Push| q.w0[ch] * q.c[ch].iter().sum::<f32>();
+                        worst_c = worst_c.max((trail(&p) / trail(&steady) - 1.0).abs());
+                    }
+                }
+            }
+            println!(
+                "{name}: restarts at {restarts:?}, fit {} Hz, worst step deviation {:.2} %, worst trail deviation \
+                 {:.2} %",
+                s.auto.fit_hz,
+                100.0 * worst,
+                100.0 * worst_c
+            );
+            assert!(restarts.len() <= 1, "{name}: {restarts:?}");
+            assert!((s.auto.fit_hz - 60.0).abs() <= 1.0, "{name}");
+            assert!(worst < 0.03, "{name}: {worst}");
+            assert!(worst_c < 0.03, "{name}: {worst_c}");
+        }
     }
 
     /// A change of a control or a tail strength restarts the history (primed to the picture), an unchanged frame
