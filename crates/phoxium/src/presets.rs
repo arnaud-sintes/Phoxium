@@ -1725,6 +1725,8 @@ mod tests {
             let q = p.params();
             assert!(q.phosphor_persistence, "{}", p.id);
             assert_eq!(q.phosphor_tail_strength_rgb, [1.0; 3], "{}", p.id);
+            // Half the trail in every preset (owner decision 2026-11-21, QUESTIONS PHY-18).
+            assert_eq!(q.phosphor_persistence_blend, 0.5, "{}", p.id);
             let tv = ["kv-trinitron-tv", "slot-tv-26in", "tv-13in"].contains(&p.id.as_str());
             assert_eq!(q.abl_enable, tv, "{}", p.id);
             if tv {
@@ -1734,7 +1736,12 @@ mod tests {
             assert_eq!(q.phosphor_saturation, d.phosphor_saturation, "{}", p.id);
             assert_eq!(q.mask_tier_blend, d.mask_tier_blend, "{}", p.id);
             assert_ne!(q.geometry_curvature, crate::params::GEOMETRY_CURVATURE_FLAT, "{}", p.id);
-            for k in ["geometry_curvature", "geometry_radius_mm", "phosphor_persistence"] {
+            for k in [
+                "geometry_curvature",
+                "geometry_radius_mm",
+                "phosphor_persistence",
+                "phosphor_persistence_blend",
+            ] {
                 assert!(
                     p.values.iter().any(|(id, _)| *id == k) && p.provenance.contains_key(k),
                     "{}: {k}",

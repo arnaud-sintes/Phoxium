@@ -56,10 +56,11 @@ pub const OPTICS: &str = "Optics";
 /// The explanation at the top of the Phosphor panel: what the trail is, its physical default, how to get more.
 const PHOSPHOR_INTRO: &str =
     "Persistence is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a \
-     fading trail. The default is the measured colour-TV phosphor (P22): a faint green and blue trail of about \
-     5, 3 and 2 % of a frame over the next frames at 60 Hz, none for red. That is physically right but easy to \
-     miss. For a clearly visible trail, raise Extra afterglow (for example 0.5 to 1 at 100 to 300 ms) or Decay \
-     scale; both go beyond the real tube. A still picture keeps its brightness either way.";
+     fading trail. The model is the measured colour-TV phosphor (P22): a green and blue trail of about 5, 3 and \
+     2 % of a frame over the next frames at 60 Hz, none for red. Persistence blend sets how much of that trail \
+     you see, from 0 (none) to 1 (all of it); the default 0.5 shows half. For a longer trail, raise Extra \
+     afterglow (for example 0.5 to 1 at 100 to 300 ms) or Decay scale; both go beyond the real tube. A still \
+     picture keeps its brightness either way.";
 
 /// The sentence at the top of the Optics panel: its effects are behind the master switch, off by default.
 pub const OPTICS_INTRO: &str =
@@ -1199,7 +1200,9 @@ mod tests {
         }
         let text = panel("Phosphor").and_then(|p| p.intro).expect("phosphor intro");
         assert!(text.contains("P22") && text.contains("Extra afterglow") && text.contains("Decay scale"));
+        assert!(text.contains("Persistence blend"));
         let m = |id| crate::params::meta(id).unwrap();
+        assert_eq!(label(m("phosphor_persistence_blend")), "Persistence blend");
         assert_eq!(label(m("phosphor_decay_scale")), "Decay scale");
         assert_eq!(label(m("phosphor_extra_afterglow_rgb")), "Extra afterglow");
         assert_eq!(label(m("phosphor_extra_afterglow_time_ms")), "Extra afterglow time");

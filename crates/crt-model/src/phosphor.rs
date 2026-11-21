@@ -539,6 +539,53 @@ impl FrameFeedback {
     pub fn trail_sum(&self) -> f64 {
         self.rho.iter().zip(self.c).map(|(&rho, c)| c / (1.0 - rho)).sum()
     }
+
+    /// One frame of the recurrence with the global trail balance `blend` (`phosphor_persistence_blend`): the
+    /// history advances exactly as in [`FrameFeedback::step`] and the output is
+    /// [`blend_trail`]`(x, y, blend)`. [D]
+    pub fn step_blended(&self, s: &mut [f64; FEEDBACK_TERMS], x: f64, blend: f64) -> f64 {
+        let y = self.step(s, x);
+        blend_trail(x, y, blend)
+    }
+}
+
+/// The blend the renderer uses for a parameter value (`phosphor_persistence_blend`): clamped to [0, 1], NaN read
+/// as 0 (no trail), as `persistence_blend` in `shaders/phosphor.comp`. [D]
+pub fn effective_blend(blend: f64) -> f64 {
+    if blend > 0.0 {
+        blend.min(1.0)
+    } else {
+        0.0
+    }
+}
+
+/// The global balance of the persistence trail (owner feedback 2026-11-21, QUESTIONS PHY-18): the linear mix
+/// out = x + b (y - x) between the light of the frame without any trail, `x`, and the frame with the full trail,
+/// `y` (the output of the recurrence, [`FrameFeedback::step`]), b = [`effective_blend`]`(blend)`. b = 1 is `y`
+/// and b = 0 is `x` exactly; a static picture (y = x) is unchanged at any b. Since the trail part is linear in
+/// the history, the trail of a single excitation is scaled by b in absolute terms (see
+/// [`blended_trail_ratio`]). [D]
+pub fn blend_trail(x: f64, y: f64, blend: f64) -> f64 {
+    let b = effective_blend(blend);
+    if b >= 1.0 {
+        y
+    } else if b <= 0.0 {
+        x
+    } else {
+        x + b * (y - x)
+    }
+}
+
+/// y_k / y_0 after a single excitation X at frame 0 (the history primed to 0 before it) under the blend b, for
+/// a recurrence of weight `w0` whose unblended ratio is `trail` = t_k. Derived by hand: unblended,
+/// y_0 = w0 X and y_k = w0 t_k X (k >= 1, the frame's own light x_k = 0); blended,
+/// y_0 = X + b (w0 X - X) = X (1 - b (1 - w0)) and y_k = 0 + b w0 t_k X, so the ratio is
+/// b w0 t_k / (1 - b (1 - w0)): t_k at b = 1, 0 at b = 0, and at b = 1/2 the trail is half its unblended
+/// level relative to X (y_k / X = w0 t_k / 2) while the frame itself gets back half of what the trail took
+/// from it. [D]
+pub fn blended_trail_ratio(w0: f64, trail: f64, blend: f64) -> f64 {
+    let b = effective_blend(blend);
+    b * w0 * trail / (1.0 - b * (1.0 - w0))
 }
 
 /// Amplitudes c of three geometric terms with distinct rates `rho`, exact at the first three
@@ -1574,5 +1621,81 @@ mod tests {
     #[should_panic(expected = "frame")]
     fn zero_frame_panics() {
         KUHN_GREEN.frame_energy_ratios(0.0);
+    }
+}
+
+#[cfg(test)]
+mod blend_tests {
+    use super::*;
+    use crate::close;
+    use crate::units::frame_period_ms;
+
+    /// The blend clamps to [0, 1] and reads NaN as 0; its ends are exact (x at 0, y at 1), the middle is the
+    /// linear mix, and a static picture (y = x) is unchanged at any value.
+    #[test]
+    fn blend_ends_middle_and_range() {
+        let (x, y) = (0.3, 0.7);
+        assert_eq!(blend_trail(x, y, 0.0), x);
+        assert_eq!(blend_trail(x, y, 1.0), y);
+        assert!(close(blend_trail(x, y, 0.5), 0.5, 1e-15));
+        assert!(close(blend_trail(x, y, 0.25), 0.4, 1e-15));
+        assert_eq!(blend_trail(x, y, -1.0), x);
+        assert_eq!(blend_trail(x, y, f64::NAN), x);
+        assert_eq!(blend_trail(x, y, 2.0), y);
+        assert_eq!(blend_trail(x, y, f64::INFINITY), y);
+        for b in [0.0, 0.1, 0.5, 0.9, 1.0] {
+            assert_eq!(blend_trail(0.42, 0.42, b), 0.42);
+        }
+        assert_eq!(effective_blend(0.5), 0.5);
+        assert_eq!(effective_blend(f64::NAN), 0.0);
+    }
+
+    /// The recurrence with the blend, against the closed form of [`blended_trail_ratio`] (Kuhn green, 60 Hz): a
+    /// single excitation then black frames. Blend 1 is `step` exactly, 0 has no trail at all, 0.5 gives half the
+    /// trail level relative to the excitation; the history is the same at every blend (the blend only touches
+    /// the output), so a change of the value takes effect without a restart. A static picture stays at x.
+    #[test]
+    fn blended_recurrence_follows_the_closed_form() {
+        let t = frame_period_ms(60.0);
+        let fb = KUHN_GREEN.frame_feedback(t, TRAIL_HORIZON_MS);
+        let x0 = 1.0;
+        let run = |blend: f64| {
+            let mut s = [0.0; FEEDBACK_TERMS];
+            let mut out = vec![fb.step_blended(&mut s, x0, blend)];
+            for _ in 1..10 {
+                out.push(fb.step_blended(&mut s, 0.0, blend));
+            }
+            (out, s)
+        };
+        let (full, s_full) = run(1.0);
+        let (none, s_none) = run(0.0);
+        let (half, s_half) = run(0.5);
+        assert_eq!(s_full, s_none, "the history does not depend on the blend");
+        assert_eq!(s_full, s_half);
+        let mut s = [0.0; FEEDBACK_TERMS];
+        assert_eq!(full[0], fb.step(&mut s, x0), "blend 1 is the plain recurrence");
+        assert_eq!(none[0], x0);
+        for k in 1..10 {
+            assert_eq!(none[k], 0.0, "blend 0: no trail at frame {k}");
+            assert!(close(half[k], 0.5 * full[k], 1e-15), "blend 0.5 halves the trail level");
+            let tk = fb.trail(k as u32);
+            for (b, out) in [(1.0, &full), (0.5, &half)] {
+                let ratio = out[k] / out[0];
+                assert!(
+                    close(ratio, blended_trail_ratio(fb.w0, tk, b), 1e-12),
+                    "blend {b} k {k}: {ratio} vs {}",
+                    blended_trail_ratio(fb.w0, tk, b)
+                );
+            }
+        }
+        assert!(close(blended_trail_ratio(fb.w0, 0.05, 1.0), 0.05, 1e-15));
+        assert_eq!(blended_trail_ratio(fb.w0, 0.05, 0.0), 0.0);
+        // Static picture: primed history, y = x whatever the blend.
+        for b in [0.0, 0.5, 1.0] {
+            let mut s = fb.steady_history(0.8);
+            for _ in 0..5 {
+                assert!(close(fb.step_blended(&mut s, 0.8, b), 0.8, 1e-12));
+            }
+        }
     }
 }

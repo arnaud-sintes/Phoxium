@@ -17,7 +17,8 @@
 // mode the CPU recomputes rho_j and c_j every frame from the measured frame period (review R-11:
 // rho_j = exp(-dt / tau_j), c_j / (1 - rho_j) kept), so the same recurrence decays by real time. The artistic
 // controls (phosphor_decay_scale, phosphor_extra_afterglow_*; QUESTIONS PHY-17) change only the CPU fit, so they
-// arrive here as other rho_j, c_j and w0.
+// arrive here as other rho_j, c_j and w0. The output y is then mixed with x by phosphor_persistence_blend
+// (persistence_blend below); the history recurrence does not see it.
 //
 // History: three RGBA32F storage images owned by the stage (set 1), read and written in place by the same
 // invocation (each texel by one invocation only). Term j < 3 is in image j (rgb), term 3 in the alpha of
@@ -48,6 +49,22 @@ layout(push_constant) uniform Persistence {
 } pc;
 
 const float FLUSH = 5.9604645e-8; // 2^-24
+
+// The global balance of the trail (params.phosphor_persistence_blend, owner feedback 2026-11-21, QUESTIONS
+// PHY-18; oracle crt_model::phosphor::blend_trail): mix(x, y, blend) between the frame without any trail (x) and
+// the frame with the full trail (y). Only the output is mixed; the history above is updated from x as always, so
+// a change of the value is instant (no restart). 1 returns y itself and 0 returns x itself (bit for bit, through
+// the selects); NaN and values below 0 act as 0, values above 1 as 1. A static picture (y = x) is unchanged.
+float persistence_blend(float x, float y) {
+    float b = params.phosphor_persistence_blend;
+    if (b >= 1.0) {
+        return y;
+    }
+    if (!(b > 0.0)) {
+        return x;
+    }
+    return x + b * (y - x);
+}
 
 // v with every NaN or infinite component replaced by 0 (ordered compare: false for NaN).
 vec4 finite_or_zero(vec4 v) {
@@ -89,7 +106,7 @@ void main() {
             vec4 open = vec4(1.0) - pc.rho[ch];
             t = mix(vec4(0.0), pc.c[ch] * x[ch] / open, greaterThan(open, vec4(0.0)));
         }
-        y[ch] = pc.w0[ch] * (x[ch] + ((t.x + t.y) + (t.z + t.w)));
+        y[ch] = persistence_blend(x[ch], pc.w0[ch] * (x[ch] + ((t.x + t.y) + (t.z + t.w))));
         vec4 n = pc.rho[ch] * t + pc.c[ch] * x[ch];
         s[ch] = mix(n, vec4(0.0), lessThan(abs(n), vec4(FLUSH)));
     }

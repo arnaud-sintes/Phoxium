@@ -32,6 +32,7 @@ geometry_curvature = "spherical"
 geometry_radius_mm = 795.0
 phosphor_persistence = true
 phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+phosphor_persistence_blend = 0.5
 exposure = 0.74
 output_match_srgb = false
 output_dither = "noise"
@@ -58,6 +59,7 @@ geometry_curvature = "E: CRT.md Faceplate curvature: spherical 1R, most pre-1990
 geometry_radius_mm = "E: CRT.md Faceplate curvature: 1R = 1.767 x 450 mm diagonal = 795 mm (sagitta table: 7.2 % of the diagonal at the corner)"
 phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown [T-87: was D; D covers only the first-frame energy ratios E1/E0; the tail beyond 2 ms is E (phosphor_tail_strength_rgb)]"
 phosphor_tail_strength_rgb = "E: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1) [T-87: was S; the Kuhn P22 power-law tail is extrapolated beyond 2 ms from another sample, not measured on this tube]"
+phosphor_persistence_blend = "E: owner decision 2026-11-21 (QUESTIONS PHY-18): the full modelled trail looked too strong, so the shipped presets show half of it (0.5); an artistic balance, not a property of the tube; 1 is the full trail of the Kuhn P22 fit"
 exposure = "D: D93 white has linear sRGB blue 1.343 at Y = 1, so exposure <= 0.745; this bounds the unmasked white only: the mask and scanline peaks lift elements above panel white (headroom readout 3.712 on 2560 x 1440), handled by output_headroom_mode (T-84)"
 output_match_srgb = "E: COL-2, tube-faithful presets"
 output_dither = "E: COL-4, noise dither for presets"

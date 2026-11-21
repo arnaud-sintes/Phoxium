@@ -20,6 +20,13 @@
 //! control or of a tail strength restarts the history (primed to the picture), so a slider move never flashes
 //! a static picture.
 //!
+//! **Global balance** (owner feedback 2026-11-21, QUESTIONS PHY-18): `phosphor_persistence_blend` mixes the output
+//! of the recurrence with the frame's own light, out = mix(x, y, blend) (`persistence_blend` in the shader, oracle
+//! [`crt_model::phosphor::blend_trail`]). It is read by the shader from the parameter block, not from the push
+//! constants, and it is not part of the fit: the history runs the same at any value, so a change never restarts it
+//! (no flash, the trail hidden at 0 is back at once). 1 is the previous output bit for bit (the shader selects y
+//! unchanged); the default 0.5 shows half the trail.
+//!
 //! History: three RGBA32F storage images of the tube size (12 floats per texel: 4 terms x 3 channels),
 //! owned by the stage (ARCHITECTURE 3.7), in their own descriptor set (set 1), read and written in
 //! place by the shader, allocated on first use and on a tube size change, freed while persistence is

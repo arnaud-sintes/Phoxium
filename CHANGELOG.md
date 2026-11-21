@@ -7,6 +7,14 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- **Persistence blend** (`phosphor_persistence_blend`, menu Phosphor panel, second row; owner request 2026-11-21: "the persistence is too much"): one slider from 0 to 1 for the whole afterglow trail, the measured phosphor decay and the extra afterglow together. 0 shows no trail at all, 1 the full trail exactly as before (bit for bit), values in between mix the two linearly. A still picture keeps its brightness at any value, and moving the slider takes effect at once (no restart, no flash).
+
+### Changed
+
+- **The default trail is now half as strong:** the bare defaults and all 10 shipped presets set the persistence blend to 0.5. Measured through the whole chain (white bar moving on black, 60 Hz, green, 8-bit codes): blend 1 (the old look) 212 and 57, 44, 37, 33 one to four frames behind; blend 0.5 (the new default) 222 and 42, 32, 27, 24; blend 0 230 and no trail. Set it to 1 in the Phosphor panel for the previous, full trail. Settings files and your own presets saved before this version have no value for it, so they get the new 0.5 too.
+
 ### Fixed
 
 - The Phoxium window has a taskbar button again, with its icon and title, in the framed window and in fullscreen (owner report 2026-11-21). Since the framed window was made non-activating (2026-11-19, so that starting or clicking it never takes the focus from the game), Windows gave it no taskbar button, and the fullscreen output never had one (it was a tool window). Both modes now ask for a button explicitly (`WS_EX_APPWINDOW`, no tool window). The window still never takes the focus when it starts, presents or is clicked; clicking its taskbar button, or picking it with Alt+Tab, is meant to hand the foreground straight back to the window you were in (the existing hand-back). Covered by unit tests of the window styles; not yet checked live on the desktop.

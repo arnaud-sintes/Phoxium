@@ -47,7 +47,7 @@ F10 opens the settings menu inside the output window. Every parameter of the tub
 - **Mask:** aperture grille, slot mask or delta dot, and its pitch in millimetres.
 - **Beam and scanlines:** the spot width and how it grows with brightness, which shapes the scanlines.
 - **Geometry:** curvature, overscan, pincushion, convergence and colour fringes.
-- **Phosphor:** saturation and the afterglow (persistence) behind moving objects.
+- **Phosphor:** saturation and the afterglow (persistence) behind moving objects; Persistence blend (0 to 1, default 0.5) sets how much of the trail you see.
 - **Optics:** glow (bloom) around bright areas and the vignette; turn on its **Enable** switch first.
 - **Source:** what was detected, **Change source**, the picture area (Auto or manual limits), the scaling multiplier and the saved profile of each game.
 - **Performance:** the quality tier (how much work the model costs, never the look) and an optional automatic drop when the GPU cannot keep up.

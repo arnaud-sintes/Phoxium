@@ -17,6 +17,10 @@
 //! must equal the oracle `DecayFit::controlled_trail_ratios` (physical: the CRT.md table, green 5.36 / 2.97 /
 //! 2.03 %, blue 4.72 / 2.60 / 1.78 % at 60 Hz, red none).
 //!
+//! With the global trail balance b (`phosphor_persistence_blend`, default 0.5, owner feedback 2026-11-21) the
+//! phosphor output is x + b (y - x): y_0 - b_l = (1 - b (1 - w0)) (x0 - b_l) and y_k - b_l = b w0 R_k (x0 - b_l), so
+//! the ratio becomes b w0 R_k / (1 - b (1 - w0)), the oracle `blended_trail_ratio` (R_k at b = 1).
+//!
 //! # Moving bar (what the eye sees)
 //!
 //! A bar moving by more than its blurred width per frame, so the trail positions do not overlap: the display
@@ -25,7 +29,9 @@
 
 mod common;
 
-use crt_model::phosphor::{DecayControls, DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED, TRAIL_HORIZON_MS};
+use crt_model::phosphor::{
+    blended_trail_ratio, DecayControls, DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED, TRAIL_HORIZON_MS,
+};
 use phoxium::gpu::{Headless, ImageF32, Settings, SourceFrame, StageReadback, TargetFormat};
 use phoxium::params::{ParamValue, Params};
 use phoxium::presets::Library;
@@ -95,14 +101,34 @@ fn controls(p: &Params, ch: usize) -> DecayControls {
     }
 }
 
-/// The parameter sets of the checks: the defaults with persistence on, every shipped preset (ABL off, see the
-/// module doc), and the defaults with the artistic controls.
+/// The oracle trail ratios (y_k - b) / (y_0 - b), k = 1, 2, ..., of `p` for channel `ch` at the frame period `t`
+/// (ms): the closed-form trail of the controlled decay, under the blend of `p` (module doc).
+fn oracle_ratios(fit: &DecayFit<'_>, p: &Params, ch: usize, t: f64) -> Vec<f64> {
+    let ctl = controls(p, ch);
+    let tail = fit.with_tail_scale(f64::from(p.phosphor_tail_strength_rgb[ch]));
+    let w0 = tail.controlled_feedback(t, TRAIL_HORIZON_MS, ctl).w0;
+    let blend = f64::from(p.phosphor_persistence_blend);
+    tail.controlled_trail_ratios(t, TRAIL_HORIZON_MS, ctl)
+        .into_iter()
+        .map(|r| blended_trail_ratio(w0, r, blend))
+        .collect()
+}
+
+/// The parameter sets of the checks: the defaults with persistence on (the default blend 0.5, and the full trail),
+/// every shipped preset (ABL off, see the module doc), and the defaults with the artistic controls.
 fn configs() -> Vec<(String, Params)> {
     let mut out = Vec::new();
     let mut d = Params::default();
     assert!(!d.phosphor_persistence, "persistence is off in the table defaults");
     d.phosphor_persistence = true;
+    assert_eq!(
+        d.phosphor_persistence_blend, 0.5,
+        "the default blend shows half the trail"
+    );
     out.push(("defaults + persistence".to_string(), d));
+    let mut full = d;
+    full.phosphor_persistence_blend = 1.0;
+    out.push(("defaults + persistence, blend 1".to_string(), full));
     for preset in Library::embedded().list() {
         let mut p = preset.params();
         assert!(p.phosphor_persistence, "{}", preset.id);
@@ -149,9 +175,7 @@ fn full_chain_trail_equals_the_oracle() {
             let lk: Vec<[f64; 3]> = (0..3).map(|_| sums(&render(&mut gpu, &p, &black).0)).collect();
             let mut line = format!("{name} {hz} Hz:");
             for (ch, (cname, fit)) in fits().into_iter().enumerate() {
-                let ctl = controls(&p, ch);
-                let tail = fit.with_tail_scale(f64::from(p.phosphor_tail_strength_rgb[ch]));
-                let oracle = tail.controlled_trail_ratios(t, TRAIL_HORIZON_MS, ctl);
+                let oracle = oracle_ratios(&fit, &p, ch, t);
                 let lit_sum = l0[ch] - lb[ch];
                 assert!(lit_sum > 0.0, "{name} {hz} Hz {cname}: the bar is not lit");
                 let got: Vec<f64> = lk.iter().map(|l| (l[ch] - lb[ch]) / lit_sum).collect();
@@ -201,6 +225,13 @@ fn moving_bar_trail_in_the_output() {
     let mut cases: Vec<(String, Params)> = configs()
         .into_iter()
         .filter(|(n, _)| n.starts_with("defaults"))
+        .map(|(n, mut p)| {
+            // The artistic controls at the full trail, as when they were recorded (QUESTIONS PHY-18).
+            if n.contains("extra afterglow") || n.contains("decay scale") {
+                p.phosphor_persistence_blend = 1.0;
+            }
+            (n, p)
+        })
         .collect();
     for id in ["pvm-20m4u", "kv-trinitron-tv"] {
         let mut p = lib.find(id).expect(id).params();
@@ -213,9 +244,14 @@ fn moving_bar_trail_in_the_output() {
     manual.phosphor_frame_rate_hz = 397.0;
     cases.push(("defaults, manual trail rate 397 Hz".to_string(), manual));
     let mut strong = cases[0].1;
+    strong.phosphor_persistence_blend = 1.0;
     strong.phosphor_extra_afterglow_rgb = [2.0; 3];
     strong.phosphor_extra_afterglow_time_ms = 300.0;
     cases.push(("defaults, extra afterglow 2 at 300 ms".to_string(), strong));
+    // The global trail balance (owner feedback 2026-11-21): 0 (no trail), the default 0.5, 1 (the full trail).
+    let mut none = cases[0].1;
+    none.phosphor_persistence_blend = 0.0;
+    cases.push(("defaults + persistence, blend 0".to_string(), none));
     let mut first_trail = Vec::new();
     for (name, p) in &cases {
         gpu.set_frame_time_ms(Some(1000.0 / 60.0));
@@ -244,7 +280,14 @@ fn moving_bar_trail_in_the_output() {
             "{name}, 60 Hz, green output (8-bit): bar {:.1}, 1 to 4 frames behind {:.1} {:.1} {:.1} {:.1}",
             codes[0], codes[1], codes[2], codes[3], codes[4]
         );
-        assert!(codes[1] > 0.5 && codes[1] < codes[0], "{name}: {codes:?}");
+        if p.phosphor_persistence_blend > 0.0 {
+            assert!(codes[1] > 0.5 && codes[1] < codes[0], "{name}: {codes:?}");
+        } else {
+            assert!(
+                codes[1..].iter().all(|&c| c < 0.5),
+                "{name}: no trail at blend 0: {codes:?}"
+            );
+        }
         assert!(
             codes.windows(2).skip(1).all(|w| w[1] <= w[0] + 0.5),
             "{name}: {codes:?}"
@@ -253,7 +296,14 @@ fn moving_bar_trail_in_the_output() {
     }
     // Four frames behind (67 ms at 60 Hz) the extra afterglow keeps the trail clearly brighter than the P22.
     let of = |n: &str| first_trail.iter().find(|(m, _)| m.as_str() == n).unwrap().1;
-    let phys = of("defaults + persistence");
+    // The blend: 0 leaves no trail; the default 0.5 lies between 0 and the full trail (1).
+    let (b0, b05, b1) = (
+        of("defaults + persistence, blend 0"),
+        of("defaults + persistence"),
+        of("defaults + persistence, blend 1"),
+    );
+    assert!(b0 < 0.5 && b05 > b0 + 1.0 && b1 > b05 + 1.0, "{b0} {b05} {b1}");
+    let phys = of("defaults + persistence, blend 1");
     assert!(
         of("defaults, extra afterglow 1 at 200 ms") > 1.4 * phys,
         "{first_trail:?}"
@@ -329,7 +379,9 @@ fn live_bar_measurement_explained() {
     gpu.set_read_stages(StageReadback::None);
     let out = (1264, 1181);
     let pat: phoxium::patterns::Pattern = "bar:8:24".parse().unwrap();
-    let base = Library::embedded().find("delta-17in").expect("delta-17in").params();
+    let mut base = Library::embedded().find("delta-17in").expect("delta-17in").params();
+    // The live numbers above were measured with the full trail (before the blend existed).
+    base.phosphor_persistence_blend = 1.0;
     let mut glow = base;
     glow.phosphor_extra_afterglow_rgb = [0.5; 3];
     glow.phosphor_extra_afterglow_time_ms = 150.0;
@@ -504,10 +556,7 @@ fn trail_survives_uneven_pacing_and_the_bypass() {
     let oracle: Vec<Vec<f64>> = [KUHN_GREEN, KUHN_BLUE]
         .iter()
         .enumerate()
-        .map(|(i, fit)| {
-            fit.with_tail_scale(f64::from(p.phosphor_tail_strength_rgb[i + 1]))
-                .controlled_trail_ratios(t, TRAIL_HORIZON_MS, controls(&p, i + 1))
-        })
+        .map(|(i, fit)| oracle_ratios(fit, &p, i + 1, t))
         .collect();
     let check = |when: &str, got: [[f64; 3]; 2]| {
         println!(

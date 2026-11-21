@@ -40,6 +40,7 @@ geometry_curvature = "spherical"
 geometry_radius_mm = 1166.0
 phosphor_persistence = true
 phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+phosphor_persistence_blend = 0.5
 geometry_conv_red_radial_mm = 1.0
 geometry_conv_blue_radial_mm = -1.0
 exposure = 0.83
@@ -74,6 +75,7 @@ geometry_curvature = "D: CRT.md Faceplate curvature: spherical 1R, most pre-1990
 geometry_radius_mm = "D: CRT.md Faceplate curvature: 1R = 1.767 x effective diagonal = 1.767 x 660 mm = 1166 mm (CRT.md: a 26 in tube gives about 1.17 m)"
 phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown [T-87: was D; D covers only the first-frame energy ratios E1/E0; the tail beyond 2 ms is E (phosphor_tail_strength_rgb)]"
 phosphor_tail_strength_rgb = "E: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1) [T-87: was S; the Kuhn P22 power-law tail is extrapolated beyond 2 ms from another sample, not measured on this tube]"
+phosphor_persistence_blend = "E: owner decision 2026-11-21 (QUESTIONS PHY-18): the full modelled trail looked too strong, so the shipped presets show half of it (0.5); an artistic balance, not a property of the tube; 1 is the full trail of the Kuhn P22 fit"
 geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
 geometry_conv_blue_radial_mm = "E: CRT.md Starting presets, convergence error corners 0.5 to 1.5 mm (TV): midpoint 1.0 mm at the corner as the radial term; CRT.md gives no centre value for TVs, so the static offset stays 0; red outward and blue inward by the mirror-image rule (CRT.md Convergence), green is the reference"
 exposure = "D: white (0.301, 0.308) has linear sRGB blue 1.192 at Y = 1, so exposure <= 0.838; this bounds the unmasked white only: the mask and scanline peaks lift elements above panel white (headroom readout 3.625 on 2560 x 1440), handled by output_headroom_mode (T-84)"

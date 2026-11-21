@@ -396,10 +396,14 @@ fn every_preset_persistence_trail_equals_the_oracle() {
     let (black, white) = (flat(w, h, 0.0), flat(w, h, 1.0));
     let fp16 = 1.0 / 1024.0 + 1e-5;
     for preset in lib.list() {
-        let p = preset.params();
+        let mut p = preset.params();
         assert!(p.phosphor_persistence, "{}: persistence on", preset.id);
         assert_eq!(p.phosphor_tail_strength_rgb, [1.0; 3], "{}", preset.id);
         assert_eq!(p.phosphor_frame_rate_hz, 0.0, "{}: real time (review R-11)", preset.id);
+        // Every preset shows half the trail (owner decision 2026-11-21); the physical decay is checked at the
+        // full trail (the blend itself: tests/stage_phosphor.rs `blend_follows_the_oracle`, tests/persistence_chain.rs).
+        assert_eq!(p.phosphor_persistence_blend, 0.5, "{}: persistence blend", preset.id);
+        p.phosphor_persistence_blend = 1.0;
         // Drop the trail of the previous preset: a cleared history is primed by the first frame, so a black
         // frame leaves it at 0 (the stage's contract; that a trail also decays to exactly 0 frame by frame is
         // checked once in tests/stage_phosphor.rs, `step_response`, instead of once per preset here).

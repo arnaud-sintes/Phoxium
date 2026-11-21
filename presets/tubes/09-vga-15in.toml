@@ -33,6 +33,7 @@ geometry_curvature = "spherical"
 geometry_radius_mm = 941.0
 phosphor_persistence = true
 phosphor_tail_strength_rgb = [1.0, 1.0, 1.0]
+phosphor_persistence_blend = 0.5
 geometry_conv_red_dx_mm = 0.075
 geometry_conv_blue_dx_mm = -0.075
 geometry_conv_red_radial_mm = 0.275
@@ -62,6 +63,7 @@ geometry_curvature = "E: CRT.md Faceplate curvature: flatter spherical 1.5R to 2
 geometry_radius_mm = "E: CRT.md Faceplate curvature: 1.5R = 1.5 x 1.767 x 355 mm diagonal = 941 mm (sagitta table: 4.8 % of the diagonal at the corner)"
 phosphor_persistence = "D: CRT.md Decay and persistence and T-63 item 1: all presets are P22, persistence on with the Kuhn (2002) constants of crt_model::phosphor (E1/E0 5.36 % green, 4.72 % blue at 60 Hz); the exact P22 variant of this tube is unknown [T-87: was D; D covers only the first-frame energy ratios E1/E0; the tail beyond 2 ms is E (phosphor_tail_strength_rgb)]"
 phosphor_tail_strength_rgb = "E: CRT.md Decay and persistence: 1 = the measured Kuhn power-law tail; Ni-killed sulfides would cut the 8 ms residual 4 to 13 times (US 5,825,124) but CRT.md has no statement for this tube, so the reduction is not applied (allowed range 0.07 to 1) [T-87: was S; the Kuhn P22 power-law tail is extrapolated beyond 2 ms from another sample, not measured on this tube]"
+phosphor_persistence_blend = "E: owner decision 2026-11-21 (QUESTIONS PHY-18): the full modelled trail looked too strong, so the shipped presets show half of it (0.5); an artistic balance, not a property of the tube; 1 is the full trail of the Kuhn P22 fit"
 geometry_conv_red_dx_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
 geometry_conv_blue_dx_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"
 geometry_conv_red_radial_mm = "E: CRT.md Starting presets, convergence error centre 0 to 0.15 mm and corners 0.2 to 0.5 mm (PC/PVM): midpoints 0.075 mm static and 0.35 mm at the corner (0.075 static + 0.275 radial); in-line red and blue are roughly mirror images about green, mostly horizontal (CRT.md Convergence), so red is moved outward and blue inward, green is the reference; the CRT.md convergence table gives 0.2 to 0.3 mm centre for PC monitors (conflict with the 0 to 0.15 row, unresolved)"

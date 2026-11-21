@@ -92,6 +92,8 @@ fn params(saturation: bool, strengths: [f32; 3], persistence: bool) -> Params {
         phosphor_persistence: persistence,
         phosphor_frame_rate_hz: 60.0,
         phosphor_tail_strength_rgb: [1.0; 3],
+        // The full trail: the derivations here are those of the recurrence itself.
+        phosphor_persistence_blend: 1.0,
         ..Params::default()
     }
 }

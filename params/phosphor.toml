@@ -16,6 +16,28 @@ source = "CRT.md Decay and persistence (Kuhn 2002 P22 impulse responses, per-fra
 description = "Phosphor persistence on or off. On: each frame also shows the decaying afterglow of the previous frames (green and blue trail about 5, 3, 2 % of a frame at 60 Hz, red none); a static picture keeps its brightness. Off: the picture passes unchanged."
 group = "Phosphor"
 
+# Owner feedback 2026-11-21 (QUESTIONS PHY-18): "the persistence is too much". One global balance of the whole
+# trail, applied to the output of the recurrence: out = mix(x, y, blend), x the frame without any trail, y the frame
+# with the full trail (the measured decay, the decay scale and the extra afterglow). The history keeps running
+# unchanged, so a change is instant (no restart, no flash) and a static picture keeps its brightness at any value.
+# Oracle crates/crt-model/src/phosphor.rs (`blend_trail`, `blended_trail_ratio`).
+
+[[param]]
+id = "phosphor_persistence_blend"
+stage = "phosphor"
+type = "f32"
+unit = "1"
+default = 0.5
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a mix between the picture without any trail (0) and the picture with the full trail (1); outside 0 to 1 it would invert or exaggerate the trail"
+tag = "E"
+source = "Owner feedback 2026-11-21 (QUESTIONS PHY-18): artistic balance, not a measurement; out = mix(no trail, full trail, blend), linear light. 1 is the full modelled trail (the measured P22 at the other defaults); the default 0.5 halves it (owner decision: the full trail looked too strong)"
+description = "How much of the afterglow trail is shown, from 0 (no trail at all) to 1 (the full trail: the measured phosphor plus Decay scale and Extra afterglow). The default 0.5 shows half of it, because the full trail looked too strong. Only the trail changes: a still picture keeps its brightness at any value, and a change takes effect at once."
+group = "Phosphor"
+
 [[param]]
 id = "phosphor_frame_rate_hz"
 stage = "phosphor"

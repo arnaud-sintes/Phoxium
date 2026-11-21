@@ -60,7 +60,10 @@
 
 mod common;
 
-use crt_model::phosphor::{DecayControls, DecayFit, KUHN_BLUE, KUHN_GREEN, KUHN_RED, TRAIL_HORIZON_MS};
+use crt_model::phosphor::{
+    blend_trail, blended_trail_ratio, DecayControls, DecayFit, FEEDBACK_TERMS, KUHN_BLUE, KUHN_GREEN, KUHN_RED,
+    TRAIL_HORIZON_MS,
+};
 use crt_model::units::frame_period_ms;
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::Params;
@@ -105,11 +108,14 @@ fn black(w: u32, h: u32) -> ImageF32 {
     image(w, h, |_, _| [0.0; 3])
 }
 
+/// Persistence `on` at `rate_hz` with tail strengths `tail` and the full trail (`phosphor_persistence_blend` 1, so
+/// the output is the recurrence itself; the blend has its own test, [`blend_follows_the_oracle`]).
 fn params(on: bool, rate_hz: f32, tail: [f32; 3]) -> Params {
     Params {
         phosphor_persistence: on,
         phosphor_frame_rate_hz: rate_hz,
         phosphor_tail_strength_rgb: tail,
+        phosphor_persistence_blend: 1.0,
         ..Params::default()
     }
 }
@@ -697,6 +703,155 @@ fn controlled_trail_is_real_time_at_60_and_144_hz() {
         at250.push(sample_at(&c60, 250.0));
     }
     assert!(at250[1] > at250[0] && at250[2] > at250[1], "{at250:?}");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+// The global trail balance (owner feedback 2026-11-21, QUESTIONS PHY-18): `phosphor_persistence_blend`, oracle
+// `crt_model::phosphor::blend_trail` and `blended_trail_ratio`.
+
+/// The blend against the oracle, manual 60 Hz, with the physical decay and with an extra afterglow: a single
+/// excitation then black frames, run at blend 0, 0.5 and 1 from the same cleared history.
+/// - 0: no trail at all, every output is the frame's own light exactly (bit for bit);
+/// - 1: the recurrence itself, y_k / y_0 within FP16 of `FrameFeedback::trail` (the previous behaviour);
+/// - 0.5: every output within FP16 of the oracle `x + 0.5 (y - x)` run in f64 on the same inputs, the ratios
+///   y_k / y_0 equal `blended_trail_ratio`, and the trail level is half the blend-1 level.
+///
+/// Then the live switch: the value changed in the middle of a trail (0 to 1, after three frames at 0) shows the
+/// full trail of the earlier excitation at once (the history kept running while the trail was hidden: no
+/// restart), and a static picture keeps its brightness at every value.
+#[test]
+fn blend_follows_the_oracle() {
+    let Some(mut gpu) = common::gpu_or_skip("blend_follows_the_oracle") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let t = frame_period_ms(60.0);
+    let pic = image(W, H, |_, _| [1.0, 1.0, 1.0]);
+    let zero = black(W, H);
+    for base in [
+        params(true, 60.0, [1.0; 3]),
+        controlled(60.0, 1.0, [1.0, 0.5, 0.25], 200.0),
+    ] {
+        let mut runs = Vec::new();
+        for blend in [0.0_f32, 0.5, 1.0] {
+            let p = Params {
+                phosphor_persistence_blend: blend,
+                ..base
+            };
+            gpu.clear_history();
+            assert_eq!(run(&mut gpu, &p, &zero), zero);
+            let mut out = vec![run(&mut gpu, &p, &pic)];
+            for _ in 1..20 {
+                out.push(run(&mut gpu, &p, &zero));
+            }
+            runs.push(out);
+        }
+        for (ch, (name, fit)) in fits().into_iter().enumerate() {
+            let fb = fit.controlled_feedback(t, TRAIL_HORIZON_MS, decay_controls(&base, ch));
+            let what = format!("{name} extra {}", base.phosphor_extra_afterglow_rgb[ch]);
+            let (none, half, full) = (&runs[0], &runs[1], &runs[2]);
+            // Blend 0: the frame's own light, exactly.
+            for (k, img) in none.iter().enumerate() {
+                let want = if k == 0 { pic.rgba[ch] } else { 0.0 };
+                assert_eq!(img.rgba[ch], want, "{what} blend 0 frame {k}");
+            }
+            // Blend 0.5 against the f64 oracle of the same frames; blend 1 against the plain recurrence.
+            let mut s = [0.0; FEEDBACK_TERMS];
+            let y0_full = f64::from(full[0].rgba[ch]);
+            for k in 0..20usize {
+                let x = if k == 0 { 1.0 } else { 0.0 };
+                let y = fb.step(&mut s, x);
+                let want = blend_trail(x, y, 0.5);
+                let got = f64::from(half[k].rgba[ch]);
+                assert!(
+                    (got - want).abs() <= (FP16 + 1e-5) * want.abs() + 1e-7,
+                    "{what} blend 0.5 frame {k}: {got} vs oracle {want}"
+                );
+                if k == 0 {
+                    continue;
+                }
+                let tk = fb.trail(k as u32);
+                let yk_full = f64::from(full[k].rgba[ch]);
+                assert!(
+                    (yk_full / y0_full - tk).abs() <= (FP16 + 1e-5) * tk + 1e-6,
+                    "{what} blend 1 k {k}: {} vs recurrence {tk}",
+                    yk_full / y0_full
+                );
+                if tk > 1e-4 {
+                    let ratio = got / f64::from(half[0].rgba[ch]);
+                    let oracle = blended_trail_ratio(fb.w0, tk, 0.5);
+                    assert!(
+                        rel(ratio, oracle) <= 2.0 * FP16 + 1e-5,
+                        "{what} k {k}: {ratio} vs {oracle}"
+                    );
+                    assert!(
+                        rel(got, 0.5 * yk_full) <= 2.0 * FP16 + 1e-5,
+                        "{what} k {k}: half the trail"
+                    );
+                }
+            }
+            println!(
+                "{what}: frame 0 / trail 1 to 3 (share of the excitation): blend 1 {:.4} / {:.4} {:.4} {:.4}; \
+                 blend 0.5 {:.4} / {:.4} {:.4} {:.4}; blend 0 {:.4} / {:.4}",
+                full[0].rgba[ch],
+                full[1].rgba[ch],
+                full[2].rgba[ch],
+                full[3].rgba[ch],
+                half[0].rgba[ch],
+                half[1].rgba[ch],
+                half[2].rgba[ch],
+                half[3].rgba[ch],
+                none[0].rgba[ch],
+                none[1].rgba[ch],
+            );
+        }
+    }
+    // Live switch: three trail frames hidden at blend 0, then blend 1 shows the trail at once, the same as a run
+    // at blend 1 throughout (no restart of the history).
+    let shown = params(true, 60.0, [1.0; 3]);
+    let hidden = Params {
+        phosphor_persistence_blend: 0.0,
+        ..shown
+    };
+    gpu.clear_history();
+    let _ = run(&mut gpu, &hidden, &zero);
+    let _ = run(&mut gpu, &hidden, &pic);
+    for _ in 0..3 {
+        assert_eq!(run(&mut gpu, &hidden, &zero), zero);
+    }
+    let switched = run(&mut gpu, &shown, &zero);
+    gpu.clear_history();
+    let _ = run(&mut gpu, &shown, &zero);
+    let _ = run(&mut gpu, &shown, &pic);
+    for _ in 0..3 {
+        let _ = run(&mut gpu, &shown, &zero);
+    }
+    let reference = run(&mut gpu, &shown, &zero);
+    assert!(switched.rgba[1] > 0.0, "the trail is there right after the switch");
+    assert_eq!(
+        switched, reference,
+        "no restart: the same trail as with blend 1 throughout"
+    );
+    // A static picture at every blend, real time with jittered periods.
+    let still = picture(W, H);
+    for blend in [0.0_f32, 0.25, 0.5, 1.0] {
+        let p = Params {
+            phosphor_persistence_blend: blend,
+            phosphor_frame_rate_hz: 0.0,
+            ..shown
+        };
+        gpu.clear_history();
+        for dt in [16.7_f32, 6.9, 13.9, 8.3, 16.6, 7.0] {
+            let y = run_at(&mut gpu, &p, &still, dt);
+            for (&got, &x) in y.rgba.iter().zip(&still.rgba) {
+                assert!(
+                    rel(f64::from(got), f64::from(x)) <= FP16 / 2.0 + 1e-5,
+                    "blend {blend}: {got} vs {x}"
+                );
+            }
+        }
+    }
     drop(gpu);
     common::assert_no_validation_messages(&counter);
 }
