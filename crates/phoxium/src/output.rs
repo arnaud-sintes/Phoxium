@@ -134,6 +134,16 @@ pub fn behaviour(mode_no_activate: bool, click_through: bool, menu_open: bool) -
     }
 }
 
+/// The extended style of a mode before [`styled`] adds the activation and mouse bits: `WS_EX_APPWINDOW` in every
+/// mode, plus `WS_EX_TOPMOST` in fullscreen; never `WS_EX_TOOLWINDOW`. The output is the app's only window and
+/// must keep a taskbar button (and an Alt+Tab entry) in both modes: a `WS_EX_NOACTIVATE` window gets none unless
+/// `WS_EX_APPWINDOW` is set, and a tool window gets none at all (owner report 2026-11-21, QUESTIONS OUT-2).
+/// Activating it from the taskbar or Alt+Tab is handed back like any other activation (T-07). Pure.
+pub fn base_ex_style(fullscreen: bool) -> isize {
+    let topmost = if fullscreen { WS_EX_TOPMOST.0 } else { 0 };
+    (WS_EX_APPWINDOW.0 | topmost) as isize
+}
+
 /// The extended style `ex` with the bits of `b` applied (`WS_EX_NOACTIVATE`, `WS_EX_TRANSPARENT`,
 /// `WS_EX_LAYERED`); every other bit is kept. Pure.
 pub fn styled(ex: isize, b: Behaviour) -> isize {
@@ -524,9 +534,9 @@ pub fn set_cursor_hidden(hidden: bool) {
 
 /// Applies a mode change decided by `modes::ModeState`: borderless fullscreen over `cover`, or the framed
 /// resizable window at `rect`. Both modes reached this way are non-activating, except while the settings menu
-/// is open (the output is then the foreground window and stays so; [`sync_activation`] decides). The window is
-/// hidden while the styles change so that the taskbar picks up the tool-window style, except when it holds the
-/// foreground (hiding would pass it on). Never activates.
+/// is open (the output is then the foreground window and stays so; [`sync_activation`] decides). Both keep their
+/// taskbar button ([`base_ex_style`]). The window is hidden while the styles change so that the taskbar picks
+/// them up, except when it holds the foreground (hiding would pass it on). Never activates.
 pub fn apply_placement(hwnd: HWND, placement: &Placement) {
     MODE_NO_ACTIVATE.store(true, Ordering::Relaxed);
     // SAFETY: our own live window.
@@ -538,7 +548,7 @@ pub fn apply_placement(hwnd: HWND, placement: &Placement) {
             Placement::Fullscreen { cover } => {
                 FULLSCREEN.store(true, Ordering::Relaxed);
                 SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_POPUP | WS_VISIBLE).0 as isize);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, (WS_EX_TOPMOST | WS_EX_TOOLWINDOW).0 as isize);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, base_ex_style(true));
                 sync_activation(hwnd);
                 let _ = SetWindowPos(
                     hwnd,
@@ -553,7 +563,7 @@ pub fn apply_placement(hwnd: HWND, placement: &Placement) {
             Placement::Windowed { rect } => {
                 FULLSCREEN.store(false, Ordering::Relaxed);
                 SetWindowLongPtrW(hwnd, GWL_STYLE, (WS_OVERLAPPEDWINDOW | WS_VISIBLE).0 as isize);
-                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, 0);
+                SetWindowLongPtrW(hwnd, GWL_EXSTYLE, base_ex_style(false));
                 sync_activation(hwnd);
                 let _ = SetWindowPos(
                     hwnd,
@@ -685,6 +695,20 @@ fn app_icon(hinstance: windows::Win32::Foundation::HINSTANCE, small: bool) -> HI
     }
 }
 
+/// The extended style a new output window is created with: the mode's [`base_ex_style`] with `WS_EX_NOACTIVATE`
+/// from the flag [`sync_activation`] just set (click-through is applied after the creation, with its layered
+/// attributes).
+fn created_ex_style(fullscreen: bool) -> isize {
+    let no_activate = NO_ACTIVATE.load(Ordering::Relaxed);
+    styled(
+        base_ex_style(fullscreen),
+        Behaviour {
+            no_activate,
+            click_through: false,
+        },
+    )
+}
+
 pub fn create(opts: &Options) -> Result<Output> {
     // Every mode starts non-activating (OUT-2, OUT-3), the default framed window included: starting, clicking or
     // dragging the output leaves the foreground and the keyboard focus on the captured window. Only the settings
@@ -727,7 +751,7 @@ pub fn create(opts: &Options) -> Result<Output> {
                 )
             })?;
             CreateWindowExW(
-                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                WINDOW_EX_STYLE(created_ex_style(true) as u32),
                 w!("phoxium_output"),
                 &HSTRING::from("phoxium"),
                 WS_POPUP,
@@ -750,11 +774,7 @@ pub fn create(opts: &Options) -> Result<Output> {
             };
             let _ = AdjustWindowRectEx(&mut r, style, false, WINDOW_EX_STYLE(0));
             // Non-activating like every mode (OUT-2); `sync_activation` below keeps the bit in step with the menu.
-            let ex = if NO_ACTIVATE.load(Ordering::Relaxed) {
-                WS_EX_NOACTIVATE
-            } else {
-                WINDOW_EX_STYLE(0)
-            };
+            let ex = WINDOW_EX_STYLE(created_ex_style(false) as u32);
             // T-57: the rectangle of the last windowed run, when it is still on a monitor.
             let (x, y, w, h) = match opts.saved_rect.filter(|s| modes::usable_rect(s, &monitor_irects())) {
                 Some(s) => (s.left, s.top, s.width(), s.height()),
@@ -1160,12 +1180,12 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        behaviour, drag_rect, effective_no_activate, hand_back_target, on_activate, rebase_drag_on_dpi, self_drag_hit,
-        should_idle, snap_rect, styled, Behaviour, OnActivate,
+        base_ex_style, behaviour, drag_rect, effective_no_activate, hand_back_target, on_activate, rebase_drag_on_dpi,
+        self_drag_hit, should_idle, snap_rect, styled, Behaviour, OnActivate,
     };
     use crate::modes::IRect;
     use windows::Win32::UI::WindowsAndMessaging::{
-        WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
+        WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
 
     /// Click-through state machine: menu open x click-through x mode. The open menu always takes the mouse and
@@ -1197,11 +1217,11 @@ mod tests {
         assert_eq!(seen, [true, false, true, false]);
     }
 
-    /// The style bits: only NOACTIVATE, TRANSPARENT and LAYERED change, the others (topmost, tool window) stay;
+    /// The style bits: only NOACTIVATE, TRANSPARENT and LAYERED change, the others (topmost, app window) stay;
     /// TRANSPARENT never goes without LAYERED (the mouse would not pass to other programs' windows).
     #[test]
     fn the_style_bits_follow_the_behaviour_and_keep_the_others() {
-        let base = (WS_EX_TOPMOST.0 | WS_EX_TOOLWINDOW.0) as isize;
+        let base = (WS_EX_TOPMOST.0 | WS_EX_APPWINDOW.0) as isize;
         let on = styled(
             base,
             Behaviour {
@@ -1211,7 +1231,7 @@ mod tests {
         );
         for bit in [
             WS_EX_TOPMOST,
-            WS_EX_TOOLWINDOW,
+            WS_EX_APPWINDOW,
             WS_EX_NOACTIVATE,
             WS_EX_TRANSPARENT,
             WS_EX_LAYERED,
@@ -1235,6 +1255,35 @@ mod tests {
                 ex & WS_EX_TRANSPARENT.0 as isize != 0,
                 ex & WS_EX_LAYERED.0 as isize != 0
             );
+        }
+    }
+
+    /// The taskbar button (owner report 2026-11-21): in both modes and every behaviour (non-activating,
+    /// click-through, menu open) the style keeps `WS_EX_APPWINDOW` and never has `WS_EX_TOOLWINDOW`, so the shell
+    /// shows a button although the window is `WS_EX_NOACTIVATE`. Fullscreen alone is topmost.
+    #[test]
+    fn every_mode_and_behaviour_keeps_a_taskbar_button() {
+        for fullscreen in [true, false] {
+            let base = base_ex_style(fullscreen);
+            assert_eq!(base & WS_EX_TOPMOST.0 as isize != 0, fullscreen);
+            for mode in [true, false] {
+                for click in [true, false] {
+                    for menu in [true, false] {
+                        let b = behaviour(mode, click, menu);
+                        let ex = styled(base, b);
+                        let what = format!("fullscreen {fullscreen} mode {mode} click {click} menu {menu}");
+                        assert_ne!(ex & WS_EX_APPWINDOW.0 as isize, 0, "{what}");
+                        assert_eq!(ex & WS_EX_TOOLWINDOW.0 as isize, 0, "{what}");
+                        assert_eq!(ex & WS_EX_NOACTIVATE.0 as isize != 0, b.no_activate, "{what}");
+                        assert_eq!(ex & WS_EX_TOPMOST.0 as isize != 0, fullscreen, "{what}");
+                    }
+                }
+            }
+        }
+        // The default start (non-activating, menu closed) is still non-activating in both modes.
+        for fullscreen in [true, false] {
+            let ex = styled(base_ex_style(fullscreen), behaviour(true, false, false));
+            assert_ne!(ex & WS_EX_NOACTIVATE.0 as isize, 0);
         }
     }
 

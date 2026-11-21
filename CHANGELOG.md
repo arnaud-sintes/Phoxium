@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Fixed
+
+- The Phoxium window has a taskbar button again, with its icon and title, in the framed window and in fullscreen (owner report 2026-11-21). Since the framed window was made non-activating (2026-11-19, so that starting or clicking it never takes the focus from the game), Windows gave it no taskbar button, and the fullscreen output never had one (it was a tool window). Both modes now ask for a button explicitly (`WS_EX_APPWINDOW`, no tool window). The window still never takes the focus when it starts, presents or is clicked; clicking its taskbar button, or picking it with Alt+Tab, is meant to hand the foreground straight back to the window you were in (the existing hand-back). Covered by unit tests of the window styles; not yet checked live on the desktop.
+
 ## [0.4.0] - 2026-11-21
 
 ### Changed
