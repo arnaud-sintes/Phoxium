@@ -803,7 +803,7 @@ fn vignette_shapes_match_the_oracle() {
     common::assert_no_validation_messages(&counter);
 }
 
-/// The vignette recipes of the README (live review 2026-11-20: the old "black corners" recipe, corner 0, start
+/// The vignette recipes of docs/REFERENCE.md (live review 2026-11-20: the old "black corners" recipe, corner 0, start
 /// 0.5, exponent 2, softness 0.4, roundness 0.5, looked like a spotlight: the middle of the left edge of a wide
 /// picture fell to about 15 % of the centre). On a flat white field of a 4:3 and a 16:9 picture the GPU against
 /// the oracle, the luma at the middle of the left edge, the corner and the centre (printed for the old and the new
@@ -896,7 +896,7 @@ fn window_frame(white_window: bool) -> Vec<u8> {
 /// 27 codes because the halation and the glare defaulted to 1.5 % and 1 %): through the whole chain to the
 /// display output (8-bit codes of the green channel, patches of 16 x 16 pixels), the black level of a white
 /// window in black (far from it, 15 pixels beside it) and of a black window in white, with Optics off, with
-/// Optics on at the new defaults, with the old defaults (halation 0.015, glare 0.01) and with the README's gentle
+/// Optics on at the new defaults, with the old defaults (halation 0.015, glare 0.01) and with the gentle (docs/REFERENCE.md)
 /// glow (weight 0.12, radius 6 mm, threshold 0.6) at several falloffs. The new defaults and the glow without a tail
 /// (falloff 0) must not lift a black by more than half a code; the glow's wide lobes (falloff 0.5, the default)
 /// leave a faint veil (measured: 2 codes far from a window, 9 inside a black area of a white field); the old
@@ -1054,7 +1054,7 @@ fn look_recipes_whole_chain() {
         black[1][1] <= black[0][1] + 0.5,
         "new defaults: black beside the window"
     );
-    // The default falloff keeps a faint veil: the README says so, with these bounds.
+    // The default falloff keeps a faint veil: docs/REFERENCE.md says so, with these bounds.
     assert!(black[3][0] <= 2.5 && black[3][2] <= 10.5, "{:?}", black[3]);
     assert!(
         black[2][2] > black[0][2] + 20.0,

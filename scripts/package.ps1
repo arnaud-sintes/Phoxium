@@ -4,7 +4,8 @@
     SHA-256 file and a record of the commit it was built from.
 .DESCRIPTION
     Run it on a clean tree, after committing. The zip contains one top-level folder with the two
-    executables, LICENSE, README.md, CHANGELOG.md, THIRD-PARTY.md (the licence texts of every dependency and the
+    executables, LICENSE, README.md, docs/REFERENCE.md (the detailed reference the README links to), CHANGELOG.md,
+    THIRD-PARTY.md (the licence texts of every dependency and the
     notices of the bundled C/C++ code and font, from scripts/gen-third-party.ps1), BUILD-INFO.txt (commit,
     toolchain) and RUNNING.txt. dist/<name>.commit holds the commit hash (with a `-dirty` and/or `-untested`
     suffix for a local trial) so scripts/release.ps1 can refuse a stale, dirty or untested zip.
@@ -125,6 +126,9 @@ foreach ($leaf in @($name, "$name.zip", "$name.zip.sha256", "$name.commit")) {
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item -LiteralPath $exes -Destination $stage
 Copy-Item 'LICENSE', 'README.md', 'CHANGELOG.md' $stage
+# The README links to docs/REFERENCE.md: the same relative place in the zip keeps the link working.
+New-Item -ItemType Directory -Force (Join-Path $stage 'docs') | Out-Null
+Copy-Item 'docs\REFERENCE.md' (Join-Path $stage 'docs')
 # The staged executables are byte-for-byte the ones of the target directory.
 foreach ($e in $exes) {
     $a = (Get-FileHash -LiteralPath $e -Algorithm SHA256).Hash
@@ -164,7 +168,7 @@ compare its SHA-256 with the .sha256 file of the release page:
     PowerShell:  (Get-FileHash .\$name.zip -Algorithm SHA256).Hash
     cmd:         certutil -hashfile $name.zip SHA256
 The two values must be identical (letters in upper or lower case). The source is on GitHub
-(arnaud-sintes/Phoxium) and the executables can be rebuilt from it (README.md, "Building").
+(arnaud-sintes/Phoxium) and the executables can be rebuilt from it (README.md, "Building from source").
 
 Phoxium is released under the MIT licence (LICENSE). Licences of the dependencies: THIRD-PARTY.md.
 Phoxium was called ultimateCRT up to v0.3.0; at its first start it copies the old settings folder

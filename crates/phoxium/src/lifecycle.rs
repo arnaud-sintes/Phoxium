@@ -485,7 +485,7 @@ impl Health {
 //   arbitrary positions. The grid is searched as a period in [PERIOD_MIN, PERIOD_MAX] px, by the
 //   phase concentration of the edge positions inside short windows (so a long image does not need a
 //   fine period resolution).
-// Known cases it cannot distinguish (documented in README.md): monospaced text with heavy strokes
+// Known cases it cannot distinguish (documented in docs/REFERENCE.md): monospaced text with heavy strokes
 // at 1:1 (its stems repeat at the character pitch), and an upscale whose flat areas are all shorter
 // than the filter support (for example bicubic x2 of art without runs of four native pixels):
 // no flat area survives, so there is no edge to count.
