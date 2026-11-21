@@ -9,7 +9,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Fixed
 
-- Integer-scale detection: one frame no longer decides. When the captured window changed size (pixel-demo from 1:1 in a 900x720 window to integer x3 in 768x720, live 2026-11-21), its first frame could still show the previous 1:1 picture, and that frame alone locked "native (x1)" for the session: the x3 game was treated as a 768x720 native raster. x1 is now taken early only after the first 6 informative frames all say so, otherwise the frames vote (a factor that at most 10 % of the other frames rule out is kept; native-looking frames give x1 only as the majority). Tests: `scaling` unit tests (stale frames after a resize, an odd frame among x3 frames, mostly native sources).
+- Integer-scale detection: one frame no longer decides. When the captured window changed size (pixel-demo from 1:1 in a 900x720 window to integer x3 in 768x720, live 2026-11-21: 5 of 9 tries with v0.3.0, 0 of 8 with the fix), its first frame could still show the previous 1:1 picture, and that frame alone locked "native (x1)" for the session: the x3 game was treated as a 768x720 native raster. x1 is now taken early only after the first 6 informative frames all say so, otherwise the frames vote (a factor that at most 10 % of the other frames rule out is kept; native-looking frames give x1 only as the majority). Tests: `scaling` unit tests (stale frames after a resize, an odd frame among x3 frames, mostly native sources).
 
 ## [0.3.0] - 2026-11-20
 
