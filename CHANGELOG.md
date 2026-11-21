@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Fixed
+
+- Integer-scale detection: one frame no longer decides. When the captured window changed size (pixel-demo from 1:1 in a 900x720 window to integer x3 in 768x720, live 2026-11-21), its first frame could still show the previous 1:1 picture, and that frame alone locked "native (x1)" for the session: the x3 game was treated as a 768x720 native raster. x1 is now taken early only after the first 6 informative frames all say so, otherwise the frames vote (a factor that at most 10 % of the other frames rule out is kept; native-looking frames give x1 only as the majority). Tests: `scaling` unit tests (stale frames after a resize, an odd frame among x3 frames, mostly native sources).
+
 ## [0.3.0] - 2026-11-20
 
 ultimateCRT v0.3.0 is the second public release (MIT licence, binaries not code-signed). Since v0.2.0 the captured picture reaches the GPU without a trip through the CPU: zero-copy capture is the default, with an automatic fallback to the CPU copy and a Capture choice in the menu's Source section. The phosphor persistence trail was repaired (it could vanish when frames arrive unevenly) and has new afterglow controls; the Optics panel gains glow (bloom) and vignette controls and no longer lifts the blacks by itself, and the Geometry panel gains chromatic aberration controls. The output can be made click-through (`Ctrl+Alt+F6`), the window title and the menu show notices for a minimised source and for a move to a monitor driven by another GPU, and the framed window snaps to a screen edge. A three-model code review round and a live review fixed crash and robustness problems, notably an intermittent crash of zero-copy capture at attach, a persistence trail lost with uneven frame pacing, and a white flash when the window opens.

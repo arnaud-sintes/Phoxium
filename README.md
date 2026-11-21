@@ -350,7 +350,7 @@ Off by default; the picture is then exactly the same as without it. In the menu 
 ## Source scaling
 
 The CRT model needs the native raster: scanlines are native rows. A game shown at 3× is captured as 768×720, so the app recovers 256×240 with a divisor:
-- **Automatic (default):** over the first 30 informative frames (flat frames such as a black screen are skipped) it looks at the run lengths of identical pixels along rows and of identical rows, and keeps the largest factor that explains nearly all of them. If nothing does, the source is native (x1) and nothing is divided. A margin of 16 pixels is ignored because Windows 11 rounds window corners.
+- **Automatic (default):** over the first 30 informative frames (flat frames such as a black screen are skipped) it looks at the run lengths of identical pixels along rows and of identical rows, and keeps the largest factor that explains nearly all of them. If nothing does, the source is native (x1) and nothing is divided. One odd frame does not decide: x1 is taken early only after the first 6 informative frames all say so, otherwise the frames vote (a factor that at most 10 % of them rule out is kept; frames that look native, such as the previous picture still shown right after the window changed size, give x1 only when they are the majority). A margin of 16 pixels is ignored because Windows 11 rounds window corners.
 - **Manual:** `--divisor` and `--crop`.
 - The shader reads the centre of each block, so no extra pass is needed. Detection restarts when the captured size changes.
 - Only simple integer nearest-neighbour upscales are handled. Smoothed or non-integer scaling detects as x1.

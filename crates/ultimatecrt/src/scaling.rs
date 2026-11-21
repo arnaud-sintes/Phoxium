@@ -206,6 +206,16 @@ impl Multiplier {
 /// Informative frames analysed before the detected divisor is locked (unless x1 is certain earlier).
 /// A flat frame (a black boot screen, a fade) is not informative and does not count.
 const DETECT_FRAMES: u32 = 30;
+/// Informative frames in a row, from the first one, that must each rule out every factor before the source
+/// is locked as native (x1) early (about 0.1 s at 60 fps). One is not enough: the first frames after the
+/// captured window changed size can still hold its previous picture (live 2026-11-21: pixel-demo going from
+/// 1:1 in a 900x720 window to integer x3 in 768x720; such a frame alone locked x1 for the session).
+const NATIVE_FRAMES: u32 = 6;
+/// A factor survives the detection when at most this fraction of the informative frames that were not native
+/// ruled it out (a frame of a toast drawn at screen pixels, a half-drawn frame): one odd frame must not decide.
+/// Native frames (ruling out every factor, such as the previous picture after a resize) are counted apart:
+/// they decide x1 only as the majority.
+const FRAME_TOLERANCE: f64 = 0.1;
 /// Largest upscale factor considered.
 const MAX_K: usize = 32;
 /// Pixels ignored on every side: Windows 11 rounds the corners of a window, which would otherwise
@@ -216,18 +226,23 @@ const MARGIN: u32 = 16;
 const TOLERANCE: f64 = 0.01;
 
 pub struct Detector {
-    cand_x: [bool; MAX_K + 1],
-    cand_y: [bool; MAX_K + 1],
+    /// Per factor, the informative frames (not native ones) that ruled it out horizontally and vertically.
+    rejected_x: [u32; MAX_K + 1],
+    rejected_y: [u32; MAX_K + 1],
+    /// Informative frames analysed.
     frames: u32,
+    /// Informative frames that ruled out every factor on both axes (a native picture).
+    native_frames: u32,
     locked: bool,
 }
 
 impl Default for Detector {
     fn default() -> Self {
         Detector {
-            cand_x: [true; MAX_K + 1],
-            cand_y: [true; MAX_K + 1],
+            rejected_x: [0; MAX_K + 1],
+            rejected_y: [0; MAX_K + 1],
             frames: 0,
+            native_frames: 0,
             locked: false,
         }
     }
@@ -255,8 +270,13 @@ fn eliminate(cand: &mut [bool; MAX_K + 1], runs: &[u32]) -> bool {
     true
 }
 
-fn best(cand: &[bool; MAX_K + 1]) -> u32 {
-    (2..=MAX_K).rev().find(|&k| cand[k]).unwrap_or(1) as u32
+/// The largest factor that at most [`FRAME_TOLERANCE`] of the `frames` frames ruled out, 1 when none.
+fn best(rejected: &[u32; MAX_K + 1], frames: u32) -> u32 {
+    let allowed = FRAME_TOLERANCE * f64::from(frames);
+    (2..=MAX_K)
+        .rev()
+        .find(|&k| f64::from(rejected[k]) <= allowed)
+        .unwrap_or(1) as u32
 }
 
 impl Detector {
@@ -268,13 +288,14 @@ impl Detector {
         self.locked
     }
 
-    /// Divisor to use: (1, 1) until the detection is locked.
+    /// Divisor to use: (1, 1) until the detection is locked. Frames that ruled out every factor (a native
+    /// picture) decide x1 when they are the majority; the other frames decide the factor, each axis apart.
     pub fn divisor(&self) -> (u32, u32) {
-        if self.locked {
-            (best(&self.cand_x), best(&self.cand_y))
-        } else {
-            (1, 1)
+        let content = self.frames - self.native_frames;
+        if !self.locked || content == 0 || self.native_frames * 2 > self.frames {
+            return (1, 1);
         }
+        (best(&self.rejected_x, content), best(&self.rejected_y, content))
     }
 
     /// Analyses `region` of a BGRA8 frame that is `frame_w` pixels wide. Input that does not hold the region (a
@@ -293,6 +314,9 @@ impl Detector {
         let at = |y: u32, x: u32| (y as usize * frame_w as usize + x as usize) * 4;
         let row = |y: u32| -> &[u8] { &data[at(y, x0)..at(y, x1)] };
 
+        // The factors this frame alone leaves standing.
+        let mut cand_x = [true; MAX_K + 1];
+        let mut cand_y = [true; MAX_K + 1];
         let mut runs = Vec::new();
         let mut vertical = Vec::new();
         let mut vertical_run = 0u32;
@@ -315,7 +339,7 @@ impl Detector {
                 }
             }
             runs.push(run);
-            informative |= eliminate(&mut self.cand_x, &runs);
+            informative |= eliminate(&mut cand_x, &runs);
 
             // Vertical runs of identical rows.
             if y > y0 && row(y - 1) == current {
@@ -328,14 +352,23 @@ impl Detector {
             }
         }
         vertical.push(vertical_run);
-        informative |= eliminate(&mut self.cand_y, &vertical);
+        informative |= eliminate(&mut cand_y, &vertical);
 
         if !informative {
             return true;
         }
         self.frames += 1;
-        let any = (2..=MAX_K).any(|k| self.cand_x[k] || self.cand_y[k]);
-        self.locked = !any || self.frames >= DETECT_FRAMES;
+        if (2..=MAX_K).any(|k| cand_x[k] || cand_y[k]) {
+            for k in 2..=MAX_K {
+                self.rejected_x[k] += u32::from(!cand_x[k]);
+                self.rejected_y[k] += u32::from(!cand_y[k]);
+            }
+        } else {
+            self.native_frames += 1;
+        }
+        // x1 early only when every frame so far was native, for several frames; otherwise the frames vote.
+        let native_early = self.native_frames == self.frames && self.frames >= NATIVE_FRAMES;
+        self.locked = native_early || self.frames >= DETECT_FRAMES;
         true
     }
 }
@@ -430,20 +463,86 @@ mod tests {
         assert_eq!(detect(64, 48, 2, 3), (2, 3));
     }
 
+    fn whole(fw: u32, fh: u32) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            w: fw,
+            h: fh,
+        }
+    }
+
     #[test]
-    fn native_source_locks_to_one_immediately() {
+    fn native_source_locks_to_one_after_a_few_frames() {
         let (data, fw, fh) = frame(64, 48, 1, 1);
         let mut d = Detector::default();
-        d.feed(
-            &data,
-            fw,
-            Rect {
-                x: 0,
-                y: 0,
-                w: fw,
-                h: fh,
-            },
-        );
+        for _ in 1..NATIVE_FRAMES {
+            d.feed(&data, fw, whole(fw, fh));
+            assert!(!d.is_locked(), "one native frame does not decide");
+        }
+        d.feed(&data, fw, whole(fw, fh));
+        assert!(d.is_locked());
+        assert_eq!(d.divisor(), (1, 1));
+    }
+
+    /// Live 2026-11-21: right after the captured window changed size its first frames can still show the previous
+    /// picture (here native 1:1). Before, that one frame locked x1 for the session; the x3 frames after it decide.
+    #[test]
+    fn frames_of_the_previous_picture_after_a_resize_do_not_lock_native() {
+        let (x3, fw, fh) = frame(64, 48, 3, 3);
+        let (old, ow, _) = frame(fw, fh, 1, 1);
+        assert_eq!(ow, fw);
+        for stale in 1..NATIVE_FRAMES {
+            let mut d = Detector::default();
+            for _ in 0..stale {
+                d.feed(&old, fw, whole(fw, fh));
+            }
+            assert!(!d.is_locked(), "{stale} stale frames");
+            for _ in 0..DETECT_FRAMES {
+                d.feed(&x3, fw, whole(fw, fh));
+            }
+            assert!(d.is_locked());
+            assert_eq!(d.divisor(), (3, 3), "{stale} stale frames");
+        }
+    }
+
+    /// One odd frame in the middle (a toast drawn at screen pixels, a half-drawn frame) does not decide either.
+    #[test]
+    fn one_odd_frame_among_upscaled_ones_keeps_the_factor() {
+        let (x3, fw, fh) = frame(64, 48, 3, 3);
+        let (odd, _, _) = frame(fw, fh, 1, 1);
+        let (x6ish, _, _) = frame(32, 24, 6, 6);
+        let mut d = Detector::default();
+        for i in 0..DETECT_FRAMES {
+            // Frame 10 is native, frame 20 happens to be a x6 picture (a x3 frame of 2 x 2 blocks).
+            let data = match i {
+                10 => &odd,
+                20 => &x6ish,
+                _ => &x3,
+            };
+            d.feed(data, fw, whole(fw, fh));
+        }
+        assert!(d.is_locked());
+        assert_eq!(d.divisor(), (3, 3));
+    }
+
+    /// A native source whose frames each leave some factor standing (blocky frames) still ends at x1, and so does a
+    /// source that is mostly native with a few upscaled frames.
+    #[test]
+    fn mostly_native_frames_end_at_one() {
+        let (x2, fw, fh) = frame(96, 72, 2, 2);
+        let (x3, _, _) = frame(64, 48, 3, 3);
+        let (native, _, _) = frame(fw, fh, 1, 1);
+        let mut d = Detector::default();
+        for i in 0..DETECT_FRAMES {
+            d.feed(if i % 2 == 0 { &x2 } else { &x3 }, fw, whole(fw, fh));
+        }
+        assert_eq!(d.divisor(), (1, 1), "x2 and x3 frames rule each other out");
+        let mut d = Detector::default();
+        d.feed(&x3, fw, whole(fw, fh));
+        for _ in 1..DETECT_FRAMES {
+            d.feed(&native, fw, whole(fw, fh));
+        }
         assert!(d.is_locked());
         assert_eq!(d.divisor(), (1, 1));
     }
