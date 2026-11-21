@@ -27,6 +27,7 @@ pub mod mask;
 pub mod optics;
 pub mod output;
 pub mod phosphor;
+pub mod phosphor_types;
 pub mod tube;
 pub mod units;
 
