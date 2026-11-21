@@ -320,7 +320,17 @@ Recommended starting points (the moving-bar codes four frames behind, 60 Hz, wit
 - **Long-persistence look** (radar, oscilloscope or old monochrome tubes, which used other phosphors): extra afterglow 1 to 2 at 200 to 500 ms (1 at 200 ms: 51; 2 at 300 ms: 52, with the moving object at 141 instead of 212). For a green-only trail raise only the G component.
 - `phosphor_decay_scale` 10 to 30 for a slightly longer and redder P22 trail (20: 40 four frames behind; 42 under the live test's conditions, where a screenshot stepping by the blurred bar width reads 29).
 
-There is no phosphor-type selector (P1, P7, P31, P39 long-persistence phosphors): the project's research (`CRT.md`) has decay constants for P22 only, and the presets stay P22.
+**Phosphor type** (`phosphor_type`, the first row of the Phosphor panel; the presets stay P22). P22 (default) is the colour tube described above. The other values are monochrome tubes built only from sourced data (`CRT.md` "Phosphor types", QUESTIONS PHY-19): one gun driven by the BT.601 luma of the source, no mask (a continuous coating), light of the phosphor's colour, its own decay:
+
+| Value | Colour (CIE xy) | Decay model | Trail at 60 Hz (next frame, blend 1) |
+|---|---|---|---|
+| `p4` | white 0.270, 0.300 | power law through 60 µs / 470 µs to 10 / 1 % | 3.9 % |
+| `p31` | green 0.245, 0.523 | power law through 38 µs / 250 µs | 1.7 % |
+| `p1` | green 0.218, 0.712 | exponential, 10.4 ms (24 / 48 ms to 10 / 1 %) | 20 % |
+| `p39` | green 0.223, 0.698 | exponential through 150 ms to 10 % (one point: an approximation) | 77 % |
+| `philips_yellow_data_display_blend` | yellow 0.480, 0.490 | exponential through at least 34 ms to 10 % (a lower bound) | 32 % |
+
+The registered times are step-off responses, used as the impulse response (exact for an exponential only). P1 and P39 smear strongly at 60 Hz, as the real phosphors did (they were made for 50 Hz and slower). The greens of P1, P39 and P31 and the yellow lie outside sRGB: the output clips the negative display channel, so they look a little less saturated than the real phosphor. With a monochrome type the green value of every red, green, blue control (tail strength, extra afterglow, saturation, gun cutoff and drive) is used, the colour-temperature retune does not apply, and Decay scale, Extra afterglow and Persistence blend work as for P22. Not offered: P7 and P38 (decay longer than the 1 s the trail is fitted over), P3 and P134 (no usable data), P43 and P45 (only vendor decay figures).
 
 Keep `phosphor_frame_rate_hz` (Advanced) at 0, the default: it follows the real time between frames, so the trail lasts as long at 144 Hz as at 60 Hz. The automatic rate is the mean of the last 64 measured frame periods; each frame decays the trail by that mean (a pause or a stall longer than three periods decays by its own length), so the uneven intervals of the window loop (with frames in flight, a frame is often recorded a millisecond after the previous one, then waits for the next vertical blank) neither shorten the trail nor make it flicker. The trail restarts (a still picture is unchanged, the afterglow of the frames before is dropped) when the display rate really changes, about a second after the change, and at most once in the first second after start (the first estimate comes from one frame). A positive value is a manual override for tests, which decays the trail by 1 / value per output frame whatever time passed (397 Hz on a 60 Hz output: each frame decays the trail by only 2.5 ms of phosphor time).
 

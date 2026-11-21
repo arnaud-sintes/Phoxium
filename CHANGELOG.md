@@ -9,6 +9,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Added
 
+- **Phosphor type** (`phosphor_type`, menu Phosphor panel, first row): P22 (the colour tube, the default, unchanged bit for bit) or a monochrome tube from registered or catalogue phosphor data: P4 (white, black-and-white TV), P31 (green, oscilloscopes and many green monitors), P1 (green, early green screens), P39 (long-persistence green, as in the IBM 5151; its decay is a one-point approximation) and the Philips yellow data-display blend. A monochrome type shows the brightness (BT.601 luma) of the source in the phosphor's own colour, with no mask, and its own afterglow; P1 and P39 smear strongly at 60 Hz, as the real phosphors did. Colours outside the display's sRGB range are clipped by the output as before. Sources and approximations in CRT.md "Phosphor types" and QUESTIONS PHY-19; CRT.md's Wolf and Deubel (1997) figure is corrected.
 - **Persistence blend** (`phosphor_persistence_blend`, menu Phosphor panel, second row; owner request 2026-11-21: "the persistence is too much"): one slider from 0 to 1 for the whole afterglow trail, the measured phosphor decay and the extra afterglow together. 0 shows no trail at all, 1 the full trail exactly as before (bit for bit), values in between mix the two linearly. A still picture keeps its brightness at any value, and moving the slider takes effect at once (no restart, no flash).
 
 ### Changed
