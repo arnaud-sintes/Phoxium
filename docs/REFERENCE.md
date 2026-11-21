@@ -8,20 +8,20 @@ The first part is the user guide in detail (status, requirements, download, the 
 
 ## What it is, and where it stands
 
-**Status:** v0.3.0 is the second public release (the first was v0.2.0). Phoxium is a personal project, still below 1.0.0 (a minor version may change behaviour); feedback and bug reports are welcome as GitHub issues on the repository. What exists: window capture with source scaling and a list to pick the window from, a test pattern and an image source, the physical chain on the GPU in linear light (FP16: source decode, video amplifier, gun law and white balance, automatic beam limiting, scanline beam with spot growth, geometry and convergence, aperture grille, slot mask or delta dot mask, phosphor saturation and persistence, faceplate optics with glow (bloom) and vignette, output transform), colour fringes (chromatic aberration), zero-copy capture on the GPU with an automatic fallback to a CPU copy, ten tube presets, the optional composite, interlace, ageing and burn-in modules (all off by default), a settings menu with every parameter, a click-through option, and a stats overlay. What is not proven yet: the chain has been checked live mostly with the bundled `pixel-demo` source and a few windows, not with a wide range of real games and PCs, and zero-copy capture has not been validated with a wide range of games and drivers (see "Known limits").
+**Status:** v0.4.0 is the third public release (v0.2.0 and v0.3.0 came before, under the name ultimateCRT). Phoxium is a personal project, still below 1.0.0 (a minor version may change behaviour); feedback and bug reports are welcome as GitHub issues on the repository. What exists: window capture with source scaling and a list to pick the window from, a test pattern and an image source, the physical chain on the GPU in linear light (FP16: source decode, video amplifier, gun law and white balance, automatic beam limiting, scanline beam with spot growth, geometry and convergence, aperture grille, slot mask or delta dot mask, phosphor saturation and persistence, faceplate optics with glow (bloom) and vignette, output transform), colour fringes (chromatic aberration), zero-copy capture on the GPU with an automatic fallback to a CPU copy, ten tube presets, the optional composite, interlace, ageing and burn-in modules (all off by default), a settings menu with every parameter, a click-through option, and a stats overlay. What is not proven yet: the chain has been checked live mostly with the bundled `pixel-demo` source and a few windows, not with a wide range of real games and PCs, and zero-copy capture has not been validated with a wide range of games and drivers (see "Known limits").
 
 ## Requirements
 
 - Windows 11 x64.
 - A GPU and a driver with Vulkan 1.3 (developed on an NVIDIA RTX A2000 Laptop GPU; on a PC with several GPUs the adapter is chosen automatically, see "GPU choice").
-- No installation and no extra runtime: the release zip holds two plain executables.
+- No installation and no extra runtime: the release zip holds one plain executable, `phoxium.exe`.
 
 ## Download and run (no command line)
 
 1. Download `phoxium-vX.Y.Z-windows-x64.zip` from the Releases page of the GitHub repository `arnaud-sintes/Phoxium`, and `phoxium-vX.Y.Z-windows-x64.zip.sha256` next to it. The releases made before the rename (v0.2.0 and v0.3.0) keep their names, `ultimatecrt-vX.Y.Z-windows-x64.zip`, with `ultimatecrt.exe` inside.
 2. The executables are **not code-signed** (see "Unsigned binaries"): check the download against the hash file before the first run.
 3. Unzip it anywhere (a folder you own; do not run it from inside the zip).
-4. Start the program you want to capture (any window; `pixel-demo.exe` from the zip is a demo source with a pixel-art scene and test cards).
+4. Start the program you want to capture (any window).
 5. Double-click `phoxium.exe`. It opens one window with a "Choose a window to capture" card: type to search, Up and Down to choose, Enter or a double-click to capture. The chosen window is captured and shown through the CRT tube.
 6. **F11** puts the output fullscreen over the source (same monitor, the source keeps the keyboard focus); **F10** opens the settings menu. **Ctrl+Alt+End** (or the close button of the framed window) quits.
 

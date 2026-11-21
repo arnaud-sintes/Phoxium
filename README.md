@@ -12,13 +12,13 @@ Phoxium was called **ultimateCRT** up to v0.3.0. It is a personal project, below
 
 - Windows 11 x64.
 - A GPU and driver with Vulkan 1.3.
-- Nothing to install: the zip holds two plain executables.
+- Nothing to install: the zip holds one plain executable, `phoxium.exe`.
 
 ## Download and run
 
 1. Download `phoxium-vX.Y.Z-windows-x64.zip` and its `.sha256` file from the [Releases page](https://github.com/arnaud-sintes/Phoxium/releases). The releases made before the rename (v0.2.0, v0.3.0) are named `ultimatecrt-vX.Y.Z-windows-x64.zip`.
 2. Check the download against the hash (see "Unsigned binaries" below), then unzip it into a folder you own.
-3. Start the game or program you want to capture. `pixel-demo.exe`, in the zip, is a demo source if you just want to try.
+3. Start the game or program you want to capture.
 4. Double-click `phoxium.exe`. It opens one window with the list of windows you can capture: type to search, Up and Down to choose, Enter or a double-click to capture.
 
 That is all: no command line is needed. The integer upscale of the game and the black bars around its picture are detected automatically, and the picture is scaled and centred for you. Every automatic choice can be overridden in the menu.
@@ -67,7 +67,7 @@ The program has no network code and sends nothing anywhere. The settings file ke
 
 ## Known limits
 
-- Checked live mostly with the bundled `pixel-demo` source and a few windows on one PC, not yet with a wide range of real games.
+- Checked live mostly with a test source of the repository (`pixel-demo`, not part of the download) and a few windows on one PC, not yet with a wide range of real games.
 - Developed and tested on one NVIDIA laptop (RTX A2000, with an Intel GPU beside it). AMD and Intel GPUs and other PCs are untested: please report what you see.
 - Zero-copy capture is not yet validated with a wide range of games and drivers (the CPU copy is the safe choice).
 - Several newer parts are covered by automated tests but not yet checked by hand; [QUESTIONS.md](QUESTIONS.md) and the [CHANGELOG](CHANGELOG.md) say which.

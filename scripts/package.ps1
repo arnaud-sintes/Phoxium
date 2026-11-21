@@ -109,7 +109,7 @@ if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
 
 # The executables come from the target directory cargo reports, not from a fixed target\release.
 $targetDir = $meta.target_directory
-$exes = @('phoxium.exe', 'pixel-demo.exe') | ForEach-Object { Join-Path $targetDir "release\$_" }
+$exes = @('phoxium.exe') | ForEach-Object { Join-Path $targetDir "release\$_" }
 foreach ($e in $exes) { if (-not (Test-Path -LiteralPath $e)) { throw "Missing $e after the build." } }
 Write-Host "Executables from $targetDir\release"
 foreach ($stale in @(Get-StaleBinaries $root $exes)) {
@@ -153,7 +153,7 @@ $info = @("Phoxium $version", "commit $commit", '', 'rustc -vV', $rustc, '', 'gl
 $running = @"
 Phoxium $version
 
-1. Start the program to capture (any window; pixel-demo.exe is a demo source).
+1. Start the program to capture (any window; a game must be windowed or borderless, not exclusive fullscreen).
 2. Start phoxium.exe (double-click) and choose that window in the list it shows (Enter or double-click).
 3. F11: fullscreen over the source, never taking focus. F10: settings (Change source, Detach, every parameter).
    Quit with Ctrl+Alt+End or the close button. Developer options: phoxium.exe --help from a terminal.

@@ -7,11 +7,14 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-11-21
+
 ### Changed
 
 - The project is renamed **Phoxium** (it was called ultimateCRT up to v0.3.0). The program is `phoxium.exe`, the window titles, the menu, the About section and the version resources say Phoxium, and the release zip is `phoxium-vX.Y.Z-windows-x64.zip` on the GitHub repository `arnaud-sintes/Phoxium` (the repository is renamed from `arnaud-sintes/ultimateCRT`; GitHub redirects the old links, and the v0.2.0 and v0.3.0 downloads keep their `ultimatecrt-...` names).
 - The settings folder is now `%APPDATA%\Phoxium`. At the first start, when that folder does not exist yet, the app copies `%APPDATA%\ultimateCRT` into it (settings, your presets, export and import folders, game profiles, burn-in state); the old folder is left untouched and nothing in the new one is overwritten. A failed copy prints a warning, starts with the defaults and is tried again at the next start. Tests: `migrate` unit tests on temporary folders.
 - The README is now a short user guide; the detailed reference (developer options, every menu section, recipes, the optional modules) moved to `docs/REFERENCE.md`, which the release zip also carries.
+- The release zip no longer contains the `pixel-demo` test source (owner decision 2026-11-21): it carries `phoxium.exe` only. `pixel-demo` stays in the repository (`cargo build --release -p pixel-demo`) as the target of the live checks; `package.ps1` and `release.ps1` no longer expect it.
 - Developers: the crate is `crates/phoxium`, and every test and build variable `UCRT_*` is now `PHOXIUM_*` (`PHOXIUM_REQUIRE_GPU`, `PHOXIUM_COMMIT`, the `PHOXIUM_PROFILE_*` knobs of the profiles and benches), as are the GLSL macros.
 
 ### Fixed
@@ -214,6 +217,7 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arnaud-sintes/ultimateCRT/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arnaud-sintes/ultimateCRT/releases/tag/v0.2.0
