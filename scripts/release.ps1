@@ -22,10 +22,13 @@
     Run every check and print the target, the assets and the release notes, but create nothing.
 .PARAMETER Publish
     Second step: make the existing draft release of this version public (after the checks).
+.PARAMETER AllowUntested
+    Accept a zip built with `package.ps1 -SkipTests` (recorded as `-untested`). Only the owner's explicit decision
+    justifies it; the release notes then say that the test step was skipped. A dirty build is still refused.
 .PARAMETER Repo
     The GitHub repository (owner/name) of the release. Default arnaud-sintes/Phoxium; `origin` must point to it.
 #>
-param([switch]$DryRun, [switch]$Publish, [string]$Repo = 'arnaud-sintes/Phoxium')
+param([switch]$DryRun, [switch]$Publish, [switch]$AllowUntested, [string]$Repo = 'arnaud-sintes/Phoxium')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -118,7 +121,9 @@ foreach ($f in $zip, $sha, $commitFile) {
     if (-not (Test-Path $f)) { throw "Missing ${f}: run scripts/package.ps1 on the committed tree." }
 }
 $built = (Get-Content $commitFile -Raw).Trim()
-if ($built -match '-untested') { throw "The zip was built with -SkipTests (untested): run scripts/package.ps1 without -SkipTests." }
+$untested = $built -match '-untested'
+if ($untested -and -not $AllowUntested) { throw "The zip was built with -SkipTests (untested): run scripts/package.ps1 without -SkipTests (or, on the owner's explicit decision, pass -AllowUntested)." }
+if ($untested) { $built = $built -replace '-untested', ''; Write-Warning 'The zip was built WITHOUT the test step (-AllowUntested): the release notes will say so.' }
 if ($built -match '-dirty') { throw "The zip was built from a dirty tree: commit, then run scripts/package.ps1 again." }
 if ($built -ne $head) { throw "The zip was built from $built, HEAD is ${head}: run scripts/package.ps1 again." }
 $expected = ((Get-Content $sha -Raw).Trim() -split '\s+')[0]
@@ -206,6 +211,7 @@ if (-not ($notes -match '(?m)^- ')) { throw "The changelog section for $version 
 $notes += "`n`n---`n`nSHA-256 of ``$name.zip`` (also in the attached ``.sha256`` file): ``$expected```n`n" +
     "The executables are not code-signed, so Windows SmartScreen may warn on first run. To check your download: " +
     "``(Get-FileHash .\$name.zip -Algorithm SHA256).Hash`` in PowerShell must print the value above."
+if ($untested) { $notes += "`n`nThis build was packaged without running the test step (the owner's decision); the last full test run was on an earlier commit." }
 $notesFile = Join-Path $env:TEMP "phoxium-notes-$version.md"
 [IO.File]::WriteAllText($notesFile, $notes + "`n", (New-Object Text.UTF8Encoding $false))
 

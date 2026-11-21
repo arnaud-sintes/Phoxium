@@ -212,7 +212,7 @@ Run it on a committed (clean) tree. It reads the version from `[workspace.packag
 - `phoxium-vX.Y.Z-windows-x64.zip.sha256` (`<hash>  <file>`, ASCII, LF), published with the release so that users can verify their download;
 - `phoxium-vX.Y.Z-windows-x64.commit`, the commit the zip was built from (with a `-dirty` and/or `-untested` suffix for a local trial), so `release.ps1` can refuse a stale, dirty or untested zip.
 
-`-SkipTests` (skips fmt, clippy, the self tests and the tests) and `-AllowDirty` exist for local trials only, never for a publish. A zip built with `-AllowDirty` is recorded as `<hash>-dirty` and one built with `-SkipTests` as `<hash>-untested`; `release.ps1` refuses both.
+`-SkipTests` (skips fmt, clippy, the self tests and the tests) and `-AllowDirty` exist for local trials only, never for a publish. A zip built with `-AllowDirty` is recorded as `<hash>-dirty` and one built with `-SkipTests` as `<hash>-untested`; `release.ps1` refuses both. The owner can still decide to publish an untested zip: `release.ps1 -AllowUntested` accepts the `-untested` record (never `-dirty`) and adds a line to the release notes saying the test step was skipped.
 
 ## 6. Deploy
 
