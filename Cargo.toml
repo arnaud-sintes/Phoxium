@@ -1,6 +1,6 @@
 ﻿[workspace]
 resolver = "2"
-members = ["crates/appres", "crates/crt-model","crates/paramgen", "crates/pixel-demo", "crates/ultimatecrt"]
+members = ["crates/appres", "crates/crt-model","crates/paramgen", "crates/pixel-demo", "crates/phoxium"]
 
 [workspace.package]
 version = "0.3.0"
@@ -17,7 +17,7 @@ license = "MIT"
 [profile.test.package.crt-model]
 opt-level = 3
 
-[profile.test.package.ultimatecrt]
+[profile.test.package.phoxium]
 opt-level = 2
 
 [profile.test.package.png]

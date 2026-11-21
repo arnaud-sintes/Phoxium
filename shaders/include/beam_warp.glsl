@@ -47,8 +47,8 @@
 // beam_lines_x_start() + k / ox; pad (raster px, >= the reach plus two taps) lets the host pixels at the edge of
 // a curved picture, which see raster positions beyond the tube image, find the skirt there. The moments are
 // stored divided by sigma_max^2 (and ^4) so FP16 keeps its relative precision for any spot size.
-#ifndef UCRT_BEAM_WARP_GLSL
-#define UCRT_BEAM_WARP_GLSL
+#ifndef PHOXIUM_BEAM_WARP_GLSL
+#define PHOXIUM_BEAM_WARP_GLSL
 
 #define BEAM_LINES_SET 2
 // Core: sum h, sum h sigma^2 / S, sum h sigma^4 / S^2 (S = sigma_max^2); tail: sum h, sum h sigma^2 / S.

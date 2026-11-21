@@ -195,7 +195,7 @@ mod tests {
     fn version_info_layout() {
         let v = VersionInfo {
             version: [1, 2, 3, 0],
-            strings: vec![("ProductName".into(), "ultimateCRT".into())],
+            strings: vec![("ProductName".into(), "Phoxium".into())],
         };
         let d = v.encode();
         assert_eq!(u16_at(&d, 0), Some(d.len() as u16));
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(u32_at(&d, 48), Some((1 << 16) | 2));
         assert_eq!(u32_at(&d, 52), Some(3 << 16));
         assert!(contains_utf16(&d, "040904b0"));
-        assert!(contains_utf16(&d, "ultimateCRT"));
+        assert!(contains_utf16(&d, "Phoxium"));
     }
 
     #[test]

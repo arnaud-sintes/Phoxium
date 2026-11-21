@@ -1,4 +1,4 @@
-# ultimateCRT
+# Phoxium
 
 ## Vision
 
@@ -69,14 +69,14 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 
 ## Repository layout
 
-Cargo workspace, Windows only. GitHub repository `arnaud-sintes/ultimateCRT`, public from v0.2.0, MIT licence (`LICENSE`).
+Cargo workspace, Windows only. GitHub repository `arnaud-sintes/Phoxium`, public from v0.2.0, MIT licence (`LICENSE`).
 - `crates/pixel-demo`: demo source app (Win32 and GDI), emulates a game presenting a native surface (1:1, integer, autofit, fit, stretch, bars, presets, test contents, corner markers, frame counter; options and keys, see `pixel-demo --help`). It is the capture target.
 - `crates/crt-model`: f64 CPU oracle of the physics (gun, beam, mask, geometry, ABL, phosphor, ageing, burn-in, optics, composite, interlace, colour, output, tube, units), used by the GPU tests and the placement code.
 - `crates/paramgen`: build-time generator of the Rust and GLSL parameter code from `params/*.toml`.
-- `crates/appres`: application icon and Windows resources (ICO writer and reader, `.res` writer, PE resource reader); the build scripts of `ultimatecrt` and `pixel-demo` use it, and the `gen_icon` example draws the icons.
-- `crates/ultimatecrt`: the main app. Modules: `adapters` (GPU selection, stable adapter identity and LUID mapping), `ageing` (ageing and burn-in values for the GPU), `app` (live loop), `bars` (pure black-bar detection and crop edits), `capture` (Windows.Graphics.Capture, CPU copy), `cli`, `controls`, `diag` (`--log`), `gpu/{context, present, headless, pipeline, stages, timing, ui_render}` (Vulkan renderer, ash; `gpu/stages/` has one file per chain stage), `headroom`, `hotkeys` (global hotkeys), `interlace`, `keyboard_layout` (what AltGr types on the installed layouts), `lifecycle` (lost source, reattach), `live` (settings writes and session state), `modes` (output window modes and rectangle), `output` (Win32 output window), `pacing` (frame pacing on the desktop composition), `params` (generated parameter table), `patterns`, `picker` (source selection logic and state machine), `placement`, `presets`, `quality` (quality tiers), `render_cmd` (offline `render`), `scaling` (pure integer-upscale detection and crop logic), `settings`, `source`, `sources` (window lookup), `tube_state` (persistent burn-in wear map), `ui/{menu, panels, picker, overlay, input, theme}` (ImGui menu, generated parameter panels, picker, stats overlay), `white`. Tests in `crates/ultimatecrt/tests/` (test data in `tests/data`).
-- `crates/ultimatecrt/assets/fonts`: the embedded Inter subset (SIL OFL 1.1, `OFL.txt`) and the script that makes it. `assets/icon`: the icon sources and outputs.
-- `shaders/`: GLSL (`*.comp`, `*.frag`, `*.vert`, `include/`), compiled to SPIR-V by `crates/ultimatecrt/build.rs` with `glslc`.
+- `crates/appres`: application icon and Windows resources (ICO writer and reader, `.res` writer, PE resource reader); the build scripts of `phoxium` and `pixel-demo` use it, and the `gen_icon` example draws the icons.
+- `crates/phoxium`: the main app. Modules: `adapters` (GPU selection, stable adapter identity and LUID mapping), `ageing` (ageing and burn-in values for the GPU), `app` (live loop), `bars` (pure black-bar detection and crop edits), `capture` (Windows.Graphics.Capture, CPU copy), `cli`, `controls`, `diag` (`--log`), `gpu/{context, present, headless, pipeline, stages, timing, ui_render}` (Vulkan renderer, ash; `gpu/stages/` has one file per chain stage), `headroom`, `hotkeys` (global hotkeys), `interlace`, `keyboard_layout` (what AltGr types on the installed layouts), `lifecycle` (lost source, reattach), `live` (settings writes and session state), `modes` (output window modes and rectangle), `output` (Win32 output window), `pacing` (frame pacing on the desktop composition), `params` (generated parameter table), `patterns`, `picker` (source selection logic and state machine), `placement`, `presets`, `quality` (quality tiers), `render_cmd` (offline `render`), `scaling` (pure integer-upscale detection and crop logic), `settings`, `source`, `sources` (window lookup), `tube_state` (persistent burn-in wear map), `ui/{menu, panels, picker, overlay, input, theme}` (ImGui menu, generated parameter panels, picker, stats overlay), `white`. Tests in `crates/phoxium/tests/` (test data in `tests/data`).
+- `crates/phoxium/assets/fonts`: the embedded Inter subset (SIL OFL 1.1, `OFL.txt`) and the script that makes it. `assets/icon`: the icon sources and outputs.
+- `shaders/`: GLSL (`*.comp`, `*.frag`, `*.vert`, `include/`), compiled to SPIR-V by `crates/phoxium/build.rs` with `glslc`.
 - `params/`: the declarative parameter table, one TOML file per stage.
 - `presets/tubes/`: the 10 shipped tube presets (data files).
 - `spikes/imgui-spike`, `spikes/focus-leak`: own Cargo workspaces, the TEC-5 (T-08) Dear ImGui spike and the T-07 focus-leak spike; not part of the product build.

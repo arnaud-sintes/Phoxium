@@ -62,7 +62,7 @@ pub fn master(st: &Style) -> String {
     let p = st.triad_pitch;
     format!(
         r##"<svg xmlns="http://www.w3.org/2000/svg" width="{size}" height="{size}" viewBox="0 0 {size} {size}">
-  <title>ultimateCRT</title>
+  <title>Phoxium</title>
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feGaussianBlur stdDeviation="{blur:.2}"/></filter>
     <linearGradient id="casing" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="{ct}"/><stop offset="1" stop-color="{cb}"/></linearGradient>

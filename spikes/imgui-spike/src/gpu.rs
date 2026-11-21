@@ -1,4 +1,4 @@
-//! Vulkan context for the spike: a copy of `crates/ultimatecrt/src/gpu/context.rs` (T-09 headless
+//! Vulkan context for the spike: a copy of `crates/phoxium/src/gpu/context.rs` (T-09 headless
 //! context with the counting validation messenger and synchronization validation), trimmed to what
 //! the spike needs, plus small image and buffer helpers copied from `gpu/headless.rs` and
 //! `gpu/mod.rs`. Copied, not shared: the spike must not depend on the main crate.
@@ -14,10 +14,10 @@ use crate::Res;
 
 const VALIDATION_LAYER: &CStr = c"VK_LAYER_KHRONOS_validation";
 
-/// True when `UCRT_REQUIRE_GPU` is set to a non-empty value other than `0`: a missing GPU or
+/// True when `PHOXIUM_REQUIRE_GPU` is set to a non-empty value other than `0`: a missing GPU or
 /// validation layer then fails the GPU tests instead of skipping them.
 pub fn gpu_required() -> bool {
-    std::env::var("UCRT_REQUIRE_GPU").is_ok_and(|v| !v.is_empty() && v != "0")
+    std::env::var("PHOXIUM_REQUIRE_GPU").is_ok_and(|v| !v.is_empty() && v != "0")
 }
 
 /// True when the Vulkan loader is present and lists `VK_LAYER_KHRONOS_validation`.

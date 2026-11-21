@@ -20,9 +20,9 @@ pub mod rt {
 }
 
 /// Product name in every VERSIONINFO.
-pub const PRODUCT_NAME: &str = "ultimateCRT";
+pub const PRODUCT_NAME: &str = "Phoxium";
 /// Copyright line in every VERSIONINFO (personal project, no company).
-pub const COPYRIGHT: &str = "Copyright (C) 2026, ultimateCRT personal project";
+pub const COPYRIGHT: &str = "Copyright (C) 2026, Phoxium personal project";
 
 /// Build-script helper: embeds the `.ico` at `ico` as the executable icon (RT_GROUP_ICON 1, the icon Explorer,
 /// the taskbar and Alt+Tab show; also what `LoadImageW(hinstance, 1, IMAGE_ICON, ..)` loads) and a VERSIONINFO

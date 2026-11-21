@@ -1,5 +1,5 @@
 //! pixel-demo: a Win32 window showing a low-resolution pixel-art source. It is the universal test
-//! source used to develop ultimatecrt: it emulates how a game presents its native surface (1:1,
+//! source used to develop phoxium: it emulates how a game presents its native surface (1:1,
 //! integer, auto-fit, filtered fit and stretch), centring with plain or patterned bars, window
 //! modes, DPI handling, native size presets, several test contents with corner markers and a frame
 //! counter, keyboard control, and a high-resolution update clock. Run `pixel-demo --help` for the

@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-    Live focus regression check (T-07): runs pixel-demo and ultimatecrt for N seconds under the independent
+    Live focus regression check (T-07): runs pixel-demo and phoxium for N seconds under the independent
     focus monitor and prints PASS or FAIL.
 .DESCRIPTION
     Builds nothing. Starts scripts\focus-monitor.ps1 (WinEvent hook, own process), then pixel-demo --scale 4
     (the source; put in the foreground with a synthetic Alt press and SetForegroundWindow, which is the
-    script's own input and resets the idle clock), then ultimatecrt (or -Exe from -Bin) with -UcrtArgs plus
+    script's own input and resets the idle clock), then phoxium (or -Exe from -Bin) with -PhoxiumArgs plus
     --exit-after. Result: PASS (exit 0) when no foreground change happens while it runs; MITIGATED (exit 4)
     when the only changes are hand-backs (the output became foreground and the previous window got it back
     within 1 s, no focus event on the output: the T-07 mitigation at work); FAIL (exit 1) otherwise.
@@ -14,19 +14,19 @@
     program through WMI in a new hidden console instead of this shell's console. Every process it started
     is stopped at the end.
     Output folder: the monitor CSV (titles can hold private content; delete it after review) and the
-    ultimatecrt console output.
+    phoxium console output.
 .EXAMPLE
-    .\scripts\check-focus.ps1 -Bin .\target\release -Seconds 120 -UcrtArgs '--window pixel-demo --fullscreen'
+    .\scripts\check-focus.ps1 -Bin .\target\release -Seconds 120 -PhoxiumArgs '--window pixel-demo --fullscreen'
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Bin,
     [int]$Seconds = 120,
-    [string]$UcrtArgs = '--window pixel-demo --fullscreen',
-    [string]$OutDir = (Join-Path $env:TEMP 'ultimatecrt-check-focus'),
+    [string]$PhoxiumArgs = '--window pixel-demo --fullscreen',
+    [string]$OutDir = (Join-Path $env:TEMP 'phoxium-check-focus'),
     [string]$Label = 'run',
     [int]$MinIdle = 60,
     [switch]$NoSource,
-    [string]$Exe = 'ultimatecrt.exe',
+    [string]$Exe = 'phoxium.exe',
     [string]$DemoBin = '',
     [switch]$ViaWmi
 )
@@ -36,10 +36,10 @@ $Bin = (Resolve-Path $Bin).Path
 if (-not $DemoBin) { $DemoBin = $Bin }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
-if (-not ('UcrtIdle' -as [type])) {
+if (-not ('PhoxiumIdle' -as [type])) {
     Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
-public static class UcrtIdle {
+public static class PhoxiumIdle {
     [StructLayout(LayoutKind.Sequential)] struct LII { public uint cbSize; public uint dwTime; }
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII i);
     [DllImport("kernel32.dll")] static extern uint GetTickCount();
@@ -54,11 +54,11 @@ public static class UcrtIdle {
 '@
 }
 
-$idle0 = [UcrtIdle]::Seconds()
+$idle0 = [PhoxiumIdle]::Seconds()
 if ($idle0 -lt $MinIdle) { Write-Output ("NOT RUN: user input {0:N0} s ago (needs {1} s idle)" -f $idle0, $MinIdle); exit 2 }
 
 $csv = Join-Path $OutDir "$Label-focus.csv"
-$ucrtOut = Join-Path $OutDir "$Label-ucrt.txt"
+$phoxiumOut = Join-Path $OutDir "$Label-phoxium.txt"
 $monitor = Join-Path $PSScriptRoot 'focus-monitor.ps1'
 $started = @()
 $t0 = Get-Date; $inject = $t0
@@ -73,52 +73,52 @@ try {
         $started += $demo
         Start-Sleep -Seconds 2
         $demo.Refresh(); $hDemo = $demo.MainWindowHandle
-        $ok = [UcrtIdle]::Activate($hDemo); $inject = Get-Date
+        $ok = [PhoxiumIdle]::Activate($hDemo); $inject = Get-Date
         Write-Output ("[$Label] own injection (Alt + SetForegroundWindow on pixel-demo) at {0}: foreground={1}" -f $inject.ToString('HH:mm:ss.fff'), $ok)
         Start-Sleep -Seconds 2
     }
-    $ucrtStart = Get-Date
+    $phoxiumStart = Get-Date
     if ($ViaWmi) {
         # Detached from this shell's console: started by the WMI service in a new hidden console.
         $si = New-CimInstance -ClassName Win32_ProcessStartup -ClientOnly -Property @{ ShowWindow = [uint16]0 }
-        $cmd = "cmd.exe /c `"`"$(Join-Path $Bin $Exe)`" $UcrtArgs --exit-after $Seconds > `"$ucrtOut`" 2>&1`""
+        $cmd = "cmd.exe /c `"`"$(Join-Path $Bin $Exe)`" $PhoxiumArgs --exit-after $Seconds > `"$phoxiumOut`" 2>&1`""
         $res = Invoke-CimMethod -ClassName Win32_Process -MethodName Create -Arguments @{ CommandLine = $cmd; ProcessStartupInformation = $si }
         Start-Sleep -Milliseconds 500
-        $ucrt = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($res.ProcessId)" | ForEach-Object { Get-Process -Id $_.ProcessId } | Select-Object -First 1
-        if (-not $ucrt) { $ucrt = Get-Process -Id $res.ProcessId }
+        $phoxium = Get-CimInstance Win32_Process -Filter "ParentProcessId=$($res.ProcessId)" | ForEach-Object { Get-Process -Id $_.ProcessId } | Select-Object -First 1
+        if (-not $phoxium) { $phoxium = Get-Process -Id $res.ProcessId }
     } else {
-        $ucrt = Start-Process (Join-Path $Bin $Exe) -ArgumentList "$UcrtArgs --exit-after $Seconds" `
-            -RedirectStandardOutput $ucrtOut -RedirectStandardError "$ucrtOut.err" -NoNewWindow -PassThru
+        $phoxium = Start-Process (Join-Path $Bin $Exe) -ArgumentList "$PhoxiumArgs --exit-after $Seconds" `
+            -RedirectStandardOutput $phoxiumOut -RedirectStandardError "$phoxiumOut.err" -NoNewWindow -PassThru
     }
-    $started += $ucrt
+    $started += $phoxium
     $aborted = $false
-    while (-not $ucrt.HasExited -and ((Get-Date) - $ucrtStart).TotalSeconds -lt ($Seconds + 15)) {
+    while (-not $phoxium.HasExited -and ((Get-Date) - $phoxiumStart).TotalSeconds -lt ($Seconds + 15)) {
         Start-Sleep -Seconds 1
-        if ([UcrtIdle]::Seconds() -lt ((Get-Date) - $inject).TotalSeconds - 1) { $aborted = $true; break }
+        if ([PhoxiumIdle]::Seconds() -lt ((Get-Date) - $inject).TotalSeconds - 1) { $aborted = $true; break }
     }
-    $ucrtEnd = Get-Date
+    $phoxiumEnd = Get-Date
     Start-Sleep -Seconds 2
 } finally {
-    foreach ($p in @($ucrt, $demo)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
+    foreach ($p in @($phoxium, $demo)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
     if ($mon) { $null = $mon.WaitForExit(15000); if (-not $mon.HasExited) { Stop-Process -Id $mon.Id -Force -ErrorAction SilentlyContinue } }
 }
 
 $rows = Import-Csv $csv
-$ucrtFrom = $ucrtStart.ToString('HH:mm:ss.fff'); $ucrtTo = $ucrtEnd.ToString('HH:mm:ss.fff')
-$during = $rows | Where-Object { $_.time -ge $ucrtFrom -and $_.time -le $ucrtTo -and $_.event -ne 'end' }
-$before = $rows | Where-Object { $_.time -lt $ucrtFrom -and $_.event -in 'baseline', 'foreground' } | Select-Object -Last 1
+$phoxiumFrom = $phoxiumStart.ToString('HH:mm:ss.fff'); $phoxiumTo = $phoxiumEnd.ToString('HH:mm:ss.fff')
+$during = $rows | Where-Object { $_.time -ge $phoxiumFrom -and $_.time -le $phoxiumTo -and $_.event -ne 'end' }
+$before = $rows | Where-Object { $_.time -lt $phoxiumFrom -and $_.event -in 'baseline', 'foreground' } | Select-Object -Last 1
 $bad = $during | Where-Object { $_.exe -ieq $Exe -and $_.event -in 'foreground', 'focus' }
 $fgChanges = $during | Where-Object { $_.event -eq 'foreground' }
-$secs = [math]::Round(($ucrtStart - $t0).TotalSeconds, 1)
-Write-Output ("[$Label] ultimatecrt ran {0} .. {1}; monitor t_ms of start ~ {2:N0}" -f $ucrtFrom, $ucrtTo, ($secs * 1000))
+$secs = [math]::Round(($phoxiumStart - $t0).TotalSeconds, 1)
+Write-Output ("[$Label] phoxium ran {0} .. {1}; monitor t_ms of start ~ {2:N0}" -f $phoxiumFrom, $phoxiumTo, ($secs * 1000))
 Write-Output ("[$Label] foreground before: {0} ({1}); foreground changes during the run: {2}" -f $before.exe, $before.title, @($fgChanges).Count)
 foreach ($r in $during) {
-    $rel = ([datetime]::ParseExact($r.time, 'HH:mm:ss.fff', $null) - [datetime]::ParseExact($ucrtFrom, 'HH:mm:ss.fff', $null)).TotalSeconds
+    $rel = ([datetime]::ParseExact($r.time, 'HH:mm:ss.fff', $null) - [datetime]::ParseExact($phoxiumFrom, 'HH:mm:ss.fff', $null)).TotalSeconds
     Write-Output ("  +{0,6:N2} s  {1,-13} {2} {3,-28} {4,-18} noact={5} top={6} tool={7}" -f $rel, $r.event, $r.hwnd, $r.class, $r.exe, $r.noactivate, $r.topmost, $r.toolwindow)
 }
-$idle1 = [UcrtIdle]::Seconds()
+$idle1 = [PhoxiumIdle]::Seconds()
 Write-Output ("[$Label] idle before {0:N0} s, after {1:N0} s" -f $idle0, $idle1)
-if ($aborted -or $idle1 -lt (($ucrtEnd - $inject).TotalSeconds)) { Write-Output "[$Label] ABORTED: user input during the run"; exit 3 }
+if ($aborted -or $idle1 -lt (($phoxiumEnd - $inject).TotalSeconds)) { Write-Output "[$Label] ABORTED: user input during the run"; exit 3 }
 # A hand-back (T-07 mitigation): the output became foreground and the window that had the foreground
 # before got it back within 1 s, with no keyboard focus on the output. Anything else is a failure.
 $fg = @($fgChanges); $handedBack = 0; $other = 0; $i = 0

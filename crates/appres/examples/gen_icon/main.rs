@@ -1,7 +1,7 @@
-//! Generates the application icons (ultimateCRT and pixel-demo) and a preview sheet.
+//! Generates the application icons (Phoxium and pixel-demo) and a preview sheet.
 //!
 //! Run from anywhere: `cargo run -p appres --example gen_icon --release`. Writes, relative to the workspace root:
-//! - `assets/icon/icon.ico` (ultimateCRT, every size), `assets/icon/icon-256.png`, `assets/icon/icon.svg` (the
+//! - `assets/icon/icon.ico` (Phoxium, every size), `assets/icon/icon-256.png`, `assets/icon/icon.svg` (the
 //!   master design as a vector approximation, without the barrel warp and the stripe anti-aliasing),
 //! - `assets/icon/pixel-demo.ico`, `assets/icon/pixel-demo-256.png`,
 //! - `target/icon-preview/` (not committed): every size as PNG, 16 and 32 px enlarged, and `preview.png`, the

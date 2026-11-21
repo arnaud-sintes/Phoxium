@@ -1,5 +1,5 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="256" height="256" viewBox="0 0 256 256">
-  <title>ultimateCRT</title>
+  <title>Phoxium</title>
   <defs>
     <filter id="shadow" x="-10%" y="-10%" width="120%" height="130%"><feGaussianBlur stdDeviation="7.68"/></filter>
     <linearGradient id="casing" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#434954"/><stop offset="1" stop-color="#22252b"/></linearGradient>

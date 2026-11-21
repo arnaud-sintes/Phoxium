@@ -6,11 +6,11 @@
     Ctrl+Alt+PageDown, Ctrl+Alt+PageUp, Ctrl+Alt+End), so any key you press or any window you activate while it
     runs falsifies the result. It refuses to start unless the desktop was idle for -MinIdle seconds, and it
     reports ABORTED if it sees user input between its own injections. It opens windows (pixel-demo and the
-    ultimatecrt output, fullscreen on the source's monitor), so do not run it while working.
+    phoxium output, fullscreen on the source's monitor), so do not run it while working.
 
     Steps:
       1. Starts scripts\focus-monitor.ps1 (independent WinEvent hook), then pixel-demo (the source, put in the
-         foreground), then ultimatecrt --fullscreen.
+         foreground), then phoxium --fullscreen.
       2. Checks the console line "hotkeys:" (every chord registered, none "unavailable") and lists the
          registration warnings (a chord that fell back: the F10 case of PLAN D-17 names its Win32 error).
       3. F11 six times (3 windowed/fullscreen cycles): after each press the console must report the new mode
@@ -21,7 +21,7 @@
          preset): the console must print the bypass state and the preset names. The menu key (F10 by default)
          is NOT pressed: with the settings menu wired in (T-52a) it activates the output on purpose. Check it
          by hand.
-      5. Ctrl+Alt+End: ultimatecrt must exit within 3 s. (The default chords since review D-01; the Ctrl+Alt+letter
+      5. Ctrl+Alt+End: phoxium must exit within 3 s. (The default chords since review D-01; the Ctrl+Alt+letter
          chords of earlier builds also fired on AltGr. A settings.toml that rebinds them makes this check fail.)
     Prints PASS (exit 0), MITIGATED (exit 4: only T-07 hand-backs seen), FAIL (exit 1), NOT RUN (exit 2: desktop
     not idle) or ABORTED (exit 3: user input during the run). Every process it started is stopped at the end.
@@ -31,10 +31,10 @@
 #>
 param(
     [Parameter(Mandatory = $true)][string]$Bin,
-    [string]$UcrtArgs = '--window pixel-demo --fullscreen',
-    [string]$OutDir = (Join-Path $env:TEMP 'ultimatecrt-check-hotkeys'),
+    [string]$PhoxiumArgs = '--window pixel-demo --fullscreen',
+    [string]$OutDir = (Join-Path $env:TEMP 'phoxium-check-hotkeys'),
     [int]$MinIdle = 60,
-    [string]$Exe = 'ultimatecrt.exe',
+    [string]$Exe = 'phoxium.exe',
     [string]$DemoBin = ''
 )
 
@@ -43,10 +43,10 @@ $Bin = (Resolve-Path $Bin).Path
 if (-not $DemoBin) { $DemoBin = $Bin }
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
-if (-not ('UcrtKeys' -as [type])) {
+if (-not ('PhoxiumKeys' -as [type])) {
     Add-Type -TypeDefinition @'
 using System; using System.Runtime.InteropServices;
-public static class UcrtKeys {
+public static class PhoxiumKeys {
     [StructLayout(LayoutKind.Sequential)] struct MOUSEINPUT { public int dx, dy; public uint mouseData, dwFlags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Sequential)] struct KEYBDINPUT { public ushort vk, scan; public uint flags, time; public IntPtr extra; }
     [StructLayout(LayoutKind.Explicit)] struct INPUTU { [FieldOffset(0)] public MOUSEINPUT mi; [FieldOffset(0)] public KEYBDINPUT ki; }
@@ -82,15 +82,15 @@ $EXT = @('PageUp', 'PageDown', 'End')
 $script:lastInject = Get-Date
 function Send-Chord([string]$text) {
     $names = $text -split '\+'
-    [UcrtKeys]::Chord([uint16[]]($names | ForEach-Object { $VK[$_] }), [bool[]]($names | ForEach-Object { $EXT -contains $_ }))
+    [PhoxiumKeys]::Chord([uint16[]]($names | ForEach-Object { $VK[$_] }), [bool[]]($names | ForEach-Object { $EXT -contains $_ }))
     $script:lastInject = Get-Date
 }
 
-$idle0 = [UcrtKeys]::IdleSeconds()
+$idle0 = [PhoxiumKeys]::IdleSeconds()
 if ($idle0 -lt $MinIdle) { Write-Output ("NOT RUN: user input {0:N0} s ago (needs {1} s idle)" -f $idle0, $MinIdle); exit 2 }
 
 $csv = Join-Path $OutDir 'focus.csv'
-$ucrtOut = Join-Path $OutDir 'ucrt.txt'
+$phoxiumOut = Join-Path $OutDir 'phoxium.txt'
 $monitor = Join-Path $PSScriptRoot 'focus-monitor.ps1'
 $started = @()
 $presses = @()          # F11 presses: time of each
@@ -105,18 +105,18 @@ try {
     $started += $demo
     Start-Sleep -Seconds 2
     $demo.Refresh()
-    $null = [UcrtKeys]::Activate($demo.MainWindowHandle)
+    $null = [PhoxiumKeys]::Activate($demo.MainWindowHandle)
     $script:lastInject = Get-Date
     Start-Sleep -Seconds 2
-    $ucrtStart = Get-Date
-    $ucrt = Start-Process (Join-Path $Bin $Exe) -ArgumentList $UcrtArgs `
-        -RedirectStandardOutput $ucrtOut -RedirectStandardError "$ucrtOut.err" -NoNewWindow -PassThru
-    $started += $ucrt
+    $phoxiumStart = Get-Date
+    $phoxium = Start-Process (Join-Path $Bin $Exe) -ArgumentList $PhoxiumArgs `
+        -RedirectStandardOutput $phoxiumOut -RedirectStandardError "$phoxiumOut.err" -NoNewWindow -PassThru
+    $started += $phoxium
     Start-Sleep -Seconds 5
-    $ucrt.Refresh()
-    $hwnd = $ucrt.MainWindowHandle
-    if ($ucrt.HasExited) { $fail += "ultimatecrt exited at startup (see $ucrtOut.err)" }
-    $out = { if (Test-Path $ucrtOut) { Get-Content $ucrtOut -Raw } else { '' } }
+    $phoxium.Refresh()
+    $hwnd = $phoxium.MainWindowHandle
+    if ($phoxium.HasExited) { $fail += "phoxium exited at startup (see $phoxiumOut.err)" }
+    $out = { if (Test-Path $phoxiumOut) { Get-Content $phoxiumOut -Raw } else { '' } }
     $WS_CAPTION = 0xC00000
 
     # 2. registration
@@ -125,7 +125,7 @@ try {
     if (-not $line) { $fail += 'no "hotkeys:" line in the console output' }
     elseif ($line -match 'unavailable') { $fail += "a hotkey is unavailable: $line" }
     Write-Output "console: $line"
-    $err = if (Test-Path "$ucrtOut.err") { Get-Content "$ucrtOut.err" } else { @() }
+    $err = if (Test-Path "$phoxiumOut.err") { Get-Content "$phoxiumOut.err" } else { @() }
     foreach ($w in ($err | Where-Object { $_ -match 'hotkey' })) { Write-Output "registration note: $w" }
 
     # 3. F11 x 6, all inside the first 25 s after the start where possible.
@@ -139,11 +139,11 @@ try {
         $lines = @((& $out) -split "`r?`n" | Where-Object { $_ -like 'output:*' })
         if ($lines.Count -le $before) { $fail += "F11 -> $want : no console line"; continue }
         if ($lines[-1] -notlike "output: $want*") { $fail += "F11 -> $want : console says '$($lines[-1])'" }
-        $style = [UcrtKeys]::Style($hwnd)
+        $style = [PhoxiumKeys]::Style($hwnd)
         $framed = ($style -band $WS_CAPTION) -eq $WS_CAPTION
         if ($want -eq 'windowed' -and -not $framed) { $fail += 'windowed output has no frame' }
         if ($want -eq 'fullscreen' -and $framed) { $fail += 'fullscreen output still has a frame' }
-        if ([UcrtKeys]::IdleSeconds() -lt ((Get-Date) - $script:lastInject).TotalSeconds - 1) { $aborted = $true; break }
+        if ([PhoxiumKeys]::IdleSeconds() -lt ((Get-Date) - $script:lastInject).TotalSeconds - 1) { $aborted = $true; break }
     }
 
     # 4. bypass and presets
@@ -156,19 +156,19 @@ try {
             Send-Chord $step.keys
             Start-Sleep -Milliseconds 1200
             if (((& $out) -split "`r?`n" | Where-Object { $_ -like "*$($step.pattern)*" }).Count -lt 1) { $fail += "$($step.keys): no '$($step.pattern)' line" }
-            if ([UcrtKeys]::IdleSeconds() -lt ((Get-Date) - $script:lastInject).TotalSeconds - 1) { $aborted = $true; break }
+            if ([PhoxiumKeys]::IdleSeconds() -lt ((Get-Date) - $script:lastInject).TotalSeconds - 1) { $aborted = $true; break }
         }
     }
 
     # 5. quit
     Send-Chord 'Ctrl+Alt+End'
-    $null = $ucrt.WaitForExit(3000)
-    $quitOk = $ucrt.HasExited
-    if (-not $quitOk) { $fail += 'Ctrl+Alt+End did not end ultimatecrt within 3 s' }
-    $ucrtEnd = Get-Date
+    $null = $phoxium.WaitForExit(3000)
+    $quitOk = $phoxium.HasExited
+    if (-not $quitOk) { $fail += 'Ctrl+Alt+End did not end phoxium within 3 s' }
+    $phoxiumEnd = Get-Date
     Start-Sleep -Seconds 2
 } finally {
-    foreach ($p in @($ucrt, $demo)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
+    foreach ($p in @($phoxium, $demo)) { if ($p -and -not $p.HasExited) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue } }
     if ($mon) { $null = $mon.WaitForExit(15000); if (-not $mon.HasExited) { Stop-Process -Id $mon.Id -Force -ErrorAction SilentlyContinue } }
 }
 
@@ -176,7 +176,7 @@ if ($aborted) { Write-Output 'ABORTED: user input during the run'; exit 3 }
 
 # Foreground check: events for the output in the 1.5 s after each F11 press, minus the T-07 hand-backs.
 $rows = Import-Csv $csv
-$from = $ucrtStart.ToString('HH:mm:ss.fff'); $to = $ucrtEnd.ToString('HH:mm:ss.fff')
+$from = $phoxiumStart.ToString('HH:mm:ss.fff'); $to = $phoxiumEnd.ToString('HH:mm:ss.fff')
 $during = $rows | Where-Object { $_.time -ge $from -and $_.time -le $to -and $_.event -ne 'end' }
 $before = $rows | Where-Object { $_.time -lt $from -and $_.event -in 'baseline', 'foreground' } | Select-Object -Last 1
 $fg = @($during | Where-Object { $_.event -eq 'foreground' })

@@ -30,12 +30,12 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-if (-not ('UcrtFg' -as [type])) {
+if (-not ('PhoxiumFg' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class UcrtFg {
+public static class PhoxiumFg {
     [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetWindowText(IntPtr h, StringBuilder s, int n);
     [DllImport("user32.dll")] static extern int GetWindowTextLength(IntPtr h);
@@ -101,7 +101,7 @@ function Invoke-Poll([string]$Path, [string]$Source, [int]$Seconds, [int]$Interv
     try {
         while ($true) {
             $hwnd = 0L; $fgPid = [uint32]0; $title = ''; $exe = ''
-            try { [UcrtFg]::Query([ref]$hwnd, [ref]$fgPid, [ref]$title, [ref]$exe) } catch { }
+            try { [PhoxiumFg]::Query([ref]$hwnd, [ref]$fgPid, [ref]$title, [ref]$exe) } catch { }
             if ($null -eq $title) { $title = '' }
             if ($null -eq $exe) { $exe = '' }
             $isSource = $false
@@ -113,7 +113,7 @@ function Invoke-Poll([string]$Path, [string]$Source, [int]$Seconds, [int]$Interv
             $lastTick = $now
             $lastSource = $isSource
 
-            # Window identity only: pixel-demo and the ultimatecrt output rewrite their titles every second,
+            # Window identity only: pixel-demo and the phoxium output rewrite their titles every second,
             # which is not a foreground change (2026-11-19 live run).
             $key = "${hwnd}|${fgPid}"
             if ($key -ne $lastKey) {

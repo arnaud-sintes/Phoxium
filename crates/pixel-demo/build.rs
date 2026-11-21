@@ -6,6 +6,6 @@ fn main() {
     appres::embed_for_build_script(
         &dir.join("../../assets/icon/pixel-demo.ico"),
         "pixel-demo",
-        "pixel-demo, demo source for ultimateCRT",
+        "pixel-demo, demo source for Phoxium",
     );
 }

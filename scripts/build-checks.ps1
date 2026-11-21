@@ -218,15 +218,15 @@ function Invoke-BuildChecksSelfTest {
     function Check([bool]$ok, [string]$what) { if (-not $ok) { $script:selfFail += $what } }
     $script:selfFail = @()
     # Binary inputs (review D-09).
-    foreach ($p in @('crates/ultimatecrt/src/app.rs', 'crates/crt-model/src/lib.rs', 'crates/ultimatecrt/build.rs',
-            'crates/pixel-demo/Cargo.toml', 'crates/ultimatecrt/assets/fonts/Inter-Regular.ttf', 'assets/icon/icon.ico',
+    foreach ($p in @('crates/phoxium/src/app.rs', 'crates/crt-model/src/lib.rs', 'crates/phoxium/build.rs',
+            'crates/pixel-demo/Cargo.toml', 'crates/phoxium/assets/fonts/Inter-Regular.ttf', 'assets/icon/icon.ico',
             'shaders/include/geometry.glsl', 'params/composite.toml', 'presets/tubes/01.toml', 'Cargo.lock',
-            'Cargo.toml', 'rust-toolchain.toml', 'crates\ultimatecrt\src\main.rs')) {
+            'Cargo.toml', 'rust-toolchain.toml', 'crates\phoxium\src\main.rs')) {
         Check (Test-BinaryInput $p) "binary input: $p"
     }
-    foreach ($p in @('crates/ultimatecrt/tests/stage_geometry.rs', 'crates/appres/examples/gen_icon.rs',
-            'crates/ultimatecrt/assets/fonts/subset.py', 'crates/ultimatecrt/assets/fonts/OFL.txt', 'assets/icon/README.md',
-            'scripts/package.ps1', 'README.md', 'CHANGELOG.md', 'deny.toml', 'crates/ultimatecrt/benches/x.rs')) {
+    foreach ($p in @('crates/phoxium/tests/stage_geometry.rs', 'crates/appres/examples/gen_icon.rs',
+            'crates/phoxium/assets/fonts/subset.py', 'crates/phoxium/assets/fonts/OFL.txt', 'assets/icon/README.md',
+            'scripts/package.ps1', 'README.md', 'CHANGELOG.md', 'deny.toml', 'crates/phoxium/benches/x.rs')) {
         Check (-not (Test-BinaryInput $p)) "not a binary input: $p"
     }
     # Argument quoting (review D-10): what the C runtime parser reads back.
@@ -262,7 +262,7 @@ function Invoke-BuildChecksSelfTest {
         Check (($trim -join ' ') -eq '/d1trimfile:E:\cargo-home\') "trim flags, CARGO_HOME: $($trim -join ' ')"
         Check (@(Get-PrivateNeedles 'D:\code\repo' 'D:\t\shared') -contains 'D:/t/shared') 'target folder needle'
     } finally { $env:USERPROFILE = $saved.USERPROFILE; $env:CARGO_HOME = $saved.CARGO_HOME }
-    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('ucrt-build-checks-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+    $tmp = Join-Path ([IO.Path]::GetTempPath()) ('phoxium-build-checks-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
     New-Item -ItemType Directory $tmp | Out-Null
     try {
         $needles = @('C:\Users\Some One', 'secretpc')

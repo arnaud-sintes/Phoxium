@@ -1,4 +1,4 @@
-//! T-07 spike: the ultimatecrt output window (same styles, show call and pump as output.rs) with no
+//! T-07 spike: the phoxium output window (same styles, show call and pump as output.rs) with no
 //! Vulkan and no capture. Options:
 //!   --windowed        WS_OVERLAPPEDWINDOW + WS_EX_NOACTIVATE instead of the fullscreen popup
 //!   --title           SetWindowTextW every second (as app.rs does)

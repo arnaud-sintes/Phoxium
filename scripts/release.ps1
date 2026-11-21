@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Publishes dist/ultimatecrt-v<version>-windows-x64.zip as a GitHub release tagged v<version>, with the
+    Publishes dist/phoxium-v<version>-windows-x64.zip as a GitHub release tagged v<version>, with the
     notes taken from the matching CHANGELOG.md section, in two steps: a DRAFT release first, then -Publish.
 .DESCRIPTION
     Run it after the version bump, the changelog update, the commit and the push, and after
@@ -23,9 +23,9 @@
 .PARAMETER Publish
     Second step: make the existing draft release of this version public (after the checks).
 .PARAMETER Repo
-    The GitHub repository (owner/name) of the release. Default arnaud-sintes/ultimateCRT; `origin` must point to it.
+    The GitHub repository (owner/name) of the release. Default arnaud-sintes/Phoxium; `origin` must point to it.
 #>
-param([switch]$DryRun, [switch]$Publish, [string]$Repo = 'arnaud-sintes/ultimateCRT')
+param([switch]$DryRun, [switch]$Publish, [string]$Repo = 'arnaud-sintes/Phoxium')
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path $PSScriptRoot -Parent
@@ -88,7 +88,7 @@ function Assert-ReleaseAssets($release, [string[]]$files) {
 
 $version = Get-WorkspaceVersion
 $tag = "v$version"
-$name = "ultimatecrt-v$version-windows-x64"
+$name = "phoxium-v$version-windows-x64"
 $zip = "dist\$name.zip"
 $sha = "dist\$name.zip.sha256"
 $commitFile = "dist\$name.commit"
@@ -98,7 +98,13 @@ Invoke-Native 'gh auth status' { gh auth status } | Out-Null
 # D-11: the target repository is explicit; origin (where HEAD was pushed and the tag will live) must be it.
 $origin = (Invoke-Native 'git remote get-url' { git remote get-url origin }) -join ''
 if ($origin -notmatch ('[/:]' + [regex]::Escape($Repo) + '(\.git)?/?$')) {
-    throw "origin is $origin, not the target repository $Repo (give -Repo or fix the remote)."
+    $hint = "give -Repo or fix the remote"
+    if ($origin -match '(?i)[/:]arnaud-sintes/ultimateCRT(\.git)?/?$' -and $Repo -eq 'arnaud-sintes/Phoxium') {
+        # The project was renamed from ultimateCRT to Phoxium (2026-11-21): the GitHub repository follows by hand.
+        $hint = "the project was renamed: first rename the GitHub repository arnaud-sintes/ultimateCRT to Phoxium " +
+            "(GitHub, Settings, Repository name), then run: git remote set-url origin https://github.com/arnaud-sintes/Phoxium.git"
+    }
+    throw "origin is $origin, not the target repository $Repo ($hint)."
 }
 $branch = ((Invoke-Native 'git branch' { git rev-parse --abbrev-ref HEAD }) -join '').Trim()
 if ($branch -ne 'main') { throw "Releases are made from main, current branch is '$branch'." }
@@ -123,18 +129,18 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
 try {
     $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
-    foreach ($need in 'LICENSE', 'THIRD-PARTY.md', 'README.md', 'CHANGELOG.md', 'RUNNING.txt', 'BUILD-INFO.txt', 'ultimatecrt.exe', 'pixel-demo.exe') {
+    foreach ($need in 'LICENSE', 'THIRD-PARTY.md', 'README.md', 'CHANGELOG.md', 'RUNNING.txt', 'BUILD-INFO.txt', 'phoxium.exe', 'pixel-demo.exe') {
         if ($entries -notcontains "$name/$need") { throw "$zip has no $need (expected $name/$need): run scripts/package.ps1 again." }
     }
     $runningEntry = $archive.GetEntry("$name/RUNNING.txt")
     $reader = New-Object IO.StreamReader($runningEntry.Open())
     try { $firstLine = $reader.ReadLine() } finally { $reader.Dispose() }
-    if ($firstLine -ne "ultimateCRT $version") { throw "RUNNING.txt of $zip says '$firstLine', expected 'ultimateCRT $version'." }
+    if ($firstLine -ne "Phoxium $version") { throw "RUNNING.txt of $zip says '$firstLine', expected 'Phoxium $version'." }
 } finally { $archive.Dispose() }
 
 # Version agreement: the lock file, the changelog and the tag all name the version of [workspace.package].
 $lockText = Get-Content 'Cargo.lock' -Raw
-foreach ($crate in 'appres', 'crt-model', 'paramgen', 'pixel-demo', 'ultimatecrt') {
+foreach ($crate in 'appres', 'crt-model', 'paramgen', 'pixel-demo', 'phoxium') {
     $m = [regex]::Match($lockText, '(?m)^name = "' + [regex]::Escape($crate) + '"\r?\nversion = "([^"]+)"')
     if (-not $m.Success) { throw "Cargo.lock has no entry for $crate." }
     if ($m.Groups[1].Value -ne $version) { throw "Cargo.lock has $crate $($m.Groups[1].Value), the workspace version is ${version}: run cargo build to refresh Cargo.lock and commit it." }
@@ -200,7 +206,7 @@ if (-not ($notes -match '(?m)^- ')) { throw "The changelog section for $version 
 $notes += "`n`n---`n`nSHA-256 of ``$name.zip`` (also in the attached ``.sha256`` file): ``$expected```n`n" +
     "The executables are not code-signed, so Windows SmartScreen may warn on first run. To check your download: " +
     "``(Get-FileHash .\$name.zip -Algorithm SHA256).Hash`` in PowerShell must print the value above."
-$notesFile = Join-Path $env:TEMP "ultimatecrt-notes-$version.md"
+$notesFile = Join-Path $env:TEMP "phoxium-notes-$version.md"
 [IO.File]::WriteAllText($notesFile, $notes + "`n", (New-Object Text.UTF8Encoding $false))
 
 try {
@@ -210,7 +216,7 @@ try {
         return
     }
     Invoke-Native 'gh release create' {
-        gh release create $tag $zip $sha --repo $Repo --draft --title "ultimateCRT $tag" --notes-file $notesFile --target $head
+        gh release create $tag $zip $sha --repo $Repo --draft --title "Phoxium $tag" --notes-file $notesFile --target $head
     } | Out-Null
     $draft = Get-Release $tag
     if (-not $draft -or -not $draft.isDraft) { throw "gh release create succeeded but no draft $tag is visible on $Repo." }

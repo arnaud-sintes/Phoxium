@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 publish.workspace = true
 license.workspace = true
-description = "Demo pixel-art source window, capture target for ultimatecrt"
+description = "Demo pixel-art source window, capture target for phoxium"
 
 [dependencies]
 png = "0.18"

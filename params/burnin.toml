@@ -4,7 +4,7 @@
 # resolution) accumulates the charge the beam deposits, in reference hours of full white at 350 cd/m2, and lowers
 # the phosphor efficiency where the picture was bright (shaders/wear.comp, shaders/wear_accumulate.comp). The wear
 # law, the white luminance and the colour rates are those of params/ageing.toml. The map is saved per tube preset
-# in %APPDATA%\ultimateCRT\tubes\<preset>.state (src/tube_state.rs). Burn-in deliberately degrades the picture.
+# in %APPDATA%\Phoxium\tubes\<preset>.state (src/tube_state.rs). Burn-in deliberately degrades the picture.
 
 [[param]]
 id = "burnin_enable"

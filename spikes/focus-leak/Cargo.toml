@@ -5,7 +5,7 @@ edition = "2021"
 license = "MIT"
 publish = false
 
-# T-07 spike: the output window of ultimatecrt without Vulkan, to find what activates it after ~25 s.
+# T-07 spike: the output window of phoxium without Vulkan, to find what activates it after ~25 s.
 [workspace]
 
 [dependencies]

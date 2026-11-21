@@ -179,7 +179,7 @@ pub enum Parsed {
     Version,
 }
 
-pub const HELP: &str = "pixel-demo: universal test source for ultimatecrt (emulates how games present a
+pub const HELP: &str = "pixel-demo: universal test source for phoxium (emulates how games present a
 low-resolution surface inside their window)
 usage: pixel-demo [options]
 
@@ -249,7 +249,7 @@ keys (when the window has the focus; the title lists the state, then the keys)
   F        cycle filter                   B  cycle bar colour       P  cycle bar pattern
   C, Space cycle content                  N  cycle native preset (resizes an exact window)
   K        frame counter on/off           X  corner markers on/off
-  A        alignment                      Alt+Enter fullscreen (F11 is ultimatecrt's)
+  A        alignment                      Alt+Enter fullscreen (F11 is phoxium's)
   Esc      quit
 A toast with the new state (for example 'integer x4', 'autofit -> x3') shows for 1.5 s at the
 bottom centre after a presentation key, so that a capture shows what changed (--no-toast).";

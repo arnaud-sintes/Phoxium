@@ -1,6 +1,6 @@
 # Third-party notices
 
-Upstream licence notices of third-party code built into ultimateCRT that the crate packages do not carry
+Upstream licence notices of third-party code built into Phoxium that the crate packages do not carry
 themselves. `scripts/gen-third-party.ps1` (called by `scripts/package.ps1`) writes the THIRD-PARTY.md of the
 release zip: the licence texts of every crate, copied from the crate packages, followed by this file. The licence
 policy (permissive only, no GPL, LGPL or AGPL) is checked by `cargo deny check licenses` with `deny.toml` and by
@@ -8,7 +8,7 @@ policy (permissive only, no GPL, LGPL or AGPL) is checked by `cargo deny check l
 
 ## Dear ImGui crates (`dear-imgui-sys`, `dear-imgui-rs`, `dear-imgui-ash`, `dear-imgui-build-support` 0.22.0)
 
-The four crates, by Mingzhen Zhuang (the author named in their manifests, repository <https://github.com/Latias94/dear-imgui-rs>), declare `MIT OR Apache-2.0` and ship no licence file (checked at T-08 and again for 0.22.0; their READMEs only point to `LICENSE-MIT` and `LICENSE-APACHE` at the repository root). ultimateCRT uses them under the MIT terms. The notice below is the repository's `LICENSE-MIT` at the commit the 0.22.0 packages were built from (`7424350518efb54693b8acd4a417b69d9d0f015b`, from their `.cargo_vcs_info.json`).
+The four crates, by Mingzhen Zhuang (the author named in their manifests, repository <https://github.com/Latias94/dear-imgui-rs>), declare `MIT OR Apache-2.0` and ship no licence file (checked at T-08 and again for 0.22.0; their READMEs only point to `LICENSE-MIT` and `LICENSE-APACHE` at the repository root). Phoxium uses them under the MIT terms. The notice below is the repository's `LICENSE-MIT` at the commit the 0.22.0 packages were built from (`7424350518efb54693b8acd4a417b69d9d0f015b`, from their `.cargo_vcs_info.json`).
 
 ```
 MIT License
@@ -40,7 +40,7 @@ The settings menu and the stats overlay (T-52a) use Dear ImGui 1.93.1 WIP (docki
 vendored and compiled from source by `dear-imgui-sys` (C++ with MSVC). The vendored C and C++ sources carry the notices
 below (copied from the `dear-imgui-sys` 0.22.0 package). The stack-layout shim of `dear-imgui-sys`
 (`THIRD_PARTY_NOTICES.md` of that package, MIT) is compiled only with its `stack-layout` feature, which
-ultimateCRT does not enable.
+Phoxium does not enable.
 
 ### Dear ImGui (`third-party/cimgui/imgui/LICENSE.txt`)
 
@@ -177,7 +177,7 @@ WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE SOFTWARE.
 
 The UI font is Inter 4.1 by The Inter Project Authors (<https://github.com/rsms/inter>, release `Inter-4.1.zip`,
 files `extras/ttf/Inter-Regular.ttf` and `extras/ttf/Inter-SemiBold.ttf`). The executable embeds Modified Versions
-of both (`crates/ultimatecrt/assets/fonts/`, made by `subset.py` in the same folder): cut to Basic Latin, Latin-1
+of both (`crates/phoxium/assets/fonts/`, made by `subset.py` in the same folder): cut to Basic Latin, Latin-1
 and a few punctuation and symbol code points, digits mapped to Inter's tabular forms, hinting and layout tables
 removed; the copyright and licence name records are kept. Inter declares no Reserved Font Name. Licence: SIL Open
 Font License 1.1, compatible with embedding in this program and its release zip (the font is not sold by itself).

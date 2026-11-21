@@ -3,7 +3,7 @@
 //! CPU, input fed through the Win32 message translation. No window is created.
 //!
 //! Skips (passes with a message) without a Vulkan 1.3 device or without the validation layer,
-//! unless `UCRT_REQUIRE_GPU=1`, which turns both into failures. Everything runs in one test: Dear
+//! unless `PHOXIUM_REQUIRE_GPU=1`, which turns both into failures. Everything runs in one test: Dear
 //! ImGui keeps its current context in a process global, so parallel test threads would race.
 
 use std::time::Instant;
@@ -307,12 +307,12 @@ fn imgui_overlay_headless() {
     let validation = gpu::validation_layer_available();
     assert!(
         validation || !require,
-        "UCRT_REQUIRE_GPU=1 but the validation layer is not installed"
+        "PHOXIUM_REQUIRE_GPU=1 but the validation layer is not installed"
     );
     let ctx = match Context::new_headless(validation) {
         Ok(c) => c,
         Err(e) => {
-            assert!(!require, "UCRT_REQUIRE_GPU=1 but no headless Vulkan device: {e}");
+            assert!(!require, "PHOXIUM_REQUIRE_GPU=1 but no headless Vulkan device: {e}");
             eprintln!("imgui_overlay_headless skipped: {e}");
             return;
         }

@@ -31,8 +31,8 @@
 // tube_size / 2 of the tube image, on both axes (mask_centred_phase). The mask is fixed to the tube, so its
 // phase at the centre does not change with the picture width (PAR, raster aspect) or the raster margin; the
 // geometry (geometry.glsl) moves the beam only. The damper wires stay at fractions of the visible height.
-#ifndef UCRT_MASK_GLSL
-#define UCRT_MASK_GLSL
+#ifndef PHOXIUM_MASK_GLSL
+#define PHOXIUM_MASK_GLSL
 
 // Stripe centres of R, G, B in triad pitches from the start of a triad, (c + 1/2) / 3 [D] (CRT.md, Slot mask
 // geometry: each colour p / 3 wide; crt-model stripe_centre).

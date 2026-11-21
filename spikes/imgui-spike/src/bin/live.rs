@@ -740,15 +740,15 @@ fn run() -> Res<()> {
         let class = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
-            lpszClassName: w!("ucrt_imgui_spike"),
+            lpszClassName: w!("phoxium_imgui_spike"),
             hCursor: LoadCursorW(None, IDC_ARROW)?,
             ..Default::default()
         };
         RegisterClassW(&class);
         CreateWindowExW(
             WINDOW_EX_STYLE(EX_BASE.0 | WS_EX_NOACTIVATE.0),
-            w!("ucrt_imgui_spike"),
-            w!("ultimatecrt imgui spike (T-08)"),
+            w!("phoxium_imgui_spike"),
+            w!("phoxium imgui spike (T-08)"),
             WINDOWED_STYLE,
             100,
             100,

@@ -18,8 +18,8 @@
 //
 // Out-of-range guard: gun_gamma is clamped to >= GUN_GAMMA_MIN in both stages (a gamma of 0 or less would
 // give pow(0, g) and 1 / g problems); a gamma of exactly 1 stays exactly 1 and returns V bit exact.
-#ifndef UCRT_GUN_LAW_GLSL
-#define UCRT_GUN_LAW_GLSL
+#ifndef PHOXIUM_GUN_LAW_GLSL
+#define PHOXIUM_GUN_LAW_GLSL
 
 const float GUN_GAMMA_MIN = 0.1;
 const float ANNEX1_VC = 0.35;

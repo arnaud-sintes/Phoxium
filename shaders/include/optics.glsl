@@ -14,8 +14,8 @@
 //               (R + 1)^2, index dy (R + 1) + dx for |dx|, |dy| <= R, then the bloom blur weights, OPT_BLOOM_R_MAX + 1
 //               per lobe from OPT_BLOOM_OFFSET
 //   19 to 21    the three bloom lobes (each at its own pyramid level), read by the composite
-#ifndef UCRT_OPTICS_GLSL
-#define UCRT_OPTICS_GLSL
+#ifndef PHOXIUM_OPTICS_GLSL
+#define PHOXIUM_OPTICS_GLSL
 
 #define OPT_DIFF_MAX 16
 #define OPT_KERNEL_OFFSET (OPT_DIFF_MAX + 1)

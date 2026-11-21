@@ -16,8 +16,8 @@
 // strength depends on the mask tier, the host resolution and the headroom mode (a resolved lit stripe is
 // 1 / fill times brighter than the prefiltered mean). Not fixed for now; the fix would saturate the beam
 // light before the mask product.
-#ifndef UCRT_SATURATION_GLSL
-#define UCRT_SATURATION_GLSL
+#ifndef PHOXIUM_SATURATION_GLSL
+#define PHOXIUM_SATURATION_GLSL
 
 vec3 phosphor_saturate(vec3 light) {
     vec3 i = max(light, vec3(0.0));

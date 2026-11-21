@@ -32,8 +32,8 @@
 // the surface is Lambertian, so a compressed area keeps its luminance (a curved edge shows less raster, as
 // bright). The curvature's local stretch (at most 1 / cos of the corner angle, 1.6 % for a 1R corner) is not
 // applied to the footprint.
-#ifndef UCRT_GEOMETRY_GLSL
-#define UCRT_GEOMETRY_GLSL
+#ifndef PHOXIUM_GEOMETRY_GLSL
+#define PHOXIUM_GEOMETRY_GLSL
 
 const float GEOMETRY_DEG = 0.017453292;
 

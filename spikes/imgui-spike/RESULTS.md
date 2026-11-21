@@ -45,12 +45,12 @@ which we do not use). `scripts/package.ps1` must add these notices to the releas
 | `live.exe` release (ash, windows, swapchain, ImGui with the stats and menu windows) | 2,324,992 bytes |
 | `dear_imgui.lib` static archive (before linker stripping) | 6,827,708 bytes |
 
-The binary size delta on `ultimatecrt` is not measured (the spike has no build without ImGui); `live.exe` as a
+The binary size delta on `phoxium` is not measured (the spike has no build without ImGui); `live.exe` as a
 whole, 2.3 MB, is an upper bound for what the UI adds to the existing exe minus ash and windows.
 
 ## 3. Headless test (`tests/headless.rs`), result: PASS
 
-`cargo test --locked` with `UCRT_REQUIRE_GPU=1`: 6 unit tests and 1 GPU test, all pass. Surface-less Vulkan 1.3
+`cargo test --locked` with `PHOXIUM_REQUIRE_GPU=1`: 6 unit tests and 1 GPU test, all pass. Surface-less Vulkan 1.3
 device (copy of `gpu/context.rs`: counting debug messenger, synchronization validation on), `dear-imgui-ash` in
 dynamic-rendering mode (no `VkRenderPass` anywhere), offscreen `R8G8B8A8_UNORM` 320x240 target, readback,
 32 frames. Validation layer and synchronization validation enabled: **0 validation messages**.

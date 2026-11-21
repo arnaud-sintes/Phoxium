@@ -1,0 +1,1316 @@
+//! GPU tests of the slot mask and the delta dot mask (T-39b, `mask_slot` and `mask_delta` in
+//! `shaders/include/mask.glsl`, parameters `params/mask.toml`), headless, validation on, zero validation
+//! messages.
+//!
+//! Set-up as in `stage_mask_grille.rs`: line pitch 0 with px per mm set, so the tube image is the uniform beam
+//! current I times the mask, compared with the `crt-model` f64 oracle (`crt_model::mask`, T-38) and with
+//! numbers derived by hand from `CRT.md` (below). The oracle works in host pixels, origin at the tube centre
+//! (cx, cy) = tube size / 2 (T-37: the mask lattice is centred on the tube on both axes; it was the top-left of
+//! the tube rectangle before), host pixel (x, y) = [x - cx, x + 1 - cx] x [y - cy, y + 1 - cy]:
+//! - slot mask: pitch p = px per mm x pitch (the f32 product the shader uses), stripe = fill x p, edge =
+//!   softness x p, slot period V = slot period x p (f32 product), bridge fraction as given;
+//! - delta: the shader reduces x modulo the cell width X = f32(P x sqrt 3) and y modulo P (P = the f32 product
+//!   px per mm x pitch), so its lattice is X wide and P tall, both f32 values. The oracle lattice is built on X
+//!   (diagonal pitch X / sqrt 3, in f64) and its rows are matched to the shader's by scaling y by
+//!   sigma = P / (X / sqrt 3) = 1 + O(1e-7): pixel (x, y) is the oracle rectangle [x - cx, x + 1 - cx] x
+//!   [(y - cy) / sigma, (y + 1 - cy) / sigma]. This only lines up the two lattices (no drift over many rows); everything else differs
+//!   by O(1e-7) relative. Dot diameter = f32(fill x P), edge = f32(softness x P).
+//!
+//! Tolerance: FP16 storage window, nearest since T-fp16 ([`Stored::detect`] asserts it), several beam currents, plus an
+//! f32 budget ([`f32_budget`]): positions of a pixel inside its period are known to a few f32 ulp of the
+//! period (2e-7 period), which moves a value by at most 4e-7 x period in px x the peak value 1 / coverage
+//! (slot: horizontal and vertical periods; delta: the cell width); the dot areas are differences of
+//! quadrant areas of size r^2, each with a few f32 ulp, 2e-6 x max(r^2, 1) x peak; plus 2e-6.
+//!
+//! Hand derivations (CRT.md sections in brackets; an independent model re-derives them):
+//!
+//! E1. Host pixels per triad [Pitch definitions; Delta (dot) triad geometry; Host-display resolution
+//!     budget]. Slot: p x px per mm; 4 px/mm with p = 0.385, 0.725, 1.1, 2.0 mm gives 1.54, 2.9, 4.4, 8 px
+//!     per triad; 0.25 mm gives 1.0, 0.75 mm gives 3.0; 26 in TV 1920 / 528 x 0.8 = 32 / 11 = 2.909091.
+//!     Delta: the triad pitch is the horizontal dot pitch P sqrt(3) / 2 = 0.866 P (vendor "horizontal dot
+//!     pitch"; for P = 0.28 mm, 0.242487 mm), so with P = 0.28 mm, px per mm = target / 0.242487:
+//!     1.54 -> 6.350853, 2.9 -> 11.959398, 4.4 -> 18.145294, 8 -> 32.991444, 1.0 -> 4.123930, 3.0 ->
+//!     12.371791, 16 -> 65.982888 px per mm.
+//! E2. Coverage [Beam transmission; Delta: a round hole of diameter h on a cell of area A_t transmits
+//!     pi h^2 / (4 A_t)]. Slot: stripe fill x (1 - bridge) = 0.25 x 0.85 = 0.2125 (defaults). Delta: two
+//!     dots of each colour per sqrt(3) P x P cell, area of a ramped dot pi (R^2 + s^2 / 12): R = 0.225 P,
+//!     s = 0.07 P (defaults), 2 pi (0.050625 + 0.000408333) / sqrt 3 = 0.185129. A lit pixel fully inside
+//!     an element reads 1 / coverage: slot 4.705882, delta 5.401655.
+//! E3. Flat white [crt-model conventions]. The value is the area mean over the coverage, so the mean over
+//!     whole periods is exactly 1 per channel. Slot: the x period is 2 p (two column phases), and the
+//!     x-averaged profile has period V / 2 (the two phases are half a period apart); windows of whole 2 p
+//!     and whole V / 2 give 1: at 1.54 px per triad 77 px = 25 x 3.08, with V = 2 px (slot period 2 / 1.54
+//!     = 1.298701, V / 2 = 1 row); at 2.9, 58 px = 10 x 5.8, V = 2 px (0.689655); at 4.4, 44 px = 5 x 8.8,
+//!     V = 4 px (0.909091, V / 2 = 2 rows); at 8, 16 px, V = 6 px (0.75, V / 2 = 3 rows); windows of 12
+//!     rows. Delta: the x period is the cell X = 2 x px per triad (3.08, 5.8, 8.8, 16 px: 77, 58, 44 and 16
+//!     px are whole), the x-averaged profile has period P / 2 = X / (2 sqrt 3), irrational in px, so over 64
+//!     rows the partial row period moves the mean by less than (P / 2) / 64 of the peak row mean; the plan
+//!     asks for 1 +/- 0.5 %, and the GPU mean must equal the oracle's area mean of the whole window.
+//! E4. Slot element positions, 16 px per triad, hard edges, fill 0.25, slot period 0.75 (V = 12 px),
+//!     bridge 1/6 (2 px) [Slot mask geometry: columns staggered by V / 2]. Stripes as on a grille: R [0.6667,
+//!     4.6667], G [6, 10], B [11.3333, 15.3333] px of each 16 px column. Even columns (x in [0, 16), [32,
+//!     48), ...) have bridges centred on rows 0, 12, 24, ...: rows [11, 13] mod 12 dark, i.e. rows 11 and 0
+//!     of each 12; odd columns centred on 6 + 12 k: rows 5 and 6 dark. Peak 1 / (0.25 x 5/6) = 4.8. So
+//!     pixel 2 (red, inside its stripe) reads 4.8 on rows 1 to 10 and 0 on rows 0 and 11; pixel 18 (red,
+//!     odd column) reads 4.8 except rows 5 and 6; pixel 0 reads 1/3 x 4.8 = 1.6 where lit. The test tube
+//!     is 64 x 24 px: its centre (32, 12) is the start of an even column (32 = 2 x 16) and of a slot period
+//!     (12 = V), so the table counts from the top-left corner as well (T-37 origin at the centre).
+//! E5. Delta lattice, P = 0.28 mm at 100 px per mm (P = 28 px) [Delta (dot) triad geometry table]: same
+//!     colour repeat along a row P sqrt 3 = 0.485 mm, same colour between adjacent rows horizontally P sqrt(3)
+//!     / 2 = 0.242 mm, row spacing P / 2 = 0.140 mm, adjacent dots of any colour in a row P / sqrt 3 = 0.162
+//!     mm; colours R G B left to right along a row; nearest same colour in the next row at distance P, 30
+//!     degrees from horizontal. Measured as dot centroids of the rendered channels. Position: on the 200 x 90
+//!     px test tube the lattice origin is the centre (100, 45) (T-37); a = X / 3 = 28 sqrt 3 / 3 = 16.1658 px,
+//!     rows every P / 2 = 14 px, so row j = -1 is at y = 31 px and its red dot (colour 0) at
+//!     x = 100 + (0 - 1.5) a = 75.7513 px, green and blue a and 2 a to the right.
+//! E6. Zoomed tube, 16 px per triad [Slot mask geometry; Delta geometry]. Slot, default slot period 0.8333
+//!     and bridge 0.15: one column has the vertical period V = 13.333 px; the row means over whole 2 p (32
+//!     px) have period V / 2 = 6.667 px (stagger). Delta: X = 32 px, P = 32 / sqrt 3 = 18.475 px; the row
+//!     means over whole cells have period P / 2 = 9.2376 px (row spacing); one column of one colour has
+//!     period P = 18.475 px (rows j and j + 2 hold the same colour at the same x).
+//! E7. Host-grid moire [Moire: beat p1 p2 / |p1 - p2|]: the x profile (mean over 64 rows) has the alias
+//!     period of the triad frequency on the host grid, t / |t - 1| for t in (2/3, 2): 1.54 -> 2.85185 px;
+//!     2.9 is below Nyquist (1 / 2.9 = 0.345 < 0.5): 2.9 px; 16 px per triad: 16 px. Slot: the 2 p
+//!     component of single rows cancels between the two column phases in the row mean; delta: the 3 a
+//!     component cancels between rows j and j + 1 (shifted by 1.5 a, half of 3 a).
+//! E8. Tier C [Host-display resolution budget; crt-model prefiltered]: below 3 px per triad the mask is
+//!     averaged over a box of one period (slot p x V, delta 1.5 a x P), whose mean is 1 at every position:
+//!     both types read exactly 1, ripple 0 < 1.4 %, and damper wires (grille only) do not appear. From 3
+//!     px per triad the area integral (structure) appears at once for both.
+
+mod common;
+
+use std::ops::Range;
+
+use crt_model::mask::{
+    alias_period_px, readouts, tier, AxisTier, AxisTiers, Delta, Grille, Mask, Rect, Slot, Tier, BARTEN_THRESHOLD,
+};
+use phoxium::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
+use phoxium::params::{
+    Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK,
+    OUTPUT_HEADROOM_MODE_CLIP,
+};
+
+/// The defaults with the headroom mode pinned to `clip`: the default `auto` (T-84b) lowers the mask contrast
+/// where the mask resolves (mask depth), and these tests compare the physical mask with the oracle.
+fn physical_mask() -> Params {
+    Params {
+        output_headroom_mode: OUTPUT_HEADROOM_MODE_CLIP,
+        ..Params::default()
+    }
+}
+use phoxium::placement::{mask_model, mask_tier_rule, mask_tiers};
+
+/// One FP16 step relative to the value, at most: 2^-10.
+const FP16_STEP: f64 = 1.0 / 1024.0;
+/// Beam currents the oracle comparisons are repeated with.
+const SCALES: [f32; 3] = [1.0, 0.83, 0.67];
+/// sqrt(3) as the shader's f32 constant.
+const SQRT3_F32: f32 = 1.732_050_8;
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Stored {
+    lo: f64,
+    hi: f64,
+}
+
+impl Stored {
+    /// Checks the FP16 store rounding (as in `stage_mask_grille.rs`): nearest on any device since T-fp16.
+    fn detect(gpu: &mut Headless) -> Self {
+        let mut fc = tube(4, 2, 1.0);
+        fc.px_per_mm = 0.0;
+        let amp = currents(&fc, |_, _| [1.0 + 0.75 / 1024.0; 3]);
+        let stored = run(gpu, &["screen"], fc, &Params::default(), &amp).pixel(0, 0)[0];
+        assert_eq!(
+            stored,
+            1.0 + 1.0 / 1024.0,
+            "FP16 stage stores must round to nearest (T-fp16)"
+        );
+        Self {
+            lo: -FP16_STEP / 2.0,
+            hi: FP16_STEP / 2.0,
+        }
+    }
+
+    fn holds(&self, got: f64, want: f64, budget: f64) -> bool {
+        let err = got - want;
+        err >= self.lo * want - budget && err <= self.hi * want + budget
+    }
+}
+
+fn tube(w: u32, h: u32, ppm: f32) -> FrameConstants {
+    let mut fc = FrameConstants::new((w, h), (w, h), false);
+    assert_eq!(fc.tube_size, [w as i32, h as i32]);
+    fc.px_per_mm = ppm;
+    fc.line_pitch_mm = 0.0;
+    fc
+}
+
+fn slot_params(pitch_mm: f32) -> Params {
+    Params {
+        mask_type: MASK_TYPE_SLOT_MASK,
+        mask_pitch_mm: pitch_mm,
+        mask_tier: MASK_TIER_INTEGRATED,
+        ..physical_mask()
+    }
+}
+
+fn delta_params(pitch_mm: f32) -> Params {
+    Params {
+        mask_type: MASK_TYPE_DELTA,
+        mask_pitch_mm: pitch_mm,
+        mask_tier: MASK_TIER_INTEGRATED,
+        ..physical_mask()
+    }
+}
+
+/// The shader's lengths of a frame in host px: (pitch p or P, delta cell width X), f32 products.
+fn pitches(fc: &FrameConstants, p: &Params) -> (f32, f32) {
+    let pp = fc.px_per_mm * p.mask_pitch_mm;
+    (pp, pp * SQRT3_F32)
+}
+
+/// Host pixels per (horizontal) triad: p for the slot mask, X / 2 = 0.866 P for delta.
+fn px_per_triad(fc: &FrameConstants, p: &Params) -> f64 {
+    let (pp, cell) = pitches(fc, p);
+    if p.mask_type == MASK_TYPE_DELTA {
+        f64::from(cell) / 2.0
+    } else {
+        f64::from(pp)
+    }
+}
+
+/// The oracle of a frame (module header), the y scale sigma that maps host rows to its rows, and the mask
+/// origin in the tube image (T-37: the tube centre, half the tube size on each axis).
+struct Oracle {
+    mask: Mask,
+    sigma: f64,
+    centre: (f64, f64),
+}
+
+impl Oracle {
+    fn new(fc: &FrameConstants, p: &Params) -> Self {
+        let (pp, cell) = pitches(fc, p);
+        let (mask, sigma) = if p.mask_type == MASK_TYPE_APERTURE_GRILLE {
+            (
+                Mask::Grille(Grille {
+                    pitch_mm: f64::from(pp),
+                    stripe_mm: f64::from(p.mask_stripe_fill * pp),
+                    edge_mm: f64::from(p.mask_edge_softness * pp),
+                    damper_y_mm: vec![],
+                    damper_mm: 0.0,
+                    damper_edge_mm: 0.0,
+                }),
+                1.0,
+            )
+        } else if p.mask_type == MASK_TYPE_DELTA {
+            let pitch = f64::from(cell) / 3.0_f64.sqrt();
+            (
+                Mask::Delta(Delta {
+                    pitch_mm: pitch,
+                    dot_mm: f64::from(p.mask_dot_fill * pp),
+                    edge_mm: f64::from(p.mask_edge_softness * pp),
+                }),
+                f64::from(pp) / pitch,
+            )
+        } else {
+            (
+                Mask::Slot(Slot {
+                    pitch_mm: f64::from(pp),
+                    stripe_mm: f64::from(p.mask_stripe_fill * pp),
+                    edge_mm: f64::from(p.mask_edge_softness * pp),
+                    slot_period_mm: f64::from(p.mask_slot_period * pp),
+                    bridge_fraction: f64::from(p.mask_slot_bridge),
+                }),
+                1.0,
+            )
+        };
+        mask.validate().expect("the test tube is a valid mask");
+        let centre = (0.5 * f64::from(fc.tube_size[0]), 0.5 * f64::from(fc.tube_size[1]));
+        Self { mask, sigma, centre }
+    }
+
+    /// The oracle rectangle of the host rectangle [x, x + w] x [y, y + h] (tube image): moved to the mask
+    /// origin at the tube centre, rows scaled by 1 / sigma about it.
+    fn rect(&self, x: f64, y: f64, w: f64, h: f64) -> Rect {
+        let (x, y) = (x - self.centre.0, y - self.centre.1);
+        Rect::new(x, y / self.sigma, x + w, (y + h) / self.sigma)
+    }
+
+    fn area_mean(&self, c: usize, x: u32, y: u32) -> f64 {
+        self.mask.area_mean(c, &self.rect(f64::from(x), f64::from(y), 1.0, 1.0))
+    }
+
+    fn image(&self, fc: &FrameConstants, value: impl Fn(usize, u32, u32) -> f64) -> Vec<[f64; 3]> {
+        let (w, h) = (fc.tube_size[0] as u32, fc.tube_size[1] as u32);
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| [value(0, x, y), value(1, x, y), value(2, x, y)])
+            .collect()
+    }
+
+    fn area_image(&self, fc: &FrameConstants) -> Vec<[f64; 3]> {
+        self.image(fc, |c, x, y| self.area_mean(c, x, y))
+    }
+
+    /// The oracle's `host_value` of every pixel under the per-axis tiers `tiers` (T-39c). Host px are the
+    /// oracle's units (1 px = 1, rows scaled by 1 / sigma = 1 + O(1e-7), within the f32 budget).
+    fn host_image(&self, fc: &FrameConstants, tiers: AxisTiers) -> Vec<[f64; 3]> {
+        self.image(fc, |c, x, y| {
+            let q = self.rect(f64::from(x), f64::from(y), 1.0, 1.0);
+            self.mask.host_value(c, &q, tiers, 1.0)
+        })
+    }
+}
+
+/// Budget of the shader's f32 arithmetic (module header).
+fn f32_budget(fc: &FrameConstants, p: &Params) -> f64 {
+    let (pp, cell) = pitches(fc, p);
+    let (pp, cell) = (f64::from(pp), f64::from(cell));
+    if p.mask_type == MASK_TYPE_DELTA {
+        let r = 0.5 * f64::from(p.mask_dot_fill) * pp;
+        let s = f64::from(p.mask_edge_softness) * pp;
+        let peak = cell * pp / (2.0 * std::f64::consts::PI * (r * r + s * s / 12.0));
+        2e-6 + (4e-7 * cell + 2e-6 * (r * r).max(1.0)) * peak
+    } else {
+        let peak = 1.0 / f64::from(p.mask_stripe_fill * (1.0 - p.mask_slot_bridge));
+        2e-6 + 4e-7 * (2.0 * pp + f64::from(p.mask_slot_period) * pp) * peak
+    }
+}
+
+fn currents(fc: &FrameConstants, f: impl Fn(u32, u32) -> [f32; 3]) -> ImageF32 {
+    let (w, h) = fc.domain_size(Domain::Amp);
+    let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+    for y in 0..h {
+        for x in 0..w {
+            let [r, g, b] = f(x, y);
+            rgba.extend_from_slice(&[r, g, b, 1.0]);
+        }
+    }
+    ImageF32 {
+        width: w,
+        height: h,
+        rgba,
+    }
+}
+
+fn run(gpu: &mut Headless, slots: &[&str], fc: FrameConstants, params: &Params, amp: &ImageF32) -> ImageF32 {
+    gpu.enable_only(slots).unwrap();
+    let settings = Settings::identity();
+    let run = StageRun {
+        input: StageInput::Image {
+            after: "gun",
+            image: amp,
+        },
+        frame: fc,
+        settings: &settings,
+        params,
+        format: TargetFormat::Rgba32F,
+    };
+    let r = gpu.render_stages(&run).expect("render_stages");
+    r.stage("screen").expect("screen is part of the frame").clone()
+}
+
+fn mask_image(gpu: &mut Headless, fc: FrameConstants, params: &Params, scale: f32) -> Vec<[f64; 3]> {
+    let amp = currents(&fc, |_, _| [scale; 3]);
+    let out = run(gpu, &["screen"], fc, params, &amp);
+    (0..out.height)
+        .flat_map(|y| (0..out.width).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let [r, g, b, _] = out.pixel(x, y);
+            [r, g, b].map(|v| f64::from(v) / f64::from(scale))
+        })
+        .collect()
+}
+
+/// Compares every pixel and channel of the rendered mask, for every current of [`SCALES`], with `want`.
+/// Returns the image of the first current.
+fn assert_matches(
+    gpu: &mut Headless,
+    what: &str,
+    fc: FrameConstants,
+    params: &Params,
+    want: &[[f64; 3]],
+) -> Vec<[f64; 3]> {
+    let stored = Stored::detect(gpu);
+    let budget = f32_budget(&fc, params);
+    let width = fc.tube_size[0] as u32;
+    let mut first = Vec::new();
+    let mut line = format!("{what}:");
+    for scale in SCALES {
+        let got = mask_image(gpu, fc, params, scale);
+        assert_eq!(got.len(), want.len());
+        let mut worst = 0.0_f64;
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            for c in 0..3 {
+                assert!(g[c] >= 0.0, "{what}: negative light at pixel {i}");
+                assert!(
+                    stored.holds(g[c], w[c], budget),
+                    "{what} current {scale}: pixel ({}, {}) channel {c}: GPU {} vs oracle {} (error {:.3e}, budget {budget:.1e})",
+                    i as u32 % width,
+                    i as u32 / width,
+                    g[c],
+                    w[c],
+                    g[c] - w[c]
+                );
+                worst = worst.max((g[c] - w[c]).abs());
+            }
+        }
+        line.push_str(&format!(" [{scale}: max {worst:.1e}]"));
+        if first.is_empty() {
+            first = got;
+        }
+    }
+    println!("{line} f32 budget {budget:.1e}");
+    first
+}
+
+struct Lcg(u64);
+
+impl Lcg {
+    fn next(&mut self) -> f64 {
+        self.0 = self
+            .0
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (self.0 >> 11) as f64 / (1u64 << 53) as f64
+    }
+}
+
+fn mean(v: &[f64]) -> f64 {
+    v.iter().sum::<f64>() / v.len() as f64
+}
+
+fn ripple(v: &[f64]) -> f64 {
+    let (lo, hi) = v.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    (hi - lo) / (hi + lo)
+}
+
+/// Mean of channel c over the window xs x ys.
+fn window_mean(img: &[[f64; 3]], width: u32, c: usize, xs: Range<u32>, ys: Range<u32>) -> f64 {
+    let v: Vec<f64> = ys
+        .flat_map(|y| xs.clone().map(move |x| (x, y)))
+        .map(|(x, y)| img[(y * width + x) as usize][c])
+        .collect();
+    mean(&v)
+}
+
+/// Period in samples of the strongest non-constant sinusoid of `v` (periodogram maximum, refined).
+fn dominant_period(v: &[f64]) -> f64 {
+    let m = mean(v);
+    let power = |f: f64| {
+        let (mut re, mut im) = (0.0, 0.0);
+        for (x, s) in v.iter().enumerate() {
+            let a = std::f64::consts::TAU * f * x as f64;
+            re += (s - m) * a.cos();
+            im += (s - m) * a.sin();
+        }
+        re * re + im * im
+    };
+    let step = 1.0 / (4.0 * v.len() as f64);
+    let steps = (0.5 / step).round() as usize;
+    let (mut best, mut best_power) = (step, 0.0);
+    for k in 4..=steps {
+        let f = k as f64 * step;
+        let p = power(f);
+        if p > best_power {
+            (best, best_power) = (f, p);
+        }
+    }
+    let (mut lo, mut hi) = (best - step, best + step);
+    for _ in 0..40 {
+        let (a, b) = (lo + (hi - lo) / 3.0, hi - (hi - lo) / 3.0);
+        if power(a) < power(b) {
+            lo = a;
+        } else {
+            hi = b;
+        }
+    }
+    2.0 / (lo + hi)
+}
+
+/// Random tubes for both types: 0.3 to 24 px per triad (log-uniform), 2 to 40 px per mm, random shape
+/// parameters inside the oracle's validity limits. Every host pixel (a random rectangle of the mask plane:
+/// the phases differ for every pixel and case) equals the oracle's `area_mean` for every beam current.
+#[test]
+fn host_pixels_equal_the_oracle_area_mean_on_random_tubes() {
+    let test = "stage_mask_slot_delta random";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut rng = Lcg(392);
+    for case in 0..20 {
+        let delta = case % 2 == 1;
+        let (w, h) = if delta { (192, 24) } else { (384, 40) };
+        let ppt = 0.3 * 80.0_f64.powf(rng.next());
+        let ppm = 2.0 + 38.0 * rng.next();
+        let fc = tube(w, h, ppm as f32);
+        let p = if delta {
+            let fill = 0.40 + 0.10 * rng.next();
+            let soft = 0.999 * rng.next() * (1.0 / 3.0_f64.sqrt() - fill).min(0.10);
+            Params {
+                mask_dot_fill: fill as f32,
+                mask_edge_softness: soft as f32,
+                ..delta_params((ppt / (ppm * 0.75_f64.sqrt())) as f32)
+            }
+        } else {
+            let fill = 0.20 + 0.07 * rng.next();
+            let period = 0.6667 + 0.9333 * rng.next();
+            let bridge = 0.10 + 0.10 * rng.next();
+            let soft = 0.999 * rng.next() * (1.0 / 3.0 - fill).min(0.10).min(bridge * period);
+            Params {
+                mask_stripe_fill: fill as f32,
+                mask_edge_softness: soft as f32,
+                mask_slot_period: period as f32,
+                mask_slot_bridge: bridge as f32,
+                ..slot_params((ppt / ppm) as f32)
+            }
+        };
+        let oracle = Oracle::new(&fc, &p);
+        let want = oracle.area_image(&fc);
+        let what = format!(
+            "{test} case {case} ({}, {:.3} px per triad)",
+            if delta { "delta" } else { "slot" },
+            px_per_triad(&fc, &p)
+        );
+        assert_matches(&mut gpu, &what, fc, &p, &want);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The plan's densities (E1) for both types, default shapes, area integral forced: every pixel against the
+/// oracle; flat-white mean 1 per channel over whole periods (E3, plan: +/- 0.5 %); at 1.0 px per triad and
+/// above 3 the same. Slot windows of whole 2 p and V / 2; delta windows of whole cells over 64 rows.
+#[test]
+fn plan_densities_and_flat_white() {
+    let test = "stage_mask_slot_delta densities";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    // Slot: (name, px per mm, pitch, hand px per triad, slot period, window px, window rows).
+    let slots: [(&str, f32, f32, f64, f32, u32, u32); 7] = [
+        ("1.54", 4.0, 0.385, 1.54, 2.0 / 1.54, 77, 12),
+        ("2.9", 4.0, 0.725, 2.9, 2.0 / 2.9, 58, 12),
+        ("26 in TV", 1920.0 / 528.0, 0.8, 32.0 / 11.0, 0.6875, 64, 12),
+        ("1.0", 4.0, 0.25, 1.0, 1.0, 2, 12),
+        ("3.0", 4.0, 0.75, 3.0, 2.0 / 3.0, 6, 12),
+        ("4.4", 4.0, 1.1, 4.4, 4.0 / 4.4, 44, 12),
+        ("8", 4.0, 2.0, 8.0, 0.75, 16, 12),
+    ];
+    let (w, h) = (1024_u32, 12_u32);
+    for (name, ppm, pitch, hand, period, wx, wy) in slots {
+        let fc = tube(w, h, ppm);
+        let p = Params {
+            mask_slot_period: period,
+            ..slot_params(pitch)
+        };
+        let ppt = px_per_triad(&fc, &p);
+        assert!((ppt / hand - 1.0).abs() < 1e-6, "slot {name}: {ppt}");
+        let oracle = Oracle::new(&fc, &p);
+        let what = format!("{test} slot {name}");
+        let got = assert_matches(&mut gpu, &what, fc, &p, &oracle.area_image(&fc));
+        let slack = FP16_STEP + f32_budget(&fc, &p);
+        for c in 0..3 {
+            let blocks = (512 / wx) * wx;
+            for xs in [0..blocks, w - blocks..w] {
+                let m = window_mean(&got, w, c, xs.clone(), 0..wy);
+                println!("{what}: channel {c} flat-white mean {m:.6} over columns {xs:?}");
+                assert!((m - 1.0).abs() <= slack, "{what}: channel {c} mean {m}");
+            }
+        }
+    }
+    // Delta: (name, px per mm, hand px per triad, whole-cell window px). P = 0.28 mm.
+    let deltas: [(&str, f32, f64, u32); 6] = [
+        ("1.54", 6.350_853, 1.54, 77),
+        ("2.9", 11.959_398, 2.9, 58),
+        ("1.0", 4.123_93, 1.0, 2),
+        ("3.0", 12.371_791, 3.0, 6),
+        ("4.4", 18.145_294, 4.4, 44),
+        ("8", 32.991_444, 8.0, 16),
+    ];
+    let (w, h) = (264_u32, 64_u32);
+    for (name, ppm, hand, wx) in deltas {
+        let fc = tube(w, h, ppm);
+        let p = delta_params(0.28);
+        let ppt = px_per_triad(&fc, &p);
+        assert!((ppt / hand - 1.0).abs() < 2e-6, "delta {name}: {ppt}");
+        let oracle = Oracle::new(&fc, &p);
+        let what = format!("{test} delta {name}");
+        let got = assert_matches(&mut gpu, &what, fc, &p, &oracle.area_image(&fc));
+        let slack = FP16_STEP + f32_budget(&fc, &p);
+        let blocks = (w / wx) * wx;
+        // Rows: the window of 32 to 64 rows nearest a whole number of row spacings P / 2 (E3).
+        let half = f64::from(pitches(&fc, &p).0) / 2.0;
+        let rows = (32..=h)
+            .min_by(|a, b| {
+                let off = |n: u32| {
+                    let k = f64::from(n) / half;
+                    (k - k.round()).abs() * half / f64::from(n)
+                };
+                off(*a).total_cmp(&off(*b))
+            })
+            .unwrap();
+        for c in 0..3 {
+            let m = window_mean(&got, w, c, 0..blocks, 0..rows);
+            let window = oracle
+                .mask
+                .area_mean(c, &oracle.rect(0.0, 0.0, f64::from(blocks), f64::from(rows)));
+            println!("{what}: channel {c} flat-white mean {m:.6} (oracle window {window:.6})");
+            assert!((m - window).abs() <= slack, "{what}: channel {c} mean {m} vs {window}");
+            assert!((m - 1.0).abs() <= 0.005, "{what}: channel {c} mean {m}");
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// E4: slot elements at 16 px per triad, hard edges: the hand table of red, green and blue columns of an
+/// even and an odd triad column over two slot periods, the stagger V / 2 = 6 rows, peak 4.8.
+#[test]
+fn slot_positions_per_channel() {
+    let test = "stage_mask_slot_delta slot positions";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (64_u32, 24_u32);
+    let fc = tube(w, h, 32.0);
+    let p = Params {
+        mask_edge_softness: 0.0,
+        mask_slot_period: 0.75,
+        mask_slot_bridge: 1.0 / 6.0,
+        ..slot_params(0.5)
+    };
+    assert_eq!(px_per_triad(&fc, &p), 16.0);
+    let peak = 4.8;
+    // Value of a pixel by hand: stripe overlap (in px) of colour c in pixel x of its column, times the
+    // bridge factor of the row in that column's phase.
+    let stripe = |c: usize, x: u32| -> f64 {
+        let (lo, hi) = [(2.0 / 3.0, 14.0 / 3.0), (6.0, 10.0), (34.0 / 3.0, 46.0 / 3.0)][c];
+        let u = f64::from(x % 16);
+        ((u + 1.0).min(hi) - u.max(lo)).max(0.0)
+    };
+    let lit = |x: u32, y: u32| -> bool {
+        let r = y % 12;
+        if (x / 16).is_multiple_of(2) {
+            r != 0 && r != 11
+        } else {
+            r != 5 && r != 6
+        }
+    };
+    let want: Vec<[f64; 3]> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .map(|(x, y)| [0, 1, 2].map(|c| if lit(x, y) { stripe(c, x) * peak } else { 0.0 }))
+        .collect();
+    // The oracle agrees with the hand table (the hand table is the check of the oracle here).
+    let oracle = Oracle::new(&fc, &p);
+    for (i, px) in oracle.area_image(&fc).iter().enumerate() {
+        for c in 0..3 {
+            // 1e-6: the bridge fraction 1/6 is an f32 (2 px + 6e-8).
+            assert!(
+                (px[c] - want[i][c]).abs() < 1e-6,
+                "oracle vs hand at {i} c{c}: {} vs {}",
+                px[c],
+                want[i][c]
+            );
+        }
+    }
+    let got = assert_matches(&mut gpu, test, fc, &p, &want);
+    let at = |x: u32, y: u32| got[(y * w + x) as usize];
+    // Red inside its stripe: even column dark on rows 0 and 11, odd column on rows 5 and 6 (dark: below 1e-3,
+    // the f32 bridge 1/6 is 2 px + 6e-8 and leaves a few 1e-7 of light at the edges of a dark row).
+    let even: Vec<u32> = (0..12).filter(|&y| at(2, y)[0] < 1e-3).collect();
+    let odd: Vec<u32> = (0..12).filter(|&y| at(18, y)[0] < 1e-3).collect();
+    println!("{test}: dark rows, even column {even:?}, odd column {odd:?}");
+    assert_eq!(even, vec![0, 11]);
+    assert_eq!(odd, vec![5, 6]);
+    // Order R, G, B along a lit row of each column.
+    for start in [0_u32, 16] {
+        let centroid = |c: usize| {
+            let v: Vec<f64> = (start..start + 16).map(|x| at(x, 3)[c]).collect();
+            v.iter().enumerate().map(|(i, s)| (i as f64 + 0.5) * s).sum::<f64>() / v.iter().sum::<f64>()
+        };
+        let (r, g, b) = (centroid(0), centroid(1), centroid(2));
+        println!("{test}: column at {start}: centroids R {r:.4} G {g:.4} B {b:.4}");
+        for (got, want) in [(r, 8.0 / 3.0), (g, 8.0), (b, 40.0 / 3.0)] {
+            assert!((got - want).abs() <= 0.002);
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Weighted centroids (x, y) in px of the 4-connected lit regions of channel c that do not touch the image
+/// border.
+fn blobs(img: &[[f64; 3]], (w, h): (u32, u32), c: usize) -> Vec<(f64, f64)> {
+    let mut seen = vec![false; img.len()];
+    let mut out = Vec::new();
+    for start in 0..img.len() {
+        if seen[start] || img[start][c] <= 1e-3 {
+            continue;
+        }
+        let (mut stack, mut border, mut sx, mut sy, mut sw) = (vec![start], false, 0.0, 0.0, 0.0);
+        seen[start] = true;
+        while let Some(i) = stack.pop() {
+            let (x, y) = (i as u32 % w, i as u32 / w);
+            let v = img[i][c];
+            sx += (f64::from(x) + 0.5) * v;
+            sy += (f64::from(y) + 0.5) * v;
+            sw += v;
+            border |= x == 0 || y == 0 || x == w - 1 || y == h - 1;
+            let mut push = |nx: u32, ny: u32| {
+                let j = (ny * w + nx) as usize;
+                if !seen[j] && img[j][c] > 1e-3 {
+                    seen[j] = true;
+                    stack.push(j);
+                }
+            };
+            if x > 0 {
+                push(x - 1, y);
+            }
+            if x + 1 < w {
+                push(x + 1, y);
+            }
+            if y > 0 {
+                push(x, y - 1);
+            }
+            if y + 1 < h {
+                push(x, y + 1);
+            }
+        }
+        if !border {
+            out.push((sx / sw, sy / sw));
+        }
+    }
+    out
+}
+
+/// E5: delta dot positions per channel at P = 0.28 mm, 100 px per mm, hard edges: the CRT.md table (0.485,
+/// 0.242, 0.140, 0.162 mm), colour order R G B along a row, same colour in the next row at P and 30 degrees.
+#[test]
+fn delta_dot_positions_and_distances() {
+    let test = "stage_mask_slot_delta delta positions";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (200_u32, 90_u32);
+    let ppm = 100.0;
+    let fc = tube(w, h, ppm);
+    let p = Params {
+        mask_edge_softness: 0.0,
+        ..delta_params(0.28)
+    };
+    let got = mask_image(&mut gpu, fc, &p, 1.0);
+    let mm = |v: f64| v / f64::from(ppm);
+    let dots: Vec<Vec<(f64, f64)>> = (0..3).map(|c| blobs(&got, (w, h), c)).collect();
+    for (c, d) in dots.iter().enumerate() {
+        println!("{test}: channel {c}: {} whole dots", d.len());
+        assert!(d.len() >= 4, "channel {c}: too few dots");
+    }
+    let same_row = |a: &(f64, f64), b: &(f64, f64)| (a.1 - b.1).abs() < 0.5;
+    // Same colour along a row, and between adjacent rows.
+    for (c, d) in dots.iter().enumerate() {
+        let mut along = f64::MAX;
+        let mut next_row = (f64::MAX, 0.0, 0.0);
+        for a in d {
+            for b in d {
+                if b.0 <= a.0 && same_row(a, b) {
+                    continue;
+                }
+                if same_row(a, b) {
+                    along = along.min(b.0 - a.0);
+                } else if b.1 > a.1 + 0.5 {
+                    let dist = (b.0 - a.0).hypot(b.1 - a.1);
+                    if dist < next_row.0 {
+                        next_row = (dist, (b.0 - a.0).abs(), b.1 - a.1);
+                    }
+                }
+            }
+        }
+        let (dist, dx, dy) = next_row;
+        let angle = dy.atan2(dx).to_degrees();
+        println!(
+            "{test}: channel {c}: along a row {:.4} mm, next row dx {:.4} dy {:.4} distance {:.4} mm at {angle:.2} deg",
+            mm(along),
+            mm(dx),
+            mm(dy),
+            mm(dist)
+        );
+        assert!((mm(along) - 0.485).abs() < 0.0006);
+        assert!((mm(dx) - 0.242).abs() < 0.0006);
+        assert!((mm(dy) - 0.140).abs() < 0.0006);
+        assert!((mm(dist) - 0.28).abs() < 0.0006);
+        assert!((angle - 30.0).abs() < 0.2);
+    }
+    // Any colour in a row: R G B left to right, spacing 0.162 mm. Row j = -1 from the lattice origin at the
+    // tube centre (100, 45): y = 45 - 14 = 31 px, R at x = 100 - 1.5 a = 75.7513 px (E5).
+    let pick = |c: usize, x: f64, y: f64| {
+        *dots[c]
+            .iter()
+            .min_by(|a, b| (a.0 - x).hypot(a.1 - y).total_cmp(&(b.0 - x).hypot(b.1 - y)))
+            .unwrap()
+    };
+    let (r, g, b) = (pick(0, 75.8, 31.0), pick(1, 91.9, 31.0), pick(2, 108.1, 31.0));
+    println!("{test}: row at y = 31 px: R {r:?} G {g:?} B {b:?} px");
+    assert!(same_row(&r, &g) && same_row(&g, &b));
+    assert!((mm(g.0 - r.0) - 0.162).abs() < 0.0006 && (mm(b.0 - g.0) - 0.162).abs() < 0.0006);
+    let a = 28.0 * 3.0_f64.sqrt() / 3.0;
+    assert!((r.0 - (100.0 - 1.5 * a)).abs() < 0.05 && (r.1 - 31.0).abs() < 0.05);
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// E6: zoomed tube at 16 px per triad (plan: slot vertical period +/- 1 %, delta row spacing P / 2 +/- 1 %).
+#[test]
+fn zoomed_vertical_periods() {
+    let test = "stage_mask_slot_delta vertical periods";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (64_u32, 480_u32);
+    // Slot, defaults: V = 0.8333 x 16 = 13.333 px.
+    let fc = tube(w, h, 32.0);
+    let p = slot_params(0.5);
+    let got = mask_image(&mut gpu, fc, &p, 1.0);
+    let v = f64::from(p.mask_slot_period) * 16.0;
+    let column: Vec<f64> = (0..h).map(|y| got[(y * w + 8) as usize][1]).collect();
+    let rows: Vec<f64> = (0..h).map(|y| window_mean(&got, w, 1, 0..32, y..y + 1)).collect();
+    let (pc, pr) = (dominant_period(&column), dominant_period(&rows));
+    println!("{test}: slot green column period {pc:.4} px (V {v:.4}), row-mean period {pr:.4} px (V / 2)");
+    assert!((pc / v - 1.0).abs() <= 0.01);
+    assert!((pr / (v / 2.0) - 1.0).abs() <= 0.01);
+    // Delta: 16 px per triad, X = 32 px, P = 18.475 px.
+    let ppm = 16.0 / (0.28 * 0.75_f32.sqrt());
+    let fc = tube(w, h, ppm);
+    let p = delta_params(0.28);
+    let (pp, cell) = pitches(&fc, &p);
+    assert!((f64::from(cell) - 32.0).abs() < 1e-4);
+    let got = mask_image(&mut gpu, fc, &p, 1.0);
+    let big_p = f64::from(pp);
+    for c in 0..3 {
+        let rows: Vec<f64> = (0..h).map(|y| window_mean(&got, w, c, 0..32, y..y + 1)).collect();
+        let x = [0, 10, 21][c];
+        let column: Vec<f64> = (0..h).map(|y| got[(y * w + x) as usize][c]).collect();
+        let (pr, pc) = (dominant_period(&rows), dominant_period(&column));
+        println!(
+            "{test}: delta channel {c}: row-mean period {pr:.4} px (P / 2 = {:.4}), column period {pc:.4} px (P)",
+            big_p / 2.0
+        );
+        assert!((pr / (big_p / 2.0) - 1.0).abs() <= 0.01);
+        assert!((pc / big_p - 1.0).abs() <= 0.01);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// E7: the period of the x profile (mean over 64 rows) of a rendered flat field equals the oracle's alias
+/// period of the triad frequency on the host grid, and the hand values.
+#[test]
+fn moire_period_of_a_rendered_flat_field() {
+    let test = "stage_mask_slot_delta moire";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (960_u32, 64_u32);
+    for (name, ppt_hand, period_hand, tolerance) in [
+        ("1.54", 1.54, 2.851_85, 0.002),
+        ("2.9", 2.9, 2.9, 0.002),
+        ("16", 16.0, 16.0, 0.01),
+    ] {
+        for delta in [false, true] {
+            let (fc, p) = if delta {
+                let ppm = (ppt_hand / (0.28 * 0.75_f64.sqrt())) as f32;
+                (tube(w, h, ppm), delta_params(0.28))
+            } else {
+                (tube(w, h, 4.0), slot_params((ppt_hand / 4.0) as f32))
+            };
+            let ppt = px_per_triad(&fc, &p);
+            let alias = alias_period_px(ppt, 1);
+            assert!(
+                (alias / period_hand - 1.0).abs() < 1e-4,
+                "{name}: oracle {alias} vs hand {period_hand}"
+            );
+            let got = mask_image(&mut gpu, fc, &p, 1.0);
+            for c in 0..3 {
+                let profile: Vec<f64> = (0..w).map(|x| window_mean(&got, w, c, x..x + 1, 0..h)).collect();
+                let period = dominant_period(&profile);
+                let kind = if delta { "delta" } else { "slot" };
+                println!("{test} {kind} {name}: channel {c} period {period:.4} px (oracle {alias:.4})");
+                assert!(
+                    (period / alias - 1.0).abs() <= tolerance,
+                    "{kind} {name} c{c}: {period} vs {alias}"
+                );
+            }
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// E8: tier C for both types. Default tier below 3 px per triad: every value exactly 1 (the oracle's
+/// `host_value`), ripple 0 < 1.4 %, damper wires (grille only) absent; at 3.0 px per triad both show
+/// structure at once. The area integral forced at 2.9 shows host-grid structure above 1.4 % (not vacuous).
+#[test]
+fn tier_c_slot_and_delta() {
+    let test = "stage_mask_slot_delta tiers";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (240_u32, 24_u32);
+    let ones = vec![[1.0_f64; 3]; (w * h) as usize];
+    for (ppt_hand, expect, blend) in [
+        (1.0, Tier::C, 0.4_f32),
+        (1.54, Tier::C, 0.4),
+        (2.9, Tier::C, 0.0),
+        (3.0, Tier::B, 0.0),
+        (2.9, Tier::C, 0.4),
+        (3.0, Tier::B, 0.4),
+        (4.4, Tier::B, 0.4),
+    ] {
+        for delta in [false, true] {
+            let (fc, base) = if delta {
+                // 3.0 exactly is not representable through P sqrt(3) / 2: aim just above it.
+                let ppm = (ppt_hand * 1.000_01 / (0.28 * 0.75_f64.sqrt())) as f32;
+                (tube(w, h, ppm), delta_params(0.28))
+            } else {
+                (tube(w, h, 4.0), slot_params((ppt_hand / 4.0) as f32))
+            };
+            let p = Params {
+                mask_tier: MASK_TIER_AUTO,
+                mask_tier_blend: blend,
+                mask_damper_count: 2,
+                tube_visible_height_mm: h as f32 / fc.px_per_mm,
+                ..base
+            };
+            let ppt = px_per_triad(&fc, &p);
+            assert_eq!(tier(ppt), expect, "{ppt}");
+            let oracle = Oracle::new(&fc, &p);
+            let kind = if delta { "delta" } else { "slot" };
+            let what = format!("{test} {kind} auto at {ppt:.4} px per triad, blend {blend}");
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            let want = oracle.host_image(&fc, tiers);
+            let got = assert_matches(&mut gpu, &what, fc, &p, &want);
+            let r = ripple(&got.iter().map(|px| px[1]).collect::<Vec<_>>());
+            println!("{what}: tier {expect:?}, {tiers:?}, green ripple {r:.4}");
+            if matches!(tiers.horizontal, AxisTier::Blended { .. }) {
+                // T-39c, in the default band (2.9 and 3.0): between flat and the full structure.
+                assert!(r > 0.0 && r < 1.0, "{what}: ripple {r}");
+                continue;
+            }
+            if expect == Tier::C {
+                assert_eq!(got, ones, "{what}: tier C is exactly 1");
+                assert!(r < BARTEN_THRESHOLD);
+            } else {
+                assert!(r > 0.5, "{what}: the resolved mask has structure");
+            }
+        }
+    }
+    for delta in [false, true] {
+        let (fc, p) = if delta {
+            (tube(w, h, 11.959_398), delta_params(0.28))
+        } else {
+            (tube(w, h, 4.0), slot_params(0.725))
+        };
+        let got = mask_image(&mut gpu, fc, &p, 1.0);
+        let r = ripple(&got.iter().map(|px| px[1]).collect::<Vec<_>>());
+        println!(
+            "{test} integrated at 2.9 ({}): green ripple {r:.4}",
+            if delta { "delta" } else { "slot" }
+        );
+        assert!(r > 10.0 * BARTEN_THRESHOLD);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// A frame and parameters of `kind` (grille, slot, delta) at `ppt` host px per horizontal triad, auto tier:
+/// grille and slot at 4 px per mm (pitch ppt / 4 mm), delta with P = 0.28 mm (px per mm = ppt / 0.242487).
+fn at_density(kind: u32, ppt: f64, (w, h): (u32, u32)) -> (FrameConstants, Params) {
+    let (ppm, pitch) = if kind == MASK_TYPE_DELTA {
+        (ppt / (0.28 * 0.75_f64.sqrt()), 0.28)
+    } else {
+        (4.0, ppt / 4.0)
+    };
+    let p = Params {
+        mask_type: kind,
+        mask_pitch_mm: pitch as f32,
+        mask_tier: MASK_TIER_AUTO,
+        ..physical_mask()
+    };
+    (tube(w, h, ppm as f32), p)
+}
+
+fn kind_name(kind: u32) -> &'static str {
+    match kind {
+        MASK_TYPE_SLOT_MASK => "slot",
+        MASK_TYPE_DELTA => "delta",
+        _ => "grille",
+    }
+}
+
+/// Michelson ripple over the rows of the row means of channel c (each over all columns).
+fn row_mean_ripple(img: &[[f64; 3]], (w, h): (u32, u32), c: usize) -> f64 {
+    ripple(
+        &(0..h)
+            .map(|y| window_mean(img, w, c, 0..w, y..y + 1))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// E9 (T-39c, D-15): the per-axis rule, decided on the CPU (`mask_tiers`), drawn by the shader. Hand
+/// decisions (blend 0.4: horizontal band 2.8 to 3.2 px per triad, vertical band 1.8667 to 2.1333 px of
+/// V / 2 or P / 2): slot 3.6 px per triad (V / 2 = 0.41665 x 3.6 = 1.5 px): horizontal integrated, vertical
+/// prefiltered; slot with slot period 1.6 at 2.7 (V / 2 = 0.8 x 2.7 = 2.16 px): horizontal prefiltered,
+/// vertical integrated; slot 4.8 (V / 2 = 1.99992 px, u = 0.4997): vertical blended, box 0.5003 x V +
+/// 0.4997 = 2.4999 px; delta 3.1 (P / 2 = 3.1 / sqrt 3 = 1.79 px): horizontal blended, vertical
+/// prefiltered; delta 3.6 (P / 2 = 2.078 px, u = 0.79): vertical blended; delta 4.0 (P / 2 = 2.309):
+/// both integrated. Every pixel equals the oracle's `host_value` under the same tiers, and the readouts
+/// (`crt_model::mask::readouts` on `mask_model`) report the same tiers. Row ripple (row means over all
+/// columns, whole horizontal periods: 192 px = 32 x 6 px at 3.0 px per triad): delta at 3.0 and slot
+/// defaults at 3.0, rows integrated (forced) above the 1.4 % Barten threshold (the oracle measured 27 %
+/// and 6.1 %), with the rule's vertical prefilter under it.
+#[test]
+fn per_axis_tiers_follow_the_oracle() {
+    let test = "stage_mask_slot_delta per-axis";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let size = (192_u32, 48_u32);
+    type Class = fn(AxisTier) -> bool;
+    let int: Class = |t| t == AxisTier::Integrated;
+    let pre: Class = |t| t == AxisTier::Prefiltered;
+    let bl: Class = |t| matches!(t, AxisTier::Blended { .. });
+    let cases: [(u32, f64, f32, Class, Class); 6] = [
+        (MASK_TYPE_SLOT_MASK, 3.6, 0.8333, int, pre),
+        (MASK_TYPE_SLOT_MASK, 2.7, 1.6, pre, int),
+        (MASK_TYPE_SLOT_MASK, 4.8, 0.8333, int, bl),
+        (MASK_TYPE_DELTA, 3.1, 0.8333, bl, pre),
+        (MASK_TYPE_DELTA, 3.6, 0.8333, int, bl),
+        (MASK_TYPE_DELTA, 4.0, 0.8333, int, int),
+    ];
+    for (kind, ppt, period, horizontal, vertical) in cases {
+        let (fc, base) = at_density(kind, ppt, size);
+        let p = Params {
+            mask_slot_period: period,
+            ..base
+        };
+        let tiers = mask_tiers(fc.px_per_mm, &p);
+        let what = format!("{test} {} {ppt} px per triad: {tiers:?}", kind_name(kind));
+        assert!(horizontal(tiers.horizontal) && vertical(tiers.vertical), "{what}");
+        if let AxisTier::Blended { box_px } = tiers.vertical {
+            if kind == MASK_TYPE_SLOT_MASK {
+                assert!((box_px - 2.4999).abs() < 2e-3, "{what}");
+            }
+        }
+        let r = readouts(
+            &mask_model(&p),
+            f64::from(fc.px_per_mm),
+            1.0,
+            1.0,
+            1.0,
+            mask_tier_rule(&p),
+        );
+        assert_eq!(r.axis_tiers, tiers, "{what}: readout");
+        let oracle = Oracle::new(&fc, &p);
+        assert_matches(&mut gpu, &what, fc, &p, &oracle.host_image(&fc, tiers));
+    }
+    for kind in [MASK_TYPE_SLOT_MASK, MASK_TYPE_DELTA] {
+        // Delta: 3.0 exactly is not representable through P sqrt(3) / 2: just above it.
+        let (fc, p) = at_density(kind, 3.0 * 1.000_01, size);
+        let tiers = mask_tiers(fc.px_per_mm, &p);
+        assert_eq!(tiers.vertical, AxisTier::Prefiltered);
+        let rule = mask_image(&mut gpu, fc, &p, 1.0);
+        let forced = Params {
+            mask_tier: MASK_TIER_INTEGRATED,
+            ..p
+        };
+        let integrated = mask_image(&mut gpu, fc, &forced, 1.0);
+        for c in 0..3 {
+            let (before, after) = (row_mean_ripple(&integrated, size, c), row_mean_ripple(&rule, size, c));
+            println!(
+                "{test} {} 3.0: channel {c} row ripple integrated {before:.4}, per-axis rule {after:.2e}",
+                kind_name(kind)
+            );
+            assert!(before > BARTEN_THRESHOLD && after < BARTEN_THRESHOLD / 4.0);
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// E10 (T-39c, D-15): the blend band on the GPU, all three types, 2.8071 to 3.2071 px per triad by 0.02
+/// (the offset keeps the densities 0.007 or more from fractions of small denominator, 3 and 29 / 10 among them, so the 2048 columns sweep every phase of the triad: at 3.0071 the three phases of the columns drift by 2048 x 0.0071 / 9 = 1.6 triads; at 3.0013 they drifted by 0.3 only and the sampled ripple dipped). Every
+/// pixel equals the oracle's `host_value`; the rendered flat-field ripple (Michelson, channel 0, row 0) is
+/// small at the lower edge (hand bound (1 - rho) / (2 f + rho - 1) with rho = 1 - 0.0178 x (1 - 1 / 2.807):
+/// 0.024 for f = 0.25, under 0.05), never falls as the pitch grows (0.02 of sampling slack), moves by at most 0.25 per
+/// step (hand: up to 0.21 per 0.02 for hard edges, crt-model `blend_band_is_continuous_and_monotone`) and
+/// reaches the full structure (> 0.5) at the upper edge. With the hard switch (blend 0) it jumps from
+/// exactly 1 everywhere at 2.99 to above 0.5 at 3.01 (the D-15 snap).
+#[test]
+fn blend_band_is_monotone_on_the_gpu() {
+    let test = "stage_mask_slot_delta blend";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let size = (2048_u32, 1_u32);
+    for kind in [MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_SLOT_MASK, MASK_TYPE_DELTA] {
+        let mut r = Vec::new();
+        for k in 0..=20 {
+            let ppt = 2.8071 + 0.02 * f64::from(k);
+            let (fc, p) = at_density(kind, ppt, size);
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            // Inside the band, and just past its upper edge for the last one.
+            let blended = matches!(tiers.horizontal, AxisTier::Blended { .. });
+            assert_eq!(blended, k < 20, "{ppt}: {tiers:?}");
+            let oracle = Oracle::new(&fc, &p);
+            let what = format!("{test} {} {ppt:.4} px per triad", kind_name(kind));
+            let got = assert_matches(&mut gpu, &what, fc, &p, &oracle.host_image(&fc, tiers));
+            r.push(ripple(
+                &got[..size.0 as usize].iter().map(|px| px[0]).collect::<Vec<_>>(),
+            ));
+        }
+        let steps: Vec<f64> = r.windows(2).map(|s| s[1] - s[0]).collect();
+        let worst = steps.iter().cloned().fold(0.0, f64::max);
+        println!(
+            "{test} {}: ripple {:?}, largest step {worst:.3}",
+            kind_name(kind),
+            r.iter().map(|v| format!("{v:.3}")).collect::<Vec<_>>()
+        );
+        assert!(r[0] < 0.05, "{}: {}", kind_name(kind), r[0]);
+        assert!(steps.iter().all(|&s| s >= -0.02), "{}: ripple falls", kind_name(kind));
+        assert!(worst <= 0.25, "{}: step {worst}", kind_name(kind));
+        assert!(r[20] > 0.5, "{}: {}", kind_name(kind), r[20]);
+        // The hard switch snaps.
+        let hard = |ppt: f64| {
+            let (fc, p) = at_density(kind, ppt, size);
+            let p = Params {
+                mask_tier_blend: 0.0,
+                ..p
+            };
+            (fc, p)
+        };
+        let (fc, p) = hard(2.99);
+        let below = mask_image(&mut gpu, fc, &p, 1.0);
+        assert!(
+            below.iter().all(|px| *px == [1.0; 3]),
+            "{}: hard switch below",
+            kind_name(kind)
+        );
+        let (fc, p) = hard(3.01);
+        let above = mask_image(&mut gpu, fc, &p, 1.0);
+        let ra = ripple(&above[..size.0 as usize].iter().map(|px| px[0]).collect::<Vec<_>>());
+        println!("{test} {}: hard switch 0 -> {ra:.3}", kind_name(kind));
+        assert!(ra > 0.5);
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// (C) of T-39c: the tier is decided once, on the CPU, in f64 (exact: the product of two f32 values has 48
+/// significant bits), and the shader draws that decision. Before T-39c the shader decided on the f32 product
+/// px per mm x pitch, which rounds to the other side of 3.0 for some pitches meant to land on it (the review
+/// measured 14 %). Grille, hard switch (blend 0), pitches within 3 f32 ulp of 3 / px per mm for random px per
+/// mm: the cases where the f32 and the f64 decisions differ are collected (at least 8); for each, the readout
+/// (`readouts` on `mask_model`) equals `mask_tiers`, and the image is what the f64 decision says: exactly 1
+/// everywhere when prefiltered, the primaries of about 3 px per triad (peak near 3) when integrated.
+#[test]
+fn tier_decision_agrees_on_the_limit() {
+    let test = "stage_mask_slot_delta limit";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let mut rng = Lcg(3039);
+    let size = (60_u32, 2_u32);
+    let (mut differ, mut tried) = (Vec::new(), 0);
+    while differ.len() < 8 && tried < 20_000 {
+        tried += 1;
+        let ppm = (2.0 + 38.0 * rng.next()) as f32;
+        let centre = 3.0 / ppm;
+        for d in -3_i32..=3 {
+            let pitch = f32::from_bits((centre.to_bits() as i32 + d) as u32);
+            let f32_integrated = ppm * pitch >= 3.0;
+            let f64_integrated = f64::from(ppm) * f64::from(pitch) >= 3.0;
+            if f32_integrated != f64_integrated {
+                differ.push((ppm, pitch, f64_integrated));
+            }
+        }
+    }
+    println!(
+        "{test}: {} pitches where f32 and f64 disagree, {tried} px per mm tried",
+        differ.len()
+    );
+    assert!(differ.len() >= 8);
+    for (ppm, pitch, f64_integrated) in differ {
+        let fc = tube(size.0, size.1, ppm);
+        let p = Params {
+            mask_type: MASK_TYPE_APERTURE_GRILLE,
+            mask_pitch_mm: pitch,
+            mask_tier: MASK_TIER_AUTO,
+            mask_tier_blend: 0.0,
+            ..physical_mask()
+        };
+        let tiers = mask_tiers(ppm, &p);
+        let r = readouts(&mask_model(&p), f64::from(ppm), 1.0, 1.0, 1.0, mask_tier_rule(&p));
+        assert_eq!(r.axis_tiers, tiers);
+        assert_eq!(tiers.horizontal == AxisTier::Integrated, f64_integrated);
+        let got = mask_image(&mut gpu, fc, &p, 1.0);
+        let peak = got.iter().flatten().cloned().fold(0.0, f64::max);
+        println!(
+            "{test}: {ppm} px/mm x {pitch} mm = {} (f64) / {} (f32): {:?}, peak {peak:.3}",
+            f64::from(ppm) * f64::from(pitch),
+            ppm * pitch,
+            tiers.horizontal
+        );
+        if f64_integrated {
+            assert!(peak > 2.5, "integrated: peak {peak}");
+        } else {
+            assert!(got.iter().all(|px| *px == [1.0; 3]), "prefiltered: not flat");
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+fn amp_col(fc: &FrameConstants, x: u32) -> u32 {
+    let (aw, _) = fc.domain_size(Domain::Amp);
+    (((f64::from(x) + 0.5) * f64::from(aw) / f64::from(fc.tube_size[0] as u32)).floor() as u32).min(aw - 1)
+}
+
+/// Bypass and the type switch. For both types: mask off, tube not placed and `screen` off give the beam
+/// image bit for bit. The three types give three different images (no fallback to the grille any more), and
+/// switching type and back leaves the grille image bit for bit unchanged and equal to its own oracle path
+/// (`stage_mask_grille.rs` keeps its expected numbers).
+#[test]
+fn bypass_and_type_switch() {
+    let test = "stage_mask_slot_delta bypass";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (96_u32, 30_u32);
+    let fc = tube(w, h, 4.0);
+    let value = |x: u32, y: u32| [1, 2, 3].map(|k| (16 + (x * k + y * 5 + k) % 97) as f32 / 64.0);
+    let amp = currents(&fc, value);
+    let beam: Vec<f32> = (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .flat_map(|(x, y)| {
+            let [r, g, b] = value(amp_col(&fc, x), y);
+            [r, g, b, 1.0]
+        })
+        .collect();
+    let grille = Params {
+        mask_type: MASK_TYPE_APERTURE_GRILLE,
+        ..slot_params(2.0)
+    };
+    let first = run(&mut gpu, &["screen"], fc, &grille, &amp);
+    let mut images = vec![first.rgba.clone()];
+    for on in [slot_params(2.0), delta_params(2.0 / 0.75_f32.sqrt())] {
+        let masked = run(&mut gpu, &["screen"], fc, &on, &amp);
+        assert_ne!(masked.rgba, beam, "the mask is visible");
+        images.push(masked.rgba.clone());
+        let off = Params {
+            mask_enabled: false,
+            ..on
+        };
+        assert_eq!(
+            run(&mut gpu, &["screen"], fc, &off, &amp).rgba,
+            beam,
+            "mask_enabled = false"
+        );
+        let mut unplaced = fc;
+        unplaced.px_per_mm = 0.0;
+        assert_eq!(
+            run(&mut gpu, &["screen"], unplaced, &on, &amp).rgba,
+            beam,
+            "px per mm 0"
+        );
+        assert_eq!(run(&mut gpu, &[], fc, &on, &amp).rgba, beam, "screen slot off");
+    }
+    assert_ne!(images[0], images[1], "slot mask drawn as the grille");
+    assert_ne!(images[0], images[2], "delta drawn as the grille");
+    assert_ne!(images[1], images[2]);
+    let again = run(&mut gpu, &["screen"], fc, &grille, &amp);
+    assert_eq!(again.rgba, first.rgba, "grille changed after a type switch");
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Least-squares displacement, in host px, of the rendered pattern against the oracle's over the samples
+/// `ks` (pixel index `pixel(k)`, oracle value `at(c, k, d)` of the pixel moved by d): a pattern moved by +d
+/// reads want(k - d) = want(k) - d x slope. Averages the FP16 noise, so it resolves a phase drift far below
+/// one FP16 step. `None` without structure.
+fn displacement(
+    got: &[[f64; 3]],
+    ks: Range<u32>,
+    pixel: impl Fn(u32) -> usize,
+    at: impl Fn(usize, u32, f64) -> f64,
+) -> Option<f64> {
+    let h = 1e-3;
+    let (mut num, mut den) = (0.0, 0.0);
+    for k in ks {
+        for (c, value) in got[pixel(k)].iter().enumerate() {
+            let slope = (at(c, k, h) - at(c, k, -h)) / (2.0 * h);
+            num -= (value - at(c, k, 0.0)) * slope;
+            den += slope * slope;
+        }
+    }
+    (den > 1.0).then(|| num / den)
+}
+
+/// The coordinate reductions do not drift: on a 4096 px row and a 4096 px column, 8 px per triad, both
+/// types, the rendered pattern in the last 512 px is where the oracle puts it within 1e-4 px (a phase error
+/// of 1e-4 triad changes a pixel by about 0.1 %, PLAN T-39a). Since T-37 the origin is the tube centre, so
+/// those pixels are 1536 to 2048 px from it, the farthest a pixel of a 4096 px tube can be.
+#[test]
+fn no_phase_drift_far_from_the_origin() {
+    let test = "stage_mask_slot_delta drift";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let n = 4096_u32;
+    for delta in [false, true] {
+        let kind = if delta { "delta" } else { "slot" };
+        for horizontal in [true, false] {
+            let (w, h) = if horizontal { (n, 2) } else { (2, n) };
+            let (fc, p) = if delta {
+                (tube(w, h, (8.0 / (0.28 * 0.75_f64.sqrt())) as f32), delta_params(0.28))
+            } else {
+                (tube(w, h, 4.0), slot_params(2.0))
+            };
+            let oracle = Oracle::new(&fc, &p);
+            let got = mask_image(&mut gpu, fc, &p, 1.0);
+            let d = if horizontal {
+                displacement(
+                    &got,
+                    n - 512..n,
+                    |k| k as usize,
+                    |c, k, d| oracle.mask.area_mean(c, &oracle.rect(f64::from(k) + d, 0.0, 1.0, 1.0)),
+                )
+            } else {
+                displacement(
+                    &got,
+                    n - 512..n,
+                    |k| (k * 2) as usize,
+                    |c, k, d| oracle.mask.area_mean(c, &oracle.rect(0.0, f64::from(k) + d, 1.0, 1.0)),
+                )
+            }
+            .expect("structure to fit");
+            let axis = if horizontal { "x" } else { "y" };
+            println!("{test} {kind}: displaced by {d:+.2e} px along {axis} in the last 512 px");
+            assert!(d.abs() <= 1e-4, "{test} {kind} {axis}: drift {d} px");
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}

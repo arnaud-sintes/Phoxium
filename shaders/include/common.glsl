@@ -3,16 +3,16 @@
 //
 // Descriptor convention of every stage, set 0: binding 0 = Params (params.glsl, T-10), binding 1 =
 // FrameConstants (below), bindings 2 and up = the stage's own images.
-#ifndef UCRT_COMMON_GLSL
-#define UCRT_COMMON_GLSL
+#ifndef PHOXIUM_COMMON_GLSL
+#define PHOXIUM_COMMON_GLSL
 
-#ifndef UCRT_FRAME_BINDING
-#define UCRT_FRAME_BINDING 1
+#ifndef PHOXIUM_FRAME_BINDING
+#define PHOXIUM_FRAME_BINDING 1
 #endif
 
 // Per-frame constants, written by the CPU once per frame in flight (src/gpu/pipeline.rs,
 // `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 96 bytes.
-layout(std140, set = 0, binding = UCRT_FRAME_BINDING) uniform FrameConstants {
+layout(std140, set = 0, binding = PHOXIUM_FRAME_BINDING) uniform FrameConstants {
     // Tube rectangle in target pixels: x0, y0, x1, y1 (x1, y1 exclusive). Outside it: black surround.
     layout(offset = 0) vec4 tube_rect_px;
     // Native raster size (source pixels after crop and divisor).

@@ -3,7 +3,7 @@
     Capture fidelity check (T-12, SP-5, QUESTIONS CAP-3): are captured pixels bit-exact?
 .DESCRIPTION
     Generates a known PNG (grey and colour ramps plus seeded random noise, 256x240), starts pixel-demo
-    showing it with --image at each integer scale, runs `ultimatecrt --save-capture`, then compares the
+    showing it with --image at each integer scale, runs `phoxium --save-capture`, then compares the
     saved capture with the known pixels: the capture must be (width*scale) x (height*scale) (or the native
     size) and every block of scale x scale pixels must equal the source pixel. The two bottom 10x10 pixel corners are reported apart: Windows 11 rounds the window corners and darkens those pixels (36 pixels measured). Prints the max channel
     difference and the number of differing pixels per condition. Exit code 0 when every condition is exact.
@@ -11,7 +11,7 @@
     Opens windows: run it under the desktop and GPU token, hands off the keyboard and mouse. Each run is
     bounded (--save-capture exits after one frame, hard timeout, leftovers killed).
 .PARAMETER TargetDir
-    Cargo target directory holding release\ultimatecrt.exe and release\pixel-demo.exe. Default: CARGO_TARGET_DIR,
+    Cargo target directory holding release\phoxium.exe and release\pixel-demo.exe. Default: CARGO_TARGET_DIR,
     else the target directory cargo metadata reports. Binaries older than their sources are refused (rebuild with
     cargo build --release --locked).
 .PARAMETER Scales
@@ -39,13 +39,13 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'build-checks.ps1')
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if (-not $TargetDir) { $TargetDir = Get-BinaryTargetDir $repoRoot }
-$ucrt = Join-Path $TargetDir 'release\ultimatecrt.exe'
+$phoxium = Join-Path $TargetDir 'release\phoxium.exe'
 $demo = Join-Path $TargetDir 'release\pixel-demo.exe'
 # D-10: the binaries of this tree, not an old build elsewhere.
-Assert-FreshBinaries $repoRoot @($ucrt, $demo)
+Assert-FreshBinaries $repoRoot @($phoxium, $demo)
 # Start-Process joins -ArgumentList unquoted in Windows PowerShell 5.1: every argument is quoted (paths with spaces).
 function Join-Args([object[]]$a) { return @($a | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) }
-$work = Join-Path ([IO.Path]::GetTempPath()) ('ucrt-check-capture-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$work = Join-Path ([IO.Path]::GetTempPath()) ('phoxium-check-capture-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $work | Out-Null
 
 Add-Type -ReferencedAssemblies System.Drawing -TypeDefinition @'
@@ -150,7 +150,7 @@ $t = New-Object System.Windows.Forms.Timer; $t.Interval = $secs*1000; $t.Add_Tic
 '@ | Set-Content $occluderScript
 
 function Stop-Leftovers {
-    Get-Process ultimatecrt, pixel-demo -ErrorAction SilentlyContinue | Stop-Process -Force
+    Get-Process phoxium, pixel-demo -ErrorAction SilentlyContinue | Stop-Process -Force
 }
 
 $results = @()
@@ -178,7 +178,7 @@ try {
                 $occProc = Start-Process powershell -ArgumentList (Join-Args @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $occluderScript, $rc.L, $rc.T, $ow, $oh, 12)) -PassThru -WindowStyle Hidden
                 Start-Sleep -Seconds 3
             }
-            $u = Start-Process -FilePath $ucrt -ArgumentList (Join-Args @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $work 'u.out') -RedirectStandardError (Join-Path $work 'u.err')
+            $u = Start-Process -FilePath $phoxium -ArgumentList (Join-Args @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20')) -PassThru -NoNewWindow -RedirectStandardOutput (Join-Path $work 'u.out') -RedirectStandardError (Join-Path $work 'u.err')
             if (-not $u.WaitForExit(25000)) { $u.Kill() }
             if ($occProc -and -not $occProc.HasExited) { $occProc.Kill() }
             Stop-Leftovers

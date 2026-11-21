@@ -6,18 +6,18 @@ the files).
 
 | File | What |
 |---|---|
-| `icon.ico` | ultimateCRT, embedded in `ultimatecrt.exe` by `crates/ultimatecrt/build.rs` |
-| `icon-256.png` | ultimateCRT at 256 px (README, release page) |
+| `icon.ico` | Phoxium, embedded in `phoxium.exe` by `crates/phoxium/build.rs` |
+| `icon-256.png` | Phoxium at 256 px (README, release page) |
 | `icon.svg` | Vector approximation of the 256 px design (no barrel warp, simplified glow); the raster files are not made from it |
 | `pixel-demo.ico` | pixel-demo, embedded in `pixel-demo.exe` by `crates/pixel-demo/build.rs` |
 | `pixel-demo-256.png` | pixel-demo at 256 px |
 
 ## Design
 
-ultimateCRT: a CRT tube face seen straight on. A graphite casing (a superellipse, lit from above: light top rim,
+Phoxium: a CRT tube face seen straight on. A graphite casing (a superellipse, lit from above: light top rim,
 darker chin, thin dark outline for light backgrounds) holds a recessed, rounder screen whose sides bulge like a
 curved faceplate. On the dark glass glows a pixel-art disc in the app's amber accent (`#E9A23B`, from
-`crates/ultimatecrt/src/ui/theme.rs`), warmer at the bottom, drawn the way the app draws a picture: through a
+`crates/phoxium/src/ui/theme.rs`), warmer at the bottom, drawn the way the app draws a picture: through a
 barrel warp, as scanlines (a beam profile per source row), with fine R, G, B aperture-grille stripes, a phosphor
 glow around it, an inner shadow at the glass edge and a soft reflection in the upper left.
 

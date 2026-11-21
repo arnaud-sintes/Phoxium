@@ -1,0 +1,58 @@
+[package]
+name = "phoxium"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+license.workspace = true
+description = "Captures a window, runs it through a virtual CRT tube and presents it in a separate output window"
+
+[dependencies]
+# The f64 reference model: the app takes the output colour matrix from it (T-46), the GPU tests use it as the
+# analytic oracle (TEC-7); workspace crate, no third-party dependency.
+crt-model = { path = "../crt-model" }
+ash = "0.38"
+# Settings menu and overlay (T-52a, TEC-5 decided at T-08/T-13): Dear ImGui through cimgui, pinned exactly
+# (0.20, 0.21 and 0.22 shipped within three weeks with breaking renderer API changes). The C++ part builds
+# from the vendored sources with MSVC (no submodule, no bindgen). The Vulkan renderer runs in dynamic-rendering
+# mode only (default `render-pass` feature off: no VkRenderPass anywhere). Notices: THIRD-PARTY.md.
+dear-imgui-rs = "=0.22.0"
+dear-imgui-sys = "=0.22.0"
+dear-imgui-ash = { version = "=0.22.0", default-features = false, features = ["dynamic-rendering"] }
+png = "0.18"
+serde = { version = "1", features = ["derive"] }
+toml = { version = "1", default-features = false, features = ["std", "serde", "parse", "display"] }
+windows = { version = "0.62", features = [
+    "Foundation",
+    "Graphics_Capture",
+    "Graphics_DirectX",
+    "Graphics_DirectX_Direct3D11",
+    "Win32_Foundation",
+    "Win32_Globalization",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_System_DataExchange",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[build-dependencies]
+# Executable icon and VERSIONINFO as a .res file for the linker (workspace crate, no dependency).
+appres = { path = "../appres" }
+paramgen = { path = "../paramgen" }
+
+[dev-dependencies]
+# PE resource reader for tests/exe_resources.rs.
+appres = { path = "../appres" }

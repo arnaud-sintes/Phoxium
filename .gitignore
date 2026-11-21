@@ -25,5 +25,5 @@ crash-*.txt
 poll-foreground.csv
 poll.csv
 
-# Diagnostic logs (ultimatecrt --log, scripts): may name programs, never commit
+# Diagnostic logs (phoxium --log, scripts): may name programs, never commit
 *.csv

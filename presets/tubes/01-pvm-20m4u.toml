@@ -1,4 +1,4 @@
-# Tube preset, data only (T-50, QUESTIONS PHY-4, ARCHITECTURE A13). Format: crates/ultimatecrt/src/presets.rs.
+# Tube preset, data only (T-50, QUESTIONS PHY-4, ARCHITECTURE A13). Format: crates/phoxium/src/presets.rs.
 # Every key of [params] is a parameter id of params/*.toml and has a [provenance] entry "<tag>: <source>"
 # with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1

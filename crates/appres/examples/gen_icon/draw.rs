@@ -4,7 +4,7 @@
 //! Layers, back to front: a soft drop shadow, the graphite casing (a superellipse, lit from above: light top
 //! rim, darker bottom, thin dark outline), a recess ring around the screen, then the screen (a rounder
 //! superellipse, so its sides bulge like a curved faceplate). The picture on the screen is a source image (a
-//! pixel-art disc for ultimateCRT, a small sprite for pixel-demo) seen through the tube model in miniature:
+//! pixel-art disc for Phoxium, a small sprite for pixel-demo) seen through the tube model in miniature:
 //! barrel warp, scanlines (beam profile per source row), RGB aperture-grille stripes per source pixel, a
 //! phosphor glow around the lit area, the dark glass with a vignette and an inner shadow at its edge, and a soft
 //! glass reflection. Small sizes use their own simplified, pixel-snapped style (see [`Style::crt`]).
@@ -160,7 +160,7 @@ pub struct Style {
     pub shadow_blur: f32,
 }
 
-/// ultimateCRT accent (theme.rs `accent`) and the warm highlight above it.
+/// Phoxium accent (theme.rs `accent`) and the warm highlight above it.
 const AMBER: u32 = 0xE9A23B;
 const AMBER_HOT: u32 = 0xFFCB55;
 const AMBER_DEEP: u32 = 0xE0661C;
@@ -197,7 +197,7 @@ impl Style {
         (casing, screen, lip)
     }
 
-    /// The ultimateCRT icon at `size` px.
+    /// The Phoxium icon at `size` px.
     pub fn crt(size: u32) -> Style {
         let s = size as f32;
         let (casing, screen, lip) = Style::frame(size);

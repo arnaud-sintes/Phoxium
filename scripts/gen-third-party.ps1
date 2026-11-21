@@ -15,8 +15,8 @@
 .PARAMETER TableFile
     Also (or only) writes the compact table the app's About section embeds: one line per package, name, version
     and declared licence separated by tabs, after a comment line. The committed copy is
-    crates/ultimatecrt/assets/third-party.tsv; regenerate it after a dependency change:
-    scripts\gen-third-party.ps1 -TableFile crates\ultimatecrt\assets\third-party.tsv
+    crates/phoxium/assets/third-party.tsv; regenerate it after a dependency change:
+    scripts\gen-third-party.ps1 -TableFile crates\phoxium\assets\third-party.tsv
     (a unit test of the app checks it against Cargo.lock).
 .PARAMETER Root
     Repository root (default: the parent of scripts/).
@@ -68,7 +68,7 @@ function Add-Line([string]$s) { [void]$sb.Append($s).Append("`n") }
 
 Add-Line '# Third-party licences'
 Add-Line ''
-Add-Line 'ultimateCRT itself is MIT-licensed (LICENSE). This file carries the licence texts of the third-party code that is'
+Add-Line 'Phoxium itself is MIT-licensed (LICENSE). This file carries the licence texts of the third-party code that is'
 Add-Line 'built into or with the executables: first every Rust crate (the licence expression it declares, from `cargo metadata`,'
 Add-Line 'then the licence and notice files of its package, unmodified), then the notices of the C and C++ sources and the'
 Add-Line 'font that the crates do not carry.'

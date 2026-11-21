@@ -8,19 +8,19 @@
 
     The model is derived from the repository on every run (no hard-coded test lists):
       - cargo workspace crates and their path dependencies (Cargo.toml);
-      - the module graph of crates/ultimatecrt/src and crates/crt-model/src (`use crate::`, `super::`);
-      - which integration tests reference which module (`ultimatecrt::<module>`, `crt_model::<module>`);
+      - the module graph of crates/phoxium/src and crates/crt-model/src (`use crate::`, `super::`);
+      - which integration tests reference which module (`phoxium::<module>`, `crt_model::<module>`);
       - shaders: the #include graph, the stage that owns a shader (`<shader>.spv` in the stage Rust file)
         and the tests that name that stage;
       - parameters: ids of params/*.toml against the tests that name them;
       - data files embedded with include_str!/include_bytes! (presets, fonts, shaders read by unit tests) and the
-        test data files of crates/ultimatecrt/tests/data;
+        test data files of crates/phoxium/tests/data;
       - the appres crate (icon and resource tool): its tests, the packages and tests that use it, and a workspace check
-        (the build scripts of ultimatecrt and pixel-demo depend on it).
+        (the build scripts of phoxium and pixel-demo depend on it).
     Parameter ids match quoted ids, the generated constants and field uses (`.gun_gamma`); a crt-model change selects the
-    unit tests and integration tests of the ultimatecrt modules that reference the changed crt-model module.
+    unit tests and integration tests of the phoxium modules that reference the changed crt-model module.
     A failed git command (a mistyped -Base) stops the script with the git message and exit code 2: it is never read
-    as "no change". The filtered unit tests run with UCRT_REQUIRE_GPU=1 like the integration tests.
+    as "no change". The filtered unit tests run with PHOXIUM_REQUIRE_GPU=1 like the integration tests.
     Anything the model cannot place falls back to FULL (fmt, clippy workspace, all tests, licence check).
 
     The test policy (when the plan is enough, when FULL is required) is in ENV.md, "Test policy".
@@ -80,7 +80,7 @@ $Root = (Resolve-Path $Root).Path.TrimEnd('\', '/')
 . (Join-Path $PSScriptRoot 'shared-paths.ps1')
 
 # The packages and the stage layout the model relies on (documented in ENV.md, Test policy).
-$MainPackageDir = 'ultimatecrt'
+$MainPackageDir = 'phoxium'
 $ModelPackageDir = 'crt-model'
 $StagePrefix = 'gpu::stages::'
 $ParamModules = @('params', 'settings', 'presets')
@@ -193,7 +193,7 @@ function Resolve-Internal([string[]]$segs, [string]$cur, $nodes) {
     return (Resolve-LongestNode $full $nodes)
 }
 
-# External reference to a crate by name (`ultimatecrt::gpu::X`): the module it resolves to, '' for a root item.
+# External reference to a crate by name (`phoxium::gpu::X`): the module it resolves to, '' for a root item.
 function Get-ExternalRefs([string]$text, [string]$crateIdent, $nodes) {
     $set = New-Object System.Collections.Generic.HashSet[string]
     foreach ($segs in (Get-RustRefs $text $crateIdent)) {
@@ -290,7 +290,7 @@ function New-Model([string]$Root) {
     }
     # Module graphs
     $ucDir = Join-Path $Root "crates/$MainPackageDir"
-    $M.Uc = Get-Modules (Join-Path $ucDir 'src') 'ultimatecrt'
+    $M.Uc = Get-Modules (Join-Path $ucDir 'src') 'phoxium'
     $M.Cm = Get-Modules (Join-Path $Root "crates/$ModelPackageDir/src") 'crt_model'
     $M.UcCrateIdent = $MainPackageDir -replace '-', '_'
     $M.CmCrateIdent = $ModelPackageDir -replace '-', '_'
@@ -469,7 +469,7 @@ function Add-Node($M, $S, [string]$node, [string]$reason) {
     $nodes = $M.Uc.Nodes
     Add-Lib $M $S $node $reason
     foreach ($t in $M.Tests.Values) {
-        if (Test-Matches-Node $t $node $true) { Add-Reason $S.Tests $t.Name "$reason; references ultimatecrt::$node" }
+        if (Test-Matches-Node $t $node $true) { Add-Reason $S.Tests $t.Name "$reason; references phoxium::$node" }
     }
     $deps = Get-Dependants $node $nodes 2
     foreach ($d in $deps.Keys) {
@@ -481,7 +481,7 @@ function Add-Node($M, $S, [string]$node, [string]$reason) {
         }
         Add-Lib $M $S $d "$reason, $tag"
         foreach ($t in $M.Tests.Values) {
-            if (Test-Matches-Node $t $d $true) { Add-Reason $S.Tests $t.Name "$reason, $tag; references ultimatecrt::$d" }
+            if (Test-Matches-Node $t $d $true) { Add-Reason $S.Tests $t.Name "$reason, $tag; references phoxium::$d" }
         }
     }
 }
@@ -995,7 +995,7 @@ function Add-ModuleUsers($M, $S, [string]$node, $tokens, [int]$depth, [string]$r
             if (-not (Test-Matches-Node $t $d.Name $true)) { continue }
             $tc = Get-TestClean $M $t
             $th = Test-Mentions $tc (Get-LiveTokens $tc $next (($d.Name -split '::')[-1])) ''
-            if ($th) { Add-Reason $S.Tests $t.Name "$reason, $tag; references ultimatecrt::$($d.Name) and uses $($th.Name)" }
+            if ($th) { Add-Reason $S.Tests $t.Name "$reason, $tag; references phoxium::$($d.Name) and uses $($th.Name)" }
         }
         if ($depth -lt 2 -and ($next.Count -gt 0 -or $chain.Tokens.Count -gt 0)) { Add-ModuleUsers $M $S $d.Name $next ($depth + 1) $reason $impacted $chain.Tokens.ToArray() }
     }
@@ -1040,7 +1040,7 @@ function Add-NodeItems($M, $S, [string]$node, [string]$file, $ctx, [string]$reas
             if (-not (Test-Matches-Node $t $node $true)) { continue }
             $tc = Get-TestClean $M $t
             $th = Test-Mentions $tc (Get-LiveTokens $tc $direct (($node -split '::')[-1])) ''
-            if ($th) { Add-Reason $S.Tests $t.Name "$reason; references ultimatecrt::$node and uses $($th.Name)" }
+            if ($th) { Add-Reason $S.Tests $t.Name "$reason; references phoxium::$node and uses $($th.Name)" }
         }
     }
     # Users of the public items; the child modules also see the private items the change reaches.
@@ -1049,7 +1049,7 @@ function Add-NodeItems($M, $S, [string]$node, [string]$file, $ctx, [string]$reas
     foreach ($k in $impacted.Keys) { if ($M.Entry.ContainsKey($k)) { $entry = $true } }
     if ($entry) {
         foreach ($t in ($M.Tests.Values | Sort-Object { $_.Name })) {
-            if ($t.Process) { Add-Reason $S.Tests $t.Name "$reason; the test runs the binary, which embeds ultimatecrt::$node" }
+            if ($t.Process) { Add-Reason $S.Tests $t.Name "$reason; the test runs the binary, which embeds phoxium::$node" }
         }
     }
     $desc = "module $node by items: changed pub [$(($pubNames | Select-Object -Unique) -join ', ')], private [$(($privNames | Select-Object -Unique) -join ', ')]"
@@ -1118,7 +1118,7 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
                     }
                     foreach ($n in $M.Uc.Nodes.Values) {
                         $refs = Get-ExternalRefs $n.Text $M.CmCrateIdent $M.Cm.Nodes
-                        if ($refs.Contains($k) -or $refs.Contains('')) { Add-ModuleImpact $M $S $n.Name "$tag; ultimatecrt::$($n.Name) references crt_model::$k" }
+                        if ($refs.Contains($k) -or $refs.Contains('')) { Add-ModuleImpact $M $S $n.Name "$tag; phoxium::$($n.Name) references crt_model::$k" }
                     }
                 }
                 $S.Files.Add("$p -> crt-model::$node, tests referencing crt_model::$node and its dependants")
@@ -1128,7 +1128,7 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
             $S.Files.Add("$p -> crt-model tests"); return
         }
         if ($dir -eq 'appres') {
-            # Icon and resource tool: the build scripts of ultimatecrt and pixel-demo use it (a compile error breaks
+            # Icon and resource tool: the build scripts of phoxium and pixel-demo use it (a compile error breaks
             # both), and their tests read the resources of the built executables.
             Add-Reason $S.Pkg $pkg "appres changed ($p)"
             Add-ClippyFor $M $S $dir "$p changed"
@@ -1145,14 +1145,14 @@ function Add-FileImpact($M, $S, [string]$f, $ctx) {
             Add-Reason $S.Pkg $pkg "paramgen changed ($p)"
             Add-ClippyFor $M $S $dir "$p changed"
             $S.CheckWs = $true
-            foreach ($t in $M.Tests.Values) { if ($t.Uc -contains 'params') { Add-Reason $S.Tests $t.Name "paramgen changed; references ultimatecrt::params" } }
+            foreach ($t in $M.Tests.Values) { if ($t.Uc -contains 'params') { Add-Reason $S.Tests $t.Name "paramgen changed; references phoxium::params" } }
             foreach ($pm in $ParamModules) { Add-Lib $M $S $pm "paramgen changed" }
             $S.Files.Add("$p -> paramgen tests, cargo check workspace, params-related tests"); return
         }
         if ($dir -eq $MainPackageDir) {
             if ($rest -eq 'src/lib.rs') {
                 $S.UcAll = $true; Add-Reason $S.Pkg $pkg 'lib.rs changed (module list)'; Add-ClippyFor $M $S $dir "$p changed"
-                $S.Files.Add("$p -> all ultimatecrt tests (module list changed)"); return
+                $S.Files.Add("$p -> all phoxium tests (module list changed)"); return
             }
             if ($rest -eq 'src/main.rs') {
                 $S.Bin = $true; Add-ClippyFor $M $S $dir "$p changed"
@@ -1319,7 +1319,7 @@ function Get-ImpactPlan([string]$Root, [string[]]$ChangedFiles, [switch]$ForceFu
     if ($S.Full.Count -gt 0) {
         $cmds.Add((New-Command 'cargo' @('clippy', '--workspace', '--all-targets', '--locked', '--', '-D', 'warnings') 'slow' 'clippy, whole workspace' $S.Full @()))
         $t = New-Command 'cargo' @('test', '--workspace', '--locked') 'slow' 'all tests (GPU required)' $S.Full @()
-        $t.Env['UCRT_REQUIRE_GPU'] = '1'
+        $t.Env['PHOXIUM_REQUIRE_GPU'] = '1'
         $cmds.Add($t)
         $cmds.Add((New-Command 'deny' @('deny', '--locked', 'check', 'licenses') 'cheap' 'licence check (cargo-deny, skipped when not installed)' $S.Full @()))
         foreach ($u in $universe) { $plan.Selected.Add($u) }
@@ -1346,7 +1346,7 @@ function Get-ImpactPlan([string]$Root, [string[]]$ChangedFiles, [switch]$ForceFu
     $ucName = $M.PkgByDir[$MainPackageDir].Name
     if ($S.UcAll) {
         $t = New-Command 'cargo' @('test', '-p', $ucName, '--locked') 'slow' "all tests of $ucName (GPU required)" $S.Pkg[$ucName] @()
-        $t.Env['UCRT_REQUIRE_GPU'] = '1'
+        $t.Env['PHOXIUM_REQUIRE_GPU'] = '1'
         $cmds.Add($t)
         foreach ($u in $universe) { if ($u -eq "unit:$ucName" -or $u.StartsWith('test:')) { $plan.Selected.Add($u) } }
         return $plan
@@ -1363,7 +1363,7 @@ function Get-ImpactPlan([string]$Root, [string[]]$ChangedFiles, [switch]$ForceFu
         }
         $u = New-Command 'cargo' $a 'cheap' "unit tests of $ucName (filtered by module)" $reasons @($S.Lib.Keys | Sort-Object)
         # Unit tests that use the GPU must fail, not skip, on a machine without a usable Vulkan device.
-        $u.Env['UCRT_REQUIRE_GPU'] = '1'
+        $u.Env['PHOXIUM_REQUIRE_GPU'] = '1'
         $cmds.Add($u)
         $plan.Selected.Add("unit:$ucName")
     }
@@ -1386,7 +1386,7 @@ function Get-ImpactPlan([string]$Root, [string[]]$ChangedFiles, [switch]$ForceFu
             $sum = 0.0; foreach ($n in $known) { $sum += $M.Tests[$n].Seconds }
             $c.Title += (" (measured {0:N0} s for {1} of {2} programs)" -f $sum, $known.Count, $names.Count)
         }
-        $c.Env['UCRT_REQUIRE_GPU'] = '1'
+        $c.Env['PHOXIUM_REQUIRE_GPU'] = '1'
         $cmds.Add($c)
     }
     # PowerShell parse check
@@ -1574,8 +1574,8 @@ function Get-MissCheck($plan, [string]$rev) {
     $names = @{}   # identifier -> where it changed
     $parent = "$rev^1"
     foreach ($f in $plan.Files) {
-        # Tests can only reference the items of ultimatecrt and crt-model, shaders and parameters.
-        if ($f -notmatch '^(crates/(ultimatecrt|crt-model)/|shaders/|params/)') { continue }
+        # Tests can only reference the items of phoxium and crt-model, shaders and parameters.
+        if ($f -notmatch '^(crates/(phoxium|crt-model)/|shaders/|params/)') { continue }
         $d = Get-GitLines @('diff', '-U0', '--no-renames', $parent, $rev, '--', $f)
         if (-not $d) { continue }   # an empty diff of a successful command: nothing changed in this file
         foreach ($l in $d) {
@@ -1634,7 +1634,7 @@ function Invoke-SelfTest {
         [IO.File]::WriteAllText($p, $content)
     }
     try {
-        W 'Cargo.toml' "[workspace]`nmembers = [`"crates/appres`", `"crates/crt-model`", `"crates/paramgen`", `"crates/pixel-demo`", `"crates/ultimatecrt`"]`n"
+        W 'Cargo.toml' "[workspace]`nmembers = [`"crates/appres`", `"crates/crt-model`", `"crates/paramgen`", `"crates/pixel-demo`", `"crates/phoxium`"]`n"
         W 'crates/appres/Cargo.toml' "[package]`nname = `"appres`"`n"
         W 'crates/appres/src/lib.rs' "pub mod pe;`npub fn embed() {}`n"
         W 'crates/appres/src/pe.rs' "pub fn check_executable() {}`n#[cfg(test)]`nmod tests {}`n"
@@ -1649,40 +1649,40 @@ function Invoke-SelfTest {
         W 'crates/pixel-demo/Cargo.toml' "[package]`nname = `"pixel-demo`"`n[dependencies]`nappres = { path = `"../appres`" }`n"
         W 'crates/pixel-demo/src/main.rs' "fn main() {}`n#[cfg(test)]`nmod tests {}`n"
         W 'crates/pixel-demo/src/options.rs' "pub struct Options;`n"
-        W 'crates/ultimatecrt/Cargo.toml' "[package]`nname = `"ultimatecrt`"`n[dependencies]`ncrt-model = { path = `"../crt-model`" }`nappres = { path = `"../appres`" }`n[build-dependencies]`nparamgen = { path = `"../paramgen`" }`n"
-        W 'crates/ultimatecrt/build.rs' "fn main() {}`n"
-        W 'crates/ultimatecrt/src/lib.rs' "pub mod app;`npub mod bars;`npub mod cli;`npub mod gpu;`npub mod output;`npub mod params;`npub mod placement;`npub mod presets;`npub mod scaling;`npub mod ui;`n"
-        W 'crates/ultimatecrt/src/bars.rs' "const FRAME: &[u8] = include_bytes!(`"../tests/data/frame.png`");`npub fn frame() -> usize { FRAME.len() }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/tests/data/frame.png' "x"
-        W 'crates/ultimatecrt/src/main.rs' "fn main() { ultimatecrt::app::run(); }`n"
-        W 'crates/ultimatecrt/src/app.rs' "use crate::output;`npub fn run() { let _ = output::create(); }`n"
-        W 'crates/ultimatecrt/src/output.rs' "pub struct Options { pub fullscreen: bool }`npub enum OnActivate { Default }`npub const TITLE_H: u32 = 4;`npub fn create() -> Options { wndproc(); Options { fullscreen: false } }`npub fn self_drag_hit(h: u32) -> bool { h == 2 }`nfn wndproc() { helper(); }`nfn helper() {}`n#[cfg(test)]`nmod tests {`n    fn t() {}`n}`n"
-        W 'crates/ultimatecrt/src/cli.rs' "pub const USAGE: &str = `"usage: ultimatecrt [options]`";`npub struct Args { pub flag: bool }`npub fn parse() -> Args { Args { flag: parse_flag() } }`nfn parse_flag() -> bool { false }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/params.rs' "pub struct Params;`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/scaling.rs' "pub struct View;`npub fn fit() -> u32 { inner() }`nfn inner() -> u32 { 1 }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/placement.rs' "use crate::scaling::View;`nuse crate::params::Params;`npub fn place() -> u32 { crate::scaling::fit() }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/presets.rs' "use crate::params::Params;`nuse crt_model::mask::mask;`nconst P: &str = include_str!(`"../../../presets/tubes/01-a.toml`");`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/ui/mod.rs' "pub mod menu;`n"
-        W 'crates/ultimatecrt/src/ui/menu.rs' "use crate::params::Params;`nuse crate::presets::Library;`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/gpu/mod.rs' "pub mod stages;`npub mod pipeline;`npub struct Headless;`npub fn client_size() -> u32 { if crate::output::self_drag_hit(1) { 1 } else { crate::output::TITLE_H } }`nfn secret() -> u32 { 7 }`n"
-        W 'crates/ultimatecrt/src/gpu/pipeline.rs' "use super::stages::abl::Abl;`npub fn p() -> u32 { super::secret() }`nconst R: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/resample.comp.spv`"));`n"
-        W 'crates/ultimatecrt/src/gpu/stages/mod.rs' "pub mod abl;`npub mod screen;`n#[cfg(test)]`nmod tests { fn scan() { std::fs::read_dir(`"shaders`"); } }`n"
-        W 'crates/ultimatecrt/src/gpu/stages/abl.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/abl.comp.spv`"));`nfn name() -> &'static str { `"abl`" }`nfn size() -> u32 { crate::gpu::client_size() }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/src/gpu/stages/screen.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/screen.comp.spv`"));`nfn name() -> &'static str { `"screen`" }`n#[cfg(test)]`nmod tests {}`n"
-        W 'crates/ultimatecrt/tests/common/mod.rs' "use ultimatecrt::gpu::Headless;`npub fn gpu_or_skip() {}`n"
-        W 'crates/ultimatecrt/tests/stage_abl.rs' "mod common;`nuse crt_model::abl::Abl;`nfn t() { gpu.enable_only(&[`"abl`"]); let _ = `"gun`"; }`n"
-        W 'crates/ultimatecrt/tests/stage_screen.rs' "mod common;`nuse crt_model::beam::Spot;`nfn t() { gpu.enable_only(&[`"screen`"]); }`n"
-        W 'crates/ultimatecrt/tests/pipeline_skip.rs' "mod common;`nuse ultimatecrt::gpu::Headless;`nfn t() { gpu.render(); }`n"
-        W 'crates/ultimatecrt/tests/placement_modes.rs' "use ultimatecrt::placement::place;`nuse ultimatecrt::scaling::{fit, View};`nfn t() { let _ = (place(), fit()); }`n"
-        W 'crates/ultimatecrt/tests/output_win.rs' "use ultimatecrt::output::{create, Options};`nfn t() { let _: Options = create(); }`n"
-        W 'crates/ultimatecrt/tests/binary_run.rs' "fn t() { let _ = std::process::Command::new(env!(`"CARGO_BIN_EXE_ultimatecrt`")); }`n"
-        W 'crates/ultimatecrt/tests/pipe_p.rs' "use ultimatecrt::gpu::pipeline::p;`nfn t() { let _ = p(); }`n"
-        W 'crates/ultimatecrt/tests/ui_menu.rs' "mod common;`nuse ultimatecrt::ui::menu::MenuRects;`nuse ultimatecrt::params::Params;`nfn t() { gpu.render(); }`n"
-        W 'crates/ultimatecrt/tests/presets.rs' "mod common;`nuse ultimatecrt::presets::Library;`nfn t() { render_source(); let _ = `"preset`"; }`n"
-        W 'crates/ultimatecrt/tests/smoke.rs' "use ultimatecrt::{cli, scaling, params};`nfn t() { let _ = cli::USAGE; }`n"
-        W 'crates/ultimatecrt/tests/units_only.rs' "use crt_model::units::mm;`nfn t() {}`n"
-        W 'crates/ultimatecrt/tests/exe_resources.rs' "fn t() { let _ = appres::pe::check_executable(); }`n"
-        W 'crates/ultimatecrt/tests/render_cmd.rs' "use ultimatecrt::params::Params;`nfn t() { let p = Params::default(); let _ = p.gun_gamma; }`n"
+        W 'crates/phoxium/Cargo.toml' "[package]`nname = `"phoxium`"`n[dependencies]`ncrt-model = { path = `"../crt-model`" }`nappres = { path = `"../appres`" }`n[build-dependencies]`nparamgen = { path = `"../paramgen`" }`n"
+        W 'crates/phoxium/build.rs' "fn main() {}`n"
+        W 'crates/phoxium/src/lib.rs' "pub mod app;`npub mod bars;`npub mod cli;`npub mod gpu;`npub mod output;`npub mod params;`npub mod placement;`npub mod presets;`npub mod scaling;`npub mod ui;`n"
+        W 'crates/phoxium/src/bars.rs' "const FRAME: &[u8] = include_bytes!(`"../tests/data/frame.png`");`npub fn frame() -> usize { FRAME.len() }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/tests/data/frame.png' "x"
+        W 'crates/phoxium/src/main.rs' "fn main() { phoxium::app::run(); }`n"
+        W 'crates/phoxium/src/app.rs' "use crate::output;`npub fn run() { let _ = output::create(); }`n"
+        W 'crates/phoxium/src/output.rs' "pub struct Options { pub fullscreen: bool }`npub enum OnActivate { Default }`npub const TITLE_H: u32 = 4;`npub fn create() -> Options { wndproc(); Options { fullscreen: false } }`npub fn self_drag_hit(h: u32) -> bool { h == 2 }`nfn wndproc() { helper(); }`nfn helper() {}`n#[cfg(test)]`nmod tests {`n    fn t() {}`n}`n"
+        W 'crates/phoxium/src/cli.rs' "pub const USAGE: &str = `"usage: phoxium [options]`";`npub struct Args { pub flag: bool }`npub fn parse() -> Args { Args { flag: parse_flag() } }`nfn parse_flag() -> bool { false }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/params.rs' "pub struct Params;`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/scaling.rs' "pub struct View;`npub fn fit() -> u32 { inner() }`nfn inner() -> u32 { 1 }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/placement.rs' "use crate::scaling::View;`nuse crate::params::Params;`npub fn place() -> u32 { crate::scaling::fit() }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/presets.rs' "use crate::params::Params;`nuse crt_model::mask::mask;`nconst P: &str = include_str!(`"../../../presets/tubes/01-a.toml`");`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/ui/mod.rs' "pub mod menu;`n"
+        W 'crates/phoxium/src/ui/menu.rs' "use crate::params::Params;`nuse crate::presets::Library;`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/gpu/mod.rs' "pub mod stages;`npub mod pipeline;`npub struct Headless;`npub fn client_size() -> u32 { if crate::output::self_drag_hit(1) { 1 } else { crate::output::TITLE_H } }`nfn secret() -> u32 { 7 }`n"
+        W 'crates/phoxium/src/gpu/pipeline.rs' "use super::stages::abl::Abl;`npub fn p() -> u32 { super::secret() }`nconst R: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/resample.comp.spv`"));`n"
+        W 'crates/phoxium/src/gpu/stages/mod.rs' "pub mod abl;`npub mod screen;`n#[cfg(test)]`nmod tests { fn scan() { std::fs::read_dir(`"shaders`"); } }`n"
+        W 'crates/phoxium/src/gpu/stages/abl.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/abl.comp.spv`"));`nfn name() -> &'static str { `"abl`" }`nfn size() -> u32 { crate::gpu::client_size() }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/src/gpu/stages/screen.rs' "use crate::params::Params;`nconst S: &[u8] = include_bytes!(concat!(env!(`"OUT_DIR`"), `"/screen.comp.spv`"));`nfn name() -> &'static str { `"screen`" }`n#[cfg(test)]`nmod tests {}`n"
+        W 'crates/phoxium/tests/common/mod.rs' "use phoxium::gpu::Headless;`npub fn gpu_or_skip() {}`n"
+        W 'crates/phoxium/tests/stage_abl.rs' "mod common;`nuse crt_model::abl::Abl;`nfn t() { gpu.enable_only(&[`"abl`"]); let _ = `"gun`"; }`n"
+        W 'crates/phoxium/tests/stage_screen.rs' "mod common;`nuse crt_model::beam::Spot;`nfn t() { gpu.enable_only(&[`"screen`"]); }`n"
+        W 'crates/phoxium/tests/pipeline_skip.rs' "mod common;`nuse phoxium::gpu::Headless;`nfn t() { gpu.render(); }`n"
+        W 'crates/phoxium/tests/placement_modes.rs' "use phoxium::placement::place;`nuse phoxium::scaling::{fit, View};`nfn t() { let _ = (place(), fit()); }`n"
+        W 'crates/phoxium/tests/output_win.rs' "use phoxium::output::{create, Options};`nfn t() { let _: Options = create(); }`n"
+        W 'crates/phoxium/tests/binary_run.rs' "fn t() { let _ = std::process::Command::new(env!(`"CARGO_BIN_EXE_phoxium`")); }`n"
+        W 'crates/phoxium/tests/pipe_p.rs' "use phoxium::gpu::pipeline::p;`nfn t() { let _ = p(); }`n"
+        W 'crates/phoxium/tests/ui_menu.rs' "mod common;`nuse phoxium::ui::menu::MenuRects;`nuse phoxium::params::Params;`nfn t() { gpu.render(); }`n"
+        W 'crates/phoxium/tests/presets.rs' "mod common;`nuse phoxium::presets::Library;`nfn t() { render_source(); let _ = `"preset`"; }`n"
+        W 'crates/phoxium/tests/smoke.rs' "use phoxium::{cli, scaling, params};`nfn t() { let _ = cli::USAGE; }`n"
+        W 'crates/phoxium/tests/units_only.rs' "use crt_model::units::mm;`nfn t() {}`n"
+        W 'crates/phoxium/tests/exe_resources.rs' "fn t() { let _ = appres::pe::check_executable(); }`n"
+        W 'crates/phoxium/tests/render_cmd.rs' "use phoxium::params::Params;`nfn t() { let p = Params::default(); let _ = p.gun_gamma; }`n"
         W 'params/gun.toml' "[[param]]`nid = `"gun_gamma`"`nstage = `"gun`"`ndefault = 2.4`n"
         W 'shaders/abl.comp' "#include `"abl.glsl`"`nvoid main() {}`n"
         W 'shaders/screen.comp' "#include `"beam.glsl`"`nvoid main() {}`n"
@@ -1709,49 +1709,49 @@ function Invoke-SelfTest {
             @{ Name = 'shader include'; Files = @('shaders/include/abl.glsl'); Tests = @('stage_abl', 'pipeline_skip', 'presets', 'ui_menu'); NotTests = @('stage_screen', 'smoke', 'units_only'); Lib = @('gpu::stages::abl::'); Full = $false }
             @{ Name = 'shared shader include (both stages)'; Files = @('shaders/include/common.glsl'); Tests = @('stage_abl', 'stage_screen'); NotTests = @('smoke'); Full = $false }
             @{ Name = 'stage shader'; Files = @('shaders/screen.comp'); Tests = @('stage_screen', 'pipeline_skip'); NotTests = @('stage_abl', 'smoke', 'placement_modes'); Lib = @('gpu::stages::screen::'); Full = $false }
-            @{ Name = 'stage rust file'; Files = @('crates/ultimatecrt/src/gpu/stages/abl.rs'); Tests = @('stage_abl', 'pipeline_skip'); NotTests = @('stage_screen', 'smoke'); Lib = @('gpu::stages::abl::'); Full = $false }
+            @{ Name = 'stage rust file'; Files = @('crates/phoxium/src/gpu/stages/abl.rs'); Tests = @('stage_abl', 'pipeline_skip'); NotTests = @('stage_screen', 'smoke'); Lib = @('gpu::stages::abl::'); Full = $false }
             @{ Name = 'params toml (one stage)'; Files = @('params/beam.toml'); Tests = @(); NotTests = @('stage_abl', 'smoke'); Lib = @('params::', 'presets::'); CheckWs = $true; Full = $false }
             @{ Name = 'params toml id named by a test'; Files = @('params/abl.toml'); Tests = @(); NotTests = @('smoke'); CheckWs = $true; Full = $false }
             @{ Name = 'preset'; Files = @('presets/tubes/01-a.toml'); Tests = @('presets', 'ui_menu'); NotTests = @('stage_abl', 'smoke', 'units_only'); Lib = @('presets::'); Full = $false }
-            @{ Name = 'ui module'; Files = @('crates/ultimatecrt/src/ui/menu.rs'); Tests = @('ui_menu'); NotTests = @('stage_abl', 'stage_screen', 'smoke', 'placement_modes'); Lib = @('ui::menu::'); Full = $false }
-            @{ Name = 'leaf module with dependants (scaling)'; Files = @('crates/ultimatecrt/src/scaling.rs'); Tests = @('smoke', 'placement_modes'); NotTests = @('units_only'); Lib = @('scaling::', 'placement::'); Full = $false }
+            @{ Name = 'ui module'; Files = @('crates/phoxium/src/ui/menu.rs'); Tests = @('ui_menu'); NotTests = @('stage_abl', 'stage_screen', 'smoke', 'placement_modes'); Lib = @('ui::menu::'); Full = $false }
+            @{ Name = 'leaf module with dependants (scaling)'; Files = @('crates/phoxium/src/scaling.rs'); Tests = @('smoke', 'placement_modes'); NotTests = @('units_only'); Lib = @('scaling::', 'placement::'); Full = $false }
             @{ Name = 'paramgen'; Files = @('crates/paramgen/src/lib.rs'); Tests = @('smoke', 'ui_menu'); NotTests = @('units_only'); Pkg = @('paramgen'); CheckWs = $true; Full = $false }
-            @{ Name = 'tests/common'; Files = @('crates/ultimatecrt/tests/common/mod.rs'); Tests = @('stage_abl', 'stage_screen', 'pipeline_skip', 'ui_menu', 'presets'); NotTests = @('smoke', 'units_only'); Full = $false }
-            @{ Name = 'one test file'; Files = @('crates/ultimatecrt/tests/smoke.rs'); Tests = @('smoke'); NotTests = @('stage_abl', 'ui_menu'); Full = $false }
+            @{ Name = 'tests/common'; Files = @('crates/phoxium/tests/common/mod.rs'); Tests = @('stage_abl', 'stage_screen', 'pipeline_skip', 'ui_menu', 'presets'); NotTests = @('smoke', 'units_only'); Full = $false }
+            @{ Name = 'one test file'; Files = @('crates/phoxium/tests/smoke.rs'); Tests = @('smoke'); NotTests = @('stage_abl', 'ui_menu'); Full = $false }
             @{ Name = 'Cargo.lock'; Files = @('Cargo.lock'); Full = $true }
             @{ Name = 'Cargo.toml of a crate'; Files = @('crates/pixel-demo/Cargo.toml'); Full = $true }
-            @{ Name = 'build.rs'; Files = @('crates/ultimatecrt/build.rs'); Full = $true }
+            @{ Name = 'build.rs'; Files = @('crates/phoxium/build.rs'); Full = $true }
             @{ Name = 'unknown file kind'; Files = @('weird.bin'); Full = $true }
             @{ Name = 'mixed doc and unknown'; Files = @('ENV.md', 'weird.bin'); Full = $true }
-            @{ Name = 'crt-model module referenced by an ultimatecrt module (mask -> presets)'; Files = @('crates/crt-model/src/mask.rs'); Tests = @('presets', 'ui_menu'); NotTests = @('smoke', 'units_only', 'binary_run', 'stage_screen'); Lib = @('presets::'); Pkg = @('crt-model'); Full = $false }
+            @{ Name = 'crt-model module referenced by an phoxium module (mask -> presets)'; Files = @('crates/crt-model/src/mask.rs'); Tests = @('presets', 'ui_menu'); NotTests = @('smoke', 'units_only', 'binary_run', 'stage_screen'); Lib = @('presets::'); Pkg = @('crt-model'); Full = $false }
             @{ Name = 'params + presets in one plan keep cargo check --workspace'; Files = @('params/beam.toml', 'presets/tubes/01-a.toml'); Tests = @('presets'); NotTests = @('smoke', 'units_only'); CheckWs = $true; Full = $false }
             @{ Name = 'appres source'; Files = @('crates/appres/src/pe.rs'); Tests = @('exe_resources'); NotTests = @('smoke', 'stage_abl', 'units_only'); Pkg = @('appres', 'pixel-demo'); CheckWs = $true; Full = $false }
             @{ Name = 'appres Cargo.toml (build configuration)'; Files = @('crates/appres/Cargo.toml'); Full = $true }
-            @{ Name = 'test data file embedded by a module'; Files = @('crates/ultimatecrt/tests/data/frame.png'); Tests = @(); NotTests = @('stage_abl', 'stage_screen', 'units_only'); Lib = @('bars::'); Full = $false }
-            @{ Name = 'test data file nobody references'; Files = @('crates/ultimatecrt/tests/data/orphan.png'); Full = $true }
+            @{ Name = 'test data file embedded by a module'; Files = @('crates/phoxium/tests/data/frame.png'); Tests = @(); NotTests = @('stage_abl', 'stage_screen', 'units_only'); Lib = @('bars::'); Full = $false }
+            @{ Name = 'test data file nobody references'; Files = @('crates/phoxium/tests/data/orphan.png'); Full = $true }
             @{ Name = 'pixel-demo only (main.rs)'; Files = @('crates/pixel-demo/src/main.rs', 'crates/pixel-demo/src/options.rs'); Tests = @(); NotTests = '*'; Pkg = @('pixel-demo'); NotLib = @('output::', 'cli::', 'gpu::stages::abl::'); Full = $false }
             # Item level (a git fixture: the diff of the working tree against HEAD).
-            @{ Name = 'item: output.rs private fn only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn helper() {}'; Replace = 'fn helper() { let _ = 1; }' })
+            @{ Name = 'item: output.rs private fn only'; Edits = @(@{ File = 'crates/phoxium/src/output.rs'; Find = 'fn helper() {}'; Replace = 'fn helper() { let _ = 1; }' })
                Tests = @('output_win', 'binary_run'); NotTests = @('stage_abl', 'stage_screen', 'pipeline_skip', 'ui_menu', 'presets', 'placement_modes', 'smoke', 'units_only'); Lib = @('output::'); NotLib = @('gpu::stages::abl::', 'placement::', 'ui::menu::'); Full = $false }
-            @{ Name = 'item: output.rs pub fn body only (OS glue is a leaf)'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'h == 2'; Replace = 'h == 3' })
+            @{ Name = 'item: output.rs pub fn body only (OS glue is a leaf)'; Edits = @(@{ File = 'crates/phoxium/src/output.rs'; Find = 'h == 2'; Replace = 'h == 3' })
                Tests = @('binary_run'); NotTests = @('stage_abl', 'pipeline_skip', 'output_win', 'smoke', 'ui_menu'); Lib = @('output::'); NotLib = @('gpu::stages::abl::'); Full = $false }
-            @{ Name = 'item: output.rs public signature change'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'pub fn self_drag_hit(h: u32) -> bool { h == 2 }'; Replace = 'pub fn self_drag_hit(h: u32, w: u32) -> bool { h == w }' })
+            @{ Name = 'item: output.rs public signature change'; Edits = @(@{ File = 'crates/phoxium/src/output.rs'; Find = 'pub fn self_drag_hit(h: u32) -> bool { h == 2 }'; Replace = 'pub fn self_drag_hit(h: u32, w: u32) -> bool { h == w }' })
                Tests = @('stage_abl', 'pipeline_skip', 'presets', 'ui_menu'); NotTests = @('stage_screen', 'smoke', 'units_only', 'output_win', 'placement_modes'); Lib = @('output::', 'gpu::stages::abl::'); NotLib = @('placement::'); Full = $false }
-            @{ Name = 'item: output.rs pub const used by gpu'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'TITLE_H: u32 = 4'; Replace = 'TITLE_H: u32 = 5' })
+            @{ Name = 'item: output.rs pub const used by gpu'; Edits = @(@{ File = 'crates/phoxium/src/output.rs'; Find = 'TITLE_H: u32 = 4'; Replace = 'TITLE_H: u32 = 5' })
                Tests = @('stage_abl', 'pipeline_skip'); NotTests = @('stage_screen', 'smoke', 'output_win', 'placement_modes'); Lib = @('gpu::stages::abl::'); Full = $false }
-            @{ Name = 'item: output.rs unit test only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn t() {}'; Replace = 'fn t() { let _ = 1; }' })
+            @{ Name = 'item: output.rs unit test only'; Edits = @(@{ File = 'crates/phoxium/src/output.rs'; Find = 'fn t() {}'; Replace = 'fn t() { let _ = 1; }' })
                Tests = @(); NotTests = '*'; Lib = @('output::'); NotLib = @('gpu::stages::abl::'); Full = $false }
-            @{ Name = 'item: output.rs comment only'; Edits = @(@{ File = 'crates/ultimatecrt/src/output.rs'; Find = 'fn helper() {}'; Replace = "// a note`nfn helper() {}" })
+            @{ Name = 'item: output.rs comment only'; Edits = @(@{ File = 'crates/phoxium/src/output.rs'; Find = 'fn helper() {}'; Replace = "// a note`nfn helper() {}" })
                Tests = @(); NotTests = '*'; Lib = @('output::'); NotLib = @('gpu::stages::abl::'); Full = $false }
-            @{ Name = 'item: cli.rs flag parsing body'; Edits = @(@{ File = 'crates/ultimatecrt/src/cli.rs'; Find = 'fn parse_flag() -> bool { false }'; Replace = 'fn parse_flag() -> bool { true }' })
+            @{ Name = 'item: cli.rs flag parsing body'; Edits = @(@{ File = 'crates/phoxium/src/cli.rs'; Find = 'fn parse_flag() -> bool { false }'; Replace = 'fn parse_flag() -> bool { true }' })
                Tests = @('binary_run'); NotTests = @('smoke', 'stage_abl', 'stage_screen', 'ui_menu', 'presets', 'pipeline_skip', 'output_win'); Lib = @('cli::'); NotLib = @('gpu::stages::abl::'); Full = $false }
-            @{ Name = 'item: cli.rs usage text (a public const)'; Edits = @(@{ File = 'crates/ultimatecrt/src/cli.rs'; Find = 'usage: ultimatecrt [options]'; Replace = 'usage: ultimatecrt [options] [--new-flag]' })
+            @{ Name = 'item: cli.rs usage text (a public const)'; Edits = @(@{ File = 'crates/phoxium/src/cli.rs'; Find = 'usage: phoxium [options]'; Replace = 'usage: phoxium [options] [--new-flag]' })
                Tests = @('smoke', 'binary_run'); NotTests = @('stage_abl', 'stage_screen', 'ui_menu', 'presets', 'pipeline_skip', 'output_win'); Lib = @('cli::'); Full = $false }
-            @{ Name = 'item: scaling.rs private fn (not OS glue)'; Edits = @(@{ File = 'crates/ultimatecrt/src/scaling.rs'; Find = 'fn inner() -> u32 { 1 }'; Replace = 'fn inner() -> u32 { 2 }' })
+            @{ Name = 'item: scaling.rs private fn (not OS glue)'; Edits = @(@{ File = 'crates/phoxium/src/scaling.rs'; Find = 'fn inner() -> u32 { 1 }'; Replace = 'fn inner() -> u32 { 2 }' })
                Tests = @('placement_modes'); NotTests = @('smoke', 'stage_abl', 'units_only', 'output_win'); Lib = @('scaling::', 'placement::'); Full = $false }
             @{ Name = 'item: params default change selects a test that uses the field (gun_gamma)'; Edits = @(@{ File = 'params/gun.toml'; Find = 'default = 2.4'; Replace = 'default = 2.2' })
                Tests = @('render_cmd'); NotTests = @('smoke', 'units_only', 'stage_screen'); CheckWs = $true; Full = $false }
-            @{ Name = 'item: gpu/mod.rs private fn seen by a child module'; Edits = @(@{ File = 'crates/ultimatecrt/src/gpu/mod.rs'; Find = '{ 7 }'; Replace = '{ 8 }' })
+            @{ Name = 'item: gpu/mod.rs private fn seen by a child module'; Edits = @(@{ File = 'crates/phoxium/src/gpu/mod.rs'; Find = '{ 7 }'; Replace = '{ 8 }' })
                Tests = @('pipe_p'); NotTests = @('smoke', 'output_win', 'units_only', 'placement_modes'); Full = $false }
         )
         $gitOk = $false

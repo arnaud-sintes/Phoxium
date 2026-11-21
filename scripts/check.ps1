@@ -15,7 +15,7 @@
     are refused unless deny.toml allows the licence). -Full also runs the self tests of scripts/impact.ps1 and
     scripts/licence-policy.ps1.
 .PARAMETER Smoke
-    Also run the live smoke test: `ultimatecrt --pattern ramp --exit-after 10 --validation`. It opens
+    Also run the live smoke test: `phoxium --pattern ramp --exit-after 10 --validation`. It opens
     an output window for 10 s, so it is opt-in. It fails on a non-zero exit or on any validation line
     on stderr.
 .PARAMETER SkipTests
@@ -66,10 +66,10 @@ function Invoke-DeclaredLicences {
 
 function Invoke-Smoke {
     Step 'live smoke (opens a window for 10 s)'
-    Invoke-Checked 'cargo build' { cargo build --locked -p ultimatecrt }
+    Invoke-Checked 'cargo build' { cargo build --locked -p phoxium }
     $targetDir = $env:CARGO_TARGET_DIR
     if (-not $targetDir) { $targetDir = Join-Path $root 'target' }
-    $exe = Join-Path $targetDir 'debug\ultimatecrt.exe'
+    $exe = Join-Path $targetDir 'debug\phoxium.exe'
     $errFile = [IO.Path]::GetTempFileName()
     try {
         $p = Start-Process -FilePath $exe -ArgumentList '--pattern', 'ramp', '--exit-after', '10', '--validation' `
@@ -107,11 +107,11 @@ Step 'cargo clippy'
 Invoke-Checked 'cargo clippy' { cargo clippy --all-targets --locked -- -D warnings }
 
 if (-not $SkipTests) {
-    Step 'cargo test (UCRT_REQUIRE_GPU=1)'
-    $oldGpu = $env:UCRT_REQUIRE_GPU
-    $env:UCRT_REQUIRE_GPU = '1'
+    Step 'cargo test (PHOXIUM_REQUIRE_GPU=1)'
+    $oldGpu = $env:PHOXIUM_REQUIRE_GPU
+    $env:PHOXIUM_REQUIRE_GPU = '1'
     try { Invoke-Checked 'cargo test' { cargo test --locked } }
-    finally { $env:UCRT_REQUIRE_GPU = $oldGpu }
+    finally { $env:PHOXIUM_REQUIRE_GPU = $oldGpu }
 }
 
 Step 'licences'

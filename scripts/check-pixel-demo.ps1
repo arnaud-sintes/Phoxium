@@ -3,7 +3,7 @@
     Live check of pixel-demo as a universal test source (T-95). NOT run by the agent that wrote it.
 .DESCRIPTION
     Exercises the display modes with the capture check: for each case it starts pixel-demo, verifies
-    the window client size, runs `ultimatecrt --save-capture` on it, checks the capture size equals the
+    the window client size, runs `phoxium --save-capture` on it, checks the capture size equals the
     client size and decodes the binary frame counter from the capture with `pixel-demo --decode`
     (same layout flags), which proves the picture is laid out where the layout code says. Then:
       - rate: `--stats` for each update rate, passes when the mean painted rate is >= 97 % of the target
@@ -16,7 +16,7 @@
     Opens windows: run it under the desktop and GPU token, hands off the keyboard and mouse. Every run
     is bounded and leftovers are killed. Exit code 0 when every check passes.
 .PARAMETER TargetDir
-    Cargo target directory holding release\ultimatecrt.exe and release\pixel-demo.exe. Default: CARGO_TARGET_DIR,
+    Cargo target directory holding release\phoxium.exe and release\pixel-demo.exe. Default: CARGO_TARGET_DIR,
     else the target directory that cargo metadata reports. Binaries older than their sources are refused (rebuild
     with cargo build --release --locked).
 .PARAMETER Rates
@@ -40,13 +40,13 @@ Add-Type -AssemblyName System.Drawing
 . (Join-Path $PSScriptRoot 'build-checks.ps1')
 $repoRoot = Split-Path $PSScriptRoot -Parent
 if (-not $TargetDir) { $TargetDir = Get-BinaryTargetDir $repoRoot }
-$ucrt = Join-Path $TargetDir 'release\ultimatecrt.exe'
+$phoxium = Join-Path $TargetDir 'release\phoxium.exe'
 $demo = Join-Path $TargetDir 'release\pixel-demo.exe'
 # D-10: the binaries of this tree, not an old build elsewhere.
-Assert-FreshBinaries $repoRoot @($ucrt, $demo)
+Assert-FreshBinaries $repoRoot @($phoxium, $demo)
 # Start-Process joins -ArgumentList unquoted in Windows PowerShell 5.1: every argument is quoted (paths with spaces).
 function Join-Args([object[]]$a) { return @($a | ForEach-Object { ConvertTo-ProcessArgument ([string]$_) }) }
-$work = Join-Path ([IO.Path]::GetTempPath()) ('ucrt-check-pixel-demo-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
+$work = Join-Path ([IO.Path]::GetTempPath()) ('phoxium-check-pixel-demo-' + [guid]::NewGuid().ToString('N').Substring(0, 8))
 New-Item -ItemType Directory $work | Out-Null
 
 Add-Type -TypeDefinition @'
@@ -66,7 +66,7 @@ public static class PdWin {
 $failures = @()
 function Fail([string]$msg) { Write-Host "FAIL: $msg"; $script:failures += $msg }
 function Pass([string]$msg) { Write-Host "ok:   $msg" }
-function Stop-Leftovers { Get-Process ultimatecrt, pixel-demo -ErrorAction SilentlyContinue | Stop-Process -Force }
+function Stop-Leftovers { Get-Process phoxium, pixel-demo -ErrorAction SilentlyContinue | Stop-Process -Force }
 
 function Start-Demo([string[]]$DemoArgs) {
     Stop-Leftovers
@@ -85,7 +85,7 @@ function Get-Client($p) {
 
 function Save-Capture([string]$name) {
     $cap = Join-Path $work "$name.png"
-    $u = Start-Process -FilePath $ucrt -ArgumentList (Join-Args @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20')) -PassThru -NoNewWindow `
+    $u = Start-Process -FilePath $phoxium -ArgumentList (Join-Args @('--window', 'pixel-demo', '--save-capture', $cap, '--exit-after', '20')) -PassThru -NoNewWindow `
         -RedirectStandardOutput (Join-Path $work 'u.out') -RedirectStandardError (Join-Path $work 'u.err')
     if (-not $u.WaitForExit(25000)) { $u.Kill() }
     if (Test-Path $cap) { return $cap } else { return $null }
@@ -127,7 +127,7 @@ try {
     Test-Case 'par-8-7-integer-x3'  @('--native', '256x240', '--mode', 'integer', '--scale', '3', '--par', '8:7') @() @(877, 720)
     Test-Case 'native-1280x720'     @('--native', '1280x720', '--mode', 'native')               @() @(1280, 720)
     Test-Case 'borderless-x2'       @('--native', '256x240', '--mode', 'integer', '--scale', '2') @('--borderless') @(512, 480)
-    Write-Host 'note: fit-free bilinear/bicubic are the smoothed-source cases: run ultimatecrt --window pixel-demo on them by hand and look for the smoothed-source warning.'
+    Write-Host 'note: fit-free bilinear/bicubic are the smoothed-source cases: run phoxium --window pixel-demo on them by hand and look for the smoothed-source warning.'
 
     # --- resize re-layout ------------------------------------------------------------------
     $p = Start-Demo @('--native', '256x240', '--mode', 'fit', '--content', 'motion', '--fixed-seed', '--window-size', '800x600')

@@ -22,8 +22,8 @@
 // integration, not point sampling). A flat field of current I has a mean light of I whatever the spot
 // width, and each amp sample keeps its energy i a P (PLAN T-36a, T-36b); light is only lost where the
 // spot spills past the tube rectangle.
-#ifndef UCRT_BEAM_GLSL
-#define UCRT_BEAM_GLSL
+#ifndef PHOXIUM_BEAM_GLSL
+#define PHOXIUM_BEAM_GLSL
 
 // Full width at half maximum of a Gaussian in sigmas, 2 sqrt(2 ln 2) [K] (CRT.md, Spot profile: 2.355).
 const float BEAM_FWHM_PER_SIGMA = 2.3548200;
@@ -168,7 +168,7 @@ BeamRaster beam_raster() {
     // down by half a line pitch; `split_woven_frame` draws the rows of the field's parity f at their progressive
     // positions, a raster of pitch 2P from first + f P (each line then deposits current x 2P: one field of a flat
     // field keeps its mean). Off leaves the progressive raster untouched.
-    if (UCRT_INTERLACE && params.interlace_mode != INTERLACE_MODE_OFF) {
+    if (PHOXIUM_INTERLACE && params.interlace_mode != INTERLACE_MODE_OFF) {
         int f = interlace_field();
         if (params.interlace_mode == INTERLACE_MODE_SPLIT_WOVEN_FRAME) {
             r.lines = ((rows + 1 - f) / 2) * r.mult;

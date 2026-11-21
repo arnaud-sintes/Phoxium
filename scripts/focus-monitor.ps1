@@ -21,14 +21,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-if (-not ('UcrtFocusMon' -as [type])) {
+if (-not ('PhoxiumFocusMon' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class UcrtFocusMon {
+public static class PhoxiumFocusMon {
     delegate void WinEventProc(IntPtr hook, uint ev, IntPtr hwnd, int idObject, int idChild, uint thread, uint time);
     [DllImport("user32.dll")] static extern IntPtr SetWinEventHook(uint min, uint max, IntPtr mod, WinEventProc proc, uint pid, uint tid, uint flags);
     [DllImport("user32.dll")] static extern bool UnhookWinEvent(IntPtr h);
@@ -118,5 +118,5 @@ public static class UcrtFocusMon {
 '@
 }
 
-[UcrtFocusMon]::Run([IO.Path]::GetFullPath($OutFile), $DurationSeconds)
-Write-Output ("focus-monitor: {0} foreground events in {1} s -> {2}" -f [UcrtFocusMon]::ForegroundEvents, $DurationSeconds, $OutFile)
+[PhoxiumFocusMon]::Run([IO.Path]::GetFullPath($OutFile), $DurationSeconds)
+Write-Output ("focus-monitor: {0} foreground events in {1} s -> {2}" -f [PhoxiumFocusMon]::ForegroundEvents, $DurationSeconds, $OutFile)

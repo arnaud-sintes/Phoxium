@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    Checks, builds and tests the tree, then creates dist/ultimatecrt-v<version>-windows-x64.zip with its
+    Checks, builds and tests the tree, then creates dist/phoxium-v<version>-windows-x64.zip with its
     SHA-256 file and a record of the commit it was built from.
 .DESCRIPTION
     Run it on a clean tree, after committing. The zip contains one top-level folder with the two
@@ -21,7 +21,7 @@
     staged executables are then scanned for the user profile path, the repository path, the user name and the
     machine name (ASCII and UTF-16): any hit fails the packaging, -Force included.
 
-    The tests run with UCRT_REQUIRE_GPU=1: a machine without a usable Vulkan device fails the gate instead of
+    The tests run with PHOXIUM_REQUIRE_GPU=1: a machine without a usable Vulkan device fails the gate instead of
     skipping the whole GPU suite. cargo-deny (deny.toml) runs when installed; the declared-licence filter of
     scripts/licence-policy.ps1 always runs.
 .PARAMETER SkipTests
@@ -83,10 +83,10 @@ try {
     Invoke-Checked 'cargo build' { cargo build --release --locked }
     if (-not $SkipTests) {
         # A machine without a usable Vulkan device must fail here, not skip the GPU suite.
-        $oldGpu = $env:UCRT_REQUIRE_GPU
-        $env:UCRT_REQUIRE_GPU = '1'
+        $oldGpu = $env:PHOXIUM_REQUIRE_GPU
+        $env:PHOXIUM_REQUIRE_GPU = '1'
         try { Invoke-Checked 'cargo test' { cargo test --release --locked } }
-        finally { $env:UCRT_REQUIRE_GPU = $oldGpu }
+        finally { $env:PHOXIUM_REQUIRE_GPU = $oldGpu }
     }
 } finally { Restore-RustFlags $savedFlags }
 
@@ -108,7 +108,7 @@ if (Get-Command cargo-deny -ErrorAction SilentlyContinue) {
 
 # The executables come from the target directory cargo reports, not from a fixed target\release.
 $targetDir = $meta.target_directory
-$exes = @('ultimatecrt.exe', 'pixel-demo.exe') | ForEach-Object { Join-Path $targetDir "release\$_" }
+$exes = @('phoxium.exe', 'pixel-demo.exe') | ForEach-Object { Join-Path $targetDir "release\$_" }
 foreach ($e in $exes) { if (-not (Test-Path -LiteralPath $e)) { throw "Missing $e after the build." } }
 Write-Host "Executables from $targetDir\release"
 foreach ($stale in @(Get-StaleBinaries $root $exes)) {
@@ -116,7 +116,7 @@ foreach ($stale in @(Get-StaleBinaries $root $exes)) {
     if ($Force) { Write-Warning "$msg Continuing because of -Force." } else { throw "$msg Rebuild (cargo build --release --locked) or use -Force for a local trial." }
 }
 
-$name = "ultimatecrt-v$version-windows-x64"
+$name = "phoxium-v$version-windows-x64"
 $stage = Join-Path $root "dist\$name"
 foreach ($leaf in @($name, "$name.zip", "$name.zip.sha256", "$name.commit")) {
     $old = Join-Path $root "dist\$leaf"
@@ -143,16 +143,16 @@ if ($env:VULKAN_SDK -and (Test-Path (Join-Path $env:VULKAN_SDK 'Bin\glslc.exe'))
 $rustc = ((Invoke-Checked 'rustc' { rustc -vV }) -join "`n").Trim()
 $glslcVersion = 'not found'
 try { $glslcVersion = ((& $glslc --version 2>&1) | ForEach-Object { "$_" }) -join "`n" } catch { }
-$info = @("ultimateCRT $version", "commit $commit", '', 'rustc -vV', $rustc, '', 'glslc --version', $glslcVersion.Trim(), '')
+$info = @("Phoxium $version", "commit $commit", '', 'rustc -vV', $rustc, '', 'glslc --version', $glslcVersion.Trim(), '')
 [IO.File]::WriteAllText("$stage\BUILD-INFO.txt", (($info -join "`n") -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
 
 $running = @"
-ultimateCRT $version
+Phoxium $version
 
 1. Start the program to capture (any window; pixel-demo.exe is a demo source).
-2. Start ultimatecrt.exe (double-click) and choose that window in the list it shows (Enter or double-click).
+2. Start phoxium.exe (double-click) and choose that window in the list it shows (Enter or double-click).
 3. F11: fullscreen over the source, never taking focus. F10: settings (Change source, Detach, every parameter).
-   Quit with Ctrl+Alt+End or the close button. Developer options: ultimatecrt.exe --help from a terminal.
+   Quit with Ctrl+Alt+End or the close button. Developer options: phoxium.exe --help from a terminal.
    F10 and F11 are registered system-wide while the program runs (no other program gets these keys meanwhile);
    both can be rebound in the settings menu.
 
@@ -164,9 +164,11 @@ compare its SHA-256 with the .sha256 file of the release page:
     PowerShell:  (Get-FileHash .\$name.zip -Algorithm SHA256).Hash
     cmd:         certutil -hashfile $name.zip SHA256
 The two values must be identical (letters in upper or lower case). The source is on GitHub
-(arnaud-sintes/ultimateCRT) and the executables can be rebuilt from it (README.md, "Building").
+(arnaud-sintes/Phoxium) and the executables can be rebuilt from it (README.md, "Building").
 
-ultimateCRT is released under the MIT licence (LICENSE). Licences of the dependencies: THIRD-PARTY.md.
+Phoxium is released under the MIT licence (LICENSE). Licences of the dependencies: THIRD-PARTY.md.
+Phoxium was called ultimateCRT up to v0.3.0; at its first start it copies the old settings folder
+(%APPDATA%\ultimateCRT) to %APPDATA%\Phoxium and leaves the old one in place.
 "@
 [IO.File]::WriteAllText("$stage\RUNNING.txt", ($running -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
 

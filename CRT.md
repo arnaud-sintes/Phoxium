@@ -1,4 +1,4 @@
-# CRT.md: real-life CRT knowledge base for ultimateCRT
+# CRT.md: real-life CRT knowledge base for Phoxium
 
 Scope: direct-view colour CRTs (PC monitors, consumer TVs, broadcast PVM/BVM, arcade), seen as the inputs a physically based GPU model needs.
 Goal: turn source RGB pixels into the light a real tube would emit.
@@ -913,7 +913,7 @@ k = Lw / (1 + b)^2.6
 | Blur Busters CRT Beam Simulator (Rejhon and Lottes, 2024, MIT; ShaderBeam app) | Temporal only: rolling scan with phosphor fade over sub-frames, per-channel persistence, linear-light accumulation with gamma 2.4 | Needs 120 Hz or more, SDR with ABL off, fast pixels. Banding if display gamma mismatches. Not for strobed, FALD or mini-LED panels. Keeps three frames of history |
 | Mattias Gustavsson crtemu, newpixie-crt, cool-retro-term | Artistic curvature, vignette, ghosting, flicker, bleed | Not physical |
 | Blargg NTSC, ntsc-adaptive, NTSC-CRT, ntsc-rs | Composite encode and decode, artifact colours | Signal only; comb filters poorly covered |
-| ShaderGlass | Windows overlay that applies RetroArch shaders to a captured window | Closest existing product to the ultimateCRT use case; inherits the shaders' limits |
+| ShaderGlass | Windows overlay that applies RetroArch shaders to a captured window | Closest existing product to the Phoxium use case; inherits the shaders' limits |
 | Analog TV Simulator, CRT-Standalone (ReShade) | Marketing claims of datasheet-parameterised stages; aggregation of other shaders | Not validated publicly |
 
 Common limitations of the field, as stated by cgwg in 2019: [S]
@@ -947,7 +947,7 @@ Common limitations of the field, as stated by cgwg in 2019: [S]
 | NIDL monitor evaluations (for example Sony GDM-F500) | Independent luminance, halation, line width and convergence measurements; could not be fetched |
 
 No peer-reviewed or open real-time renderer was found that combines a measured beam profile, a geometric mask model, measured phosphor spectra and decay, and faceplate light transport.
-That is the gap ultimateCRT could fill.
+That is the gap Phoxium could fill.
 
 ## Suggested physical pipeline order (informative)
 

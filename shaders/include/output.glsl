@@ -1,7 +1,7 @@
 // Output transform helpers of the `encode` stage (T-46): soft shoulder, dither thresholds. The f64 oracle
 // is crates/crt-model/src/output.rs; keep both in step.
-#ifndef UCRT_OUTPUT_GLSL
-#define UCRT_OUTPUT_GLSL
+#ifndef PHOXIUM_OUTPUT_GLSL
+#define PHOXIUM_OUTPUT_GLSL
 
 // A channel counts as clipped above 1 + CLIP_EPS or below -CLIP_EPS: float noise of the colour matrix
 // (rows sum to 1 within 1e-7) must not turn tube white into a clipped pixel.

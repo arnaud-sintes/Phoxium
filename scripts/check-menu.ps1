@@ -19,7 +19,7 @@
       1. start pixel-demo --scale 3 (the source) and give it the foreground (Alt tap + SetForegroundWindow, the
          script's own input);
       2. start scripts\poll-foreground.ps1 (T-06) as an independent 50 ms poll in a background job;
-      3. start ultimatecrt --window pixel-demo [--fullscreen] --validation --exit-after T, output to files;
+      3. start phoxium --window pixel-demo [--fullscreen] --validation --exit-after T, output to files;
       4. menu closed for -ClosedSeconds: no foreground change is allowed, except T-07 hand-back blips (the output
          activated by Windows and the source back within 1 s), which are counted and reported;
       5. -Cycles times: menu key (SendInput) -> the foreground must be the output within 1 s; type "t52" (goes to
@@ -30,10 +30,10 @@
          close; menu closed => the source has the foreground within the settle time and keeps it, except T-07
          hand-back blips (output for at most 1 s). The state at the start of the poll is not judged (the
          startup hand-back of fullscreen happens before the poll starts, and a windowed output may still hold
-         the foreground at the start: both are reported as notes); zero validation messages in the ultimatecrt
+         the foreground at the start: both are reported as notes); zero validation messages in the phoxium
          error output.
       -SelfTest runs the verdict function on recorded sample sequences (no window, no build, no input).
-    Output (-OutDir): the poll CSVs and the ultimatecrt console output. The CSVs hold window titles: delete them
+    Output (-OutDir): the poll CSVs and the phoxium console output. The CSVs hold window titles: delete them
     after reading. Exit 0 when every mode passes, 1 on a failure, 2 when not run (user active), 3 when aborted.
 
     Manual checklist (a person, after the automatic part, PLAN T-52a "slider and text input work"):
@@ -41,7 +41,7 @@
       - drag the opacity slider and the exposure slider; the picture follows the exposure;
       - click into the preset filter and type: the text appears; pick a preset in the combo: the tube changes;
       - move and resize the menu, collapse it, close it with the menu key, reopen: same place and size;
-        restart ultimatecrt: same place and size (settings.toml [global.ui]);
+        restart phoxium: same place and size (settings.toml [global.ui]);
       - with the menu open, Alt+Tab to another window: the menu closes, the other window keeps the foreground;
       - with the menu open, Esc: the menu closes, the source gets the foreground back, the output stays open;
       - with the menu open, F11 (both directions): the mode changes, the menu stays open and usable; close the
@@ -50,7 +50,7 @@
         quits and the source gets the foreground back;
       - with a hotkey made unavailable (another program holding F10), the menu shows the registration message.
 .PARAMETER Bin
-    Folder with ultimatecrt.exe and pixel-demo.exe. Default: target\release of the repository (built unless
+    Folder with phoxium.exe and pixel-demo.exe. Default: target\release of the repository (built unless
     -NoBuild).
 .PARAMETER Cycles
     Open and close cycles per mode. Default 10 (PLAN T-52a).
@@ -68,7 +68,7 @@ param(
     [int]$ClosedSeconds = 60,
     [int]$MenuKey = 0x79,
     [string[]]$Modes = @('windowed', 'fullscreen'),
-    [string]$OutDir = (Join-Path $env:TEMP 'ultimatecrt-check-menu'),
+    [string]$OutDir = (Join-Path $env:TEMP 'phoxium-check-menu'),
     [int]$MinIdle = 60,
     [switch]$NoBuild,
     [switch]$SelfTest
@@ -214,13 +214,13 @@ function Test-MenuForeground($Samples, $Cycles, [DateTime]$PollEnd, [int]$Settle
 }
 
 # Foreground samples from a poll-foreground.ps1 CSV: the output first (its executable, or a title starting with
-# 'ultimatecrt': the output title names the source program, so the source flag alone matches it too), then the
+# 'phoxium': the output title names the source program, so the source flag alone matches it too), then the
 # source flag, anything else is another window.
 function Read-ForegroundSamples([string]$Path) {
     $samples = @()
     foreach ($row in (Import-Csv -LiteralPath $Path)) {
         $state = 'other'
-        if ($row.exe -eq 'ultimatecrt.exe' -or $row.title -like 'ultimatecrt*') { $state = 'output' } elseif ($row.is_source -eq '1') { $state = 'source' }
+        if ($row.exe -eq 'phoxium.exe' -or $row.title -like 'phoxium*') { $state = 'output' } elseif ($row.is_source -eq '1') { $state = 'source' }
         $t = [DateTime]::ParseExact($row.timestamp, 'yyyy-MM-ddTHH:mm:ss.fff', [Globalization.CultureInfo]::InvariantCulture)
         $samples += @{ Time = $t; State = $state }
     }
@@ -285,23 +285,23 @@ if (-not $Bin) {
     if (-not $NoBuild) {
         Push-Location $root
         try {
-            cargo build --release --locked -p pixel-demo -p ultimatecrt
+            cargo build --release --locked -p pixel-demo -p phoxium
             if ($LASTEXITCODE -ne 0) { throw 'build failed' }
         } finally { Pop-Location }
     }
 }
-$ucrt = Join-Path $Bin 'ultimatecrt.exe'
+$phoxium = Join-Path $Bin 'phoxium.exe'
 $demo = Join-Path $Bin 'pixel-demo.exe'
-foreach ($exe in @($ucrt, $demo)) { if (-not (Test-Path $exe)) { throw "missing binary: $exe" } }
+foreach ($exe in @($phoxium, $demo)) { if (-not (Test-Path $exe)) { throw "missing binary: $exe" } }
 $poll = Join-Path $root 'scripts\poll-foreground.ps1'
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
-if (-not ('UcrtMenuCheck' -as [type])) {
+if (-not ('PhoxiumMenuCheck' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
 using System.Runtime.InteropServices;
 using System.Text;
-public static class UcrtMenuCheck {
+public static class PhoxiumMenuCheck {
     [StructLayout(LayoutKind.Sequential)] struct LII { public uint cbSize; public uint dwTime; }
     [DllImport("user32.dll")] static extern bool GetLastInputInfo(ref LII i);
     [DllImport("kernel32.dll")] static extern uint GetTickCount();
@@ -324,7 +324,7 @@ public static class UcrtMenuCheck {
 '@
 }
 
-$idle0 = [UcrtMenuCheck]::IdleSeconds()
+$idle0 = [PhoxiumMenuCheck]::IdleSeconds()
 if ($idle0 -lt $MinIdle) { Write-Output ("NOT RUN: user input {0:N0} s ago (needs {1} s idle)" -f $idle0, $MinIdle); exit 2 }
 
 Write-Host '=================================================================='
@@ -336,7 +336,7 @@ Write-Host '=================================================================='
 function Wait-Foreground([string]$like, [int]$ms) {
     $sw = [Diagnostics.Stopwatch]::StartNew()
     do {
-        $t = [UcrtMenuCheck]::Title()
+        $t = [PhoxiumMenuCheck]::Title()
         if ($t -like $like) { return $t }
         Start-Sleep -Milliseconds 20
     } while ($sw.ElapsedMilliseconds -lt $ms)
@@ -357,13 +357,13 @@ foreach ($mode in $Modes) {
     $demoProc = Start-Process -FilePath $demo -ArgumentList @('--scale', '3') -PassThru
     Start-Sleep -Milliseconds 2000
     $demoProc.Refresh()
-    [void][UcrtMenuCheck]::Activate($demoProc.MainWindowHandle)
+    [void][PhoxiumMenuCheck]::Activate($demoProc.MainWindowHandle)
     $injected = [DateTime]::Now
-    $ucrtArgs = @('--window', 'pixel-demo', '--validation', '--exit-after', $run)
-    if ($mode -eq 'fullscreen') { $ucrtArgs += '--fullscreen' }
-    # -NoNewWindow: without it Windows opens a console window (Windows Terminal) for ultimatecrt that takes
+    $phoxiumArgs = @('--window', 'pixel-demo', '--validation', '--exit-after', $run)
+    if ($mode -eq 'fullscreen') { $phoxiumArgs += '--fullscreen' }
+    # -NoNewWindow: without it Windows opens a console window (Windows Terminal) for phoxium that takes
     # the foreground and becomes the menu's restore target (seen live 2026-11-19).
-    $up = Start-Process -FilePath $ucrt -ArgumentList $ucrtArgs -PassThru -NoNewWindow -RedirectStandardOutput $outLog -RedirectStandardError $errLog
+    $up = Start-Process -FilePath $phoxium -ArgumentList $phoxiumArgs -PassThru -NoNewWindow -RedirectStandardOutput $outLog -RedirectStandardError $errLog
     Start-Sleep -Milliseconds 3000
     # The independent poll starts once the output exists: from here on every change is counted.
     $job = Start-Job -ScriptBlock {
@@ -374,19 +374,19 @@ foreach ($mode in $Modes) {
 
     # Menu closed: nothing may change the foreground (hand-back blips are counted from the poll CSV below).
     Start-Sleep -Seconds $ClosedSeconds
-    if (([DateTime]::Now - $injected).TotalSeconds - [UcrtMenuCheck]::IdleSeconds() -gt 1) { $aborted = $true }
+    if (([DateTime]::Now - $injected).TotalSeconds - [PhoxiumMenuCheck]::IdleSeconds() -gt 1) { $aborted = $true }
 
     $opens = 0; $closes = 0; $cycleTimes = @()
     for ($c = 1; $c -le $Cycles; $c++) {
         $tOpen = [DateTime]::Now
-        [UcrtMenuCheck]::Tap([uint16]$MenuKey)
-        $t = Wait-Foreground 'ultimatecrt*' 1000
-        if ($t -like 'ultimatecrt*') { $opens++ } else { $reasons += "cycle ${c}: open left the foreground on '$t'" }
+        [PhoxiumMenuCheck]::Tap([uint16]$MenuKey)
+        $t = Wait-Foreground 'phoxium*' 1000
+        if ($t -like 'phoxium*') { $opens++ } else { $reasons += "cycle ${c}: open left the foreground on '$t'" }
         Start-Sleep -Milliseconds 300
-        [UcrtMenuCheck]::Type('t52')
+        [PhoxiumMenuCheck]::Type('t52')
         Start-Sleep -Milliseconds 700
         $tClose = [DateTime]::Now
-        [UcrtMenuCheck]::Tap([uint16]$MenuKey)
+        [PhoxiumMenuCheck]::Tap([uint16]$MenuKey)
         $t = Wait-Foreground '*pixel-demo*' 1000
         if ($t -like '*pixel-demo*') { $closes++ } else { $reasons += "cycle ${c}: close left the foreground on '$t'" }
         Start-Sleep -Milliseconds 800
@@ -395,7 +395,7 @@ foreach ($mode in $Modes) {
     $injected = [DateTime]::Now
 
     $pollOut = Receive-Job -Job $job -Wait -AutoRemoveJob 6>&1 2>&1 | Out-String
-    if (-not $up.WaitForExit(30000)) { $up.Kill(); $reasons += 'ultimatecrt did not exit in time (killed)' }
+    if (-not $up.WaitForExit(30000)) { $up.Kill(); $reasons += 'phoxium did not exit in time (killed)' }
     if (-not $demoProc.HasExited) { Stop-Process -Id $demoProc.Id -Force }
 
     Write-Host "  opens to the output: $opens / $Cycles, closes to the source: $closes / $Cycles"
@@ -426,7 +426,7 @@ foreach ($mode in $Modes) {
         $val = @(Select-String -Path $errLog -Pattern 'VUID|Validation|SYNC-HAZARD')
         if ($val.Count -gt 0) { $reasons += "validation messages: $($val.Count) (see $errLog)" }
         $errors = @(Select-String -Path $errLog -Pattern '^error|panicked')
-        foreach ($e in $errors) { $reasons += "ultimatecrt: $($e.Line)" }
+        foreach ($e in $errors) { $reasons += "phoxium: $($e.Line)" }
     }
     if ($reasons.Count -eq 0) { Write-Host "PASS ($mode)" } else {
         $allPass = $false
@@ -438,7 +438,7 @@ foreach ($mode in $Modes) {
 
 Write-Host ''
 Write-Host "Results in $OutDir (the CSV files hold window titles: delete them after reading)."
-if ((([DateTime]::Now - $injected).TotalSeconds - [UcrtMenuCheck]::IdleSeconds()) -gt 2) { $aborted = $true }
+if ((([DateTime]::Now - $injected).TotalSeconds - [PhoxiumMenuCheck]::IdleSeconds()) -gt 2) { $aborted = $true }
 if ($aborted) { Write-Host 'T-52a menu check: ABORTED (user input during the run)'; exit 3 }
 if ($allPass) { Write-Host 'T-52a menu check: PASS (now run the manual checklist of the script header)'; exit 0 }
 Write-Host 'T-52a menu check: FAIL'

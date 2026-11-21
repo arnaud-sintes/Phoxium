@@ -316,7 +316,7 @@ pub fn draw_text(buf: &mut [u32], w: usize, h: usize) {
         "THE QUICK BROWN FOX JUMPS OVER",
         "THE LAZY DOG. 0123456789",
         "ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-        "+-=/:.,!? ULTIMATECRT TEXT TEST",
+        "+-=/:.,!? PHOXIUM TEXT TEST",
     ];
     let mut y = 16;
     for l in lines {
