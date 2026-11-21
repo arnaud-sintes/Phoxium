@@ -55,8 +55,12 @@ pub const SOURCE: &str = "Source and placement";
 pub const OPTICS: &str = "Optics";
 /// The explanation at the top of the Phosphor panel: what the trail is, its physical default, how to get more.
 const PHOSPHOR_INTRO: &str =
-    "Persistence is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a \
-     fading trail. The model is the measured colour-TV phosphor (P22): a green and blue trail of about 5, 3 and \
+    "Type picks the phosphor: P22 (default) is the colour tube; P4, P31, P1, P39 and the Philips yellow blend are \
+     monochrome tubes from registered or catalogue phosphor data (RCA 1961, HP AN-115 1970, a Philips patent; \
+     CRT.md Phosphor types), shown in the luma of the source with no mask. P1 and P39 smear strongly at 60 Hz: that \
+     is authentic, they were made for slow refresh. \
+     Persistence is the afterglow a phosphor keeps after the beam has passed: a moving bright object leaves a \
+     fading trail. With P22 it is the measured colour-TV phosphor: a green and blue trail of about 5, 3 and \
      2 % of a frame over the next frames at 60 Hz, none for red. Persistence blend sets how much of that trail \
      you see, from 0 (none) to 1 (all of it); the default 0.5 shows half. For a longer trail, raise Extra \
      afterglow (for example 0.5 to 1 at 100 to 300 ms) or Decay scale; both go beyond the real tube. A still \
@@ -121,7 +125,7 @@ pub const PANELS: &[PanelDef] = &[
     PanelDef {
         name: "Phosphor",
         stages: &["phosphor"],
-        first: &[],
+        first: &["phosphor_type"],
         empty_note: None,
         intro: Some(PHOSPHOR_INTRO),
     },
@@ -1201,7 +1205,14 @@ mod tests {
         let text = panel("Phosphor").and_then(|p| p.intro).expect("phosphor intro");
         assert!(text.contains("P22") && text.contains("Extra afterglow") && text.contains("Decay scale"));
         assert!(text.contains("Persistence blend"));
+        assert!(text.starts_with("Type picks the phosphor") && text.contains("P39") && text.contains("60 Hz"));
+        assert_eq!(words("p22"), "P22");
+        assert_eq!(
+            words("philips_yellow_data_display_blend"),
+            "Philips yellow data display blend"
+        );
         let m = |id| crate::params::meta(id).unwrap();
+        assert_eq!(label(m("phosphor_type")), "Type");
         assert_eq!(label(m("phosphor_persistence_blend")), "Persistence blend");
         assert_eq!(label(m("phosphor_decay_scale")), "Decay scale");
         assert_eq!(label(m("phosphor_extra_afterglow_rgb")), "Extra afterglow");

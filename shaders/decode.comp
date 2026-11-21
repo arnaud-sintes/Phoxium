@@ -20,6 +20,10 @@
 // A disabled `gun` slot passes V through bit for bit, and `encode` then treats V as linear light: the
 // picture comes out LIGHTER than with the gun on (V is a gamma-encoded value shown as if it were light;
 // code 20 shows about code 80 on a pure 2.2 host instead of 20), not darker.
+// Monochrome phosphor type (params.phosphor_type other than p22, QUESTIONS PHY-19; src/phosphor_type.rs): one gun, so the
+// three channels carry the BT.601 luma Y' = 0.299 R' + 0.587 G' + 0.114 B' of the gamma-encoded code values (the weights of
+// crt_model::composite::LUMA, oracle crt_model::phosphor_types::mono_drive), taken before the drive voltage and the gun
+// law. P22 does not take the branch (bit for bit unchanged).
 // pc.transfer and pc.gamma (Settings::source) remain only as an optional transfer applied to V after the
 // drive voltage, for tests of the pre-T-34 chain; the default is the identity.
 
@@ -54,6 +58,10 @@ void main() {
         return;
     }
     ivec2 texel = clamp(pc.origin + p * pc.div + pc.div / 2, ivec2(0), textureSize(src, 0) - 1);
-    vec3 v = drive_voltage(texelFetch(src, texel, 0).rgb);
+    vec3 code = texelFetch(src, texel, 0).rgb;
+    if (params.phosphor_type != PHOSPHOR_TYPE_P22) {
+        code = vec3(dot(code, vec3(0.299, 0.587, 0.114)));
+    }
+    vec3 v = drive_voltage(code);
     imageStore(native_out, p, round_f16(vec4(transfer_to_linear(v, pc.transfer, pc.gamma), 1.0)));
 }

@@ -71,7 +71,12 @@ pub fn white_retune_gains_from_chromaticities(
 /// Luminance shares of the three primaries in the tube white (`tube_*_xy`): `s(tube white)`, which sums to 1
 /// because every unit-luminance primary has Y = 1 and the white has Y = 1 (the wear law of T-42 and T-43 is
 /// calibrated on this white). `None` when the white is not reachable (see [`white_retune_gains_from_chromaticities`]).
+///
+/// A monochrome phosphor type (QUESTIONS PHY-19): the three channels carry the same light, a third each.
 pub fn luminance_shares(params: &Params) -> Option<[f64; 3]> {
+    if crate::phosphor_type::mono(params).is_some() {
+        return Some([1.0 / 3.0; 3]);
+    }
     let (r, g, b) = (
         xyz(params.tube_red_xy)?,
         xyz(params.tube_green_xy)?,
@@ -82,9 +87,10 @@ pub fn luminance_shares(params: &Params) -> Option<[f64; 3]> {
 }
 
 /// The gains of the frame: the retune from `tube_white_xy` to `gun_retune_white_xy` of the parameter table
-/// when `gun_white_balance` is on and both whites are reachable, else the neutral (1, 1, 1).
+/// when `gun_white_balance` is on and both whites are reachable, else the neutral (1, 1, 1). Always neutral for a
+/// monochrome phosphor type (QUESTIONS PHY-19): one phosphor, its colour is not retuned.
 pub fn white_gains(params: &Params) -> [f32; 3] {
-    if !params.gun_white_balance {
+    if !params.gun_white_balance || crate::phosphor_type::mono(params).is_some() {
         return [1.0; 3];
     }
     white_retune_gains_from_chromaticities(

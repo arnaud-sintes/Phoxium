@@ -95,8 +95,7 @@ use std::collections::HashMap;
 
 use ash::vk;
 use crt_model::phosphor::{
-    frame_step_ms, is_rate_sample, DecayControls, DecayFit, FrameFeedback, FEEDBACK_TERMS, KUHN_BLUE, KUHN_GREEN,
-    KUHN_RED, TRAIL_HORIZON_MS,
+    frame_step_ms, is_rate_sample, DecayControls, FrameFeedback, FEEDBACK_TERMS, TRAIL_HORIZON_MS,
 };
 
 use super::{binding, compute_pipeline, push, ComputePass, Domain, Registration, Stage, GROUP};
@@ -115,8 +114,6 @@ const SATURATION_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/saturati
 pub(in crate::gpu) const HISTORY_FORMAT: vk::Format = vk::Format::R32G32B32A32_SFLOAT;
 /// History images: 3 x RGBA = 4 terms x 3 channels.
 const HISTORY_IMAGES: usize = 3;
-/// Decay fits per channel, red, green, blue (CRT.md "Decay and persistence", Kuhn 2002). [S][D]
-const FITS: [DecayFit<'static>; 3] = [KUHN_RED, KUHN_GREEN, KUHN_BLUE];
 
 /// Registration of the slot (see [`super::CHAIN`]).
 pub(in crate::gpu) const SLOT: Registration = Registration {
@@ -170,6 +167,8 @@ struct Controls {
     scale: f32,
     extra: [f32; 3],
     extra_ms: f32,
+    /// The phosphor_type index (QUESTIONS PHY-19): which decay fit each channel uses (crate::phosphor_type::decay_fit).
+    ptype: u32,
 }
 
 impl Controls {
@@ -178,6 +177,7 @@ impl Controls {
         scale: 1.0,
         extra: [0.0; 3],
         extra_ms: 100.0,
+        ptype: 0,
     };
 
     fn of(params: &Params) -> Self {
@@ -185,6 +185,7 @@ impl Controls {
             scale: params.phosphor_decay_scale,
             extra: params.phosphor_extra_afterglow_rgb,
             extra_ms: params.phosphor_extra_afterglow_time_ms,
+            ptype: params.phosphor_type,
         }
     }
 
@@ -206,8 +207,13 @@ impl Controls {
     }
 
     /// The bits of channel `ch`'s controls (cache key).
-    fn key(&self, ch: usize) -> [u32; 3] {
-        [self.scale.to_bits(), self.extra[ch].to_bits(), self.extra_ms.to_bits()]
+    fn key(&self, ch: usize) -> [u32; 4] {
+        [
+            self.scale.to_bits(),
+            self.extra[ch].to_bits(),
+            self.extra_ms.to_bits(),
+            self.ptype,
+        ]
     }
 }
 
@@ -221,7 +227,7 @@ fn channel_fit(rate_hz: f32, ch: usize, tail: f32, ctl: Controls) -> FrameFeedba
     } else {
         1.0
     };
-    FITS[ch]
+    crate::phosphor_type::decay_fit(ctl.ptype, ch)
         .with_tail_scale(scale)
         .controlled_feedback(fit_period_ms(rate_hz), TRAIL_HORIZON_MS, ctl.decay(ch))
 }
@@ -399,7 +405,7 @@ fn trail_rate_hz(manual_hz: f32, frame_ms: f32, auto: &mut AutoRate) -> f32 {
     auto.fit_rate_hz()
 }
 /// What the channel fits of a frame depend on: rate bits, tail strength bits, control bits per channel.
-type FitsKey = (u32, [u32; 3], [[u32; 3]; 3]);
+type FitsKey = (u32, [u32; 3], [[u32; 4]; 3]);
 
 #[derive(Default)]
 struct Phosphor {
@@ -423,7 +429,7 @@ struct Phosphor {
     fits: [FrameFeedback; 3],
     fits_key: Option<FitsKey>,
     /// Channel fits per (rate bits, channel, tail strength bits, control bits).
-    fit_cache: HashMap<(u32, usize, u32, [u32; 3]), FrameFeedback>,
+    fit_cache: HashMap<(u32, usize, u32, [u32; 4]), FrameFeedback>,
     /// Number of channel fits computed (cache misses), for the tests.
     fits_computed: usize,
     /// The automatic rate (measured frame periods, rate of the fit).
@@ -946,9 +952,10 @@ mod tests {
     /// 10 to 240 Hz), so the default output does not change.
     #[test]
     fn default_controls_are_bit_exact() {
+        use crt_model::phosphor::{KUHN_BLUE, KUHN_GREEN, KUHN_RED};
         assert_eq!(Controls::of(&Params::default()), Controls::PHYSICAL);
         for rate in [10.0, 60.0, 144.0, 240.0] {
-            for (ch, fit) in FITS.iter().enumerate() {
+            for (ch, fit) in [KUHN_RED, KUHN_GREEN, KUHN_BLUE].iter().enumerate() {
                 for tail in [1.0_f32, 0.07] {
                     let old = fit
                         .with_tail_scale(f64::from(tail))
@@ -1099,6 +1106,7 @@ mod tests {
                 scale: bad,
                 extra: [bad; 3],
                 extra_ms: bad,
+                ptype: 0,
             };
             for ch in 0..3 {
                 let d = ctl.decay(ch);

@@ -5,6 +5,27 @@
 # R-10). The decay constants are the Kuhn (2002) P22 fits of crt-model (phosphor.rs, KUHN_RED, KUHN_GREEN,
 # KUHN_BLUE); the presets choose them later (T-64).
 
+# QUESTIONS PHY-19 (2026-11-21): the phosphor-type selector. p22 (default) is the colour tube of every other
+# parameter, unchanged bit for bit. Each other value is a monochrome tube, one data row of crt-model
+# (src/phosphor_types.rs): its chromaticity, its decay as a DecayFit and the source. The engine resolves a
+# monochrome type on the CPU (src/phosphor_type.rs): the decode stage drives all three channels with the BT.601
+# luma Y' of the source, the mask is off (continuous coating), every per-channel (_rgb) control and the convergence
+# take the green value, the colour matrix maps the equal channels to the type's chromaticity, the white retune is
+# off. Held back: P7 and P38 (decay beyond the 1 s trail window), P3 and P134 (no chromaticity or no data found),
+# P43 and P45 (only a vendor decay without measurement conditions). CRT.md "Phosphor types".
+
+[[param]]
+id = "phosphor_type"
+stage = "phosphor"
+type = "enum"
+unit = "1"
+default = "p22"
+values = ["p22", "p4", "p31", "p1", "p39", "philips_yellow_data_display_blend"]
+tag = "D"
+source = "CRT.md Phosphor types (QUESTIONS PHY-19), data rows crt_model::phosphor_types. p22: Kuhn (2002) fits and tube_*_xy (unchanged). p4: RCA TPM-1508A (1961), HP AN-115 (1970): xy 0.270, 0.300, 60 us to 10 %, 470 us to 1 %, power law t0 10.29 us, n 1.198 [D]. p31: xy 0.245, 0.523 RCA 1961 (Phosphor Technology current grade 0.287, 0.521: the two primary sources disagree by 0.04 in x, RCA used), 38 us / 250 us (RCA, HP AN-115, EIA TEP116-B via Wolf and Deubel 1997), power law t0 8.30 us, n 1.339 [D]. p1: xy 0.218, 0.712, 24 ms / 48 ms (HP AN-115; RCA 24.5 ms), exponential tau 10.4 ms [D]. p39: xy 0.223, 0.698, 150 ms to 10 % (HP AN-115, one point only), exponential tau 65.1 ms [D], a one-point approximation (the registered curve is not exponential). philips_yellow_data_display_blend: US 4,405,880 (North American Philips 1983), 15/85 Zn2SiO4:Mn,As + CdSiO3:Mn,As, xy 0.480, 0.490, at least 34 ms to 10 %, exponential tau 14.8 ms through that lower bound [D]. All: the registered step-off times are used as the impulse response, exact for an exponential only; luma Y' = BT.601 of the gamma-encoded source (crt_model::composite::LUMA) [K]"
+description = "Which phosphor coats the screen. P22 (default): the colour tube, three phosphors behind the mask, set by every other parameter. The others are monochrome tubes from registered or catalogue phosphor data (real tubes vary by maker and age): one gun driven by the brightness (luma) of the source, no mask, light of the phosphor's own colour. P4: white of black-and-white TVs, short afterglow. P31: green of oscilloscopes and many green monitors, short afterglow. P1: green of early green screens, about 10 ms afterglow, a visible smear at 60 Hz. P39: long-persistence green (used in the IBM 5151), about 65 ms afterglow, a strong smear at 60 Hz (designed for 50 Hz text; its decay is a one-point approximation). Philips yellow data-display blend: an amber-like yellow, at least 15 ms afterglow. Several of these greens and the yellow lie outside the sRGB range of the display: the output clips them (the negative display channel is set to 0), so they look slightly less saturated than the real phosphor. Decay scale, Extra afterglow, Tail strength and Persistence blend still apply; with a monochrome type the green value of each red, green, blue control is used."
+group = "Phosphor"
+
 [[param]]
 id = "phosphor_persistence"
 stage = "phosphor"
@@ -73,8 +94,8 @@ group = "Phosphor"
 # at 60 Hz, red none) is physically right but hard to see. Two artistic controls, both identities at their
 # defaults (the output does not change by one bit): a time-constant multiplier of the measured decay and an extra
 # exponential afterglow per channel. Oracle crates/crt-model/src/phosphor.rs (`DecayControls`,
-# `DecayFit::controlled_feedback`). CRT.md has decay constants for P22 only (Kuhn 2002), none for the
-# long-persistence phosphors (P1, P7, P31, P39), so there is no phosphor-type selector.
+# `DecayFit::controlled_feedback`). They apply on top of the selected `phosphor_type` (the Kuhn 2002 P22 fits by
+# default; the monochrome types of CRT.md "Phosphor types" otherwise).
 
 [[param]]
 id = "phosphor_decay_scale"

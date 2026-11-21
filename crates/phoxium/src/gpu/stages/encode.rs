@@ -60,7 +60,13 @@ struct Push {
 /// with D65, from [`crt_model::output::tube_to_display`], or the identity with `output_match_srgb`. A
 /// degenerate tube (a white or primary with y <= 0, or collinear primaries) also gives the identity, so
 /// that a bad UI value cannot panic the render loop.
+///
+/// A monochrome phosphor type (QUESTIONS PHY-19) gives the rank-one matrix of its chromaticity instead
+/// ([`crate::phosphor_type::mono_output_matrix`]), whatever `output_match_srgb` and the tube primaries say.
 pub fn output_matrix(p: &Params) -> Mat3 {
+    if let Some(t) = crate::phosphor_type::mono(p) {
+        return crate::phosphor_type::mono_output_matrix(t.xy).unwrap_or(IDENTITY);
+    }
     if p.output_match_srgb {
         return IDENTITY;
     }

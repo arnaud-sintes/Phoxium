@@ -1358,8 +1358,9 @@ impl Pipeline {
         target: &Target,
         ui: Option<&mut dyn UiPass>,
     ) -> Res<vk::CommandBuffer> {
-        // T-42: a worn gun's grown spot, seen by every user of the spot law (crate::ageing).
-        let params = &crate::ageing::effective_params(params);
+        // PHY-19: a monochrome phosphor type resolved into the parameters (crate::phosphor_type); T-42: a worn gun's
+        // grown spot, seen by every user of the spot law (crate::ageing).
+        let params = &crate::phosphor_type::render_params(params);
         let now = Instant::now();
         let mut fc = self.live_constants(view, settings, params, target.extent);
         fc.frame_index = self.frame_index;
@@ -1388,7 +1389,7 @@ impl Pipeline {
         format: vk::Format,
     ) -> Res<()> {
         // The same constants as `record` (image sizes included), so its plan reallocates nothing.
-        let params = &crate::ageing::effective_params(params);
+        let params = &crate::phosphor_type::render_params(params);
         let fc = self.live_constants(view, settings, params, extent);
         self.plan_frame(ctx, view, &fc, settings, params, format).map(|_| ())
     }
@@ -1458,7 +1459,7 @@ impl Pipeline {
         params: &Params,
         target: &Target,
     ) -> Res<vk::CommandBuffer> {
-        let params = &crate::ageing::effective_params(params);
+        let params = &crate::phosphor_type::render_params(params);
         self.record_frame(ctx, view, fc, settings, params, target, None)
     }
 

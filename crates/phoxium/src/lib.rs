@@ -24,6 +24,7 @@ pub mod output;
 pub mod pacing;
 pub mod params;
 pub mod patterns;
+pub mod phosphor_type;
 pub mod picker;
 pub mod placement;
 pub mod preset_files;
