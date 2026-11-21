@@ -1,5 +1,7 @@
 # Phoxium
 
+Called ultimateCRT up to v0.3.0; renamed Phoxium on 2026-11-21 (owner decision, `QUESTIONS.md` REN-1). The local folder `C:\projects\personal\ultimateCRT` and the `ultimateCRT-wt` worktrees keep their old names; the GitHub repository is renamed by the owner (`ENV.md` section 6).
+
 ## Vision
 
 A universal, physically accurate CRT shader for Windows.
@@ -53,7 +55,8 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 - `CLAUDE.md`: this file, the summary of the expressed need.
 - `CRT.md`: consolidated knowledge about real-life CRT monitors relevant to this project.
 - `QUESTIONS.md`: decisions, open questions, spikes and live-test findings, in the order they were made.
-- `README.md`: the user guide (download, run, hotkeys, unsigned binaries, licence), then the detailed reference and how to build.
+- `README.md`: the short user guide (what it is, download, run, keys, main controls, known limits, unsigned binaries, licence).
+- `docs/REFERENCE.md`: the detailed user and developer reference (command-line options, every menu section, hotkeys and fallbacks, GPU choice, capture path, presets and parameters, recipes, optional modules, source scaling, target lifecycle).
 - `LICENSE`, `THIRD-PARTY.md`: the MIT licence of the project and the notices of the bundled third-party code and fonts (`deny.toml` is the dependency licence policy).
 - `PLAN.md`: the execution plan of the AI-assisted build, kept as provenance of the decisions.
 - `ARCHITECTURE.md`: architecture and architectural decisions (languages, API, modules, data flow, target pipeline).
@@ -69,7 +72,7 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 
 ## Repository layout
 
-Cargo workspace, Windows only. GitHub repository `arnaud-sintes/Phoxium`, public from v0.2.0, MIT licence (`LICENSE`).
+Cargo workspace, Windows only. GitHub repository `arnaud-sintes/Phoxium` (formerly `arnaud-sintes/ultimateCRT`, renamed by hand, see `ENV.md` section 6), public from v0.2.0, MIT licence (`LICENSE`).
 - `crates/pixel-demo`: demo source app (Win32 and GDI), emulates a game presenting a native surface (1:1, integer, autofit, fit, stretch, bars, presets, test contents, corner markers, frame counter; options and keys, see `pixel-demo --help`). It is the capture target.
 - `crates/crt-model`: f64 CPU oracle of the physics (gun, beam, mask, geometry, ABL, phosphor, ageing, burn-in, optics, composite, interlace, colour, output, tube, units), used by the GPU tests and the placement code.
 - `crates/paramgen`: build-time generator of the Rust and GLSL parameter code from `params/*.toml`.
@@ -85,7 +88,7 @@ Cargo workspace, Windows only. GitHub repository `arnaud-sintes/Phoxium`, public
 
 ## Status
 
-Study phase done (2026-11-18); decision gate done (2026-11-19: stack kept, CPU-copy capture kept, GPU choice is a setting, one screen is a conditional GO, 60 fps is a target, first-version scope confirmed; see `QUESTIONS.md`). The workspace version is 0.3.0, the second public release (the first was 0.2.0; MIT, unsigned binaries, see `README.md` and `ENV.md` section 7).
+Study phase done (2026-11-18); decision gate done (2026-11-19: stack kept, CPU-copy capture kept, GPU choice is a setting, one screen is a conditional GO, 60 fps is a target, first-version scope confirmed; see `QUESTIONS.md`). The workspace version is 0.3.0, the second public release (the first was 0.2.0; MIT, unsigned binaries, see `README.md` and `ENV.md` section 7). Both releases were published as ultimateCRT; the next one is the first under the name Phoxium.
 
 What exists (see `ARCHITECTURE.md` for the detail): the single-window flow with no command line (the in-window source picker, Change source and Detach in the menu, ask-at-start and the last choice in the settings, a GUI-subsystem release binary); window capture with source scaling, the picture-area detection (Auto, Manual limits) and the target lifecycle; test patterns and image sources; the full physical chain on the GPU with analytic tests against the `crt-model` oracle (source decode, video amplifier, gun law and white balance, automatic beam limiting, beam with spot growth, geometry and convergence, aperture grille, slot mask and delta dot mask, phosphor saturation and persistence, faceplate optics, output transform); the optional modules, all off by default (ageing and burn-in with the wear map saved per tube preset, composite video, interlace); quality tiers and the automatic quality drop; 10 tube presets; a settings file; the offline `render` command; diagnostics (`--log`, GPU timestamps with `--stats`); the ImGui settings menu with every parameter as a generated panel, presets, search and the GPU and system panel (hotkeys rebound in the menu, with a safety chord for the menu key), preset files (rename, delete, duplicate, export, import), the saved per-game profiles, the interface size, the resets, the About section and the first-run hint, and the read-only stats overlay; the global hotkeys (configurable, with fallbacks) and the output modes (fullscreen and framed window, remembered rectangle); the live-check scripts; and the release tooling (package, release, third-party notices, impact analysis).
 

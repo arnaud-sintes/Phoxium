@@ -1,5 +1,7 @@
 # PLAN: execution plan for ultimateCRT
 
+> The project was renamed **Phoxium** on 2026-11-21 (QUESTIONS REN-1). This plan is kept as written, as provenance: read `ultimateCRT` as Phoxium, `ultimatecrt` (crate, binary) as `phoxium` and `UCRT_*` as `PHOXIUM_*`.
+
 Plan written 2026-11-18 from `CLAUDE.md`, `ARCHITECTURE.md`, `DESIGN.md`, `ENV.md`, `CRT.md`, `QUESTIONS.md` and the code. Ids such as CAP-4 or PHY-2 refer to `QUESTIONS.md`, A1 to A18 to the decisions table of `ARCHITECTURE.md`, T-xx to tasks in this file. The compact summary table is in section 11.
 
 ## 1. Introduction

@@ -1121,6 +1121,12 @@ Each has a recommended default so you can reply with exceptions only.
 - **Who:** USER.
 - **Default:** Yes. One model document per stage with provenance tags, one parameter table with units, range, default and tag, and a short user guide.
 
+### REN-1 Project name
+- **DECISION (2026-11-21, owner):** the project is renamed from ultimateCRT to **Phoxium**, everywhere (README, code, GitHub), and the README is simplified for users.
+- **Done in the repository:** product name `Phoxium` in every user-visible text and in the version resources; crate, folder, package and binary `phoxium` (`crates/phoxium`, `phoxium.exe`); test knobs and GLSL macros `PHOXIUM_*` (was `UCRT_*`, no compatibility layer); settings folder `%APPDATA%\Phoxium`, with a one-time copy of `%APPDATA%\ultimateCRT` at the start of a live session when the new folder does not exist (`migrate.rs`: copy into a temporary sibling then rename, never overwrite, never delete the old folder, a failure is a warning and is retried next start); zip `phoxium-vX.Y.Z-windows-x64.zip`; `release.ps1` default repository `arnaud-sintes/Phoxium`. The README keeps the user guide only; the detail moved to `docs/REFERENCE.md`, which the zip carries.
+- **Kept on purpose:** the burn-in file magic `UCRTWEAR` (saved wear maps stay readable); the released CHANGELOG sections and their links; the published v0.2.0 and v0.3.0 assets (`ultimatecrt-...zip`); `PLAN.md` (provenance, old name); the old name in the entries of this file that record what happened before the rename (live-run quotes, the "ucrt" shorthand), where only the product name and paths were replaced mechanically; the local folder names `ultimateCRT` and `ultimateCRT-wt`.
+- **Left to the owner:** renaming the GitHub repository and pointing `origin` at it (`ENV.md` section 6, "The rename"); `release.ps1` refuses to run until then and says how.
+
 ## Tensions inside the need
 
 These contradictions or conflicts were raised by at least two analysts.
