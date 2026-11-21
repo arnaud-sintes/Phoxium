@@ -18,6 +18,7 @@ pub mod interlace;
 pub mod keyboard_layout;
 pub mod lifecycle;
 pub mod live;
+pub mod migrate;
 pub mod modes;
 pub mod output;
 pub mod pacing;
