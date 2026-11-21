@@ -9,6 +9,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Fixed
 
+- Frame pacing: moving pictures no longer step like 30 fps on the NVIDIA laptop. A few seconds after start, once the GPU lowered its clocks, the frames came in pairs (about 2 ms apart, then about 30 ms), in the framed window and in fullscreen alike, so only one frame of each pair could carry a new capture of a 60 fps game. The app now starts each frame after the next desktop composition (vsync and the FIFO swapchain unchanged). Measured on the RTX A2000 at 60 Hz (QUESTIONS OUT-6): frame intervals under 5 ms went from 32 to 49 % of all frames to none, the 95th percentile from 33 ms to 18 ms, and the frames that carry a new capture of pixel-demo from 50 % (one every 33 ms) to 90 % (one every 16.7 ms). The Intel UHD, which did not show the problem, is unchanged. Tests: `pacing` unit tests.
+
 - Integer-scale detection: one frame no longer decides. When the captured window changed size (pixel-demo from 1:1 in a 900x720 window to integer x3 in 768x720, live 2026-11-21: 5 of 9 tries with v0.3.0, 0 of 8 with the fix), its first frame could still show the previous 1:1 picture, and that frame alone locked "native (x1)" for the session: the x3 game was treated as a 768x720 native raster. x1 is now taken early only after the first 6 informative frames all say so, otherwise the frames vote (a factor that at most 10 % of the other frames rule out is kept; native-looking frames give x1 only as the majority). Tests: `scaling` unit tests (stale frames after a resize, an odd frame among x3 frames, mostly native sources).
 
 ## [0.3.0] - 2026-11-20

@@ -20,6 +20,7 @@ pub mod lifecycle;
 pub mod live;
 pub mod modes;
 pub mod output;
+pub mod pacing;
 pub mod params;
 pub mod patterns;
 pub mod picker;

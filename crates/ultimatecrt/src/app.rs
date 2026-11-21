@@ -674,12 +674,27 @@ pub fn run() -> Res<()> {
     let own = win.hwnd.0 as isize;
     // R-04: the previous iteration idled (minimised output).
     let mut was_idle = false;
+    // OUT-6: each frame starts after the next desktop composition (steady pacing in the framed output too).
+    let mut pacer = crate::pacing::Pacer::default();
 
     // R-01: the session loop. Every error in it (a `?`) ends the loop and comes out here as `outcome`; the
     // shutdown below then runs on every exit path, normal or not. D-05: so does a panic (`crash::guard`), and
     // a panic caught in a window procedure ends the loop at the next iteration.
     let outcome: Res<()> = crate::crash::guard(|| -> Res<()> {
         loop {
+            // OUT-6: wait for the next composition before taking the source frame, so the frame drawn is the newest
+            // capture; not after an idle iteration (minimised: `wait_messages` paced it).
+            if !was_idle {
+                match pacer.before_frame(crate::pacing::wait_for_composition) {
+                    Some(crate::pacing::Change::Lost) => {
+                        println!("notice: the desktop composition does not pace the frames; the swapchain paces them")
+                    }
+                    Some(crate::pacing::Change::Back) => {
+                        println!("pacing: the desktop composition paces the frames again")
+                    }
+                    None => {}
+                }
+            }
             if !output::pump() {
                 break;
             }
