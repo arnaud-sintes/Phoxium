@@ -7,6 +7,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-11-21
+
 ### Added
 
 - **Phosphor type** (`phosphor_type`, menu Phosphor panel, first row): P22 (the colour tube, the default, unchanged bit for bit) or a monochrome tube from registered or catalogue phosphor data: P4 (white, black-and-white TV), P31 (green, oscilloscopes and many green monitors), P1 (green, early green screens), P39 (long-persistence green, as in the IBM 5151; its decay is a one-point approximation) and the Philips yellow data-display blend. A monochrome type shows the brightness (BT.601 luma) of the source in the phosphor's own colour, with no mask, and its own afterglow; P1 and P39 smear strongly at 60 Hz, as the real phosphors did. Colours outside the display's sRGB range are clipped by the output as before. Sources and approximations in CRT.md "Phosphor types" and QUESTIONS PHY-19; CRT.md's Wolf and Deubel (1997) figure is corrected.
@@ -230,7 +232,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.5.0...HEAD
+[0.5.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arnaud-sintes/ultimateCRT/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/arnaud-sintes/ultimateCRT/releases/tag/v0.2.0
