@@ -1,6 +1,6 @@
 # Phoxium
 
-![Phoxium icon](assets/icon/icon-256.png)
+![Phoxium icon](../assets/icon/icon-256.png)
 
 Phoxium is a CRT shader for Windows. It captures the window of a game or a program, runs the picture through a virtual CRT tube on the GPU and shows the result in its own window, which can go fullscreen over the game. It runs beside the captured program: nothing is injected into it and nothing in it is changed. The output is SDR.
 
@@ -76,7 +76,7 @@ The program has no network code and sends nothing anywhere. The settings file ke
 - A whole monitor can be captured ("Whole screen N" in the list); the output window is then hidden from screen captures, and the Manual picture-area limits give a fixed region. Not checked with an HDR monitor.
 - Opening the menu deactivates the game for the moment (some games pause).
 
-The full list, with the technical detail, is in [docs/REFERENCE.md](docs/REFERENCE.md#known-limits).
+The full list, with the technical detail, is in [docs/REFERENCE.md](REFERENCE.md#known-limits).
 
 ## Unsigned binaries
 
@@ -103,10 +103,10 @@ The executables are `target\release\phoxium.exe` and `target\release\pixel-demo.
 
 ## More documentation
 
-- [docs/REFERENCE.md](docs/REFERENCE.md): the detailed reference (developer command-line options, every menu section, hotkeys and their fallbacks, GPU choice, capture path, presets and parameters, recipes for glow, vignette and afterglow, the optional modules, source scaling, the target lifecycle).
+- [docs/REFERENCE.md](REFERENCE.md): the detailed reference (developer command-line options, every menu section, hotkeys and their fallbacks, GPU choice, capture path, presets and parameters, recipes for glow, vignette and afterglow, the optional modules, source scaling, the target lifecycle).
 - [ENV.md](ENV.md): build, test, package and publish. [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md): how it is built, coding rules.
 - [CRT.md](CRT.md): what real CRT monitors do and the data the model uses. [QUESTIONS.md](QUESTIONS.md): decisions, open questions, live-test findings. [CHANGELOG.md](CHANGELOG.md): changes per version.
 
 ## Licence
 
-MIT: see [LICENSE](LICENSE). The release zip also carries `THIRD-PARTY.md`, the licences of the third-party code and of the Inter font built into the executables. Only permissive licences are used (no GPL, LGPL or AGPL).
+MIT: see [LICENSE](../LICENSE). The release zip also carries `THIRD-PARTY.md`, the licences of the third-party code and of the Inter font built into the executables. Only permissive licences are used (no GPL, LGPL or AGPL).

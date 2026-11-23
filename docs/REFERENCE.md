@@ -1,6 +1,6 @@
 # Phoxium reference
 
-The detailed reference of Phoxium. The short user guide is the [README](../README.md); setup, build, tests, packaging and releases are in [ENV.md](../ENV.md), the architecture in [ARCHITECTURE.md](../ARCHITECTURE.md), the physics in [CRT.md](../CRT.md), decisions and open questions in [QUESTIONS.md](../QUESTIONS.md), changes per version in [CHANGELOG.md](../CHANGELOG.md).
+The detailed reference of Phoxium. The short user guide is the [README](README.md); setup, build, tests, packaging and releases are in [ENV.md](ENV.md), the architecture in [ARCHITECTURE.md](ARCHITECTURE.md), the physics in [CRT.md](CRT.md), decisions and open questions in [QUESTIONS.md](QUESTIONS.md), changes per version in [CHANGELOG.md](CHANGELOG.md).
 
 The first part is the user guide in detail (status, requirements, download, the source picker, hotkeys, the menu, the settings files, known limits, unsigned binaries, licence, building); the second part is the reference: command-line options, the picker, the GPU choice, the capture path, hotkeys, presets and parameters, the menu, quality tiers, the optional modules, source scaling and adjustment, the target lifecycle and the icon.
 

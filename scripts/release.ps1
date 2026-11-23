@@ -145,7 +145,7 @@ foreach ($crate in 'appres', 'crt-model', 'paramgen', 'pixel-demo', 'phoxium') {
     if (-not $m.Success) { throw "Cargo.lock has no entry for $crate." }
     if ($m.Groups[1].Value -ne $version) { throw "Cargo.lock has $crate $($m.Groups[1].Value), the workspace version is ${version}: run cargo build to refresh Cargo.lock and commit it." }
 }
-$changelogLines = @(Get-Content 'CHANGELOG.md')
+$changelogLines = @(Get-Content 'docs/CHANGELOG.md')
 $dated = @($changelogLines | Where-Object { $_ -match ('^## \[' + [regex]::Escape($version) + '\] - \d{4}-\d{2}-\d{2}\s*$') })
 if ($dated.Count -ne 1) { throw "CHANGELOG.md needs exactly one heading '## [$version] - YYYY-MM-DD' (found $($dated.Count))." }
 $unreleasedAt = -1
@@ -190,7 +190,7 @@ if ($existing) {
 }
 
 # Notes: the changelog section "## [<version>]" up to the next "## [".
-$lines = @(Get-Content 'CHANGELOG.md')
+$lines = @(Get-Content 'docs/CHANGELOG.md')
 $start = -1
 for ($i = 0; $i -lt $lines.Count; $i++) {
     if ($lines[$i] -match ('^## \[' + [regex]::Escape($version) + '\]')) { $start = $i; break }

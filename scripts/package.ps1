@@ -125,8 +125,12 @@ foreach ($leaf in @($name, "$name.zip", "$name.zip.sha256", "$name.commit")) {
 }
 New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item -LiteralPath $exes -Destination $stage
-Copy-Item 'LICENSE', 'README.md', 'CHANGELOG.md' $stage
-# The README links to docs/REFERENCE.md: the same relative place in the zip keeps the link working.
+Copy-Item 'LICENSE' $stage
+Copy-Item 'docs\CHANGELOG.md' $stage
+# The README sits in docs/ in the repository (links to REFERENCE.md and ../LICENSE) and at the root of the zip, next to
+# docs/REFERENCE.md and LICENSE: the two links are rewritten for that place.
+$readme = [IO.File]::ReadAllText((Join-Path $root 'docs\README.md'), [Text.Encoding]::UTF8).Replace('](REFERENCE.md', '](docs/REFERENCE.md').Replace('](../LICENSE', '](LICENSE')
+[IO.File]::WriteAllText((Join-Path $stage 'README.md'), $readme, (New-Object Text.UTF8Encoding($false)))
 New-Item -ItemType Directory -Force (Join-Path $stage 'docs') | Out-Null
 Copy-Item 'docs\REFERENCE.md' (Join-Path $stage 'docs')
 # The staged executables are byte-for-byte the ones of the target directory.

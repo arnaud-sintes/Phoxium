@@ -124,7 +124,7 @@ if ($blocks -ne $rows.Count) { throw "Count check failed: $blocks licence blocks
 Add-Line ''
 Add-Line '# Notices the crates do not carry'
 Add-Line ''
-$repoNotices = [IO.File]::ReadAllText((Join-Path $Root 'THIRD-PARTY.md'), [Text.Encoding]::UTF8) -replace "`r`n", "`n"
+$repoNotices = [IO.File]::ReadAllText((Join-Path $Root 'docs\THIRD-PARTY.md'), [Text.Encoding]::UTF8) -replace "`r`n", "`n"
 $firstSection = $repoNotices.IndexOf("`n## ")
 if ($firstSection -lt 0) { throw 'THIRD-PARTY.md has no section.' }
 Add-Line $repoNotices.Substring($firstSection + 1).TrimEnd()
