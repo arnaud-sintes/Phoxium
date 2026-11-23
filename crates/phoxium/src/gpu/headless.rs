@@ -388,10 +388,12 @@ impl Headless {
     /// and the current enable flags ([`Headless::set_stage_enabled`], [`Headless::enable_only`]), into
     /// a target of `run.frame.target_size`, and reads back the target and every chain image.
     pub fn render_stages(&mut self, run: &StageRun<'_>) -> Res<Rendered> {
-        let target = (
+        // The injected constants are in the tube's frame; a turned tube (TATE) shows it in the output with its sides
+        // swapped.
+        let target = crate::placement::Turn::from_params(run.params).swap((
             run.frame.target_size[0].max(0) as u32,
             run.frame.target_size[1].max(0) as u32,
-        );
+        ));
         if target.0 == 0 || target.1 == 0 {
             return Err("headless render: empty target".into());
         }

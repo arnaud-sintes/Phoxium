@@ -40,7 +40,7 @@ pub struct ClipCounts {
 
 const STAGES: vk::ShaderStageFlags = vk::ShaderStageFlags::FRAGMENT;
 
-/// Push constants of `encode.frag`, laid out as its `Push` block (72 bytes).
+/// Push constants of `encode.frag`, laid out as its `Push` block (96 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 struct Push {
@@ -54,6 +54,10 @@ struct Push {
     exposure: f32,
     knee: f32,
     rate: f32,
+    /// Padding: the next member is a vec4 and starts on 16 bytes.
+    _pad: [f32; 2],
+    /// The tube rectangle as the target shows it (a turned tube, `source_rotation`: `placement::viewer_rect`).
+    view_rect: [f32; 4],
 }
 
 /// The linear colour matrix from the tube primaries and white (`colour.toml`) to sRGB/Rec.709 primaries
@@ -240,6 +244,8 @@ impl Encode {
                 exposure: xf.exposure,
                 knee: xf.knee,
                 rate: xf.rate,
+                _pad: [0.0; 2],
+                view_rect: tube_rect,
             };
             super::push(d, cb, self.layout, STAGES, &push);
             d.cmd_draw(cb, 3, 1, 0, 0);

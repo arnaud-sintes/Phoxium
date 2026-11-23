@@ -65,6 +65,7 @@ pub fn summary(p: &SourceProfile) -> String {
         p.surround_color.is_some(),
         p.display_aspect.is_some(),
         p.raster_aspect.is_some(),
+        p.rotation.is_some(),
     ]
     .iter()
     .filter(|b| **b)

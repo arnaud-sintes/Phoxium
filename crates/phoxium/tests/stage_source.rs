@@ -30,7 +30,7 @@ use crt_model::geometry::{px_per_triad, triads_across, triads_per_source_px};
 use crt_model::tube;
 use phoxium::gpu::{FrameConstants, Headless, Rendered, Settings, SourceFrame, TargetFormat, Transfer, AMP_K};
 use phoxium::params::{ParamValue, Params, RASTER_ASPECT_FILL_TUBE, SOURCE_EOTF_SRGB};
-use phoxium::placement::{place, HostFit, PlacementInput, RasterAspect};
+use phoxium::placement::{place, HostFit, PlacementInput, RasterAspect, Turn};
 use phoxium::scaling::View;
 
 const W: u32 = 256;
@@ -388,6 +388,7 @@ fn pvm_input(native: (u32, u32), aspect: RasterAspect) -> PlacementInput {
         line_multiplier: 1,
         integer: false,
         fit: HostFit::default(),
+        turn: Turn::None,
     }
 }
 

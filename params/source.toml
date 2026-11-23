@@ -97,6 +97,18 @@ description = "Centre the picture in the output (letterbox or pillarbox). Off: a
 group = "Source"
 
 [[param]]
+id = "source_rotation"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "off"
+values = ["off", "counter_clockwise", "clockwise"]
+tag = "E"
+source = "TODO.md TATE (rotated tube); CRT.md: vertical arcade games run on a tube turned on its side, so the scanlines are the columns of the upright picture"
+description = "TATE: the tube is turned a quarter turn, as in a vertical arcade cabinet. The captured picture is upright (a portrait game); the scanlines, the beam, the mask, the geometry and the phosphor run along the tube's own axes, so on screen the scanlines are columns and the mask is turned with the tube. off: an ordinary tube. counter_clockwise: the tube is turned a quarter turn counter-clockwise (its top is on the left of the screen; the first scanline is the rightmost column of the picture). clockwise: turned clockwise (its top is on the right; the first scanline is the leftmost column). The tube (aspect, size) is the landscape tube before it is turned. The host LCD subpixel layout of the mask is not applied while the tube is turned."
+group = "Source"
+
+[[param]]
 id = "source_surround_color"
 stage = "source"
 type = "vec3"

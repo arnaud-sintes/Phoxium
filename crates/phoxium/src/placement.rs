@@ -42,6 +42,16 @@
 //!   tube's. `tube_height_fraction` applies to the `tube` mode only.
 //!
 //! The oracle of the host modes is `crt_model::tube::host_rows_scale` (an independent counting search).
+//!
+//! # A turned tube (TATE, `source_rotation`)
+//!
+//! A vertical arcade game runs on a tube turned a quarter turn. The whole chain then works in the tube's own
+//! frame, the landscape tube: the native raster is the upright picture turned (`decode`), `FrameConstants` hold
+//! the tube-frame target (`target_size` is the output with its sides swapped) and the tube rectangle in that
+//! frame, and only `encode` turns the tube image into the output ([`viewer_rect`] gives the rectangle as the
+//! output shows it). The turn is a whole quarter turn, so no pixel is resampled: the tube's pixels are the output's.
+//! [`PlacementInput::turn`] makes [`place`] fit the turned picture into the output: the height fraction applies to
+//! the output's height (the tube's width) and `source_center` off aligns the picture to the output's top-left corner.
 
 use std::fmt;
 
@@ -50,9 +60,58 @@ use crt_model::mask::{AxisTier, AxisTiers, Delta, Grille, HostSubpixel, Mask, Sl
 use crate::gpu::FrameConstants;
 use crate::params::{
     Params, MASK_HOST_SUBPIXEL_BGR, MASK_HOST_SUBPIXEL_RGB, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED,
-    MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE, SOURCE_SCALE_MODE_FIT, SOURCE_SCALE_MODE_FIT_FREE,
-    SOURCE_SCALE_MODE_INTEGER, SOURCE_SCALE_MODE_NATIVE,
+    MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE, SOURCE_ROTATION_CLOCKWISE,
+    SOURCE_ROTATION_COUNTER_CLOCKWISE, SOURCE_SCALE_MODE_FIT, SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER,
+    SOURCE_SCALE_MODE_NATIVE,
 };
+
+/// The quarter turn of the tube (`params.source_rotation`, TATE; module documentation).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Turn {
+    /// An ordinary tube: the output shows the tube as it is.
+    #[default]
+    None,
+    /// The tube is turned counter-clockwise: its top is on the left of the output, its right edge on top.
+    CounterClockwise,
+    /// The tube is turned clockwise: its top is on the right of the output, its right edge at the bottom.
+    Clockwise,
+}
+
+impl Turn {
+    /// The turn of the parameter table.
+    pub fn from_params(p: &Params) -> Self {
+        match p.source_rotation {
+            SOURCE_ROTATION_COUNTER_CLOCKWISE => Turn::CounterClockwise,
+            SOURCE_ROTATION_CLOCKWISE => Turn::Clockwise,
+            _ => Turn::None,
+        }
+    }
+
+    /// Whether the tube is turned.
+    pub fn is_turned(self) -> bool {
+        self != Turn::None
+    }
+
+    /// A size of the output as the tube sees it: the sides swapped when the tube is turned.
+    pub fn swap<T>(self, size: (T, T)) -> (T, T) {
+        if self.is_turned() {
+            (size.1, size.0)
+        } else {
+            size
+        }
+    }
+}
+
+/// The rectangle `r` (x0, y0, x1, y1, exclusive) of the tube frame as the output shows it, for a tube frame
+/// `tube_target` px wide and high (the output's sides swapped): counter-clockwise the tube's point (u, v) is at
+/// (v, W - u), clockwise at (H - v, u), W and H being the tube frame's width and height.
+pub fn viewer_rect(turn: Turn, r: [f32; 4], tube_target: (f32, f32)) -> [f32; 4] {
+    match turn {
+        Turn::None => r,
+        Turn::CounterClockwise => [r[1], tube_target.0 - r[2], r[3], tube_target.0 - r[0]],
+        Turn::Clockwise => [tube_target.1 - r[3], r[0], tube_target.1 - r[1], r[2]],
+    }
+}
 
 /// How the picture takes its shape on the tube (`params.raster_aspect`, `params.source_display_aspect`).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -158,6 +217,9 @@ pub struct PlacementInput {
     pub integer: bool,
     /// Host scale mode and alignment (T-96); the default is the `tube` mode, centred.
     pub fit: HostFit,
+    /// The quarter turn of the tube. `target` is always the output; with a turn the placement is in the tube's
+    /// frame, the output with its sides swapped (module documentation).
+    pub turn: Turn,
 }
 
 impl PlacementInput {
@@ -182,6 +244,7 @@ impl PlacementInput {
                 mode: ScaleMode::from_params(params),
                 center: params.source_center,
             },
+            turn: Turn::from_params(params),
         }
     }
 }
@@ -189,7 +252,8 @@ impl PlacementInput {
 /// Result of [`place`].
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Placement {
-    /// Tube rectangle in output pixels: x0, y0, x1, y1 (exclusive), whole pixels.
+    /// Tube rectangle in output pixels: x0, y0, x1, y1 (exclusive), whole pixels. With a turned tube it is in the
+    /// tube's frame (the output with its sides swapped); [`viewer_rect`] turns it into the output's.
     pub rect_px: [f32; 4],
     /// Host pixels per tube mm.
     pub px_per_mm: f64,
@@ -210,7 +274,8 @@ pub struct Placement {
 /// an empty tube domain).
 pub fn place(i: &PlacementInput) -> Placement {
     let (nw, nh) = (f64::from(i.native.0), f64::from(i.native.1));
-    let (tw, th) = (f64::from(i.target.0), f64::from(i.target.1));
+    // In the tube's frame: with a turned tube the output's sides are swapped.
+    let (tw, th) = i.turn.swap((f64::from(i.target.0), f64::from(i.target.1)));
     let (vw, vh) = i.visible_mm;
     let empty = Placement {
         rect_px: [0.0; 4],
@@ -238,7 +303,12 @@ pub fn place(i: &PlacementInput) -> Placement {
         (vw, vw / aspect)
     };
     let (s, fit) = if i.fit.mode == ScaleMode::Tube {
-        let mut s = (tw / wr).min(i.height_fraction * th / hr);
+        // The fraction is of the output's height, which is the tube's width when the tube is turned.
+        let mut s = if i.turn.is_turned() {
+            (i.height_fraction * tw / wr).min(th / hr)
+        } else {
+            (tw / wr).min(i.height_fraction * th / hr)
+        };
         if i.integer {
             let row_px = s * hr / nh;
             if row_px >= 1.0 {
@@ -256,7 +326,12 @@ pub fn place(i: &PlacementInput) -> Placement {
     let (x0, y0) = if i.fit.center {
         (((tw - w) / 2.0).floor(), ((th - h) / 2.0).floor())
     } else {
-        (0.0, 0.0)
+        // The output's top-left corner, in the tube's frame.
+        match i.turn {
+            Turn::None => (0.0, 0.0),
+            Turn::CounterClockwise => (tw - w, 0.0),
+            Turn::Clockwise => (0.0, th - h),
+        }
     };
     Placement {
         rect_px: [x0 as f32, y0 as f32, (x0 + w) as f32, (y0 + h) as f32],
@@ -307,6 +382,9 @@ pub struct Readout {
     pub mode: ScaleMode,
     pub native: (u32, u32),
     pub target: (u32, u32),
+    /// The quarter turn of the tube (TATE); `native` is then the turned raster (scanline length, scanlines),
+    /// `picture_px` and `offset_px` are as the output shows them.
+    pub turn: Turn,
     /// Host pixels per source pixel (columns, rows): the picture size over the native size.
     pub px_per_source_px: (f64, f64),
     /// Every source pixel is a whole number of host pixels on both axes.
@@ -337,14 +415,21 @@ pub fn readout(params: &Params, native: (u32, u32), target: (u32, u32), integer:
     let per = |a: u32, n: u32| if n > 0 { f64::from(a) / f64::from(n) } else { 0.0 };
     let px = (per(w, native.0), per(h, native.1));
     let whole = |v: f64| v >= 1.0 && v.fract() == 0.0;
+    // The picture as the output shows it.
+    let shown = viewer_rect(
+        input.turn,
+        p.rect_px,
+        (input.turn.swap(target).0 as f32, input.turn.swap(target).1 as f32),
+    );
     Readout {
         mode: input.fit.mode,
         native,
         target,
+        turn: input.turn,
         px_per_source_px: px,
         integer_aligned: whole(px.0) && whole(px.1),
-        picture_px: (w, h),
-        offset_px: (p.rect_px[0] as u32, p.rect_px[1] as u32),
+        picture_px: input.turn.swap((w, h)),
+        offset_px: (shown[0].max(0.0) as u32, shown[1].max(0.0) as u32),
         px_per_mm: p.px_per_mm,
         line_px: p.line_pitch_mm * p.px_per_mm,
         px_per_triad: f64::from(params.mask_pitch_mm) * p.px_per_mm,
@@ -360,10 +445,15 @@ impl fmt::Display for Readout {
             AxisTier::Blended { box_px } => format!("blended (box {box_px:.2} px)"),
             AxisTier::Prefiltered => "prefiltered".to_string(),
         };
+        let turn = match self.turn {
+            Turn::None => "",
+            Turn::CounterClockwise => " (tube turned counter-clockwise)",
+            Turn::Clockwise => " (tube turned clockwise)",
+        };
         write!(
             f,
-            "placement: {} | native {}x{} in {}x{} | picture {}x{} at ({}, {}) | {:.4} x {:.4} px per source px{} | \
-             {:.4} px/mm | scanline {:.3} px | {:.3} px per triad | mask tier h {} v {}",
+            "placement: {} | native {}x{}{turn} in {}x{} | picture {}x{} at ({}, {}) | {:.4} x {:.4} px per source px{} \
+             | {:.4} px/mm | scanline {:.3} px | {:.3} px per triad | mask tier h {} v {}",
             self.mode,
             self.native.0,
             self.native.1,
@@ -439,6 +529,11 @@ pub fn mask_tier_rule(p: &Params) -> TierRule {
 
 /// The host LCD subpixel layout of the parameter table (`mask_host_subpixel`).
 pub fn host_subpixel(p: &Params) -> HostSubpixel {
+    // The layout is along the host's horizontal axis, which is not the tube's when the tube is turned (the shader
+    // does not apply it then, `mask.glsl` `mask_host_layout`).
+    if Turn::from_params(p).is_turned() {
+        return HostSubpixel::Off;
+    }
     match p.mask_host_subpixel {
         MASK_HOST_SUBPIXEL_RGB => HostSubpixel::Rgb,
         MASK_HOST_SUBPIXEL_BGR => HostSubpixel::Bgr,
@@ -481,8 +576,14 @@ impl FrameConstants {
     /// The constants of a `native` raster placed into `target` by the tube parameters ([`place`]): tube
     /// rectangle and size, `px_per_mm` and `line_pitch_mm` filled; K = `amp_samples` (default 4), frame index
     /// and time 0.
+    ///
+    /// `target` is the output. With a turned tube (`source_rotation`) the constants are in the tube's frame: the
+    /// target size is the output with its sides swapped, the tube rectangle is in that frame, and `encode` turns the
+    /// image into the output (module documentation).
     pub fn placed(native: (u32, u32), target: (u32, u32), integer: bool, params: &Params) -> Self {
-        let p = place(&PlacementInput::from_params(params, native, target, integer));
+        let input = PlacementInput::from_params(params, native, target, integer);
+        let p = place(&input);
+        let target = input.turn.swap(target);
         Self {
             tube_rect_px: p.rect_px,
             tube_size: [
@@ -665,6 +766,7 @@ mod tests {
             line_multiplier: 1,
             integer: false,
             fit: HostFit::default(),
+            turn: Turn::None,
         }
     }
 
@@ -722,6 +824,80 @@ mod tests {
         });
         assert!((double.line_pitch_mm - 0.604_167).abs() < 1e-5);
         assert_eq!(double.line_pitch_mm * 2.0, p.line_pitch_mm);
+    }
+
+    /// TATE: a 224 x 288 upright game is the native raster 288 x 224 of the tube (scanlines are the columns), on
+    /// the 2560 x 1440 output whose tube frame is 1440 x 2560. Hand numbers: aspect 288 / 224 = 1.2857, under the
+    /// tube's 4:3, so the raster is 290 x 1.2857 = 372.86 mm wide and 290 mm high; the scale is the tube frame's
+    /// width over it, 1440 / 372.86 = 3.8621 px/mm, the rectangle round(372.86 x 3.8621) = 1440 wide and
+    /// round(290 x 3.8621) = 1120 high, centred: (0, 720) to (1440, 1840) in the tube's frame. The output shows it
+    /// 1120 wide and 1440 high, centred in 2560: (720, 0) to (1840, 1440) counter-clockwise, the same box clockwise.
+    #[test]
+    fn a_turned_tube_is_placed_in_its_own_frame_and_shown_turned() {
+        let mut i = pvm((288, 224), (2560, 1440), RasterAspect::Par(1.0));
+        i.turn = Turn::CounterClockwise;
+        let p = place(&i);
+        assert_eq!(p.rect_px, [0.0, 720.0, 1440.0, 1840.0]);
+        assert!((p.px_per_mm - 1440.0 / (290.0 * 288.0 / 224.0)).abs() < 1e-9);
+        let tube_frame = (1440.0, 2560.0);
+        assert_eq!(
+            viewer_rect(Turn::CounterClockwise, p.rect_px, tube_frame),
+            [720.0, 0.0, 1840.0, 1440.0]
+        );
+        assert_eq!(
+            viewer_rect(Turn::Clockwise, p.rect_px, tube_frame),
+            [720.0, 0.0, 1840.0, 1440.0]
+        );
+        // The height fraction is of the output's height (the tube's width when turned): 0.5 gives half of 1440.
+        let half = place(&PlacementInput {
+            height_fraction: 0.5,
+            ..i
+        });
+        assert_eq!(half.rect_px[2] - half.rect_px[0], 720.0);
+        // Aligned to the output's top-left corner (`source_center` off), whichever way the tube is turned.
+        for turn in [Turn::CounterClockwise, Turn::Clockwise] {
+            let corner = place(&PlacementInput {
+                turn,
+                fit: HostFit {
+                    center: false,
+                    ..HostFit::default()
+                },
+                ..i
+            });
+            let shown = viewer_rect(turn, corner.rect_px, tube_frame);
+            assert_eq!((shown[0], shown[1]), (0.0, 0.0), "{turn:?}");
+            assert_eq!((shown[2] - shown[0], shown[3] - shown[1]), (1120.0, 1440.0), "{turn:?}");
+        }
+    }
+
+    /// The turn comes from `source_rotation`; the constants of a turned tube are in its frame (the output with its
+    /// sides swapped), the readout reports the picture as the output shows it, and the host LCD layout (along the
+    /// output's horizontal axis, not the tube's) is off.
+    #[test]
+    fn a_turned_tube_gives_constants_in_its_frame() {
+        use crate::params::{MASK_HOST_SUBPIXEL_RGB, SOURCE_ROTATION_COUNTER_CLOCKWISE};
+        let plain = Params::default();
+        assert_eq!(Turn::from_params(&plain), Turn::None);
+        let turned = Params {
+            source_rotation: SOURCE_ROTATION_COUNTER_CLOCKWISE,
+            mask_host_subpixel: MASK_HOST_SUBPIXEL_RGB,
+            ..Params::default()
+        };
+        assert_eq!(Turn::from_params(&turned), Turn::CounterClockwise);
+        let fc = FrameConstants::placed((288, 224), (2560, 1440), false, &turned);
+        assert_eq!(fc.target_size, [1440, 2560]);
+        assert_eq!(fc.native_size, [288, 224]);
+        assert_eq!(fc.tube_rect_px, [0.0, 720.0, 1440.0, 1840.0]);
+        assert_eq!(fc.tube_size, [1440, 1120]);
+        let r = readout(&turned, (288, 224), (2560, 1440), false);
+        assert_eq!((r.picture_px, r.offset_px), ((1120, 1440), (720, 0)));
+        assert!(r.to_string().contains("tube turned counter-clockwise"), "{r}");
+        assert_eq!(host_subpixel(&turned), HostSubpixel::Off);
+        let plain_rgb = Params {
+            mask_host_subpixel: MASK_HOST_SUBPIXEL_RGB,
+            ..Params::default()
+        };
+        assert_eq!(host_subpixel(&plain_rgb), HostSubpixel::Rgb);
     }
 
     /// PAR 8:7 on 256 x 240: aspect 292.571 / 240 = 1.2190 (+-0.5 %); at 1440 px high the rectangle is

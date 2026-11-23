@@ -531,7 +531,9 @@ pub fn run() -> Res<()> {
     let mut fresh = true; // upload the first frame
     let mut detector = scaling::Detector::default();
     let mut detect_key = (0u32, 0u32, None);
-    let mut view = scaling::View::full(frame.width, frame.height);
+    // TATE: the tube's turn (`source_rotation`) changes the native raster, so a change remakes the view.
+    let mut turn = placement::Turn::from_params(&params);
+    let mut view = scaling::View::full(frame.width, frame.height).turned(turn.is_turned());
     // Target lifecycle (T-56): reattach, black or stale frames, smoothed source, size changes.
     let mut health = lifecycle::Health::new(0.0);
     let mut smoothing = lifecycle::SmoothingWatch::default();
@@ -1238,6 +1240,10 @@ pub fn run() -> Res<()> {
                 }
                 remap = true;
             }
+            if placement::Turn::from_params(&params) != turn {
+                turn = placement::Turn::from_params(&params);
+                remap = true;
+            }
             if std::mem::take(&mut remap) {
                 fresh = true;
             }
@@ -1302,7 +1308,7 @@ pub fn run() -> Res<()> {
                     }
                 }
                 let div = fixed.unwrap_or_else(|| detector.divisor());
-                view = scaling::View::new(region, div);
+                view = scaling::View::new(region, div).turned(turn.is_turned());
                 // SRC-2: a detected (not given) divisor of 1 on a locked detection means no integer scale.
                 // That alone also holds for text at 1:1, so the watch's verdict needs filtered edges on a
                 // regular grid (an upscale of a low-resolution source), see `lifecycle::EdgeStats`.
@@ -1389,7 +1395,8 @@ pub fn run() -> Res<()> {
                     &eff_map,
                     &detector,
                     (frame.width, frame.height),
-                    view,
+                    // The upright picture's size (the section shows the source as it is captured).
+                    view.turned(turn.is_turned()),
                     lost_at.map(|t| (now - t, lost_watch.policy().wait_s)),
                     scaling::Multiplier::of(&params, cli_divisor.or(profile.divisor_pair())),
                     bars_state.view(),
@@ -1905,8 +1912,8 @@ pub fn run() -> Res<()> {
                         "capture {:.0} fps | render {:.0} fps | source {}x{} (div {}x{}) | {}{}",
                         (captured - last_captured) as f64 / secs,
                         renders as f64 / secs,
-                        view.native.0,
-                        view.native.1,
+                        view.turned(turn.is_turned()).native.0,
+                        view.turned(turn.is_turned()).native.1,
                         view.div.0,
                         view.div.1,
                         renderer.gpu_name,
@@ -1926,8 +1933,8 @@ pub fn run() -> Res<()> {
                         renders as f64 / secs,
                         frame.width,
                         frame.height,
-                        view.native.0,
-                        view.native.1,
+                        view.turned(turn.is_turned()).native.0,
+                        view.turned(turn.is_turned()).native.1,
                         view.div.0,
                         view.div.1
                     );

@@ -463,6 +463,8 @@ pub struct SourceProfile {
     pub display_aspect: Option<f32>,
     /// `raster_aspect` value name: `par` or `fill_tube` (T-96).
     pub raster_aspect: Option<String>,
+    /// `source_rotation` value name: `off`, `counter_clockwise` or `clockwise` (TATE: a vertical game).
+    pub rotation: Option<String>,
 }
 
 /// The parameters a [`SourceProfile`] can set ([`SourceProfile::apply_to`]).
@@ -478,6 +480,7 @@ pub const PROFILE_PARAM_IDS: &[&str] = &[
     "source_center",
     "source_surround_color",
     "source_display_aspect",
+    "source_rotation",
 ];
 
 /// Sets the enum parameter `id` to the value called `name` (its `values` entry, `-` read as `_`). False
@@ -512,6 +515,7 @@ impl SourceProfile {
             ("source_divisor_mode", &self.divisor_mode, "divisor_mode"),
             ("source_scale_mode", &self.scale_mode, "scale_mode"),
             ("raster_aspect", &self.raster_aspect, "raster_aspect"),
+            ("source_rotation", &self.rotation, "rotation"),
         ];
         for (id, value, field) in enums {
             if let Some(v) = value {
@@ -1172,6 +1176,7 @@ mod tests {
             surround_color: Some([0.25, 0.5, 0.0]),
             display_aspect: Some(4.0 / 3.0),
             raster_aspect: Some("par".into()),
+            rotation: Some("clockwise".into()),
             picture_area: Some("manual".into()),
             crop_client: Some([640, 480]),
         });
@@ -1658,7 +1663,7 @@ mod tests {
     fn source_profile_applies_to_the_parameters() {
         use crate::params::{
             RASTER_ASPECT_FILL_TUBE, SOURCE_CROP_MODE_NONE, SOURCE_DIVISOR_MODE_MANUAL, SOURCE_EOTF_SRGB,
-            SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER,
+            SOURCE_ROTATION_COUNTER_CLOCKWISE, SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER,
         };
         let mut p = Params::default();
         assert!(SourceProfile::default().apply_to(&mut p).is_empty());
@@ -1680,9 +1685,11 @@ mod tests {
             surround_color: Some([0.1, 0.2, 0.3]),
             display_aspect: Some(1.5),
             raster_aspect: Some("fill_tube".into()),
+            rotation: Some("counter-clockwise".into()),
             ..Default::default()
         };
         assert!(profile.apply_to(&mut p).is_empty());
+        assert_eq!(p.source_rotation, SOURCE_ROTATION_COUNTER_CLOCKWISE);
         assert_eq!(p.source_eotf, SOURCE_EOTF_SRGB);
         assert_eq!(p.source_crop_mode, SOURCE_CROP_MODE_NONE);
         assert_eq!(p.source_divisor_mode, SOURCE_DIVISOR_MODE_MANUAL);

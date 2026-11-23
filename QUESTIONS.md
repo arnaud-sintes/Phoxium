@@ -218,6 +218,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** "Anything else physically relevant" is unbounded, and each item adds a model, UI and tests.
 - **Who:** USER.
 - **Default:** All out, except TATE (cheap if planned early, decide with the user) and pointer mapping (OUT-4). `CRT.md` already treats composite as a separate pre-stage.
+- **DONE (2026-11-23), TATE:** `source_rotation` (off, counter_clockwise, clockwise) turns the tube a quarter turn for an upright, portrait capture; the scanlines become the columns of the picture. The chain works in the tube's frame, the turn is applied by `decode` and `encode` only (ARCHITECTURE A33), so it is exact (whole pixels) and the rest of the model needed no change. Open: the host LCD layout is off while turned; not tried on a real vertical game or a portrait monitor.
 
 ### SCP-7 Why a new application at all
 - **Q:** What concrete result must Phoxium show that ShaderGlass plus crt-royale, crt-guest-advanced, Sony Megatron or the Blur Busters beam simulator cannot? Could the physical model first be prototyped as a RetroArch shader?

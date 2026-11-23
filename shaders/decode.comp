@@ -57,7 +57,17 @@ void main() {
     if (any(greaterThanEqual(p, frame.native_size))) {
         return;
     }
-    ivec2 texel = clamp(pc.origin + p * pc.div + pc.div / 2, ivec2(0), textureSize(src, 0) - 1);
+    // TATE (`source_rotation`): the native raster is the upright picture turned a quarter turn, so that the
+    // scanlines (native rows) are the columns of the upright picture. The native size is already the turned
+    // size (`View::native`); b is the block of the upright picture that native pixel p shows. Counter-clockwise:
+    // the first scanline is the rightmost column; clockwise: the leftmost (the same maps as `encode` inverts).
+    ivec2 b = p;
+    if (params.source_rotation == SOURCE_ROTATION_COUNTER_CLOCKWISE) {
+        b = ivec2(p.y, frame.native_size.x - 1 - p.x);
+    } else if (params.source_rotation == SOURCE_ROTATION_CLOCKWISE) {
+        b = ivec2(frame.native_size.y - 1 - p.y, p.x);
+    }
+    ivec2 texel = clamp(pc.origin + b * pc.div + pc.div / 2, ivec2(0), textureSize(src, 0) - 1);
     vec3 code = texelFetch(src, texel, 0).rgb;
     if (params.phosphor_type != PHOSPHOR_TYPE_P22) {
         code = vec3(dot(code, vec3(0.299, 0.587, 0.114)));

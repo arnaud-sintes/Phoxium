@@ -137,7 +137,8 @@ pub fn render_source(
         height: frame.height,
         bgra: &frame.data,
     };
-    let view = scaling::View::full(frame.width, frame.height);
+    let view =
+        scaling::View::full(frame.width, frame.height).turned(crate::placement::Turn::from_params(params).is_turned());
     Ok(renderer
         .render(Some(sf), view, &Settings::default(), params, target, format)?
         .output)

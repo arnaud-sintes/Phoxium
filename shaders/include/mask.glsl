@@ -86,8 +86,14 @@ float mask_box(float code, float period) {
 // value of channel c is the area mean of the mask over that subpixel's footprint instead of over the whole
 // pixel: the same box moved by the offset and narrowed to a third of a pixel when it is the host pixel, so the
 // mask is resolved at the panel's own sub-element grain. Off: no offset, the footprint is as before, bit for bit.
+// The layout is along the host's horizontal axis; with the tube turned (`source_rotation`, TATE) that axis is the
+// tube's vertical one, which this footprint does not follow, so the layout is not applied then.
+uint mask_host_layout() {
+    return params.source_rotation == SOURCE_ROTATION_OFF ? uint(params.mask_host_subpixel) : uint(MASK_HOST_SUBPIXEL_OFF);
+}
+
 vec3 mask_subpixel_shift() {
-    switch (params.mask_host_subpixel) {
+    switch (mask_host_layout()) {
     case MASK_HOST_SUBPIXEL_RGB:
         return vec3(-1.0, 0.0, 1.0) / 3.0;
     case MASK_HOST_SUBPIXEL_BGR:
@@ -101,7 +107,7 @@ vec3 mask_subpixel_shift() {
 // `period` px), narrowed by two thirds of a pixel at the host pixel (1 px: a third) and by nothing at the
 // whole period, linearly in the blend band, so it stays continuous with the prefiltered end. Layout off: bx.
 float mask_subpixel_width(float code, float bx, float period) {
-    if (params.mask_host_subpixel == MASK_HOST_SUBPIXEL_OFF || mask_prefiltered(code)) {
+    if (mask_host_layout() == uint(MASK_HOST_SUBPIXEL_OFF) || mask_prefiltered(code)) {
         return bx;
     }
     float t = period > 1.0 ? clamp((period - bx) / (period - 1.0), 0.0, 1.0) : 1.0;

@@ -1907,7 +1907,12 @@ impl Pipeline {
             have_source.then_some(s.encode_set),
             target.view,
             target.extent,
-            fc.tube_rect_px,
+            // The tube rectangle as the target shows it: a turned tube (TATE) is turned into the output.
+            crate::placement::viewer_rect(
+                crate::placement::Turn::from_params(params),
+                fc.tube_rect_px,
+                (fc.target_size[0] as f32, fc.target_size[1] as f32),
+            ),
             settings.host,
             params,
             xf,

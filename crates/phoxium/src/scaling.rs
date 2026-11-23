@@ -388,6 +388,10 @@ pub fn region_fits(len: usize, frame_w: u32, region: Rect) -> bool {
 }
 
 /// The part of the captured frame that is the source, and how it maps to native pixels.
+///
+/// `origin` and `div` are in the captured frame. `native` is the raster the chain works on: the picture's size
+/// divided by `div`, with its sides swapped when the tube is turned (TATE, `source_rotation`: `decode` reads the
+/// upright picture turned a quarter turn, see [`View::turned`]).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct View {
     pub origin: (u32, u32),
@@ -401,6 +405,20 @@ impl View {
             origin: (0, 0),
             div: (1, 1),
             native: (w, h),
+        }
+    }
+
+    /// The view of a tube turned a quarter turn (`turned`): the native raster has its sides swapped (the
+    /// scanlines are the columns of the upright picture). The turn is applied to a view made for the upright
+    /// picture, once; `decode` reads the picture turned back.
+    pub fn turned(self, turned: bool) -> Self {
+        View {
+            native: if turned {
+                (self.native.1, self.native.0)
+            } else {
+                self.native
+            },
+            ..self
         }
     }
 
@@ -436,6 +454,26 @@ mod tests {
             }
         }
         (data, fw, fh)
+    }
+
+    /// A turned tube sees the picture's sides swapped; turning twice gives the picture back, and the origin and the
+    /// divisor (in the captured frame) are not touched.
+    #[test]
+    fn a_turned_view_swaps_the_native_size_only() {
+        let v = View::new(
+            Rect {
+                x: 5,
+                y: 7,
+                w: 672,
+                h: 864,
+            },
+            (3, 3),
+        );
+        assert_eq!(v.native, (224, 288));
+        let t = v.turned(true);
+        assert_eq!((t.native, t.origin, t.div), ((288, 224), v.origin, v.div));
+        assert_eq!(v.turned(false), v);
+        assert_eq!(t.turned(true), v);
     }
 
     fn detect(w: u32, h: u32, kx: u32, ky: u32) -> (u32, u32) {

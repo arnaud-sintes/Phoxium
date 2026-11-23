@@ -53,20 +53,33 @@ layout(push_constant) uniform Push {
     float exposure;
     float knee;
     float rate;
+    // TATE (`source_rotation`): the tube image is turned a quarter turn into the target; `view_rect` is the
+    // tube rectangle as the target shows it (x0, y0, x1, y1), turned with the tube (`placement::viewer_rect`).
+    // Offset 80: a vec4 starts on 16 bytes, the Rust block pads after `rate`.
+    vec4 view_rect;
 } pc;
 
 layout(location = 0) out vec4 out_color;
 
 void main() {
     vec2 f = gl_FragCoord.xy;
-    vec4 r = frame.tube_rect_px;
+    vec4 r = params.source_rotation == SOURCE_ROTATION_OFF ? frame.tube_rect_px : pc.view_rect;
     // A guard only: the scissor keeps every fragment inside the tube rectangle, so this branch does not run and
     // the surround is the clear colour (above), not this black.
     if (f.x < r.x || f.y < r.y || f.x >= r.z || f.y >= r.w) {
         out_color = vec4(0.0, 0.0, 0.0, 1.0);
         return;
     }
-    ivec2 q = clamp(ivec2(floor(f) - floor(r.xy)), ivec2(0), frame.tube_size - 1);
+    ivec2 d = ivec2(floor(f) - floor(r.xy));
+    // The target pixel d of the rectangle shows the tube pixel q (the inverse of `placement::viewer_rect`'s turn):
+    // counter-clockwise (the tube's top on the left, its right on top), clockwise (its top on the right).
+    ivec2 q = d;
+    if (params.source_rotation == SOURCE_ROTATION_COUNTER_CLOCKWISE) {
+        q = ivec2(frame.tube_size.x - 1 - d.y, d.x);
+    } else if (params.source_rotation == SOURCE_ROTATION_CLOCKWISE) {
+        q = ivec2(d.y, frame.tube_size.y - 1 - d.x);
+    }
+    q = clamp(q, ivec2(0), frame.tube_size - 1);
     vec3 e = texelFetch(linear_in, q, 0).rgb * pc.exposure;
     vec3 c = vec3(dot(pc.m0.xyz, e), dot(pc.m1.xyz, e), dot(pc.m2.xyz, e));
 
