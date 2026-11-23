@@ -370,6 +370,7 @@ Each has a recommended default so you can reply with exceptions only.
 - **Why:** It triples effective horizontal mask resolution for aperture grilles, and is the only way to resolve PVM-class pitch on 4K. But it is panel-specific (RGB, BGR, WOLED, QD-OLED triangle), needs 100 % scaling and 1:1 pixel mapping, is not a physical model of the tube, and breaks in screenshots and streaming. There is no reliable OS API for the layout.
 - **Who:** USER plus SPIKE.
 - **Default:** Panel-independent area-integrated mask first. Reserve a per-display "subpixel layout" profile field. Revisit once the panel is known.
+- **DONE (2026-11-23):** `mask_host_subpixel` = off (default), rgb, bgr: each channel's mask value is the area mean over its own host subpixel (a third of a pixel wide, offset a third of a pixel), narrowing linearly through the blend band from the whole-period box; the tier thresholds are unchanged. A machine setting (kept by preset changes, like the quality tier). Oracle `crt_model::mask::HostSubpixel` and `host_value_subpixel`, GPU tests in `stage_mask_grille.rs` and `stage_mask_slot_delta.rs`. Open: a look on a real RGB and a BGR panel, lowering the 3 px limit for a subpixel panel (needs that look first), WOLED and QD-OLED layouts, a subpixel test pattern.
 
 ### HW-7 OLED wear and panel protection
 - **Q:** Is the output an OLED, and are burn-in risk from static high-luminance mask and borders, and the panel's own ABL (which changes brightness with picture level and corrupts the CRT ABL and rolling-scan models), acceptable?

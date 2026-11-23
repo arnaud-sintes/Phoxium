@@ -86,14 +86,16 @@ pub fn effective(p: &Params, drop: u32) -> Params {
     }
 }
 
-/// The parameter ids of the quality settings ([`keep`] copies them; "Reset look overrides" keeps them).
-pub const PARAM_IDS: [&str; 2] = ["quality_tier", "quality_auto"];
+/// The parameter ids of the machine settings: the quality ones and the host display's subpixel layout
+/// (`mask_host_subpixel`). [`keep`] copies them; "Reset look overrides" keeps them.
+pub const PARAM_IDS: [&str; 3] = ["quality_tier", "quality_auto", "mask_host_subpixel"];
 
-/// Copies the quality settings of `old` into `new`: a preset change (hotkey or menu) keeps them, as they describe
-/// the machine, not the tube.
+/// Copies the machine settings of `old` into `new` (the quality settings and the host subpixel layout): a preset
+/// change (hotkey or menu) keeps them, as they describe the machine, not the tube.
 pub fn keep(new: &mut Params, old: &Params) {
     new.quality_tier = old.quality_tier;
     new.quality_auto = old.quality_auto;
+    new.mask_host_subpixel = old.mask_host_subpixel;
 }
 
 /// Amplifier sub-samples per source pixel (`FrameConstants::amp_k`) for the tier: `amp_samples` (at least 1) in
@@ -320,6 +322,20 @@ impl AutoQuality {
 
 #[cfg(test)]
 mod tests {
+    /// The host subpixel layout describes the monitor, so a preset change keeps it, like the quality settings.
+    #[test]
+    fn a_preset_change_keeps_the_host_subpixel_layout() {
+        let old = Params {
+            mask_host_subpixel: crate::params::MASK_HOST_SUBPIXEL_BGR,
+            ..Params::default()
+        };
+        let mut new = Params::default();
+        assert_eq!(new.mask_host_subpixel, crate::params::MASK_HOST_SUBPIXEL_OFF);
+        keep(&mut new, &old);
+        assert_eq!(new.mask_host_subpixel, crate::params::MASK_HOST_SUBPIXEL_BGR);
+        assert!(PARAM_IDS.contains(&"mask_host_subpixel"));
+    }
+
     use super::*;
 
     #[test]

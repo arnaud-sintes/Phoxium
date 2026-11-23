@@ -219,3 +219,16 @@ tag = "E"
 source = "PLAN D-16 option C (owner decision 2026-11-19, T-84): a non-physical limit on the mask contrast for SDR. Used only when the headroom mode is mask_depth, chosen or picked by auto (T-84b: auto = mask_depth where the readout has a resolved mask): each channel weight m becomes 1 + depth (m - 1) = mix(1, m, depth). Linear in m, so the field mean of every channel stays exactly 1 (the mask's own mean) and the peak over the mean falls from m_peak to 1 + depth (m_peak - 1); a peak-limiting curve such as min(m, cap) would lose mean. 0.5 is a placeholder midpoint, no source [E]. With the derived exposure (white kept = 1 / (readout x 1.02)) a single depth cannot suit every tube: a mask peak of 3 to 4 at depth 0.5 still keeps only about 40 to 47 % of the intended white, so presets with a resolved mask on the reference host set their own depth (see their notes)"
 description = "Mask depth mode only (also when auto picks it) (NON-PHYSICAL): how much of the mask contrast is kept, 1 = the physical mask, 0 = flat. Lowers the brightest elements so that less exposure reduction is needed in SDR; the mean of a flat field does not change. Damper-wire shadows are made shallower by the same factor."
 group = "Mask"
+
+[[param]]
+id = "mask_host_subpixel"
+stage = "mask"
+type = "enum"
+unit = "1"
+default = "off"
+values = ["off", "rgb", "bgr"]
+tag = "D"
+source = "TODO host LCD subpixel layout; QUESTIONS HW-6 (host subpixel use; the Sony Megatron approach, CRT.md Host-display resolution budget); crt-model mask.rs HostSubpixel. The light of a host pixel's channel comes from the panel's own subpixel: a stripe a third of a pixel wide at (c - 1) / 3 px from the pixel centre on an RGB panel, (1 - c) / 3 on a BGR one (the usual LCD stripe layouts; WOLED and QD-OLED have other layouts and are not covered)"
+description = "Host display subpixel layout. off (default): the mask is averaged over the whole host pixel, the same for the three channels. rgb or bgr: the mask is averaged, for each channel, over the footprint of that channel's own subpixel of the host LCD (a third of a pixel wide, moved by a third of a pixel to either side), so a resolved mask keeps its colour structure at the grain of the panel; the blend band and the prefiltered tier are unchanged at their ends. Set it to the stripe order of your monitor (most LCDs are rgb; check with a close look at white text). It describes the machine, not the tube: a preset change keeps it. Not for WOLED or QD-OLED panels."
+group = "Mask"
+advanced = true

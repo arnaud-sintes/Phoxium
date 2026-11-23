@@ -80,6 +80,34 @@ float mask_box(float code, float period) {
     return mask_prefiltered(code) ? period : code;
 }
 
+// Host LCD subpixels (`mask_host_subpixel`, TODO "host subpixel layout"; crt-model HostSubpixel): the light of
+// a host pixel's channel c comes from the panel's own subpixel c, a stripe a third of a pixel wide centred
+// (c - 1) / 3 px from the pixel centre on an RGB panel, (1 - c) / 3 on a BGR one. With the layout set, the
+// value of channel c is the area mean of the mask over that subpixel's footprint instead of over the whole
+// pixel: the same box moved by the offset and narrowed to a third of a pixel when it is the host pixel, so the
+// mask is resolved at the panel's own sub-element grain. Off: no offset, the footprint is as before, bit for bit.
+vec3 mask_subpixel_shift() {
+    switch (params.mask_host_subpixel) {
+    case MASK_HOST_SUBPIXEL_RGB:
+        return vec3(-1.0, 0.0, 1.0) / 3.0;
+    case MASK_HOST_SUBPIXEL_BGR:
+        return vec3(1.0, 0.0, -1.0) / 3.0;
+    default:
+        return vec3(0.0);
+    }
+}
+
+// Width in host px of the horizontal footprint of a channel: the box `bx` of the tier (code `code`, period
+// `period` px), narrowed by two thirds of a pixel at the host pixel (1 px: a third) and by nothing at the
+// whole period, linearly in the blend band, so it stays continuous with the prefiltered end. Layout off: bx.
+float mask_subpixel_width(float code, float bx, float period) {
+    if (params.mask_host_subpixel == MASK_HOST_SUBPIXEL_OFF || mask_prefiltered(code)) {
+        return bx;
+    }
+    float t = period > 1.0 ? clamp((period - bx) / (period - 1.0), 0.0, 1.0) : 1.0;
+    return bx - (2.0 / 3.0) * t;
+}
+
 // Position of the left edge of host column `qx` inside its triad, in triad pitches, [0, 1): fract(qx / ppt)
 // without rounding drift. ppt = m 2^-s with m its 24-bit mantissa; qx 2^s - k m is computed modulo 2^32 with
 // unsigned integers, which is exact because the true remainder is below 2^25 in magnitude (k = floor(qx / ppt)
@@ -119,9 +147,10 @@ float mask_centred_phase(int q, int size, float period) {
 // Aperture grille, column term: area mean of the three stripe trains over [a, a + width] (triad pitches, a the
 // left edge of the pixel inside its triad), divided by the coverage `fill`. Closed form of crt-model
 // train_integral: whole pulses between the two ends, plus the pulse cumulative at each end measured from the
-// nearest stripe centre. Needs fill + soft <= 1 / 3 and soft <= fill (mask_grille limits them).
-vec3 mask_grille_columns(float a, float width, float fill, float soft) {
-    vec3 ta = a - MASK_STRIPE_CENTRE;
+// nearest stripe centre. `shift`: per-channel offset of the box, in triad pitches (host subpixels). Needs
+// fill + soft <= 1 / 3 and soft <= fill (mask_grille limits them).
+vec3 mask_grille_columns(float a, vec3 shift, float width, float fill, float soft) {
+    vec3 ta = a + shift - MASK_STRIPE_CENTRE;
     vec3 tb = ta + width;
     vec3 ka = floor(ta + 0.5);
     vec3 kb = floor(tb + 0.5);
@@ -171,9 +200,10 @@ vec3 mask_grille(ivec2 q) {
     float fill = clamp(params.mask_stripe_fill, 1e-4, 1.0 / 3.0);
     float soft = clamp(params.mask_edge_softness, 0.0, min(fill, 1.0 / 3.0 - fill));
     // Box of bx px centred on the pixel: its left end is (1 - bx) / 2 px from the pixel's (0 for the pixel).
-    float bx = frame.mask_box_px.x;
+    // Host subpixels: the box is narrowed and moved to each channel's subpixel (mask_subpixel_width).
+    float bx = mask_subpixel_width(frame.mask_box_px.x, frame.mask_box_px.x, ppt);
     float a = mask_centred_phase(q.x, frame.tube_size.x, ppt) + 0.5 * (1.0 - bx) / ppt;
-    return mask_grille_columns(a, bx / ppt, fill, soft) * rows;
+    return mask_grille_columns(a, mask_subpixel_shift() / ppt, bx / ppt, fill, soft) * rows;
 }
 
 // ---- Slot mask (T-39b) -------------------------------------------------------------------------------------
@@ -224,12 +254,15 @@ vec3 mask_slot(ivec2 q) {
 
     // Columns, in units of two triads: even columns hold their stripes at centre / 2, odd ones at (1 + centre) / 2.
     // Footprint: a box of bx px centred on the pixel (one triad when prefiltered horizontally).
-    float bx = mask_box(frame.mask_box_px.x, ppt);
+    // Host subpixels: the box of each channel is narrowed and moved (mask_subpixel_width, mask_subpixel_shift),
+    // which moves the stripe centres the other way.
+    float bx = mask_subpixel_width(frame.mask_box_px.x, mask_box(frame.mask_box_px.x, ppt), ppt);
     float a2 = mask_centred_phase(q.x, frame.tube_size.x, 2.0 * ppt) + 0.5 * (1.0 - bx) / (2.0 * ppt);
     float w2 = 0.5 * bx / ppt;
     float s2 = 0.5 * soft / ppt;
-    vec3 even = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE, 0.5 * fill, s2), 0.0) / w2;
-    vec3 odd = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE + 0.5, 0.5 * fill, s2), 0.0) / w2;
+    vec3 shift2 = mask_subpixel_shift() / (2.0 * ppt);
+    vec3 even = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE - shift2, 0.5 * fill, s2), 0.0) / w2;
+    vec3 odd = max(mask_train(a2, w2, 0.5 * MASK_STRIPE_CENTRE + 0.5 - shift2, 0.5 * fill, s2), 0.0) / w2;
 
     // Rows, in slot periods: mean over the footprint's rows of 1 - bridges, bridges centred on 0 (even) or 1/2
     // (odd). Prefiltered vertically (a box of V): 1 - bridge for both phases, in closed form.
@@ -375,8 +408,9 @@ vec3 mask_delta(ivec2 q) {
         return vec3(1.0);
     }
     // Footprint: a box of bx x by px centred on the pixel (cell / 2 or P when that axis is prefiltered).
-    float bx = mask_box(frame.mask_box_px.x, 0.5 * cell);
+    float bx = mask_subpixel_width(frame.mask_box_px.x, mask_box(frame.mask_box_px.x, 0.5 * cell), 0.5 * cell);
     float by = mask_box(frame.mask_box_px.y, pp);
+    vec3 shift = mask_subpixel_shift();
     float a = cell / 3.0;
     float dot_px = clamp(params.mask_dot_fill, 1e-4, 1.0 / MASK_SQRT3) * pp;
     // crt-model validate(): edge <= dot, dot + edge <= a.
@@ -388,7 +422,6 @@ vec3 mask_delta(ivec2 q) {
     // Pixel footprint inside its lattice cell, exact phases.
     float x0 = mask_centred_phase(q.x, frame.tube_size.x, cell) * cell + 0.5 * (1.0 - bx);
     float y0 = mask_centred_phase(q.y, frame.tube_size.y, pp) * pp + 0.5 * (1.0 - by);
-    float x1 = x0 + bx;
     float y1 = y0 + by;
 
     vec3 sum = vec3(0.0);
@@ -400,13 +433,16 @@ vec3 mask_delta(ivec2 q) {
             continue;
         }
         for (int c = 0; c < 3; c++) {
-            // Dots of colour c in row j: x = (c + 1.5 j) a + m cell.
+            // Dots of colour c in row j: x = (c + 1.5 j) a + m cell. The footprint is moved to the channel's
+            // host subpixel (shift[c] px, 0 when the layout is off).
             float xc = (float(c) + 1.5 * float(j)) * a;
-            int m0 = int(ceil((x0 - rmax - xc) / cell)) - 1;
-            int m1 = min(int(floor((x1 + rmax - xc) / cell)) + 1, m0 + MASK_MAX_DOTS_PER_ROW);
+            float xl = x0 + shift[c];
+            float xr = xl + bx;
+            int m0 = int(ceil((xl - rmax - xc) / cell)) - 1;
+            int m1 = min(int(floor((xr + rmax - xc) / cell)) + 1, m0 + MASK_MAX_DOTS_PER_ROW);
             for (int m = m0; m <= m1; m++) {
                 float cx = xc + float(m) * cell;
-                sum[c] += mask_soft_dot(x0 - cx, x1 - cx, y0 - cy, y1 - cy, r, soft);
+                sum[c] += mask_soft_dot(xl - cx, xr - cx, y0 - cy, y1 - cy, r, soft);
             }
         }
     }

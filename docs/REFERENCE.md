@@ -250,6 +250,15 @@ Global hotkeys are registered with `RegisterHotKey` on the output window (no key
 - Every parameter (id, unit, default, range, confidence tag, source, description) is declared in `params\*.toml`, one file per stage. `--set id=value` of `render` takes those ids.
 - Without `--preset`, the live app starts from the preset named in `%APPDATA%\Phoxium\settings.toml` (else the parameter defaults), with the parameter overrides stored in that file on top.
 
+### Host LCD subpixel layout (Mask panel, `mask_host_subpixel`)
+
+An LCD pixel is three vertical stripes, one per colour, each a third of a pixel wide: red, green, blue from left to right on most monitors (`rgb`), the other way round on some (`bgr`). By default the mask is averaged over the whole host pixel, the same for the three channels (`off`). With the layout set to `rgb` or `bgr` (Mask panel, Advanced), the value of each channel is averaged over the footprint of that channel's own subpixel, a third of a pixel wide and moved by a third of a pixel to its side, so a resolved mask keeps its colour structure at the grain of the panel and the light of each stripe is computed where it is really emitted. In the blend band the footprint narrows from one whole period (prefiltered end, unchanged: the mask averages out there) to the third of a pixel, so nothing steps.
+
+- Set it to the stripe order of your monitor (a close look at white text on a white-on-black page shows it). It describes the machine, not the tube: a preset change and **Reset look overrides** keep it, as they keep the quality settings. It is saved with the other parameter overrides.
+- The tier thresholds are unchanged (3 px per triad horizontally): the layout changes what a resolved mask looks like, it does not make a mask resolvable that the rule prefilters. The headroom readout follows it: a narrower footprint lifts the brightest stripe of a resolved mask to 1 / fill, where a whole pixel falls short of it.
+- Not for WOLED or QD-OLED panels (other subpixel layouts), nor for a vertical or rotated panel. The picture is made for the screen: a snapshot or a screenshot shows the colour fringes of the layout and looks wrong on another monitor.
+- Checked: the CPU oracle (`crt-model` `host_value_subpixel`) and the GPU for the three mask types, both layouts, through the prefiltered tier, the blend band and the area integral. Not checked by eye on a real RGB or BGR panel.
+
 ### Colour fringes (chromatic aberration)
 
 A real tube shows coloured fringes because its three beams never land exactly on the same spot (imperfect convergence): red and blue end up slightly apart, usually on opposite sides of green, more toward the edges. The settings menu has a **Chromatic aberration** group in the Geometry panel for that, off by default (both amounts 0 give exactly the picture without it):

@@ -88,12 +88,12 @@ mod common;
 use std::ops::Range;
 
 use crt_model::mask::{
-    alias_period_px, damper_positions_mm, tier, AxisTier, Grille, Mask, Rect, Tier, BARTEN_THRESHOLD,
+    alias_period_px, damper_positions_mm, tier, AxisTier, Grille, HostSubpixel, Mask, Rect, Tier, BARTEN_THRESHOLD,
 };
 use phoxium::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    ParamValue, Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA,
-    MASK_TYPE_SLOT_MASK, OUTPUT_HEADROOM_MODE_CLIP,
+    ParamValue, Params, MASK_HOST_SUBPIXEL_BGR, MASK_HOST_SUBPIXEL_RGB, MASK_TIER_AUTO, MASK_TIER_INTEGRATED,
+    MASK_TIER_PREFILTERED, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, OUTPUT_HEADROOM_MODE_CLIP,
 };
 
 /// The defaults with the headroom mode pinned to `clip`: the default `auto` (T-84b) lowers the mask contrast
@@ -790,6 +790,69 @@ fn damper_wires_dim_their_host_row() {
                 .map(|(y, _)| format!("row {y}: {:.4}", mean(&row(&got, w, *y, 1, 0..(w / period) * period))))
                 .collect();
             println!("{what}: {}", dim.join(", "));
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Host LCD subpixels (`mask_host_subpixel`), the grille at the tiers of the rule: every pixel and channel
+/// equals the oracle's `host_value_subpixel` on both layouts, with and without damper wires, from the
+/// prefiltered tier (1.55 px per triad: the layout changes nothing there) through the blend band (2.9, 3.0,
+/// 3.1) to the area integral (3.5, 4.0, 7.3 px per triad), at every beam current. A narrower footprint
+/// resolves what the pixel could not: at 3.5 px per triad the brightest element is above the whole-pixel one.
+#[test]
+fn host_subpixel_layouts_follow_the_oracle() {
+    let test = "stage_mask_grille host subpixel";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let (w, h) = (192_u32, 24_u32);
+    for (layout, sub) in [
+        (MASK_HOST_SUBPIXEL_RGB, HostSubpixel::Rgb),
+        (MASK_HOST_SUBPIXEL_BGR, HostSubpixel::Bgr),
+    ] {
+        for (ppt, wires) in [
+            (1.55_f32, 0),
+            (2.9, 0),
+            (3.0, 2),
+            (3.1, 0),
+            (3.5, 2),
+            (4.0, 0),
+            (7.3, 1),
+        ] {
+            let fc = tube(w, h, 4.0);
+            let p = Params {
+                mask_pitch_mm: ppt / 4.0,
+                mask_tier: MASK_TIER_AUTO,
+                mask_damper_count: wires,
+                mask_host_subpixel: layout,
+                tube_visible_height_mm: h as f32 / 4.0,
+                ..physical_mask()
+            };
+            let mask = oracle(&fc, &p);
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            let what = format!("{test} {sub:?} {ppt} px per triad, {wires} wires: {tiers:?}");
+            let want = oracle_image(&fc, |c, q| mask.host_value_subpixel(c, q, tiers, 1.0, sub));
+            let got = assert_matches(&mut gpu, &what, fc, &p, &want);
+            if ppt == 3.5 {
+                let off = Params {
+                    mask_host_subpixel: 0,
+                    ..p
+                };
+                let plain = mask_image(&mut gpu, fc, &off, 1.0);
+                let peak = |img: &[[f64; 3]]| img.iter().flatten().fold(0.0_f64, |a, b| a.max(*b));
+                println!(
+                    "{what}: peak {:.3} against {:.3} without the layout",
+                    peak(&got),
+                    peak(&plain)
+                );
+                assert!(
+                    peak(&got) > peak(&plain) + 0.1,
+                    "{what}: the subpixel footprint resolves more"
+                );
+            }
         }
     }
     drop(gpu);

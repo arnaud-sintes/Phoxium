@@ -44,7 +44,7 @@ use crate::params::{
     Params, OUTPUT_HEADROOM_MODE_AUTO, OUTPUT_HEADROOM_MODE_CLIP, OUTPUT_HEADROOM_MODE_MASK_DEPTH,
     OUTPUT_HEADROOM_MODE_PHYSICAL, OUTPUT_HEADROOM_MODE_SHOULDER,
 };
-use crate::placement::{mask_model, mask_tiers};
+use crate::placement::{host_subpixel, mask_model, mask_tiers};
 
 /// A readout this close above 1 counts as 1 in the automatic shoulder: the rows of a colour matrix between two
 /// equal whites sum to 1 only within float noise (1e-7), as the clip counters' CLIP_EPS of `output.glsl`.
@@ -72,7 +72,7 @@ pub fn headroom(params: &Params, px_per_mm: f32, line_pitch_mm: f32, screen: boo
     let placed = screen && ppm.is_finite() && ppm > 0.0;
     let pixel_mm = if placed { 1.0 / ppm } else { 0.0 };
     let mask_peak_physical = if placed && params.mask_enabled {
-        let v = mask_model(params).peak_value(mask_tiers(px_per_mm, params), pixel_mm);
+        let v = mask_model(params).peak_value_subpixel(mask_tiers(px_per_mm, params), pixel_mm, host_subpixel(params));
         if v.is_finite() {
             v.max(1.0)
         } else {
@@ -261,6 +261,33 @@ mod tests {
         assert_eq!(headroom(&p, ppm, 380.0 / 240.0, true).mask_peak, h.mask_peak_physical);
         assert!(p.set("output_headroom_mode", ParamValue::Enum(OUTPUT_HEADROOM_MODE_CLIP)));
         assert_eq!(OutputTransform::new(&p, &h), OutputTransform::clip(&p));
+    }
+
+    /// Host subpixels: a third-of-a-pixel footprint reaches the stripe's own 1 / fill where a whole pixel cannot
+    /// (grille at 3.5 px per triad: plateau 0.63 px), so the readout, and the exposure derived from it, follow
+    /// the layout; the layout off is the earlier readout.
+    #[test]
+    fn the_host_subpixel_layout_raises_the_mask_peak_in_the_readout() {
+        let mut p = Params::default();
+        let ppm = 1440.0_f32 / 380.0;
+        for (id, v) in [
+            ("mask_pitch_mm", ParamValue::F32(3.5 / ppm)),
+            ("mask_tier", ParamValue::Enum(crate::params::MASK_TIER_INTEGRATED)),
+            ("mask_stripe_fill", ParamValue::F32(0.25)),
+            ("mask_edge_softness", ParamValue::F32(0.07)),
+        ] {
+            assert!(p.set(id, v), "{id}");
+        }
+        let off = headroom(&p, ppm, 380.0 / 240.0, true).mask_peak_physical;
+        assert!(off < 3.8, "{off}");
+        for layout in [
+            crate::params::MASK_HOST_SUBPIXEL_RGB,
+            crate::params::MASK_HOST_SUBPIXEL_BGR,
+        ] {
+            assert!(p.set("mask_host_subpixel", ParamValue::Enum(layout)));
+            let on = headroom(&p, ppm, 380.0 / 240.0, true).mask_peak_physical;
+            assert!((on - 4.0).abs() < 1e-6, "{on}");
+        }
     }
 
     /// T-84b: `auto` (the default) is mask_depth where the physical mask peak is above 1 and shoulder where it

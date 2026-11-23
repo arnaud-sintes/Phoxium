@@ -83,12 +83,13 @@ mod common;
 use std::ops::Range;
 
 use crt_model::mask::{
-    alias_period_px, readouts, tier, AxisTier, AxisTiers, Delta, Grille, Mask, Rect, Slot, Tier, BARTEN_THRESHOLD,
+    alias_period_px, readouts, tier, AxisTier, AxisTiers, Delta, Grille, HostSubpixel, Mask, Rect, Slot, Tier,
+    BARTEN_THRESHOLD,
 };
 use phoxium::gpu::{Domain, FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    Params, MASK_TIER_AUTO, MASK_TIER_INTEGRATED, MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK,
-    OUTPUT_HEADROOM_MODE_CLIP,
+    Params, MASK_HOST_SUBPIXEL_BGR, MASK_HOST_SUBPIXEL_RGB, MASK_TIER_AUTO, MASK_TIER_INTEGRATED,
+    MASK_TYPE_APERTURE_GRILLE, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, OUTPUT_HEADROOM_MODE_CLIP,
 };
 
 /// The defaults with the headroom mode pinned to `clip`: the default `auto` (T-84b) lowers the mask contrast
@@ -251,6 +252,14 @@ impl Oracle {
 
     fn area_image(&self, fc: &FrameConstants) -> Vec<[f64; 3]> {
         self.image(fc, |c, x, y| self.area_mean(c, x, y))
+    }
+
+    /// The oracle's `host_value_subpixel` of every pixel on a host LCD of layout `sub`.
+    fn host_subpixel_image(&self, fc: &FrameConstants, tiers: AxisTiers, sub: HostSubpixel) -> Vec<[f64; 3]> {
+        self.image(fc, |c, x, y| {
+            let q = self.rect(f64::from(x), f64::from(y), 1.0, 1.0);
+            self.mask.host_value_subpixel(c, &q, tiers, 1.0, sub)
+        })
     }
 
     /// The oracle's `host_value` of every pixel under the per-axis tiers `tiers` (T-39c). Host px are the
@@ -1040,6 +1049,47 @@ fn per_axis_tiers_follow_the_oracle() {
                 kind_name(kind)
             );
             assert!(before > BARTEN_THRESHOLD && after < BARTEN_THRESHOLD / 4.0);
+        }
+    }
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// Host LCD subpixels (`mask_host_subpixel`) on the slot mask and the delta dot mask, RGB and BGR panels, at
+/// the tiers of the rule: horizontal prefiltered with the rows integrated (slot, 2.7 px per triad, period 1.6),
+/// horizontal blended (delta 3.1), both integrated (slot 4.8 and 6.0, delta 4.0 and 5.5). Every pixel and channel
+/// equals the oracle's `host_value_subpixel`.
+#[test]
+fn host_subpixel_layouts_follow_the_oracle() {
+    let test = "stage_mask_slot_delta host subpixel";
+    let Some(mut gpu) = common::gpu_or_skip(test) else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let size = (96_u32, 48_u32);
+    let cases: [(u32, f64, f32); 6] = [
+        (MASK_TYPE_SLOT_MASK, 2.7, 1.6),
+        (MASK_TYPE_SLOT_MASK, 4.8, 0.8333),
+        (MASK_TYPE_SLOT_MASK, 6.0, 0.8333),
+        (MASK_TYPE_DELTA, 3.1, 0.8333),
+        (MASK_TYPE_DELTA, 4.0, 0.8333),
+        (MASK_TYPE_DELTA, 5.5, 0.8333),
+    ];
+    for (layout, sub) in [
+        (MASK_HOST_SUBPIXEL_RGB, HostSubpixel::Rgb),
+        (MASK_HOST_SUBPIXEL_BGR, HostSubpixel::Bgr),
+    ] {
+        for (kind, ppt, period) in cases {
+            let (fc, base) = at_density(kind, ppt, size);
+            let p = Params {
+                mask_slot_period: period,
+                mask_host_subpixel: layout,
+                ..base
+            };
+            let tiers = mask_tiers(fc.px_per_mm, &p);
+            let what = format!("{test} {} {sub:?} {ppt} px per triad: {tiers:?}", kind_name(kind));
+            let oracle = Oracle::new(&fc, &p);
+            assert_matches(&mut gpu, &what, fc, &p, &oracle.host_subpixel_image(&fc, tiers, sub));
         }
     }
     drop(gpu);

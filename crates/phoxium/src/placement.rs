@@ -45,12 +45,13 @@
 
 use std::fmt;
 
-use crt_model::mask::{AxisTier, AxisTiers, Delta, Grille, Mask, Slot, TierMode, TierRule};
+use crt_model::mask::{AxisTier, AxisTiers, Delta, Grille, HostSubpixel, Mask, Slot, TierMode, TierRule};
 
 use crate::gpu::FrameConstants;
 use crate::params::{
-    Params, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED, MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE,
-    SOURCE_SCALE_MODE_FIT, SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER, SOURCE_SCALE_MODE_NATIVE,
+    Params, MASK_HOST_SUBPIXEL_BGR, MASK_HOST_SUBPIXEL_RGB, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED,
+    MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE, SOURCE_SCALE_MODE_FIT, SOURCE_SCALE_MODE_FIT_FREE,
+    SOURCE_SCALE_MODE_INTEGER, SOURCE_SCALE_MODE_NATIVE,
 };
 
 /// How the picture takes its shape on the tube (`params.raster_aspect`, `params.source_display_aspect`).
@@ -433,6 +434,15 @@ pub fn mask_tier_rule(p: &Params) -> TierRule {
             _ => TierMode::Auto,
         },
         blend: f64::from(p.mask_tier_blend),
+    }
+}
+
+/// The host LCD subpixel layout of the parameter table (`mask_host_subpixel`).
+pub fn host_subpixel(p: &Params) -> HostSubpixel {
+    match p.mask_host_subpixel {
+        MASK_HOST_SUBPIXEL_RGB => HostSubpixel::Rgb,
+        MASK_HOST_SUBPIXEL_BGR => HostSubpixel::Bgr,
+        _ => HostSubpixel::Off,
     }
 }
 

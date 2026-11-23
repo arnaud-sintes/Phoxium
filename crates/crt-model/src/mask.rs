@@ -191,6 +191,48 @@ impl Default for TierRule {
     }
 }
 
+/// Subpixel layout of the host LCD (`mask_host_subpixel`). The light of a host pixel's channel c comes from the
+/// panel's own subpixel c: a stripe a third of a pixel wide, centred [`HostSubpixel::offset_px`] from the pixel
+/// centre. [D] (the usual LCD stripe layouts; WOLED and QD-OLED are not covered).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HostSubpixel {
+    /// No layout: the mask is averaged over the whole pixel, the same for the three channels.
+    #[default]
+    Off,
+    /// Red left, green centre, blue right.
+    Rgb,
+    /// Blue left, green centre, red right.
+    Bgr,
+}
+
+impl HostSubpixel {
+    /// Horizontal offset in host px of the subpixel of channel `c` (0 red, 1 green, 2 blue) from the pixel centre.
+    pub fn offset_px(self, c: usize) -> f64 {
+        let k = c as f64 - 1.0;
+        match self {
+            HostSubpixel::Off => 0.0,
+            HostSubpixel::Rgb => k / 3.0,
+            HostSubpixel::Bgr => -k / 3.0,
+        }
+    }
+
+    /// Width in host px of the horizontal footprint of a channel, for a tier box `box_px` whose whole-period
+    /// box is `period_px`: the host pixel (1 px) becomes a third of a pixel, the whole period stays, and the
+    /// blend band narrows linearly between, so the footprint is continuous with the prefiltered end.
+    /// `prefiltered`: the tier is the whole period, which is kept as it is. Off: `box_px`.
+    pub fn width_px(self, box_px: f64, period_px: f64, prefiltered: bool) -> f64 {
+        if self == HostSubpixel::Off || prefiltered {
+            return box_px;
+        }
+        let t = if period_px > 1.0 {
+            ((period_px - box_px) / (period_px - 1.0)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        box_px - 2.0 / 3.0 * t
+    }
+}
+
 /// How one axis of the mask is brought to host pixels (T-39c).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum AxisTier {
@@ -727,6 +769,36 @@ impl Mask {
         }
     }
 
+    /// Footprint of channel `c` of host pixel `q` on a host LCD of layout `sub` (`mask_host_subpixel`): the
+    /// horizontal box of [`Mask::footprint`] narrowed ([`HostSubpixel::width_px`]) and moved to the subpixel
+    /// of the channel ([`HostSubpixel::offset_px`]); the vertical box is unchanged. `Off` is the footprint.
+    pub fn subpixel_footprint(&self, c: usize, q: &Rect, tiers: AxisTiers, px_mm: f64, sub: HostSubpixel) -> Rect {
+        let f = self.footprint(q, tiers, px_mm);
+        if sub == HostSubpixel::Off {
+            return f;
+        }
+        let w = sub.width_px(
+            (f.x1 - f.x0) / px_mm,
+            self.triad_pitch_mm() / px_mm,
+            tiers.horizontal == AxisTier::Prefiltered,
+        ) * px_mm;
+        let cx = 0.5 * (f.x0 + f.x1) + sub.offset_px(c) * px_mm;
+        Rect::new(cx - 0.5 * w, f.y0, cx + 0.5 * w, f.y1)
+    }
+
+    /// [`Mask::host_value`] on a host LCD of layout `sub`: the area mean over the channel's own
+    /// [`Mask::subpixel_footprint`]. The fully prefiltered case (the closed form, no horizontal dependence)
+    /// is unchanged; `Off` is `host_value`.
+    pub fn host_value_subpixel(&self, c: usize, q: &Rect, tiers: AxisTiers, px_mm: f64, sub: HostSubpixel) -> f64 {
+        let prefiltered = tiers.horizontal == AxisTier::Prefiltered
+            && (tiers.vertical == AxisTier::Prefiltered || matches!(self, Mask::Grille(_)));
+        if sub == HostSubpixel::Off || prefiltered {
+            self.host_value(c, q, tiers, px_mm)
+        } else {
+            self.area_mean(c, &self.subpixel_footprint(c, q, tiers, px_mm, sub))
+        }
+    }
+
     /// Largest host-pixel value [`Mask::host_value`] of a flat white field under `tiers`, over the three
     /// channels and every pixel phase, for host pixels of `px_mm` mask units (T-84 headroom readout, audit B1).
     /// The value of a channel is its area mean over coverage, so its mean over the phase is 1 and this peak
@@ -735,6 +807,13 @@ impl Mask {
     /// each colour (where a box-filtered symmetric element peaks) and a 24 x 24 grid over one period of the
     /// pattern (a guard for overlapping boxes); damper wires only lower the value and are not modelled here. [D]
     pub fn peak_value(&self, tiers: AxisTiers, px_mm: f64) -> f64 {
+        self.peak_value_subpixel(tiers, px_mm, HostSubpixel::Off)
+    }
+
+    /// [`Mask::peak_value`] on a host LCD of layout `sub`: the pixels searched are those whose own subpixel of
+    /// the channel is centred on an element, and the narrower footprint lifts the peak of a resolved stripe
+    /// (up to 1 / fill, where a whole pixel box falls short of it).
+    pub fn peak_value_subpixel(&self, tiers: AxisTiers, px_mm: f64, sub: HostSubpixel) -> f64 {
         let (period_x, period_y) = match self {
             Mask::Grille(g) => (g.pitch_mm, px_mm),
             Mask::Slot(m) => (2.0 * m.pitch_mm, m.slot_period_mm),
@@ -742,7 +821,7 @@ impl Mask {
         };
         let at = |c: usize, x: f64, y: f64| {
             let q = Rect::new(x - 0.5 * px_mm, y - 0.5 * px_mm, x + 0.5 * px_mm, y + 0.5 * px_mm);
-            self.host_value(c, &q, tiers, px_mm)
+            self.host_value_subpixel(c, &q, tiers, px_mm, sub)
         };
         let mut peak: f64 = 0.0;
         for c in 0..3 {
@@ -755,7 +834,7 @@ impl Mask {
                     (x, y)
                 }
             };
-            peak = peak.max(at(c, cx, cy));
+            peak = peak.max(at(c, cx - sub.offset_px(c) * px_mm, cy));
             const N: usize = 24;
             // The grille's value does not depend on y (no dampers here): one row is enough.
             let rows = if matches!(self, Mask::Grille(_)) { 1 } else { N };
@@ -1744,5 +1823,154 @@ mod tests {
             seg,
             1e-12
         ));
+    }
+
+    // ---- Host LCD subpixels (`mask_host_subpixel`). Masks in host px as above.
+
+    /// Offsets by hand: RGB panel R -1/3, G 0, B +1/3 px from the pixel centre; BGR the mirror; off 0. Widths:
+    /// the host pixel (1 px) becomes 1/3, the whole period (prefiltered) stays, the blend band is linear
+    /// (period 3, box 2.5: t = 0.25, 2.5 - 2/3 x 0.25 = 2.3333); a period of 1 px or less is the third as well.
+    #[test]
+    fn host_subpixel_offsets_and_widths() {
+        let third = 1.0 / 3.0;
+        for (sub, want) in [
+            (HostSubpixel::Off, [0.0, 0.0, 0.0]),
+            (HostSubpixel::Rgb, [-third, 0.0, third]),
+            (HostSubpixel::Bgr, [third, 0.0, -third]),
+        ] {
+            for (c, w) in want.iter().enumerate() {
+                assert!(close(sub.offset_px(c), *w, 1e-15), "{sub:?} {c}");
+            }
+        }
+        let rgb = HostSubpixel::Rgb;
+        assert!(close(rgb.width_px(1.0, 4.0, false), third, 1e-15));
+        assert!(close(rgb.width_px(3.0, 3.0, true), 3.0, 1e-15));
+        assert!(
+            close(rgb.width_px(3.0, 3.0, false), 3.0, 1e-15),
+            "band lower edge: the whole period"
+        );
+        assert!(close(rgb.width_px(2.5, 3.0, false), 2.5 - 2.0 / 3.0 * 0.25, 1e-15));
+        assert!(close(rgb.width_px(1.0, 0.8, false), third, 1e-15));
+        assert!(close(HostSubpixel::Off.width_px(1.0, 4.0, false), 1.0, 1e-15));
+    }
+
+    /// Layout off is `host_value`, bit for bit, for the three types and the three tiers.
+    #[test]
+    fn host_subpixel_off_is_the_host_value() {
+        let auto = TierRule::default();
+        for m in [
+            grille_px(2.0),
+            grille_px(3.0),
+            grille_px(5.0),
+            slot_px(5.0, 0.8333),
+            delta_px(5.0),
+        ] {
+            let tiers = m.axis_tiers(1.0, auto);
+            for k in 0..40 {
+                let x = 0.173 * k as f64;
+                let q = Rect::new(x, 0.3 + 0.11 * k as f64, x + 1.0, 1.3 + 0.11 * k as f64);
+                for c in 0..3 {
+                    assert_eq!(
+                        m.host_value_subpixel(c, &q, tiers, 1.0, HostSubpixel::Off),
+                        m.host_value(c, &q, tiers, 1.0)
+                    );
+                }
+            }
+        }
+    }
+
+    /// The footprint of an RGB panel by hand: grille at 4 px per triad (integrated), pixel [10, 11): red
+    /// [10, 10 + 1/3], green [10 + 1/3, 10 + 2/3], blue [10 + 2/3, 11]; BGR swaps the outer two. The
+    /// vertical box is the pixel's.
+    #[test]
+    fn host_subpixel_footprint_is_the_panels_own_stripe() {
+        let m = grille_px(4.0);
+        let tiers = m.axis_tiers(1.0, TierRule::default());
+        let q = Rect::new(10.0, 2.0, 11.0, 3.0);
+        let third = 1.0 / 3.0;
+        for (sub, order) in [(HostSubpixel::Rgb, [0, 1, 2]), (HostSubpixel::Bgr, [2, 1, 0])] {
+            for c in 0..3 {
+                let f = m.subpixel_footprint(c, &q, tiers, 1.0, sub);
+                let k = order.iter().position(|&o| o == c).unwrap() as f64;
+                assert!(close(f.x0, 10.0 + k * third, 1e-12), "{sub:?} {c}");
+                assert!(close(f.x1, 10.0 + (k + 1.0) * third, 1e-12), "{sub:?} {c}");
+                assert_eq!((f.y0, f.y1), (2.0, 3.0));
+            }
+        }
+    }
+
+    /// A narrower footprint resolves a thinner stripe: at 3.5 px per triad the plateau of a stripe (0.18 x 3.5 =
+    /// 0.63 px) is narrower than a pixel, so the whole-pixel peak is below 1 / fill = 4, while a third of a
+    /// pixel centred on a stripe reaches it. Fully prefiltered the layout changes nothing.
+    #[test]
+    fn host_subpixel_resolves_thinner_stripes_and_keeps_the_prefiltered_tier() {
+        let m = grille_px(3.5);
+        let tiers = m.axis_tiers(1.0, TierRule::default());
+        let off = m.peak_value(tiers, 1.0);
+        assert!(off < 3.8, "whole pixel {off}");
+        for sub in [HostSubpixel::Rgb, HostSubpixel::Bgr] {
+            let p = m.peak_value_subpixel(tiers, 1.0, sub);
+            assert!(close(p, 4.0, 1e-9), "{sub:?} {p}");
+        }
+        let low = grille_px(2.5);
+        let t = low.axis_tiers(1.0, TierRule::default());
+        assert_eq!(t.horizontal, AxisTier::Prefiltered);
+        for c in 0..3 {
+            let q = Rect::new(7.3, 0.0, 8.3, 1.0);
+            assert_eq!(
+                low.host_value_subpixel(c, &q, t, 1.0, HostSubpixel::Rgb),
+                low.host_value(c, &q, t, 1.0)
+            );
+        }
+    }
+
+    /// No hidden gain: the mean over the phases of a flat field is 1 per channel for the three types and
+    /// both layouts (a box average keeps the mean of the pattern), 4 px per triad.
+    #[test]
+    fn host_subpixel_keeps_the_field_mean() {
+        let auto = TierRule::default();
+        for m in [grille_px(4.0), slot_px(4.0, 0.8333), delta_px(4.0)] {
+            let tiers = m.axis_tiers(1.0, auto);
+            for sub in [HostSubpixel::Rgb, HostSubpixel::Bgr] {
+                for c in 0..3 {
+                    let (nx, ny) = (96, 24);
+                    let (px, py) = (8.0, m.vertical_box_mm().unwrap_or(1.0).max(1.0) * 2.0);
+                    let mut sum = 0.0;
+                    for j in 0..ny {
+                        for i in 0..nx {
+                            let (x, y) = (px * (i as f64 + 0.5) / nx as f64, py * (j as f64 + 0.5) / ny as f64);
+                            sum += m.host_value_subpixel(c, &Rect::new(x, y, x + 1.0, y + 1.0), tiers, 1.0, sub);
+                        }
+                    }
+                    let mean = sum / (nx * ny) as f64;
+                    assert!(close(mean, 1.0, 0.02), "{m:?} {sub:?} {c}: {mean}");
+                }
+            }
+        }
+    }
+
+    /// The footprint is continuous across the tier band: just over the prefiltered end the value is the
+    /// prefiltered one (1), just under the integrated end it is the integrated one (a third of a pixel).
+    #[test]
+    fn host_subpixel_is_continuous_across_the_band() {
+        let sub = HostSubpixel::Rgb;
+        let value = |ppt: f64, c: usize, x: f64| {
+            let m = grille_px(ppt);
+            let tiers = m.axis_tiers(1.0, TierRule::default());
+            m.host_value_subpixel(c, &Rect::new(x, 0.0, x + 1.0, 1.0), tiers, 1.0, sub)
+        };
+        for c in 0..3 {
+            for k in 0..20 {
+                let x = 0.37 * k as f64;
+                assert!(
+                    close(value(2.8 + 1e-6, c, x), value(2.8, c, x), 1e-4),
+                    "lower edge {c} {x}"
+                );
+                assert!(
+                    close(value(3.2 - 1e-6, c, x), value(3.2, c, x), 1e-4),
+                    "upper edge {c} {x}"
+                );
+            }
+        }
     }
 }

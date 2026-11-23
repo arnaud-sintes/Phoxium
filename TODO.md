@@ -8,7 +8,6 @@ _(empty)_
 
 ## High
 
-- [ ] Host LCD subpixel layout (RGB/BGR) for resolving the mask.
 - [ ] Performance: phosphor history bandwidth, curved-tube `screen` stage (PRF-1); re-measure first, 60 fps is a target, not a gate.
 
 ## Medium
