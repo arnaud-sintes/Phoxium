@@ -217,9 +217,30 @@ pub fn run() -> Res<()> {
     // `ask_at_start` is off and it runs, else none (the picker).
     let initial: Option<sources::WindowEntry> = if synthetic {
         None
-    } else if let Some(needle) = args.window.as_deref() {
-        let source = sources::find_by_title(needle)
-            .ok_or_else(|| format!("no visible window with \"{needle}\" in its title (try --list-windows)"))?;
+    } else if args.targeted() {
+        // --window / --process: a launcher may start us before the window exists: --wait-window waits for it.
+        let waited = std::time::Instant::now();
+        let mut announced = false;
+        let source = sources::wait_for_window(
+            args.wait_window,
+            || {
+                let found = sources::find_target(args.process.as_deref(), args.window.as_deref());
+                if found.is_none() && args.wait_window.is_some() && !announced {
+                    announced = true;
+                    println!("source: waiting for {}", args.target_text());
+                }
+                found
+            },
+            std::thread::sleep,
+            || waited.elapsed().as_secs_f64(),
+        )
+        .ok_or_else(|| {
+            let after = args
+                .wait_window
+                .filter(|s| *s > 0.0)
+                .map_or(String::new(), |s| format!(" after waiting {s} s"));
+            format!("cannot find {}{after} (try --list-windows)", args.target_text())
+        })?;
         Some(sources::WindowEntry::from_info(&source))
     } else {
         let rows = picker_rows(&recent);
@@ -234,7 +255,7 @@ pub fn run() -> Res<()> {
         }
     };
     if args.save_capture.is_some() && initial.is_none() && !synthetic {
-        return Err("--save-capture needs --window (or --pattern, --image)".into());
+        return Err("--save-capture needs --window or --process (or --pattern, --image)".into());
     }
     // T-96: the source profile of the target (executable and class) applies on top of the preset and the
     // global overrides, the command-line options on top of the profile.
@@ -296,7 +317,7 @@ pub fn run() -> Res<()> {
                 Some(c)
             }
             // The developer path stops on the error, as before; the last choice falls back to the picker.
-            Err(e) if args.window.is_some() => return Err(e.into()),
+            Err(e) if args.targeted() => return Err(e.into()),
             Err(e) => {
                 start_message = Some((false, format!("The last window could not be captured: {e}")));
                 None
@@ -347,7 +368,7 @@ pub fn run() -> Res<()> {
                 break;
             }
             if Instant::now() > deadline {
-                if args.window.is_some() || synthetic {
+                if args.targeted() || synthetic {
                     return Err(NO_FRAME.into());
                 }
                 // The last choice does not draw: the picker instead.
@@ -442,7 +463,7 @@ pub fn run() -> Res<()> {
             frame.seq = 0;
         }
         // The developer path stops, as at the first start; the last choice goes to the picker.
-        lifecycle::Restart::Lost(why) if args.window.is_some() => return Err(why.into()),
+        lifecycle::Restart::Lost(why) if args.targeted() => return Err(why.into()),
         lifecycle::Restart::Lost(why) => {
             eprintln!("warning: {why}");
             start_message = Some((false, format!("The last window could not be captured: {why}.")));

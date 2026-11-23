@@ -105,13 +105,92 @@ pub fn window_exists(hwnd: isize) -> bool {
 pub fn find_by_title(needle: &str) -> Option<WinInfo> {
     let windows = enumerate();
     let w = find_title_in(&windows, needle)?;
-    Some(WinInfo {
+    Some(win_info(w))
+}
+
+fn win_info(w: &crate::picker::RawWindow) -> WinInfo {
+    WinInfo {
         hwnd: HWND(w.hwnd as *mut std::ffi::c_void),
         title: w.title.clone(),
         class: w.class.clone(),
         width: w.width,
         height: w.height,
-    })
+    }
+}
+
+/// Whether the executable file name `exe` is the program `wanted`, case insensitive, with or without `.exe`:
+/// `Game.exe` matches `game` and `GAME.EXE`.
+pub fn exe_matches(exe: &str, wanted: &str) -> bool {
+    let wanted = wanted.trim().to_lowercase();
+    let exe = exe.trim().to_lowercase();
+    !wanted.is_empty() && (exe == wanted || exe == format!("{wanted}.exe"))
+}
+
+/// The window of the program `process` (see [`exe_matches`]) among `windows`, optionally also with `title` in its title
+/// (starting with it preferred, as [`find_title_in`]): among the windows the picker would list that are not
+/// minimised, the largest one (a game has its main window and often a launcher or a splash of the same program),
+/// the first in z-order on a tie.
+pub fn find_process_in<'a>(
+    windows: &'a [crate::picker::RawWindow],
+    process: &str,
+    title: Option<&str>,
+) -> Option<&'a crate::picker::RawWindow> {
+    let mut candidates: Vec<&crate::picker::RawWindow> = windows
+        .iter()
+        .filter(|w| crate::picker::exclusion(w).is_none() && !w.minimized)
+        .filter(|w| w.exe.as_deref().is_some_and(|e| exe_matches(e, process)))
+        .collect();
+    if let Some(needle) = title.map(str::to_lowercase) {
+        let starts: Vec<_> = candidates
+            .iter()
+            .copied()
+            .filter(|w| w.title.to_lowercase().starts_with(&needle))
+            .collect();
+        candidates = if starts.is_empty() {
+            candidates
+                .into_iter()
+                .filter(|w| w.title.to_lowercase().contains(&needle))
+                .collect()
+        } else {
+            starts
+        };
+    }
+    let area = |w: &&crate::picker::RawWindow| i64::from(w.width.max(0)) * i64::from(w.height.max(0));
+    let best = candidates.iter().map(area).max()?;
+    candidates.into_iter().find(|w| area(w) == best)
+}
+
+/// The window the command line asks for: of the program `process` (and with `title` in its title when both are
+/// given), else with `title` in its title ([`find_by_title`]).
+pub fn find_target(process: Option<&str>, title: Option<&str>) -> Option<WinInfo> {
+    match process {
+        Some(p) => {
+            let windows = enumerate();
+            find_process_in(&windows, p, title).map(win_info)
+        }
+        None => find_by_title(title?),
+    }
+}
+
+/// Calls `find` until it returns something: at once with `wait_s` of `None`, else every 250 ms until `wait_s` seconds
+/// have passed (`0`: no limit). `elapsed` is the seconds since the start (the clock, given for the tests) and `sleep`
+/// the pause between two tries. `None` when the wait ran out.
+pub fn wait_for_window<T>(
+    wait_s: Option<f64>,
+    mut find: impl FnMut() -> Option<T>,
+    mut sleep: impl FnMut(std::time::Duration),
+    mut elapsed: impl FnMut() -> f64,
+) -> Option<T> {
+    loop {
+        if let Some(found) = find() {
+            return Some(found);
+        }
+        let limit = wait_s?;
+        if limit > 0.0 && elapsed() >= limit {
+            return None;
+        }
+        sleep(std::time::Duration::from_millis(250));
+    }
 }
 
 /// The pure part of [`find_by_title`]: the first candidate of `windows` (z-order) whose title starts with
@@ -370,8 +449,120 @@ pub fn exe_icon(path: &str) -> Option<(u32, u32, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exe_file_name, find_title_in};
+    use super::{exe_file_name, exe_matches, find_process_in, find_title_in, wait_for_window};
     use crate::picker::RawWindow;
+
+    /// A listable window of `exe` with a size.
+    fn of_exe(hwnd: isize, title: &str, exe: &str, size: (i32, i32)) -> RawWindow {
+        RawWindow {
+            exe: Some(exe.to_string()),
+            width: size.0,
+            height: size.1,
+            ..window(hwnd, title)
+        }
+    }
+
+    #[test]
+    fn a_program_name_matches_with_or_without_exe_in_any_case() {
+        assert!(exe_matches("Game.exe", "game"));
+        assert!(exe_matches("Game.exe", "GAME.EXE"));
+        assert!(exe_matches("game", "game"));
+        assert!(!exe_matches("Game.exe", "gam"));
+        assert!(!exe_matches("Game.exe", ""));
+        assert!(!exe_matches("Game2.exe", "game"));
+    }
+
+    #[test]
+    fn the_largest_window_of_the_program_is_taken() {
+        let list = [
+            of_exe(1, "Launcher", "Game.exe", (400, 300)),
+            of_exe(2, "Other", "Other.exe", (3000, 2000)),
+            of_exe(3, "Game", "Game.exe", (1280, 720)),
+            of_exe(4, "Game again", "game.exe", (1280, 720)),
+        ];
+        assert_eq!(
+            find_process_in(&list, "game", None).map(|w| w.hwnd),
+            Some(3),
+            "largest, first on a tie"
+        );
+        assert_eq!(find_process_in(&list, "nothing", None), None);
+        // The title narrows it: starting with it first, else containing it.
+        assert_eq!(find_process_in(&list, "game", Some("launch")).map(|w| w.hwnd), Some(1));
+        assert_eq!(find_process_in(&list, "game", Some("again")).map(|w| w.hwnd), Some(4));
+        assert_eq!(find_process_in(&list, "game", Some("zzz")), None);
+    }
+
+    #[test]
+    fn minimised_and_unlistable_windows_of_the_program_are_skipped() {
+        let mut small = of_exe(1, "Game", "Game.exe", (800, 600));
+        let mut big = of_exe(2, "Game big", "Game.exe", (1920, 1080));
+        big.minimized = true;
+        let mut unlisted = of_exe(3, "Game tool", "Game.exe", (2000, 2000));
+        unlisted.tool_window = true;
+        small.exe_path = None;
+        let list = [big, unlisted, small];
+        assert_eq!(find_process_in(&list, "game", None).map(|w| w.hwnd), Some(1));
+        // A window whose program cannot be queried never matches a program name.
+        let mut none = of_exe(4, "Game", "Game.exe", (800, 600));
+        none.exe = None;
+        assert_eq!(find_process_in(&[none], "game", None), None);
+    }
+
+    #[test]
+    fn waiting_for_a_window_stops_at_the_limit_or_when_it_appears() {
+        let (clock, tries) = (std::cell::Cell::new(0.0f64), std::cell::Cell::new(0));
+        let sleep = |d: std::time::Duration| clock.set(clock.get() + d.as_secs_f64());
+        // No wait asked: one try.
+        let found: Option<u32> = wait_for_window(
+            None,
+            || {
+                tries.set(tries.get() + 1);
+                None
+            },
+            sleep,
+            || clock.get(),
+        );
+        assert_eq!((found, tries.get()), (None, 1));
+        // A wait of 1 s: tries every 250 ms, gives up after 1 s.
+        tries.set(0);
+        clock.set(0.0);
+        let found: Option<u32> = wait_for_window(
+            Some(1.0),
+            || {
+                tries.set(tries.get() + 1);
+                None
+            },
+            sleep,
+            || clock.get(),
+        );
+        assert_eq!((found, tries.get()), (None, 5));
+        // The window appears at the third try.
+        tries.set(0);
+        clock.set(0.0);
+        let found = wait_for_window(
+            Some(10.0),
+            || {
+                tries.set(tries.get() + 1);
+                (tries.get() == 3).then_some(7u32)
+            },
+            sleep,
+            || clock.get(),
+        );
+        assert_eq!((found, tries.get()), (Some(7), 3));
+        // 0 means no limit: it waits until the window appears.
+        tries.set(0);
+        clock.set(0.0);
+        let found = wait_for_window(
+            Some(0.0),
+            || {
+                tries.set(tries.get() + 1);
+                (tries.get() == 50).then_some(1u32)
+            },
+            sleep,
+            || clock.get(),
+        );
+        assert_eq!((found, tries.get()), (Some(1), 50));
+    }
 
     fn window(hwnd: isize, title: &str) -> RawWindow {
         RawWindow {

@@ -14,6 +14,11 @@ diagnostic conveniences.
 Usage: phoxium [options]
   --window <text>      capture the window whose title starts with <text>, else contains it, at once
                        (no picker; an error when there is none)
+  --process <exe>      capture a window of this program (its executable name, with or without .exe, any case): the
+                       largest one; with --window also with that text in its title. The saved source profile of
+                       the program applies by itself. For launchers that know the program, not the title
+  --wait-window <secs> with --window or --process: wait this long for the window to appear (0 = no limit) instead
+                       of failing at once, so a launcher can start Phoxium before the game window exists
   --list-windows       list capturable windows and monitors, then exit
   --list-gpus          list Vulkan devices, then exit
   --list-adapters      adapter topology (DXGI adapters and monitors, Vulkan devices, LUIDs, the chosen adapter,
@@ -88,6 +93,10 @@ uses Ctrl+Alt with a letter: that also fires on AltGr. A chord another program o
 #[derive(Default)]
 pub struct Args {
     pub window: Option<String>,
+    /// `--process <exe>`: capture a window of this program (see [`crate::sources::find_process_in`]).
+    pub process: Option<String>,
+    /// `--wait-window <secs>`: how long to wait at start for the `--window`/`--process` window (0 = no limit).
+    pub wait_window: Option<f64>,
     pub list_windows: bool,
     pub list_gpus: bool,
     pub list_adapters: bool,
@@ -162,6 +171,22 @@ pub fn parse_ratio(flag: &str, text: &str) -> Res<f32> {
 }
 
 impl Args {
+    /// The command line names the window to capture (`--window` or `--process`): no picker, and a window that cannot
+    /// be captured stops the program (the developer path) instead of falling back to the picker.
+    pub fn targeted(&self) -> bool {
+        self.window.is_some() || self.process.is_some()
+    }
+
+    /// The window the command line asks for, in words (for messages).
+    pub fn target_text(&self) -> String {
+        match (&self.process, &self.window) {
+            (Some(p), Some(t)) => format!("a window of the program \"{p}\" with \"{t}\" in its title"),
+            (Some(p), None) => format!("a window of the program \"{p}\""),
+            (None, Some(t)) => format!("a visible window with \"{t}\" in its title"),
+            (None, None) => "a window".to_string(),
+        }
+    }
+
     /// Applies the source options of the command line onto `params` (T-96): they override the preset, the
     /// global overrides and the source profile. `--crop` implies the manual crop mode, `--no-crop` none,
     /// `--divisor` the manual divisor mode, unless the mode is given.
@@ -253,6 +278,14 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
         let mut value = |name: &str| it.next().ok_or_else(|| format!("{name} expects a value"));
         match arg.as_str() {
             "--window" => a.window = Some(value("--window")?),
+            "--process" => a.process = Some(value("--process")?),
+            "--wait-window" => {
+                let secs = number::<f64>("--wait-window", &value("--wait-window")?)?;
+                if secs < 0.0 {
+                    return Err("--wait-window expects seconds, 0 or more".into());
+                }
+                a.wait_window = Some(secs);
+            }
             "--list-windows" => a.list_windows = true,
             "--list-gpus" => a.list_gpus = true,
             "--list-adapters" | "--adapters" => a.list_adapters = true,
@@ -352,6 +385,27 @@ mod tests {
 
     fn parse(s: &str) -> Res<Args> {
         parse_from(s.split_whitespace().map(String::from))
+    }
+
+    /// `--process` and `--wait-window` (launcher automation): parsed, `targeted` covers both ways to name a window.
+    #[test]
+    fn process_and_wait_window_flags() {
+        let a = parse("").unwrap();
+        assert!(!a.targeted() && a.process.is_none() && a.wait_window.is_none());
+        let a = parse("--process Game.exe --wait-window 30").unwrap();
+        assert_eq!((a.process.as_deref(), a.wait_window), (Some("Game.exe"), Some(30.0)));
+        assert!(a.targeted());
+        assert!(a.target_text().contains("program \"Game.exe\""), "{}", a.target_text());
+        let a = parse("--process game --window Level").unwrap();
+        assert!(
+            a.target_text().contains("\"Level\" in its title"),
+            "{}",
+            a.target_text()
+        );
+        assert!(parse("--window x").unwrap().targeted());
+        assert!(parse("--wait-window -1").is_err());
+        assert!(parse("--wait-window soon").is_err());
+        assert!(parse("--process").is_err());
     }
 
     /// A29: `--capture-path` takes the two path names (`zero_copy` too), anything else is an error.
