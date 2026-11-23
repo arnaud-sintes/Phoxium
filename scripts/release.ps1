@@ -102,11 +102,6 @@ Invoke-Native 'gh auth status' { gh auth status } | Out-Null
 $origin = (Invoke-Native 'git remote get-url' { git remote get-url origin }) -join ''
 if ($origin -notmatch ('[/:]' + [regex]::Escape($Repo) + '(\.git)?/?$')) {
     $hint = "give -Repo or fix the remote"
-    if ($origin -match '(?i)[/:]arnaud-sintes/ultimateCRT(\.git)?/?$' -and $Repo -eq 'arnaud-sintes/Phoxium') {
-        # The project was renamed from ultimateCRT to Phoxium (2026-11-21): the GitHub repository follows by hand.
-        $hint = "the project was renamed: first rename the GitHub repository arnaud-sintes/ultimateCRT to Phoxium " +
-            "(GitHub, Settings, Repository name), then run: git remote set-url origin https://github.com/arnaud-sintes/Phoxium.git"
-    }
     throw "origin is $origin, not the target repository $Repo ($hint)."
 }
 $branch = ((Invoke-Native 'git branch' { git rev-parse --abbrev-ref HEAD }) -join '').Trim()

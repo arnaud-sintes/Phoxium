@@ -22,7 +22,7 @@ use std::{
     mem::size_of,
     sync::{
         atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering},
-        Arc, Mutex,
+        Arc, Mutex, MutexGuard, PoisonError,
     },
     time::{Duration, Instant},
 };
@@ -65,6 +65,15 @@ pub const SAMPLE_EVERY: Duration = Duration::from_millis(100);
 /// How long the capture thread waits for its GPU copy before it gives the zero-copy path up (a healthy copy takes
 /// microseconds; a hung GPU is the renderer's to report).
 const COPY_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// Locks `m` even when another thread panicked while holding it. The capture callbacks run on a thread of their own
+/// and `crash.rs` promises that a panic there ends that thread while the app goes on: a plain `lock().unwrap()` would
+/// turn that panic into a second one in the render loop, at the next lock. The guarded data (the latest frame, the
+/// failure text, the copy costs, the slot pool) is replaced whole or reset at each use, so reading it after a panic
+/// at worst shows one stale or missing frame.
+fn lock_tolerant<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// One captured frame: tightly packed BGRA8, top-down.
 ///
@@ -274,7 +283,7 @@ impl Capture {
             let worker = worker.clone();
             pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
                 move |pool, _| match pool.as_ref() {
-                    Some(pool) => worker.lock().unwrap().on_frame(pool),
+                    Some(pool) => lock_tolerant(&worker).on_frame(pool),
                     None => Ok(()),
                 },
             ))?;
@@ -344,12 +353,12 @@ impl Capture {
 
     /// Why the capture thread left the zero-copy path (once), `None` when it did not.
     pub fn take_failure(&self) -> Option<String> {
-        self.shared.failure.lock().unwrap().take()
+        lock_tolerant(&self.shared.failure).take()
     }
 
     /// The capture thread's copy cost since the last call: (mean ms, max ms, frames).
     pub fn take_copy_cost(&self) -> Option<(f64, f64, u64)> {
-        self.shared.cost.lock().unwrap().take()
+        lock_tolerant(&self.shared.cost).take()
     }
 
     /// Copies the newest frame into `into` if it is newer than `into.seq`. Returns true if it did. On the
@@ -360,7 +369,7 @@ impl Capture {
         if let Ok(mut w) = self.worker.try_lock() {
             w.retry_pending();
         }
-        let mut f = self.shared.frame.lock().unwrap();
+        let mut f = lock_tolerant(&self.shared.frame);
         if f.seq == into.seq || f.seq == 0 {
             return false;
         }
@@ -428,14 +437,14 @@ impl SyntheticFeed {
     /// A captured frame: the client area `crop` (x, y, width, height) of `texture` (BGRA8, on the capture's device)
     /// goes the way the frame callback sends a real one (the path asked, the zero-copy pool, the fallback).
     pub fn push(&self, texture: &ID3D11Texture2D, crop: (u32, u32, u32, u32)) -> Result<()> {
-        self.worker.lock().unwrap().deliver(texture.clone(), crop, None)
+        lock_tolerant(&self.worker).deliver(texture.clone(), crop, None)
     }
 
     /// Test seam: `hook` runs on the pushing thread between the read-back of each zero-copy CPU sample and its
     /// publication (the window in which the main thread may take the previous frame), `None` removes it.
     #[doc(hidden)]
     pub fn set_sample_hook(&self, hook: Option<Box<dyn FnMut() + Send>>) {
-        self.worker.lock().unwrap().sample_hook = hook;
+        lock_tolerant(&self.worker).sample_hook = hook;
     }
 }
 
@@ -575,7 +584,7 @@ impl Worker {
     fn cpu_frame(&mut self, texture: &ID3D11Texture2D, crop: (u32, u32, u32, u32)) -> Result<()> {
         let t0 = Instant::now();
         let shared = self.shared.clone();
-        let mut out = shared.frame.lock().unwrap();
+        let mut out = lock_tolerant(&shared.frame);
         if let Err(e) = read_back_region(
             &self.device,
             &self.context,
@@ -596,7 +605,7 @@ impl Worker {
         out.data_size = (crop.2, crop.3);
         out.pool = None;
         drop(out);
-        self.shared.cost.lock().unwrap().push(t0.elapsed().as_secs_f64() * 1e6);
+        lock_tolerant(&self.shared.cost).push(t0.elapsed().as_secs_f64() * 1e6);
         self.shared.captured.fetch_add(1, Ordering::Relaxed);
         Ok(())
     }
@@ -626,7 +635,7 @@ impl Worker {
     fn fail(&mut self, why: &str) {
         // The reason first: whoever reads the path back as zero-copy and asks again sees the failure as well.
         {
-            let mut f = self.shared.failure.lock().unwrap();
+            let mut f = lock_tolerant(&self.shared.failure);
             if f.is_none() {
                 *f = Some(format!("capture side: {why}"));
             }
@@ -669,7 +678,7 @@ impl Worker {
             // thread has not taken yet stays where it is until this one replaces it: emptying it here let the main
             // thread take that frame, while this read-back runs, as "this frame's pixels" with an empty buffer
             // (the zero-copy start-up crash of the 2026-11-20 live review).
-            let mut latest = self.shared.frame.lock().unwrap();
+            let mut latest = lock_tolerant(&self.shared.frame);
             if latest.data_seq == 0 {
                 sample = std::mem::take(&mut latest.data);
             }
@@ -683,7 +692,7 @@ impl Worker {
                 hook();
             }
         }
-        let mut out = self.shared.frame.lock().unwrap();
+        let mut out = lock_tolerant(&self.shared.frame);
         let seq = out.seq + 1;
         if !pool.publish(slot, seq) {
             return Err(windows::core::Error::new(
@@ -701,7 +710,7 @@ impl Worker {
         }
         out.pool = Some(pool);
         drop(out);
-        self.shared.cost.lock().unwrap().push(cost);
+        lock_tolerant(&self.shared.cost).push(cost);
         self.shared.captured.fetch_add(1, Ordering::Relaxed);
         Ok(true)
     }
@@ -874,22 +883,22 @@ impl SharedTextures {
 
     /// A slot to write ([`SlotPool::begin_write`]).
     pub fn begin_write(&self) -> Option<usize> {
-        self.slots.lock().unwrap().begin_write()
+        lock_tolerant(&self.slots).begin_write()
     }
 
     /// The write into `slot` failed ([`SlotPool::abort_write`]).
     pub fn abort_write(&self, slot: usize) {
-        self.slots.lock().unwrap().abort_write(slot);
+        lock_tolerant(&self.slots).abort_write(slot);
     }
 
     /// The write into `slot` is complete on the GPU: it holds frame `seq` ([`SlotPool::publish`]).
     pub fn publish(&self, slot: usize, seq: u64) -> bool {
-        self.slots.lock().unwrap().publish(slot, seq)
+        lock_tolerant(&self.slots).publish(slot, seq)
     }
 
     /// The slot states, for tests and diagnostics.
     pub fn slot_states(&self) -> [crate::zerocopy::SlotState; POOL_SLOTS] {
-        self.slots.lock().unwrap().states()
+        lock_tolerant(&self.slots).states()
     }
 
     /// Copies the `self.size` region at `origin` of `src` into `slot` and waits until the copy finished on the
@@ -943,7 +952,7 @@ impl SharedTextures {
 
     /// Render side: the newest frame published after `after`, held until every clone of it is dropped.
     pub fn take(self: &Arc<Self>, after: u64) -> Option<SharedFrame> {
-        let (slot, seq) = self.slots.lock().unwrap().take(after)?;
+        let (slot, seq) = lock_tolerant(&self.slots).take(after)?;
         Some(SharedFrame {
             hold: Arc::new(Hold {
                 pool: self.clone(),
@@ -982,7 +991,7 @@ struct Hold {
 
 impl Drop for Hold {
     fn drop(&mut self) {
-        self.pool.slots.lock().unwrap().release(self.slot);
+        lock_tolerant(&self.pool.slots).release(self.slot);
     }
 }
 
@@ -1179,5 +1188,26 @@ fn client_crop(hwnd: HWND, tex_w: u32, tex_h: u32) -> (u32, u32, u32, u32) {
             i64::from(client.bottom - client.top),
             (tex_w, tex_h),
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_poisoned_lock_is_still_usable() {
+        let m = Arc::new(Mutex::new(7_u32));
+        let other = Arc::clone(&m);
+        let panicked = std::thread::spawn(move || {
+            let _held = other.lock().unwrap();
+            panic!("a capture callback panicked while holding the lock");
+        })
+        .join();
+        assert!(panicked.is_err());
+        assert!(m.is_poisoned(), "the premise: the panic poisoned the mutex");
+        // The old `lock().unwrap()` would panic here, in the render loop.
+        *lock_tolerant(&m) += 1;
+        assert_eq!(*lock_tolerant(&m), 8);
     }
 }

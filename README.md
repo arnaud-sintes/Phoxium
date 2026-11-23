@@ -6,7 +6,7 @@ Phoxium is a CRT shader for Windows. It captures the window of a game or a progr
 
 The model is physical, not a filter: each source pixel drives the three electron beams of a virtual tube, and each phosphor element of the mask emits light in proportion to the beam energy it receives.
 
-Phoxium was called **ultimateCRT** up to v0.3.0. It is a personal project, below 1.0.0 (a minor version may still change behaviour). Bug reports and feedback are welcome in the [GitHub issues](https://github.com/arnaud-sintes/Phoxium/issues).
+Phoxium is a personal project, below 1.0.0 (a minor version may still change behaviour). Bug reports and feedback are welcome in the [GitHub issues](https://github.com/arnaud-sintes/Phoxium/issues).
 
 ## Requirements
 
@@ -16,7 +16,7 @@ Phoxium was called **ultimateCRT** up to v0.3.0. It is a personal project, below
 
 ## Download and run
 
-1. Download `phoxium-vX.Y.Z-windows-x64.zip` and its `.sha256` file from the [Releases page](https://github.com/arnaud-sintes/Phoxium/releases). The releases made before the rename (v0.2.0, v0.3.0) are named `ultimatecrt-vX.Y.Z-windows-x64.zip`.
+1. Download `phoxium-vX.Y.Z-windows-x64.zip` and its `.sha256` file from the [Releases page](https://github.com/arnaud-sintes/Phoxium/releases).
 2. Check the download against the hash (see "Unsigned binaries" below), then unzip it into a folder you own.
 3. Start the game or program you want to capture.
 4. Double-click `phoxium.exe`. It opens one window with the list of windows you can capture: type to search, Up and Down to choose, Enter or a double-click to capture.

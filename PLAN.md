@@ -1,6 +1,5 @@
-# PLAN: execution plan for ultimateCRT
+# PLAN: execution plan for Phoxium
 
-> The project was renamed **Phoxium** on 2026-11-21 (QUESTIONS REN-1). This plan is kept as written, as provenance: read `ultimateCRT` as Phoxium, `ultimatecrt` (crate, binary) as `phoxium` and `UCRT_*` as `PHOXIUM_*`.
 
 Plan written 2026-11-18 from `CLAUDE.md`, `ARCHITECTURE.md`, `DESIGN.md`, `ENV.md`, `CRT.md`, `QUESTIONS.md` and the code. Ids such as CAP-4 or PHY-2 refer to `QUESTIONS.md`, A1 to A18 to the decisions table of `ARCHITECTURE.md`, T-xx to tasks in this file. The compact summary table is in section 11.
 
@@ -12,8 +11,8 @@ A physically based CRT shader for Windows. It captures an external window (no in
 
 ### Current state (read from the code, 2026-11-18)
 
-- Workspace version 0.1.0, never released (`CHANGELOG.md` has only `[Unreleased]`). Two crates: `pixel-demo` (Win32/GDI source: NES-style scene, test card, PNG, any resolution and integer scale) and `ultimatecrt`.
-- `ultimatecrt` is a binary only (no `lib.rs`). `main.rs` holds argument parsing, the main loop, stats and the PNG dump.
+- Workspace version 0.1.0, never released (`CHANGELOG.md` has only `[Unreleased]`). Two crates: `pixel-demo` (Win32/GDI source: NES-style scene, test card, PNG, any resolution and integer scale) and `phoxium`.
+- `phoxium` is a binary only (no `lib.rs`). `main.rs` holds argument parsing, the main loop, stats and the PNG dump.
 - `capture.rs`: Windows.Graphics.Capture, free-threaded frame pool, client-area crop, CPU copy through a D3D11 staging texture, latest frame wins. The D3D11 device uses the default adapter.
 - `scaling.rs`: pure integer-upscale detector and `View` (origin, divisor, native size), 5 unit tests. These are the only automated tests.
 - `output.rs`: raw Win32 output, windowed or fullscreen `WS_POPUP | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`, `MA_NOACTIVATE`, Ctrl+Alt+Q via `RegisterHotKey` (the quit chord then; Ctrl+Alt+End since review D-01). No click-through, no second window.
@@ -37,10 +36,10 @@ A physically based CRT shader for Windows. It captures an external window (no in
 
 | M | Name | Release | Exit criterion (checkable) |
 |---|---|---|---|
-| M0 | Spikes and foundations | v0.1.0 | With the stand-in game (D-13) windowed on one monitor and `ultimatecrt --fullscreen` covering it for 10 min: average capture >= 58 fps, zero foreground changes in the T-06 poll log, game input works (T-06 first, then repeated with the final build). Headless GPU test passes, the parameter table generates Rust and GLSL, the ImGui spike shows the F12 menu opening inside the output window with a live slider and a text field, and the focus returning to the source on close. The early-look renders (T-16) have been judged by the owner. T-13 decision record approved by the owner. |
+| M0 | Spikes and foundations | v0.1.0 | With the stand-in game (D-13) windowed on one monitor and `phoxium --fullscreen` covering it for 10 min: average capture >= 58 fps, zero foreground changes in the T-06 poll log, game input works (T-06 first, then repeated with the final build). Headless GPU test passes, the parameter table generates Rust and GLSL, the ImGui spike shows the F12 menu opening inside the output window with a live slider and a text field, and the focus returning to the source on close. The early-look renders (T-16) have been judged by the owner. T-13 decision record approved by the owner. |
 | M1 | Pipeline foundations | none | `cargo test` runs the headless identity test (all 256 codes per channel come out exact through the FP16 stage chain) with zero validation messages; the live app renders through the stage chain at display refresh; `--stats` prints GPU ms per stage. |
 | M2 | Core CRT model | none | All M2 analytic tests (T-30, T-33, T-34, T-36a, T-36b, T-38, T-39a, T-46) pass in `cargo test` with zero validation messages. The GPU budget is measured by T-47 (M3), not here. |
-| M3 | First usable version | v0.2.0 | Owner plays the stand-in game 30 min on one monitor through `ultimatecrt` fullscreen (F11), a preset loaded and tuned in the F12 settings menu: zero foreground changes while the menu is closed, the menu takes the focus when opened and gives it back to the game when closed (both logged), output at 60 fps, total GPU time <= 4.2 ms for the M3 stage set with presets 1, 5 and 9 (T-47), settings and source profile restored after a restart (T-61). v0.2.0 published. |
+| M3 | First usable version | v0.2.0 | Owner plays the stand-in game 30 min on one monitor through `phoxium` fullscreen (F11), a preset loaded and tuned in the F12 settings menu: zero foreground changes while the menu is closed, the menu takes the focus when opened and gives it back to the game when closed (both logged), output at 60 fps, total GPU time <= 4.2 ms for the M3 stage set with presets 1, 5 and 9 (T-47), settings and source profile restored after a restart (T-61). v0.2.0 published. |
 | M4 | Complete tube | v0.3.0 | ABL, saturation, persistence, optics and geometry tests pass; standard quality tier <= 4.2 ms at 2560x1440; physics audit (T-49) has no open high finding. v0.3.0 published. |
 | M5 | Optional modules | v0.4.0 | Composite, interlace, ageing and burn-in each give output bit-identical to M4 when off (default); their tests pass; burn-in state survives a restart. v0.4.0 published. |
 | M6 | Hardening | v0.5.0 | A 2 h owner session with a monitor unplug, target relaunch and an injected device loss ends without crash or manual restart, and the Mina acceptance session on the owner's other machine (T-83) is recorded. v0.5.0 published. |
@@ -63,7 +62,7 @@ Out of M3: ABL, phosphor saturation, persistence (afterglow), halation, diffusio
 - **Review by a second model** (column Review). Physics, unsafe/FFI and GPU-synchronisation tasks are reviewed by a different model before merge: Opus-authored -> Fable medium, Sonnet-authored -> Opus medium (low for small FFI), Fable-authored -> Opus high, infrastructure written by Opus -> Sonnet high. The reviewer receives the task spec, the diff, the relevant `CRT.md` section and the test output, not the author's conclusions.
 - **Owner.** "yes" means the task cannot finish without the owner: a decision, a run on the owner's machine with a real game or the owner's eyes, or a publish (CLAUDE.md: never publish, commit or push without being asked). Agent tasks that open windows or go fullscreen on the desktop say so in their report before running.
 - **Worktrees.** Every task that runs in a wave with other tasks runs in its own git worktree on branch `task/T-xx` (Agent tool `isolation: "worktree"`). Spikes that are throw-away use `spike/T-xx` and are never merged; only their documentation is. Merging a task is a commit plus merge, done only when the owner asks (a standing per-wave permission is the recommended way).
-- **Hotspot files** take append-only edits and are merged in task-id order, keeping both sides: `crates/ultimatecrt/src/lib.rs`, `cli.rs`, `app.rs`, `gpu/mod.rs`, `gpu/pipeline.rs`, `gpu/stages/mod.rs` (one registration line per stage), `build.rs`, `crates/crt-model/src/lib.rs` (one `mod` line per module), all `Cargo.toml`, `CHANGELOG.md`, `README.md`, `ARCHITECTURE.md`, `QUESTIONS.md` (each task edits only its own question entries).
+- **Hotspot files** take append-only edits and are merged in task-id order, keeping both sides: `crates/phoxium/src/lib.rs`, `cli.rs`, `app.rs`, `gpu/mod.rs`, `gpu/pipeline.rs`, `gpu/stages/mod.rs` (one registration line per stage), `build.rs`, `crates/crt-model/src/lib.rs` (one `mod` line per module), all `Cargo.toml`, `CHANGELOG.md`, `README.md`, `ARCHITECTURE.md`, `QUESTIONS.md` (each task edits only its own question entries).
 - **Concurrency.** At most 5 agents at once. A wave with more tasks runs in sub-batches in the order listed. Each worktree uses its own `CARGO_TARGET_DIR` so builds never lock each other's executables.
 - **Desktop and GPU token** (gate 13). There is one desktop, one keyboard focus, one global quit hotkey (Ctrl+Alt+Q then, Ctrl+Alt+End since review D-01) and one GPU. Tasks marked `live` in section 4 (windows, fullscreen, foreground polling, GPU timings) run one at a time, never concurrently, and say so in their report.
 - **Oracle independence.** A stage task that adds an oracle function and its expected numbers to `crt-model` has them checked first by a model that has not seen the shader: it re-derives the numbers from `CRT.md`. The author's own oracle is never the only check (gate 11).
@@ -73,7 +72,7 @@ Out of M3: ABL, phosphor saturation, persistence (afterglow), halation, diffusio
 
 ### Waves and files touched
 
-Paths under `src/`, `tests/` are in `crates/ultimatecrt/` unless stated. "WT" = run in a worktree. `live` = needs the desktop and GPU token (section 3). A wave larger than 5 tasks runs in sub-batches in the order listed.
+Paths under `src/`, `tests/` are in `crates/phoxium/` unless stated. "WT" = run in a worktree. `live` = needs the desktop and GPU token (section 3). A wave larger than 5 tasks runs in sub-batches in the order listed.
 
 | Wave | Task | Files touched | WT | Notes |
 |---|---|---|---|---|
@@ -101,16 +100,16 @@ Paths under `src/`, `tests/` are in `crates/ultimatecrt/` unless stated. "WT" = 
 | W3 | T-20b | `src/gpu/pipeline.rs`, `src/gpu/stages/{mod,signal,amp,gun,screen,phosphor,optics}.rs`, `shaders/{gun.comp,screen.comp}`, `shaders/include/{beam,mask}.glsl`, ARCHITECTURE | yes | runs at risk before T-13 completes |
 | W3 | T-21 | `src/gpu/timing.rs`, `src/gpu/pipeline.rs`, `src/app.rs` | yes | merge T-20b first |
 | W3 | T-23 | `src/render_cmd.rs`, `src/cli.rs`, `tests/render_cmd.rs`, README | yes | `--preset` comes with T-50 |
-| W3 | T-51 | `src/settings.rs` (new), `src/sources.rs`, `crates/ultimatecrt/Cargo.toml` | yes | none |
+| W3 | T-51 | `src/settings.rs` (new), `src/sources.rs`, `crates/phoxium/Cargo.toml` | yes | none |
 | W4 | T-15 | `CHANGELOG.md`, release (version stays 0.1.0) | no | publish from main before merging the rest of W4 |
-| W4 | T-26 | `src/capture.rs`, `src/gpu/upload.rs`, `src/cli.rs`, `crates/ultimatecrt/Cargo.toml` | yes | only if T-13 adopts the shared handle |
+| W4 | T-26 | `src/capture.rs`, `src/gpu/upload.rs`, `src/cli.rs`, `crates/phoxium/Cargo.toml` | yes | only if T-13 adopts the shared handle |
 | W4 | T-30 | `shaders/decode.comp`, `src/gpu/stages/decode.rs`, `params/{source,tube}.toml`, `crates/crt-model/src/{tube,lib}.rs`, `src/gpu/stages/mod.rs`, `tests/stage_decode.rs` | yes | registration line |
 | W4 | T-33 | `shaders/amp.comp`, `src/gpu/stages/amp.rs`, `params/amp.toml`, `tests/stage_amp.rs`, `src/gpu/stages/mod.rs` | yes | registration line |
 | W4 | T-34 | `shaders/gun.comp`, `src/gpu/stages/gun.rs`, `params/gun.toml`, `crates/crt-model/src/{gun,lib}.rs`, `tests/stage_gun.rs` | yes | reads `params/colour.toml` (T-10) |
 | W4 | T-36a | `shaders/include/beam.glsl`, `params/beam.toml`, `crates/crt-model/src/{beam,lib}.rs`, `tests/stage_beam_v.rs` | yes | tests inject their own `FrameConstants` |
-| W4 | T-44 | `crates/ultimatecrt/benches/optics/**`, QUESTIONS PHY-10 | yes | live (GPU timings) |
+| W4 | T-44 | `crates/phoxium/benches/optics/**`, QUESTIONS PHY-10 | yes | live (GPU timings) |
 | W4 | T-46 | `shaders/encode.frag`, `src/gpu/stages/encode.rs`, `params/output.toml`, `crates/crt-model/src/{output,lib}.rs`, `tests/stage_output.rs` | yes | reads `params/colour.toml` (T-10) |
-| W4 | T-52a | `src/ui/{mod,control_window}.rs`, `src/gpu/ui_render.rs`, `src/gpu/present.rs`, `src/output.rs`, `src/app.rs`, `crates/ultimatecrt/Cargo.toml` | yes | live (focus checks) |
+| W4 | T-52a | `src/ui/{mod,control_window}.rs`, `src/gpu/ui_render.rs`, `src/gpu/present.rs`, `src/output.rs`, `src/app.rs`, `crates/phoxium/Cargo.toml` | yes | live (focus checks) |
 | W5 | T-25 | `src/gpu/shaders.rs`, `src/gpu/pipeline.rs`, `src/cli.rs` | yes | only W5 task on `pipeline.rs` |
 | W5 | T-36b | `shaders/include/beam.glsl`, `params/beam.toml`, `crates/crt-model/src/beam.rs`, `tests/stage_beam_h.rs` | yes | after T-36a |
 | W5 | T-39a | `shaders/include/mask.glsl`, `params/mask.toml`, `src/gpu/stages/screen.rs`, `tests/stage_mask.rs` | yes | tests inject their own `FrameConstants` |
@@ -263,11 +262,11 @@ Spike overview (details in each task):
 | SP-7 early | T-16 | At 1.5 and 2.9 px per triad, is the physical model visibly different from scanlines alone? | 0.5 day | Stronger option D, host-subpixel masks (HW-6) or re-scoping, decided in T-13 |
 | SP-13 | T-63 | Is published reference data enough (the owner has no CRT)? | 1 day | Values stay [E] and exposed; owner may later measure |
 
-### T-01 Split `ultimatecrt` into library and binary
+### T-01 Split `phoxium` into library and binary
 - **M0, W0, S.** Implements: prerequisite of TEC-7 integration tests, DESIGN 2. Deps: none.
 - **Do:** add `src/lib.rs` declaring the modules; `main.rs` keeps only `fn main`; move `Args`, `parse_args`, `USAGE` to `cli.rs` and `run` to `app.rs`. No behaviour change.
 - **Files:** `src/lib.rs`, `src/main.rs`, `src/cli.rs`, `src/app.rs`.
-- **Accept:** fmt, clippy, test clean; `ultimatecrt --help` output identical to before (diff of saved output); a `tests/smoke.rs` that uses the library compiles and passes; manual end-to-end test of ENV 3 unchanged.
+- **Accept:** fmt, clippy, test clean; `phoxium --help` output identical to before (diff of saved output); a `tests/smoke.rs` that uses the library compiles and passes; manual end-to-end test of ENV 3 unchanged.
 - **Model:** Sonnet medium, mechanical refactor with a clear target. **Review:** none. **Owner:** no.
 
 ### T-02 Split `gpu.rs` into modules, surface-less device
@@ -310,7 +309,7 @@ Spike overview (details in each task):
 - **M0, W0, S.** Settles CAP-4; feeds CAP-6, CAP-7, CAP-8, SRC-2 for the real target. Deps: none (runs on the current build).
 - **Question:** does the game keep rendering and the capture keep delivering frames at source rate while our fullscreen output covers it on the same monitor, with no focus change?
 - **Why first:** a failure here invalidates the one-screen requirement (OUT-1, CAP-4) and with it much of the plan. The current binary already has `--fullscreen --stats --exit-after`; nothing else is needed.
-- **Do:** the agent writes `scripts/poll-foreground.ps1` (polls `GetForegroundWindow` every 100 ms with no hook, writes a CSV row on each change: time, title, pid, executable, "is the source"). Procedure: owner starts the stand-in game (D-13; pixel-demo is a synthetic fallback and cannot give a final CAP-4 verdict) windowed at an integer scale (then borderless if offered); the agent starts the poll script, then `ultimatecrt --window "<game title>" --fullscreen --stats --exit-after 600` with output redirected to a file; the owner plays 10 min with keyboard or gamepad. Repeat with the output on the second monitor (bonus mode) and with the source minimised (expected to fail, documented). The agent analyses the files and records: captured size, detected divisor, capture fps distribution from the `--stats` lines, gaps, foreground log, any pause, cursor behaviour, window title and class.
+- **Do:** the agent writes `scripts/poll-foreground.ps1` (polls `GetForegroundWindow` every 100 ms with no hook, writes a CSV row on each change: time, title, pid, executable, "is the source"). Procedure: owner starts the stand-in game (D-13; pixel-demo is a synthetic fallback and cannot give a final CAP-4 verdict) windowed at an integer scale (then borderless if offered); the agent starts the poll script, then `phoxium --window "<game title>" --fullscreen --stats --exit-after 600` with output redirected to a file; the owner plays 10 min with keyboard or gamepad. Repeat with the output on the second monitor (bonus mode) and with the source minimised (expected to fail, documented). The agent analyses the files and records: captured size, detected divisor, capture fps distribution from the `--stats` lines, gaps, foreground log, any pause, cursor behaviour, window title and class.
 - **Time box:** 1 h owner, 1 h agent.
 - **Mina (D-2):** Mina is on another machine. Once the v0.1.0 zip exists (T-15), the owner may run `scripts\poll-foreground.ps1` and the same command there as an early smoke test; the full Mina session is T-83.
 - **Pass:** covered mode average >= 58 fps, no gap > 100 ms outside menus and loading, zero foreground changes, input reaches the game. **Fail:** try the CAP-4 fallbacks in order (output 1 px smaller than the monitor, second monitor); if none works, owner decision D-1 (section 10).
@@ -321,7 +320,7 @@ Spike overview (details in each task):
 ### T-07 SP-2: non-activating present and click-through
 - **M0, W2, M.** Settles OUT-2, part of OUT-3, OUT-4 (click-through), TEC-4. Deps: T-05, T-03 (run per adapter configuration).
 - **Question:** does the borderless topmost non-activating Vulkan window present every refresh without taking focus, and which present mode does Windows use?
-- **Do:** add `--click-through` (`WS_EX_TRANSPARENT`; find whether `WS_EX_LAYERED` is required and whether it changes the present mode). Owner installs PresentMon (external tool, licence unverified, used only as a tool) and runs it on ultimatecrt and the game for 10 min of play. Check Alt-Tab, Win key, a click on the output (with and without click-through), gamepad, cursor clip of the game.
+- **Do:** add `--click-through` (`WS_EX_TRANSPARENT`; find whether `WS_EX_LAYERED` is required and whether it changes the present mode). Owner installs PresentMon (external tool, licence unverified, used only as a tool) and runs it on phoxium and the game for 10 min of play. Check Alt-Tab, Win key, a click on the output (with and without click-through), gamepad, cursor clip of the game.
 - **Time box:** 1 day.
 - **Pass:** zero foreground changes, no missed refresh in 10 min, present mode recorded. **Fail:** focus leak -> fix in `output.rs`; missed refreshes caused by composition -> latency cost recorded and a DXGI/D3D12 present path weighed in T-13.
 - **Files:** `src/output.rs`, `src/cli.rs`, QUESTIONS OUT-2, OUT-4.
@@ -341,15 +340,15 @@ Spike overview (details in each task):
 
 ### T-09 TEC-7: headless renderer and GPU test harness
 - **M0, W1, M.** Implements TEC-7, A16 (infrastructure). Deps: T-02.
-- **Do:** `gpu/headless.rs`: surface-less device, offscreen RGBA16F/RGBA32F target, upload an input image, run the passthrough pass, read back to `Vec<f32>`. A debug-utils messenger counts validation messages (layer enabled when installed). `tests/common/mod.rs`: `gpu_or_skip()` skips with a message when no Vulkan 1.3 device exists; `UCRT_REQUIRE_GPU=1` turns the skip into a failure. Report on software Vulkan for a future CI (availability on Windows unverified, report only).
+- **Do:** `gpu/headless.rs`: surface-less device, offscreen RGBA16F/RGBA32F target, upload an input image, run the passthrough pass, read back to `Vec<f32>`. A debug-utils messenger counts validation messages (layer enabled when installed). `tests/common/mod.rs`: `gpu_or_skip()` skips with a message when no Vulkan 1.3 device exists; `PHOXIUM_REQUIRE_GPU=1` turns the skip into a failure. Report on software Vulkan for a future CI (availability on Windows unverified, report only).
 - **Files:** `src/gpu/headless.rs`, `src/gpu/context.rs`, `tests/common/mod.rs`, `tests/gpu_passthrough.rs`, ENV 3.
-- **Accept:** on the dev machine `cargo test` runs `gpu_passthrough`: a 256-step ramp per channel round-trips (`round(v * 255) == code`, FP16 cannot hold k/255 exactly); the validation layer must be present when `UCRT_REQUIRE_GPU=1` (a missing layer fails the test, otherwise a count of 0 would prove nothing); validation message count 0; without a GPU the test prints "skipped" and passes.
+- **Accept:** on the dev machine `cargo test` runs `gpu_passthrough`: a 256-step ramp per channel round-trips (`round(v * 255) == code`, FP16 cannot hold k/255 exactly); the validation layer must be present when `PHOXIUM_REQUIRE_GPU=1` (a missing layer fails the test, otherwise a count of 0 would prove nothing); validation message count 0; without a GPU the test prints "skipped" and passes.
 - **Model:** Opus high, readback synchronisation and infrastructure every model test relies on. **Review:** Sonnet high. **Owner:** no.
 
 ### T-10 TEC-3: declarative parameter table
 - **M0, W1, M.** Implements TEC-3, DESIGN 8 ("defined once"), PHY-3 units, UX-1 metadata. Deps: T-01.
 - **Do:** `params/<stage>.toml` (one file per stage so parallel stage tasks do not collide). Entry: id, stage, type (f32, i32, bool, enum), unit, default, soft min/max, confidence tag S/D/K/E, source, description, UI group. Generator crate `crates/paramgen` (build-dependency; `serde` and `toml`, both MIT OR Apache-2.0 per crates.io, to recheck in `package.ps1`) used by `build.rs` to emit: a Rust `Params` struct with defaults and a metadata array (`include!` from `OUT_DIR`), std140 serialisation, and `params.glsl` with a uniform block whose members carry explicit `layout(offset = N)` (the compiler only rejects overlapping or misaligned offsets; the Rust-side offset test below is the real guard that Rust and GLSL agree). Parameters live in a uniform buffer (push constants are limited to 128 bytes). Prototype entries: `exposure`, and the shared colorimetry in `params/colour.toml` (tube primaries xy and white xy, read by T-34 and T-46 so those tasks do not depend on each other); test-only entries live in `params/_test.toml` and are excluded from release builds. `tube_gamma` and `source_eotf` are defined by T-34 and T-30, not here, so ids stay unique.
-- **Files:** `crates/paramgen/**`, `params/output.toml`, `crates/ultimatecrt/build.rs`, `src/params.rs`, both `Cargo.toml`, ARCHITECTURE.
+- **Files:** `crates/paramgen/**`, `params/output.toml`, `crates/phoxium/build.rs`, `src/params.rs`, both `Cargo.toml`, ARCHITECTURE.
 - **Accept:** unit tests: std140 offsets for mixed float/int/vec members equal hand-computed values; a parameter added in TOML appears in Rust, GLSL and the metadata list; the generated header compiles with `glslc`; a duplicate id or an out-of-range default fails the build with a message naming file and id.
 - **Model:** Opus high, cross-language source-of-truth design with layout rules. **Review:** Sonnet high. **Owner:** no.
 
@@ -362,7 +361,7 @@ Spike overview (details in each task):
 
 ### T-12 SP-5: capture fidelity
 - **M0, W0, S.** Settles CAP-3, part of SRC-2. Deps: none.
-- **Do:** `pixel-demo --verify-capture <png>` compares a PNG with its own current raster (scale removed) and prints the max difference; `scripts/check-capture.ps1` starts pixel-demo at scale 1, 3 and 4, runs `ultimatecrt --save-capture`, then the verification. Owner repeats with Night Light on and with 125 % display scaling.
+- **Do:** `pixel-demo --verify-capture <png>` compares a PNG with its own current raster (scale removed) and prints the max difference; `scripts/check-capture.ps1` starts pixel-demo at scale 1, 3 and 4, runs `phoxium --save-capture`, then the verification. Owner repeats with Night Light on and with 125 % display scaling.
 - **Time box:** 0.5 day. **Pass:** bit-exact in the default configuration. **Fail:** list the breaking conditions; T-56 adds a run-time warning for them.
 - **Files:** `crates/pixel-demo/src/main.rs`, `scripts/check-capture.ps1`, QUESTIONS CAP-3.
 - **Accept:** the script exits 0 on the default configuration; CAP-3 lists each tested condition with its max difference.
@@ -425,19 +424,19 @@ Spike overview (details in each task):
 - **M1, W1, M.** Implements UX-3 (patterns), UX-5 (image input), SRC-1 decision (image source from the start). Deps: T-01.
 - **Do:** pure `patterns.rs`: flat level, grey ramp, 1-px vertical line every N, 1-px horizontal line, grating of period N, checkerboard, crosshatch, point source, windows at 10/25/50/100 % APL, moving bar (px per frame), PLUGE (near-black steps) and a moire grid (UX-3). `source.rs`: `Source { Capture, Pattern, Image }`. Flags `--pattern name[:args]`, `--pattern-size WxH`, `--image file.png` (divisor 1).
 - **Files:** `src/patterns.rs`, `src/source.rs`, `src/app.rs`, `src/cli.rs`, README.
-- **Accept:** unit test per pattern (exact pixel values, APL within 0.5 %); `ultimatecrt --pattern ramp` runs with no capture target.
+- **Accept:** unit test per pattern (exact pixel values, APL within 0.5 %); `phoxium --pattern ramp` runs with no capture target.
 - **Model:** Sonnet medium. **Review:** none. **Owner:** no.
 
 ### T-23 Headless render command
 - **M1, W3, S.** Implements UX-5 (headless render). Deps: T-20a, T-22.
-- **Do:** `ultimatecrt render (--image f.png | --pattern ...) [--set id=value]... (the `--preset` flag is added by T-50) --size WxH --out out.png|out.pfm` (PFM for float output, no dependency).
+- **Do:** `phoxium render (--image f.png | --pattern ...) [--set id=value]... (the `--preset` flag is added by T-50) --size WxH --out out.png|out.pfm` (PFM for float output, no dependency).
 - **Files:** `src/render_cmd.rs`, `src/cli.rs`, `tests/render_cmd.rs`, README.
 - **Accept:** integration test: rendering a pattern to PFM and reading it back equals the in-process headless result exactly.
 - **Model:** Sonnet medium. **Review:** none. **Owner:** no.
 
 ### T-24 Check script, licence policy, validation gate
 - **M1, W2, S.** Implements TEC-9 (local), DESIGN 11 `cargo-deny` plan. Deps: T-09, T-22 (the smoke run uses `--pattern ramp`).
-- **Do:** `scripts/check.ps1`: fmt check, clippy `-D warnings`, `cargo test` with `UCRT_REQUIRE_GPU=1`, then a 10 s live smoke `--pattern ramp --exit-after 10 --validation` that fails on any validation line on stderr. `deny.toml` with the same licence policy as `package.ps1` (GPL denied); the script runs `cargo deny check licenses` when `cargo-deny` is installed, else warns.
+- **Do:** `scripts/check.ps1`: fmt check, clippy `-D warnings`, `cargo test` with `PHOXIUM_REQUIRE_GPU=1`, then a 10 s live smoke `--pattern ramp --exit-after 10 --validation` that fails on any validation line on stderr. `deny.toml` with the same licence policy as `package.ps1` (GPL denied); the script runs `cargo deny check licenses` when `cargo-deny` is installed, else warns.
 - **Files:** `scripts/check.ps1`, `deny.toml`, ENV 3.
 - **Accept:** script exits 0 on a clean tree; exits non-zero when a clippy warning is introduced (shown in the task report, then reverted).
 - **Model:** Sonnet low. **Review:** none. **Owner:** no.
@@ -454,7 +453,7 @@ Spike overview (details in each task):
 - **Earlier status (2026-11-19, D-20): deferred optional performance setting.** Not cancelled and not scheduled: it follows the T-04 study. The default stays the CPU copy; `--handoff shared` (and a matching setting) would be opt-in.
 - **M1, W4, M.** Implements CAP-2 decision. Deps: T-13 (adopted), T-20a.
 - **Do:** productionise the T-04 path behind `--handoff auto|cpu|shared` (auto = shared on the same adapter when supported, else CPU). The detector needs CPU pixels: read back every Nth frame until the divisor locks.
-- **Files:** `src/capture.rs`, `src/gpu/upload.rs`, `src/cli.rs`, `crates/ultimatecrt/Cargo.toml`, ARCHITECTURE A3.
+- **Files:** `src/capture.rs`, `src/gpu/upload.rs`, `src/cli.rs`, `crates/phoxium/Cargo.toml`, ARCHITECTURE A3.
 - **Accept:** ENV 3 test in both modes, validation silent; T-04 cost numbers reproduced within 20 %; frame-counter card shows no stale or torn frame over 10 min.
 - **Model:** Opus xhigh, cross-API synchronisation in production code. **Review:** Fable medium. **Owner:** no.
 
@@ -569,7 +568,7 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 
 ### T-43 Burn-in wear map (optional)
 - **M5, W14, L.** Settles PHY-14 (burn-in), SCP-6. Deps: T-42.
-- **Do:** per-colour wear map (RGBA32F, resolution in tube mm, default 0.5 mm per texel) accumulating beam charge x accelerated time; efficiency = f(Q) calibrated so a constant drive equivalent to 350 cd/m2 for 20,000 h gives 0.85 (the only sourced figure [S]; colour ratios [E]); applied in emission. Tube state per preset in `%APPDATA%\ultimateCRT\tubes\<preset>.state` (magic, schema version, map size, tube size), atomic write on exit and every N minutes. UI: acceleration, "burn in now" (X hours at once), "new tube".
+- **Do:** per-colour wear map (RGBA32F, resolution in tube mm, default 0.5 mm per texel) accumulating beam charge x accelerated time; efficiency = f(Q) calibrated so a constant drive equivalent to 350 cd/m2 for 20,000 h gives 0.85 (the only sourced figure [S]; colour ratios [E]); applied in emission. Tube state per preset in `%APPDATA%\Phoxium\tubes\<preset>.state` (magic, schema version, map size, tube size), atomic write on exit and every N minutes. UI: acceleration, "burn in now" (X hours at once), "new tube".
 - **Files:** `shaders/wear.comp`, `src/gpu/stages/wear.rs`, `src/tube_state.rs`, `shaders/screen.comp`, `src/ui/panel/burnin.rs`, `tests/stage_burnin.rs`.
 - **Accept:** acceleration 0 -> map bit-identical after 1000 frames; calibration point 0.85 +/- 0.01; blue wears faster than red by the configured ratio; save and load bit-exact; corrupt or wrong-version file -> new tube plus warning, never a crash; a static bar leaves a ghost only inside its area (efficiency exactly 1.0 outside).
 - **Model:** Opus high, FP32 accumulation and persistence format. **Review:** Fable medium. **Owner:** no.
@@ -579,7 +578,7 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 - **Question:** which halation algorithm fits the budget with acceptable error? Ring radius is about 104 px for PVM-20M4U (t = 12 mm, 4.97 px/mm), about 83 px for a consumer TV (t = 13 mm, 3.6 px/mm) and about 210 px for the 17 to 21 in monitor presets (t = 20 mm). Optics budget to meet: <= 1.0 ms.
 - **Do:** headless benchmarks at a 1920x1440 tube rectangle: (a) sparse ring sampling at 1/4 resolution, (b) mip-pyramid approximation, (c) FFT convolution; compare radial profiles with the f64 oracle kernel.
 - **Time box:** 1 day. **Pass:** a method at <= 1.0 ms with radial-profile error <= 5 % of the ring peak. **Fail:** low-resolution ring with documented error, finer option only in the reference tier (T-48).
-- **Files:** `crates/ultimatecrt/benches/optics/**` (or `#[ignore]` tests), QUESTIONS PHY-10.
+- **Files:** `crates/phoxium/benches/optics/**` (or `#[ignore]` tests), QUESTIONS PHY-10.
 - **Accept:** table of ms and error per method; choice recorded.
 - **Model:** Opus high. **Review:** none (choice reviewed with T-45). **Owner:** no.
 
@@ -621,22 +620,22 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 
 ### T-50 Tube presets as data files
 - **M3, W6, M.** Settles PHY-4, A13, PHY-2 option D, PRJ-3 (labels). Deps: T-30, T-33, T-34, T-36b, T-39a, T-46 (parameter ids only: the loader is CPU-side).
-- **Do:** `presets/tubes/01-pvm-20m4u.toml` to `10-delta-17in.toml` (PHY-4 extended list), schema version, label "based on published data for model X", every value with tag and source (CRT.md starting presets and pitch tables); loader in crt-model (unknown key = error naming file and key, value outside the soft range = warning); applying a preset overrides parameter defaults; option D suggestion list; adds the `--preset <file>` flag to `ultimatecrt` and to `ultimatecrt render` (T-23).
+- **Do:** `presets/tubes/01-pvm-20m4u.toml` to `10-delta-17in.toml` (PHY-4 extended list), schema version, label "based on published data for model X", every value with tag and source (CRT.md starting presets and pitch tables); loader in crt-model (unknown key = error naming file and key, value outside the soft range = warning); applying a preset overrides parameter defaults; option D suggestion list; adds the `--preset <file>` flag to `phoxium` and to `phoxium render` (T-23).
 - **Files:** `presets/tubes/*.toml`, `crates/crt-model/src/preset.rs`, `src/cli.rs`, `src/render_cmd.rs`, `tests/presets.rs`.
 - **Accept:** all 10 load; px per triad on a 1920 px image matches the PHY-4 table within 10 %; every [E] value is tagged E; save -> load round trip identical; a schema mismatch is a clear error.
 - **Model:** Sonnet medium, data transcription with a loader. **Review:** Opus medium (values against `CRT.md`). **Owner:** no.
 
 ### T-51 Settings and profiles
 - **M3, W3, M.** Settles UX-2, PRF-4 (reset store), SRC-2 (per-profile storage). Deps: T-10, T-14.
-- **Do:** `%APPDATA%\ultimateCRT\settings.toml`: global (preset, overrides as the ids changed from the parameter defaults (the diff against a preset is computed in T-53), hotkey chords, UI state), host profile (monitor, panel size mm from EDID with manual override; P2418D 53 x 30 cm), source profiles keyed by executable file name and window class (crop, divisor, PAR, EOTF, pixel clock, bandwidth, line multiplier). Executable name via `GetWindowThreadProcessId` and `QueryFullProcessImageNameW`. Atomic write, schema version.
-- **Files:** `src/settings.rs`, `src/sources.rs`, `crates/ultimatecrt/Cargo.toml`.
+- **Do:** `%APPDATA%\Phoxium\settings.toml`: global (preset, overrides as the ids changed from the parameter defaults (the diff against a preset is computed in T-53), hotkey chords, UI state), host profile (monitor, panel size mm from EDID with manual override; P2418D 53 x 30 cm), source profiles keyed by executable file name and window class (crop, divisor, PAR, EOTF, pixel clock, bandwidth, line multiplier). Executable name via `GetWindowThreadProcessId` and `QueryFullProcessImageNameW`. Atomic write, schema version.
+- **Files:** `src/settings.rs`, `src/sources.rs`, `crates/phoxium/Cargo.toml`.
 - **Accept:** round-trip test; corrupt file -> defaults plus warning, the file kept as `.bak`; the overrides hold only changed ids; profile lookup by executable and class; executable-name parsing test.
 - **Model:** Sonnet medium. **Review:** Opus low (small FFI). **Owner:** no.
 
 ### T-52a ImGui integration: settings menu in the output window
 - **M3, W4, M.** Implements A17, OUT-3 (settings menu), D-7, the TEC-5 decision. Deps: T-08, T-13, T-20a.
 - **Do:** ImGui drawn in the encode pass of the output window (same swapchain, no second window). F12 (global hotkey, T-54) toggles the menu. Opening: remember the foreground window (the source), activate the output window, route mouse, wheel, keyboard and text input into ImGui, show the cursor. Closing: stop routing input, hide the cursor, restore the remembered foreground window (workaround from T-08 if needed). While the menu is closed the output stays `WS_EX_NOACTIVATE` and does not take input. The menu window is movable, collapsible and has an opacity slider, so it can be moved off the picture while tuning. The captured game may see a deactivate message while the menu is open (it may pause): accepted by D-7, documented. ImGui renderer as chosen in T-13, per-monitor DPI.
-- **Files:** `src/ui/{mod,menu}.rs`, `src/gpu/ui_render.rs`, `src/gpu/stages/encode.rs`, `src/output.rs`, `src/app.rs`, `crates/ultimatecrt/Cargo.toml`.
+- **Files:** `src/ui/{mod,menu}.rs`, `src/gpu/ui_render.rs`, `src/gpu/stages/encode.rs`, `src/output.rs`, `src/app.rs`, `crates/phoxium/Cargo.toml`.
 - **Accept:** `scripts/poll-foreground.ps1` log: zero foreground changes over 10 min with the menu closed and the game running; 10 open and close cycles (fullscreen and windowed) log exactly one change to the output window on open and one back to the source on close; slider and text input work; validation silent. Live, under the desktop and GPU token.
 - **Model:** Opus high, ImGui renderer integration and Win32 focus hand-off rules. **Review:** Fable medium. **Owner:** no.
 
@@ -656,7 +655,7 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 
 ### T-54 Hotkeys
 - **M3, W5, S.** Settles OUT-5. Deps: T-52a. Ctrl+Alt+PageDown and PageUp raise `NextPreset` and `PreviousPreset` events that T-53 handles.
-- **Do:** `RegisterHotKey` only (no low-level hook): F11 toggle fullscreen and resizable windowed output (also the panic key, fixed), F12 toggle the settings menu (T-52a), Ctrl+Alt+Q quit (exists), Ctrl+Alt+O overlay, Ctrl+Alt+B A/B and bypass (the chords then: review D-01 moved quit, overlay and bypass to Ctrl+Alt+End, F9 and F7 because Ctrl+Alt+letter fires on AltGr), Ctrl+Alt+PageDown/PageUp next/previous preset; chords configurable in settings except quit and F11; F11 and F12 are registered globally, so the game loses those two keys while ultimatecrt runs (configurable, documented); a failed registration names the chord. The keys still arrive as `WM_HOTKEY` while the menu has the focus, so F12 closes it.
+- **Do:** `RegisterHotKey` only (no low-level hook): F11 toggle fullscreen and resizable windowed output (also the panic key, fixed), F12 toggle the settings menu (T-52a), Ctrl+Alt+Q quit (exists), Ctrl+Alt+O overlay, Ctrl+Alt+B A/B and bypass (the chords then: review D-01 moved quit, overlay and bypass to Ctrl+Alt+End, F9 and F7 because Ctrl+Alt+letter fires on AltGr), Ctrl+Alt+PageDown/PageUp next/previous preset; chords configurable in settings except quit and F11; F11 and F12 are registered globally, so the game loses those two keys while phoxium runs (configurable, documented); a failed registration names the chord. The keys still arrive as `WM_HOTKEY` while the menu has the focus, so F12 closes it.
 - **Files:** `src/hotkeys.rs`, `src/output.rs`, `src/settings.rs`, `src/app.rs`, README.
 - **Accept:** unit tests of chord parsing and formatting; double registration reports the failing chord; F11 and F12 work while the source has the focus; manual checklist.
 - **Model:** Sonnet medium. **Review:** none. **Owner:** no.
@@ -734,7 +733,7 @@ Order follows "Suggested physical pipeline order" in `CRT.md` (the authority, se
 
 ### T-67 Screenshots and output export
 - **M4, W10, S.** Settles OUT-8 (screenshots; recording and streaming stay out). Deps: T-20b, T-53, T-61.
-- **Do:** a hotkey and a panel button save the final output as PNG and the linear FP16 tube image as PFM (EXR only if a permissive crate exists) to `%USERPROFILE%\Pictures\ultimateCRT\`, with the readback done after present and no foreground change.
+- **Do:** a hotkey and a panel button save the final output as PNG and the linear FP16 tube image as PFM (EXR only if a permissive crate exists) to `%USERPROFILE%\Pictures\Phoxium\`, with the readback done after present and no foreground change.
 - **Files:** `src/screenshot.rs`, `src/hotkeys.rs`, `src/ui/panel/**`.
 - **Accept:** the PNG equals the headless render of the same state; the hotkey causes no foreground change (poll log).
 - **Model:** Sonnet medium. **Review:** none. **Owner:** no.
@@ -818,7 +817,7 @@ Not modelled and ranked by visual impact (audit): optics (T-45: glare, halation,
 
 1. `cargo fmt --all --check` clean.
 2. `cargo clippy --all-targets -- -D warnings` clean; each `#[allow]` has a one-line reason.
-3. `cargo test` passes on the dev machine with `UCRT_REQUIRE_GPU=1` once T-09 exists (GPU tests run and count zero validation messages). After T-24, `scripts/check.ps1` replaces items 1 to 4.
+3. `cargo test` passes on the dev machine with `PHOXIUM_REQUIRE_GPU=1` once T-09 exists (GPU tests run and count zero validation messages). After T-24, `scripts/check.ps1` replaces items 1 to 4.
 4. GPU or shader change: live run with `--validation` (pixel-demo and `--pattern`) prints no validation message.
 5. Documentation per DESIGN 11: a line under `## [Unreleased]` in CHANGELOG for every user-visible change; README and the USAGE text for new flags; ARCHITECTURE when behaviour or structure changes; QUESTIONS when a question is settled (with the date).
 6. New dependency: permissive licence (MIT, Apache-2.0, BSD, ISC, Zlib), named in the task report; the `package.ps1` licence check passes.
@@ -896,7 +895,7 @@ Work that is postponed on purpose, not dropped. Each item comes back after the f
 | Insider build changes capture or present behaviour (HW-2) | Breakage after updates | T-81, re-run spikes |
 | Mina or the stand-in not integer-scaled or smoothed (SRC-2) | Wrong raster, no scanline alignment | T-06 records it, manual divisor, T-56 warning |
 | Mina behaves differently from the stand-in (covered throttling, scale, EOTF) and is first tested late (D-2) | One-screen or look surprises at the end | Early optional smoke with the v0.1.0 zip (T-06), a stand-in of a similar kind (D-13), T-83 before v0.5.0 |
-| F11 and F12 are taken from the game and every other program while ultimatecrt runs (global hotkeys, D-7) | A game that uses F11 or F12 loses them | Chords configurable (T-54), documented, a failed registration names the chord |
+| F11 and F12 are taken from the game and every other program while phoxium runs (global hotkeys, D-7) | A game that uses F11 or F12 loses them | Chords configurable (T-54), documented, a failed registration names the chord |
 | Parallel agents collide on hotspot files | Merge breakage | File table in section 4, worktrees, merge order |
 | Oracle and shader share the same mistake | Tests pass on wrong physics | Oracle review (T-14 by Fable), oracle numbers re-derived before each stage review (gate 11), T-49 audit |
 | Parallel agents share one desktop, one focus, one hotkey and one GPU | Invalid focus and timing measurements, hotkey registration failures | Desktop and GPU token (gate 13), `live` marks in section 4, sub-batches of at most 5 |

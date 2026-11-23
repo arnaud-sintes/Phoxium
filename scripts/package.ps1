@@ -171,8 +171,8 @@ The two values must be identical (letters in upper or lower case). The source is
 (arnaud-sintes/Phoxium) and the executables can be rebuilt from it (README.md, "Building from source").
 
 Phoxium is released under the MIT licence (LICENSE). Licences of the dependencies: THIRD-PARTY.md.
-Phoxium was called ultimateCRT up to v0.3.0; at its first start it copies the old settings folder
-(%APPDATA%\ultimateCRT) to %APPDATA%\Phoxium and leaves the old one in place.
+At its first start Phoxium copies the settings folder of the earlier versions (%APPDATA%\ultimateCRT) to
+%APPDATA%\Phoxium and leaves the old one in place.
 "@
 [IO.File]::WriteAllText("$stage\RUNNING.txt", ($running -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
 

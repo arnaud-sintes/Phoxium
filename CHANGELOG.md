@@ -7,6 +7,14 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Changed
+
+- The former project name is removed from the documentation (`CLAUDE.md`, README, `docs/REFERENCE.md`, `ARCHITECTURE.md`, `ENV.md`, `PLAN.md`, `QUESTIONS.md`), the release and package scripts and the code comments. What stays: the one-time copy of the old settings folder `%APPDATA%\ultimateCRT` (its console messages now say "settings of the earlier versions"), the burn-in file magic (saved wear maps stay readable) and the released changelog sections. The `ENV.md` rename procedure and the `release.ps1` rename hint are gone (the repository is renamed and `origin` points at it).
+
+### Fixed
+
+- Capture hardening: the capture state (latest frame, failure text, copy costs, slot pool) is now locked with a poison-tolerant helper (`capture::lock_tolerant`). A panic on a capture callback thread used to poison these locks, so the render loop panicked at its next lock although `crash.rs` promises that such a panic ends only that thread and the app goes on. Test: `capture::tests::a_poisoned_lock_is_still_usable`.
+
 ## [0.5.0] - 2026-11-21
 
 ### Added

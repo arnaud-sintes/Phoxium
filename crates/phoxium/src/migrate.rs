@@ -1,9 +1,9 @@
-//! One-time copy of the settings folder of the versions called ultimateCRT (up to 0.3.0) into the Phoxium one.
+//! One-time copy of the settings folder of the earlier versions (up to 0.3.0) into the Phoxium one.
 //!
-//! The project was renamed from ultimateCRT to Phoxium on 2026-11-21 (QUESTIONS REN-1), and its settings folder
-//! with it: `%APPDATA%\ultimateCRT` (settings, presets, export and import folders, game profiles, burn-in state,
-//! crash reports) became `%APPDATA%\Phoxium` ([`crate::settings::default_dir`]). At start, [`migrate_dir`] copies
-//! the old folder when the new one does not exist yet. The rules:
+//! The settings folder of the earlier versions was `%APPDATA%\ultimateCRT` (settings, presets, export and import
+//! folders, game profiles, burn-in state, crash reports); it became `%APPDATA%\Phoxium` (QUESTIONS REN-1,
+//! [`crate::settings::default_dir`]). At start, [`migrate_dir`] copies the old folder when the new one does not
+//! exist yet. The rules:
 //!
 //! - nothing happens when the new folder (or a file of that name) exists, or when there is no old folder;
 //! - the old folder is only read, never changed or deleted (an older build keeps working with it);
@@ -117,7 +117,7 @@ fn message(outcome: &Outcome, old: &Path, new: &Path) -> Option<String> {
     match outcome {
         Outcome::NotNeeded => None,
         Outcome::Copied { files, skipped } => Some(format!(
-            "settings: copied {files} file(s) from {} to {} (the project was renamed from ultimateCRT to Phoxium; \
+            "settings: copied {files} file(s) from {} to {} (settings of the earlier versions; \
              the old folder is kept{})",
             old.display(),
             new.display(),
@@ -128,7 +128,7 @@ fn message(outcome: &Outcome, old: &Path, new: &Path) -> Option<String> {
             }
         )),
         Outcome::Failed(why) => Some(format!(
-            "warning: settings: the settings of ultimateCRT were not copied ({why}); starting with the defaults, \
+            "warning: settings: the settings of the earlier versions were not copied ({why}); starting with the defaults, \
              the old folder is unchanged and the next start tries again"
         )),
     }

@@ -218,11 +218,6 @@ Run it on a committed (clean) tree. It reads the version from `[workspace.packag
 
 Deployment is a GitHub release of the zip on the repository `arnaud-sintes/Phoxium` (public from v0.2.0; it was private before). There is no installer: unzip and run. The executables are **not code-signed** (decision: no certificate), so Windows SmartScreen and antivirus tools may warn on first run; the README and `RUNNING.txt` say so and tell users to compare the SHA-256 of the zip with the `.sha256` file attached to the release (`Get-FileHash`, or `certutil -hashfile <zip> SHA256`).
 
-**The rename (2026-11-21).** The project was called ultimateCRT up to v0.3.0, on the repository `arnaud-sintes/ultimateCRT`. The code, the zip (`phoxium-vX.Y.Z-windows-x64.zip`) and `release.ps1` (default `-Repo arnaud-sintes/Phoxium`) already use the new name; the GitHub repository is renamed by hand, once, before the first release under the new name:
-1. On GitHub: the repository's Settings, General, Repository name: `ultimateCRT` to `Phoxium` (or `gh repo rename Phoxium --repo arnaud-sintes/ultimateCRT`). GitHub then redirects the old web, clone and release URLs to the new ones.
-2. In every checkout: `git remote set-url origin https://github.com/arnaud-sintes/Phoxium.git`, then `git remote -v` and `git fetch origin` to check. Until then `release.ps1` stops at its `origin` check with a message that gives this command.
-3. The published v0.2.0 and v0.3.0 keep their tags, notes and assets as they are (`ultimatecrt-v0.X.0-windows-x64.zip`, `ultimatecrt.exe`): they are not re-uploaded or renamed, and the redirect keeps their links working. The local folders (`C:\projects\personal\ultimateCRT`, the `ultimateCRT-wt` worktrees) keep their names; `scripts\shared-paths.ps1` derives everything from the repository location.
-
 ```
 .\scripts\release.ps1 -DryRun   # runs every check, prints the target repository, tag, assets and notes
 .\scripts\release.ps1           # creates the DRAFT release with the zip and checksum (not public, no tag yet)
@@ -236,8 +231,8 @@ Two steps: the first run creates the release as a draft on the target repository
 ### Recovery
 
 The first step creates a draft and no tag; `-Publish` makes it public and GitHub creates the tag. If a step fails half way:
-- check `gh release view vX.Y.Z --repo arnaud-sintes/Phoxium` and `git ls-remote --tags origin vX.Y.Z` (the releases made before the rename, v0.2.0 and v0.3.0, are on the same repository, which keeps them through the rename);
-- `origin is ..., not the target repository arnaud-sintes/Phoxium`: the GitHub repository was not renamed yet, or this checkout still points at the old URL (see "The rename" above);
+- check `gh release view vX.Y.Z --repo arnaud-sintes/Phoxium` and `git ls-remote --tags origin vX.Y.Z`;
+- `origin is ..., not the target repository arnaud-sintes/Phoxium`: this checkout points at another repository (fix with `git remote set-url origin <url>`, or give `-Repo`);
 - a draft that lacks files or has wrong ones: fix it (`gh release upload vX.Y.Z dist\<file> --clobber --repo ...`) or delete the draft (`gh release delete vX.Y.Z --repo ...`; it has no tag yet) and run `release.ps1` again;
 - a wrong public release to redo: `gh release delete vX.Y.Z --cleanup-tag` (deleting is the owner's decision), then run `release.ps1` and `release.ps1 -Publish` again;
 - a wrong version already released is never reused: fix forward with the next patch version.

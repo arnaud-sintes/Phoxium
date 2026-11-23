@@ -181,7 +181,7 @@ pub fn run() -> Res<()> {
         return Ok(());
     }
 
-    // REN-1: a live session first copies the settings folder of the versions called ultimateCRT, once (before
+    // REN-1: a live session first copies the settings folder of the earlier versions, once (before
     // anything reads the settings). Never fatal; the offline commands above leave the folders alone.
     if let Ok(Some(line)) = std::panic::catch_unwind(crate::migrate::migrate_default_dir) {
         eprintln!("{line}");

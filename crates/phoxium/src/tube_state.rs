@@ -45,8 +45,8 @@ use std::{
 use crate::params::Params;
 use crate::Res;
 
-/// File magic. It keeps the letters of the project's former name (ultimateCRT, renamed Phoxium on 2026-11-21)
-/// so that the wear maps saved by earlier versions stay readable: never change it.
+/// File magic. It keeps the letters of an earlier name of the project, so that the wear maps saved by earlier
+/// versions stay readable: never change it.
 pub const MAGIC: &[u8; 8] = b"UCRTWEAR";
 /// Schema version of the file.
 pub const VERSION: u32 = 1;
