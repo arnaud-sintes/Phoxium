@@ -2,14 +2,6 @@
 
 Remaining work, most important first. Details live in `QUESTIONS.md` (ids in brackets) and `CLAUDE.md` ("Next step"). Updated 2026-11-23.
 
-## Very high
-
-_(empty)_
-
-## High
-
-- [ ] Performance: phosphor history bandwidth, curved-tube `screen` stage (PRF-1); re-measure first, 60 fps is a target, not a gate.
-
 ## Medium
 
 - [ ] Hold-to-bypass key (today the bypass is a toggle).
@@ -28,4 +20,10 @@ _(empty)_
 
 ## Very low
 
+- [ ] Performance, only if a target host needs it: FP16 phosphor history in the `low` quality tier (PRF-1 re-measure 2026-11-23: -0.9 ms of 4.4 at 2560x1440 on preset 01; needs a shader variant and the tier error re-measured).
 - [ ] Potential Linux port (Vulkan and Rust already portable; capture, output window, hotkeys, picker are Windows-only).
+
+## Finalization
+
+- [ ] In-depth code review (3 sub-agents - Opus, Fable, Sonnet - high effort)
+- [ ] In-depth performance analysis (3 sub-agents - Opus, Fable, Sonnet - high effort)
