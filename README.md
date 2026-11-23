@@ -32,6 +32,7 @@ That is all: no command line is needed. The integer upscale of the game and the 
 | Quit | `Ctrl+Alt+End` (or the close button of the framed window) |
 | Stats overlay | `Ctrl+Alt+F9` |
 | A/B: bypass the whole CRT chain | `Ctrl+Alt+F7` |
+| A/B while held: bypass only as long as the key is down | `Ctrl+Alt+Insert` |
 | Next / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` |
 | Click-through on / off | `Ctrl+Alt+F6` |
 
@@ -72,6 +73,7 @@ The program has no network code and sends nothing anywhere. The settings file ke
 - Zero-copy capture is not yet validated with a wide range of games and drivers (the CPU copy is the safe choice).
 - Several newer parts are covered by automated tests but not yet checked by hand; [QUESTIONS.md](QUESTIONS.md) and the [CHANGELOG](CHANGELOG.md) say which.
 - SDR output only; no HDR.
+- A whole monitor can be captured ("Whole screen N" in the list); the output window is then hidden from screen captures, and the Manual picture-area limits give a fixed region. Not checked with an HDR monitor.
 - Opening the menu deactivates the game for the moment (some games pause).
 
 The full list, with the technical detail, is in [docs/REFERENCE.md](docs/REFERENCE.md#known-limits).

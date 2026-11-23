@@ -136,6 +136,7 @@ fn label(a: Action) -> &'static str {
         Action::PreviousPreset => "Previous preset",
         Action::ToggleClickThrough => "Click-through",
         Action::Snapshot => "Snapshot (save PNG)",
+        Action::HoldBypass => "Hold to bypass (A/B)",
     }
 }
 

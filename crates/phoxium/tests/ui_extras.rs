@@ -321,9 +321,9 @@ fn hotkeys_are_rebound_from_the_menu() {
     let config = UiConfig {
         registration: Some(reg.clone()),
         layout_probe: Some(german),
-        ..tall(UiConfig::headless(), 1400.0)
+        ..tall(UiConfig::headless(), 1500.0)
     };
-    let Some(mut rig) = Rig::new("hotkeys_are_rebound_from_the_menu", 1280, 1400, config) else {
+    let Some(mut rig) = Rig::new("hotkeys_are_rebound_from_the_menu", 1280, 1500, config) else {
         return;
     };
     rig.open_menu();

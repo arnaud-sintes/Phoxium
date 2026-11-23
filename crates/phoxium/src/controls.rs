@@ -51,8 +51,17 @@ impl UiHook for NoUi {
 pub struct Controls {
     /// Set by `Action::Quit`: the application loop ends.
     pub quit: bool,
-    /// A/B bypass on: every chain slot is disabled.
+    /// A/B bypass on (the toggle): every chain slot is disabled.
     pub bypass: bool,
+    /// The hold-to-bypass key is down ([`Action::HoldBypass`], released by [`release_hold`]).
+    pub hold_bypass: bool,
+}
+
+impl Controls {
+    /// The chain is bypassed: the toggle is on, or the hold key is down.
+    pub fn bypassed(&self) -> bool {
+        self.bypass || self.hold_bypass
+    }
 }
 
 /// Preset direction.
@@ -76,6 +85,16 @@ pub enum Command {
     Snapshot,
 }
 
+/// The hold-to-bypass key went up: the chain comes back unless the toggle holds it off. `None` when the key was
+/// not held, or the toggle keeps the bypass on.
+pub fn release_hold(controls: &mut Controls) -> Option<Command> {
+    if !controls.hold_bypass {
+        return None;
+    }
+    controls.hold_bypass = false;
+    (!controls.bypass).then_some(Command::SetBypass(false))
+}
+
 /// Applies `action`: updates `controls`, calls the UI, and returns the command that needs the window or the
 /// renderer, if any.
 pub fn dispatch(action: Action, controls: &mut Controls, ui: &mut dyn UiHook) -> Option<Command> {
@@ -94,7 +113,15 @@ pub fn dispatch(action: Action, controls: &mut Controls, ui: &mut dyn UiHook) ->
         }
         Action::ToggleBypass => {
             controls.bypass = !controls.bypass;
-            Some(Command::SetBypass(controls.bypass))
+            Some(Command::SetBypass(controls.bypassed()))
+        }
+        Action::HoldBypass => {
+            // The registered hotkey repeats while the key is held: only the first press changes anything.
+            if controls.hold_bypass {
+                return None;
+            }
+            controls.hold_bypass = true;
+            (!controls.bypass).then_some(Command::SetBypass(true))
         }
         Action::NextPreset => Some(Command::StepPreset(Step::Next)),
         Action::PreviousPreset => Some(Command::StepPreset(Step::Previous)),
@@ -241,6 +268,42 @@ mod tests {
         assert!(!c.bypass);
     }
 
+    /// Hold to bypass: on at the press, one command only while the key repeats, off at the release; the toggle
+    /// keeps its own state: held over an active toggle nothing changes, and a toggle switched off while the key is
+    /// down keeps the chain bypassed until the release.
+    #[test]
+    fn hold_bypass_follows_the_key_and_leaves_the_toggle_alone() {
+        let (mut c, mut ui) = (Controls::default(), NoUi);
+        assert_eq!(
+            dispatch(Action::HoldBypass, &mut c, &mut ui),
+            Some(Command::SetBypass(true))
+        );
+        assert!(c.hold_bypass && !c.bypass && c.bypassed());
+        assert_eq!(dispatch(Action::HoldBypass, &mut c, &mut ui), None, "key repeat");
+        assert_eq!(release_hold(&mut c), Some(Command::SetBypass(false)));
+        assert!(!c.bypassed());
+        assert_eq!(release_hold(&mut c), None, "nothing held");
+
+        // The toggle is on: holding and releasing change nothing, the toggle stays on.
+        assert_eq!(
+            dispatch(Action::ToggleBypass, &mut c, &mut ui),
+            Some(Command::SetBypass(true))
+        );
+        assert_eq!(dispatch(Action::HoldBypass, &mut c, &mut ui), None);
+        assert_eq!(release_hold(&mut c), None);
+        assert!(c.bypass && c.bypassed());
+
+        // The toggle is switched off while the key is down: the chain stays bypassed until the release.
+        assert_eq!(dispatch(Action::HoldBypass, &mut c, &mut ui), None);
+        assert_eq!(
+            dispatch(Action::ToggleBypass, &mut c, &mut ui),
+            Some(Command::SetBypass(true))
+        );
+        assert!(!c.bypass && c.bypassed());
+        assert_eq!(release_hold(&mut c), Some(Command::SetBypass(false)));
+        assert!(!c.bypassed());
+    }
+
     #[test]
     fn presets_and_fullscreen_become_commands() {
         let (mut c, mut ui) = (Controls::default(), NoUi);
@@ -264,7 +327,7 @@ mod tests {
         // Adding an action without a dispatch arm fails to compile; this checks the arms are the intended ones.
         let (mut c, mut ui) = (Controls::default(), NoUi);
         let commands: Vec<_> = Action::ALL.iter().map(|&a| dispatch(a, &mut c, &mut ui)).collect();
-        assert_eq!(commands.iter().filter(|c| c.is_some()).count(), 6);
+        assert_eq!(commands.iter().filter(|c| c.is_some()).count(), 6, "{commands:?}");
         assert_eq!(dispatch(Action::Snapshot, &mut c, &mut ui), Some(Command::Snapshot));
         assert_eq!(
             dispatch(Action::ToggleClickThrough, &mut c, &mut ui),

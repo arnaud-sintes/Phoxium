@@ -171,11 +171,12 @@ pub fn run() -> Res<()> {
         }
         for (i, r) in output::monitor_rects().iter().enumerate() {
             println!(
-                "monitor {i}: {}x{} at ({}, {})",
+                "monitor {i}: {}x{} at ({}, {})  (output: --monitor {i}; whole-monitor source: --window \"Whole screen {}\")",
                 r.right - r.left,
                 r.bottom - r.top,
                 r.left,
-                r.top
+                r.top,
+                i + 1
             );
         }
         return Ok(());
@@ -645,6 +646,9 @@ pub fn run() -> Res<()> {
     } else {
         Phase::NoSource
     };
+    // A whole monitor as the source would contain the output itself: while one is attached the output window is
+    // hidden from screen captures (`output::set_capture_excluded`), and shown again for any other source.
+    let mut capture_excluded = false;
     let mut reattach = match (&capture, &target) {
         (Some(_), Some(t)) => Some(lifecycle::Reattacher::new(t.clone(), follow.0 as isize)),
         _ => None,
@@ -712,6 +716,8 @@ pub fn run() -> Res<()> {
     let mut snapshot_from_menu: Option<crate::snapshot::Kind> = None;
     let mut snapshot_kind: Option<crate::snapshot::Kind> = None;
     let mut cli_snapshot_asked = false;
+    // Frames rendered since the start (`renders` restarts every second, for the rates): `--snapshot` waits for 30.
+    let mut rendered_total = 0u32;
 
     // R-01: the session loop. Every error in it (a `?`) ends the loop and comes out here as `outcome`; the
     // shutdown below then runs on every exit path, normal or not. D-05: so does a panic (`crash::guard`), and
@@ -751,6 +757,20 @@ pub fn run() -> Res<()> {
                 break;
             }
             let now = start.elapsed().as_secs_f64();
+            let want_excluded = reattach
+                .as_ref()
+                .is_some_and(|r| r.is_attached() && sources::monitor_index(r.hwnd()).is_some());
+            if want_excluded != capture_excluded {
+                capture_excluded = want_excluded;
+                if !output::set_capture_excluded(win.hwnd, want_excluded) && want_excluded {
+                    eprintln!(
+                        "warning: this Windows cannot hide the output from a screen capture: the captured monitor \
+                         shows the output itself (use a second monitor for the output)"
+                    );
+                } else if want_excluded {
+                    println!("source: whole monitor, the output window is hidden from the capture");
+                }
+            }
             // R-04: minimised (or no client area): no frame taken, no render; the loop sleeps in `wait_messages`
             // below, so the hotkeys, the menu key and the lifecycle (reattach, lost source) keep working.
             let out_size = output::client_size(win.hwnd);
@@ -1699,7 +1719,7 @@ pub fn run() -> Res<()> {
                         ui_state.snapshot_message = Some((false, text));
                     }
                 }
-                if args.snapshot.is_some() && !cli_snapshot_asked && renders >= 30 {
+                if args.snapshot.is_some() && !cli_snapshot_asked && rendered_total >= 30 {
                     cli_snapshot_asked = renderer.request_snapshot();
                     if !cli_snapshot_asked {
                         return Err("--snapshot: the output surface cannot be copied from".into());
@@ -1743,6 +1763,7 @@ pub fn run() -> Res<()> {
                         println!("{}", placement::readout(&params, view.native, out_size, args.integer));
                     }
                     renders += 1;
+                    rendered_total = rendered_total.saturating_add(1);
                     if let Some(l) = log.as_mut() {
                         l.tick(captured_base + capture.as_ref().map_or(0, |c| c.frames_captured()));
                     }

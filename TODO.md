@@ -4,8 +4,6 @@ Remaining work, most important first. Details live in `QUESTIONS.md` (ids in bra
 
 ## Medium
 
-- [ ] Hold-to-bypass key (today the bypass is a toggle).
-- [ ] Whole-monitor or fixed-region capture.
 - [ ] Composite demodulator realism (per-line and per-frame carrier phase, dot crawl, decoder chroma matrix).
 - [ ] Analogue impairments, off by default: hum bar, scanline jitter and crawl, ghosting, noise and snow, line tracking.
 - [ ] TATE (rotated tube).

@@ -246,11 +246,15 @@ pub enum Action {
     ToggleClickThrough,
     /// Saves a snapshot of the output (the picture without the menu) as a PNG in the pictures folder.
     Snapshot,
+    /// Hold to bypass: the CRT chain is off while the key is held down and back on at its release (the toggle
+    /// [`Action::ToggleBypass`] is unaffected). A registered hotkey reports presses only, so the release is polled
+    /// (`output::key_down`).
+    HoldBypass,
 }
 
 impl Action {
     /// Every action, in registration order (Quit first: it is the escape path).
-    pub const ALL: [Action; 9] = [
+    pub const ALL: [Action; 10] = [
         Action::Quit,
         Action::ToggleFullscreen,
         Action::ToggleMenu,
@@ -260,6 +264,7 @@ impl Action {
         Action::PreviousPreset,
         Action::ToggleClickThrough,
         Action::Snapshot,
+        Action::HoldBypass,
     ];
 
     /// The key of the action in `[global.hotkeys]` of `settings.toml`.
@@ -274,6 +279,7 @@ impl Action {
             Action::PreviousPreset => "previous_preset",
             Action::ToggleClickThrough => "toggle_click_through",
             Action::Snapshot => "snapshot",
+            Action::HoldBypass => "hold_bypass",
         }
     }
 
@@ -293,6 +299,7 @@ impl Action {
             Action::PreviousPreset => "Ctrl+Alt+PageUp",
             Action::ToggleClickThrough => "Ctrl+Alt+F6",
             Action::Snapshot => "Ctrl+Alt+F2",
+            Action::HoldBypass => "Ctrl+Alt+Insert",
         }
     }
 
@@ -325,6 +332,7 @@ impl Action {
             Action::PreviousPreset => &["Ctrl+Alt+Shift+PageUp"],
             Action::ToggleClickThrough => &["Ctrl+Alt+Shift+F6"],
             Action::Snapshot => &["Ctrl+Alt+Shift+F2"],
+            Action::HoldBypass => &["Ctrl+Alt+Shift+Insert"],
         }
     }
 
@@ -340,6 +348,7 @@ impl Action {
             Action::PreviousPreset => "previous preset",
             Action::ToggleClickThrough => "click-through",
             Action::Snapshot => "snapshot",
+            Action::HoldBypass => "hold to bypass",
         }
     }
 

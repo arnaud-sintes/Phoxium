@@ -10,6 +10,7 @@ use windows::Win32::Foundation::HWND;
 use crate::{
     controls::{self, Command, Controls, SlotFlags, Step, UiHook},
     gpu,
+    hotkeys::Action,
     lifecycle::LostWatch,
     modes::{IRect, ModeState, Placement, WindowMode},
     output,
@@ -41,6 +42,9 @@ pub struct Live {
     dirty_since: Option<std::time::Instant>,
     /// A snapshot asked by its hotkey and not yet taken by the loop ([`Live::take_snapshot_request`]).
     snapshot_request: Option<crate::snapshot::Kind>,
+    /// The key of the hold-to-bypass hotkey while it is held: its release is polled every loop
+    /// (`output::key_down`), a registered hotkey reports presses only.
+    hold_key: Option<u16>,
 }
 
 /// How long the settings wait after the last menu change before they are written (a drag writes once).
@@ -76,6 +80,7 @@ impl Live {
             last_follow: std::time::Instant::now(),
             dirty_since: None,
             snapshot_request: None,
+            hold_key: None,
         }
     }
 
@@ -91,10 +96,23 @@ impl Live {
         params: &mut Params,
         lost: &mut LostWatch,
     ) {
+        // The hold-to-bypass key came up (checked before the new presses, so that a tap shows the bypass for at
+        // least one frame): the chain comes back.
+        if let Some(vk) = self.hold_key {
+            if !output::key_down(vk) {
+                self.hold_key = None;
+                if let Some(command) = controls::release_hold(&mut self.controls) {
+                    self.run(command, hwnd, renderer, params, lost);
+                }
+            }
+        }
         for (action, chord) in output::take_actions() {
             // The menu waiting for a new hotkey takes a registered chord as that new chord (Quit always runs).
             if ui.capture_chord(action, chord) {
                 continue;
+            }
+            if action == Action::HoldBypass {
+                self.hold_key = Some(chord.vk);
             }
             if let Some(command) = controls::dispatch(action, &mut self.controls, ui) {
                 self.run(command, hwnd, renderer, params, lost);

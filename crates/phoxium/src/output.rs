@@ -55,8 +55,8 @@ use windows::{
         System::LibraryLoader::GetModuleHandleW,
         UI::{
             Input::KeyboardAndMouse::{
-                GetCapture, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent, UnregisterHotKey,
-                HOT_KEY_MODIFIERS, MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT,
+                GetAsyncKeyState, GetCapture, RegisterHotKey, ReleaseCapture, SetCapture, TrackMouseEvent,
+                UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, TME_LEAVE, TRACKMOUSEEVENT,
             },
             WindowsAndMessaging::*,
         },
@@ -421,7 +421,9 @@ thread_local! {
 /// The source window changed (an attach in the picker, a reattach, a detach: 0), the last fallback of the T-07
 /// hand-back (A23).
 pub fn set_source(source: HWND) {
-    SOURCE.store(source.0 as isize, Ordering::Relaxed);
+    // A whole monitor has no window to hand the focus back to.
+    let h = source.0 as isize;
+    SOURCE.store(if h < 0 { 0 } else { h }, Ordering::Relaxed);
 }
 
 /// Activations handed back since the last call (for a console line).
@@ -489,6 +491,10 @@ pub fn monitor_irects() -> Vec<IRect> {
 /// The monitor nearest to the window.
 pub fn monitor_of(hwnd: HWND) -> IRect {
     let fallback = IRect::new(0, 0, 1280, 720);
+    // The handle of a whole monitor as a capture source: that monitor.
+    if let Some(m) = crate::sources::monitor_index(hwnd.0 as isize).and_then(|i| monitor_irects().get(i).copied()) {
+        return m;
+    }
     // SAFETY: a plain query on a window handle.
     unsafe { monitor_rect(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST)) }.map_or(fallback, irect)
 }
@@ -518,6 +524,14 @@ pub fn default_outer_size(client: (i32, i32)) -> (i32, i32) {
 /// the menu takes it as a new chord while it waits for one). Drained by the application loop.
 pub fn take_actions() -> Vec<(Action, Chord)> {
     std::mem::take(&mut *ACTIONS.lock().unwrap_or_else(|e| e.into_inner()))
+}
+
+/// Whether the key with virtual-key code `vk` is down right now (the physical state, whatever program has the focus
+/// and even when a registered hotkey swallowed the press). Used to see the release of a held hotkey, which
+/// `RegisterHotKey` does not report.
+pub fn key_down(vk: u16) -> bool {
+    // SAFETY: a pure query of the keyboard state; the high bit of the result is set while the key is down.
+    unsafe { GetAsyncKeyState(i32::from(vk)) < 0 }
 }
 
 /// True once after the monitor layout or resolution changed (`WM_DISPLAYCHANGE`).
@@ -583,6 +597,26 @@ unsafe extern "system" fn monitor_proc(m: HMONITOR, _: HDC, _: *mut RECT, lparam
     let list = &mut *(lparam.0 as *mut Vec<HMONITOR>);
     list.push(m);
     true.into()
+}
+
+/// The monitors, in the order of [`monitor_rects`] (the same index), as handles.
+pub fn monitor_handles() -> Vec<HMONITOR> {
+    let mut list: Vec<HMONITOR> = Vec::new();
+    // SAFETY: plain enumeration; `list` outlives the call.
+    unsafe {
+        let _ = EnumDisplayMonitors(None, None, Some(monitor_proc), LPARAM(&mut list as *mut _ as isize));
+    }
+    list.into_iter().filter(|m| monitor_rect(*m).is_some()).collect()
+}
+
+/// Hides the output window from screen captures (`WDA_EXCLUDEFROMCAPTURE`, Windows 10 2004 and later) or shows it
+/// again: a captured whole monitor would otherwise contain the output itself (a picture of the picture, over and
+/// over). The output's own pixels, the snapshot and the menu are not affected, only what other programs capture
+/// of the screen. `false` when the system refused (an older Windows).
+pub fn set_capture_excluded(hwnd: HWND, excluded: bool) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{SetWindowDisplayAffinity, WDA_EXCLUDEFROMCAPTURE, WDA_NONE};
+    // SAFETY: our own live window.
+    unsafe { SetWindowDisplayAffinity(hwnd, if excluded { WDA_EXCLUDEFROMCAPTURE } else { WDA_NONE }).is_ok() }
 }
 
 pub fn monitor_rects() -> Vec<RECT> {
@@ -720,7 +754,7 @@ pub fn create(opts: &Options) -> Result<Output> {
     CLICK_THROUGH.store(opts.click_through, Ordering::Relaxed);
     // No window yet: only the flag the window procedure reads during the creation.
     sync_activation(HWND::default());
-    SOURCE.store(opts.follow.0 as isize, Ordering::Relaxed);
+    set_source(opts.follow);
     LAST_FOREGROUND.store(unsafe { GetForegroundWindow() }.0 as isize, Ordering::Relaxed);
     unsafe {
         let hinstance = GetModuleHandleW(None)?;

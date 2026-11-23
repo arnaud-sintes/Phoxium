@@ -93,9 +93,53 @@ pub fn list_entries() -> Vec<WindowEntry> {
     list_windows().iter().map(WindowEntry::from_info).collect()
 }
 
-/// True while `hwnd` still designates a window (a destroyed window or a stale handle gives false).
+/// True while `hwnd` still designates a window (a destroyed window or a stale handle gives false), or, for the
+/// handle of a whole monitor ([`monitor_handle`]), while that monitor is connected.
 pub fn window_exists(hwnd: isize) -> bool {
+    if let Some(i) = monitor_index(hwnd) {
+        return i < crate::output::monitor_irects().len();
+    }
     unsafe { IsWindow(Some(HWND(hwnd as *mut std::ffi::c_void))).as_bool() }
+}
+
+/// Whole monitors as capture sources: each connected monitor is listed with the windows, as a pseudo-window of
+/// the program [`MONITOR_EXE`], the class [`MONITOR_CLASS_PREFIX`] and its number, the title "Whole screen N" and the
+/// handle [`monitor_handle`] (negative: no window has one). Everything keyed by window (the picker, the last
+/// choice, the reattach after the monitor comes back, the saved profile of a program and class) then works for
+/// a monitor without a case of its own; only the capture start and the places that call Win32 with the handle
+/// know the difference.
+pub const MONITOR_EXE: &str = "Display";
+/// Class prefix of the monitor pseudo-windows (followed by the 1-based monitor number).
+pub const MONITOR_CLASS_PREFIX: &str = "phoxium_monitor_";
+
+/// The handle standing for monitor `index` (0-based, the order of `output::monitor_rects`): -1, -2, ...
+pub fn monitor_handle(index: usize) -> isize {
+    -(index as isize) - 1
+}
+
+/// The monitor index of a handle made by [`monitor_handle`], `None` for a window handle.
+pub fn monitor_index(handle: isize) -> Option<usize> {
+    (handle < 0).then(|| (-(handle + 1)) as usize)
+}
+
+/// The pseudo-windows of the connected monitors, for the window list.
+pub fn raw_monitors(monitors: &[crate::modes::IRect]) -> Vec<crate::picker::RawWindow> {
+    monitors
+        .iter()
+        .enumerate()
+        .map(|(i, m)| crate::picker::RawWindow {
+            hwnd: monitor_handle(i),
+            title: format!("Whole screen {}", i + 1),
+            class: format!("{MONITOR_CLASS_PREFIX}{}", i + 1),
+            exe: Some(MONITOR_EXE.to_string()),
+            exe_path: None,
+            visible: true,
+            width: m.width(),
+            height: m.height(),
+            monitor: Some(i),
+            ..Default::default()
+        })
+        .collect()
 }
 
 /// Window whose title starts with `needle`, else the first one that contains it (case insensitive), among
@@ -348,7 +392,11 @@ pub fn enumerate() -> Vec<crate::picker::RawWindow> {
     }
     let own = unsafe { GetCurrentProcessId() };
     let monitors = crate::output::monitor_irects();
-    handles.into_iter().map(|h| raw_window(h, own, &monitors)).collect()
+    let mut windows: Vec<crate::picker::RawWindow> =
+        handles.into_iter().map(|h| raw_window(h, own, &monitors)).collect();
+    // The whole monitors come after the windows (the picker lists them last).
+    windows.extend(raw_monitors(&monitors));
+    windows
 }
 
 /// The 32 x 32 icon of an executable as RGBA (`PrivateExtractIconsW`, the first icon of the file), `None` when the
@@ -449,8 +497,61 @@ pub fn exe_icon(path: &str) -> Option<(u32, u32, Vec<u8>)> {
 
 #[cfg(test)]
 mod tests {
-    use super::{exe_file_name, exe_matches, find_process_in, find_title_in, wait_for_window};
+    use super::{
+        exe_file_name, exe_matches, find_process_in, find_title_in, monitor_handle, monitor_index, raw_monitors,
+        wait_for_window,
+    };
     use crate::picker::RawWindow;
+
+    /// A whole monitor has a negative handle (no window has one) and comes back as its index; a window handle is
+    /// not a monitor.
+    #[test]
+    fn monitor_handles_round_trip_and_are_never_window_handles() {
+        for i in [0usize, 1, 2, 7] {
+            let h = monitor_handle(i);
+            assert!(h < 0);
+            assert_eq!(monitor_index(h), Some(i));
+        }
+        assert_eq!(monitor_handle(0), -1);
+        assert_eq!(monitor_index(0), None);
+        assert_eq!(monitor_index(0x10ABC), None);
+    }
+
+    /// The monitors are listed like windows: the picker takes them (title "Whole screen N", program "Display"), the
+    /// last choice and the saved profile key them by their class, which holds the monitor number, so a profile is
+    /// per monitor; `--window "Whole screen 2"` finds one.
+    #[test]
+    fn monitors_are_picker_rows_with_a_class_per_monitor() {
+        let monitors = [
+            crate::modes::IRect::new(0, 0, 2560, 1440),
+            crate::modes::IRect::new(2560, -251, 4000, 2309),
+        ];
+        let raw = raw_monitors(&monitors);
+        assert!(
+            raw.iter().all(|w| crate::picker::exclusion(w).is_none()),
+            "listed by the picker"
+        );
+        let rows = crate::picker::candidates(&raw);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            (
+                rows[1].title.as_str(),
+                rows[1].class.as_str(),
+                rows[1].program().as_str()
+            ),
+            ("Whole screen 2", "phoxium_monitor_2", "Display")
+        );
+        assert_eq!((rows[1].width, rows[1].height, rows[1].monitor), (1440, 2560, Some(1)));
+        assert_eq!(
+            rows[1].details(),
+            "Display  \u{00B7}  1440 \u{00D7} 2560  \u{00B7}  monitor 2"
+        );
+        assert_eq!(rows[0].last_source().class, "phoxium_monitor_1");
+        assert_eq!(
+            find_title_in(&raw, "whole screen 2").map(|w| w.hwnd),
+            Some(monitor_handle(1))
+        );
+    }
 
     /// A listable window of `exe` with a size.
     fn of_exe(hwnd: isize, title: &str, exe: &str, size: (i32, i32)) -> RawWindow {

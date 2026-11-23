@@ -40,6 +40,7 @@ At start (and from **Change source** in the menu) the output window lists the wi
 | Settings menu | `F10` |
 | Stats overlay | `Ctrl+Alt+F9` |
 | A/B: bypass the whole CRT chain | `Ctrl+Alt+F7` |
+| A/B while held: bypass only as long as the key is down | `Ctrl+Alt+Insert` |
 | Next / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` |
 | Click-through on / off (mouse to the game under the output) | `Ctrl+Alt+F6` |
 | Save a snapshot of the output (PNG) | `Ctrl+Alt+F2` |
@@ -156,6 +157,15 @@ The last choice (program, class and title) is kept in `settings.toml`, `[global.
 
 Without a source, Esc in the list only clears the search (there is nothing to go back to) and the menu key shows the settings; closing them comes back to the list. Switching to another window leaves the list where it is. Quit with Ctrl+Alt+End or the close button. Errors during the session (a window that cannot be captured, a source given up) are shown as a message in the card; a fatal error at start is shown in a message box when the app was not started from a terminal.
 
+### A whole monitor as the source
+
+Every connected monitor is also in the list, after the windows, as **Whole screen N** (program "Display", the monitor's size and number): choose it to capture everything that monitor shows, for games and programs that are not a window of their own (exclusive or borderless fullscreen, several windows together, an emulator frontend and its game), and to see the desktop as it is.
+
+- **The output is hidden from the capture.** A monitor that holds the output would otherwise capture the output itself, a picture of the picture without end. While a whole monitor is the source, the output window is hidden from screen captures (`SetWindowDisplayAffinity` with `WDA_EXCLUDEFROMCAPTURE`, Windows 10 version 2004 and later): the capture sees what is under it. Only what other programs capture of the screen is affected (the output, its menu and the snapshot are as always); with another source the output is shown to captures again. On an older Windows the console says so and a second monitor for the output is the way out.
+- **A fixed region:** the captured frame is the whole monitor, and the picture-area limits of the Source section (Manual: Left, Top, Right, Bottom, the pixels cropped from each side, kept in the profile) cut the region you want out of it, so a game window that stays put on a monitor is a fixed region of it. The profile belongs to the program "Display" and the class of the monitor ("phoxium_monitor_2"), so each monitor has its own picture area and settings, and a monitor that is unplugged and plugged again is reattached like a window. Auto detection of the picture area works on it as on any frame (black bars around a picture), which on a desktop usually finds nothing to cut.
+- **Command line:** `--window "Whole screen 2"` (the numbers are those of the picker: `--list-windows` prints each monitor with its `--monitor` index, from 0, and its source name, from 1).
+- **Cost and limits:** a 2560 x 1440 source is four times the pixels of a 1280 x 720 game: the capture is cheap with zero-copy, the chain costs what its size costs (profile it with `--stats`), and the amplifier samples are limited on a source that wide (the console says so). The mouse pointer is not captured, as for windows. A monitor that goes away is a lost source (the wait, then the list). Checked live: a whole 2560 x 1440 monitor through the real window under zero-copy, no picture of the output in the picture; not checked: the old Windows without the capture exclusion, several monitors of different GPUs, an HDR monitor.
+
 Release builds are GUI programs (no console window). Started from a terminal with options, the app writes its text to that terminal (`--help`, `--list-windows`, `--stats`...); without options it prints nothing.
 
 ## GPU choice (HW-3)
@@ -229,6 +239,7 @@ Global hotkeys are registered with `RegisterHotKey` on the output window (no key
 | Settings menu (T-52a) | `F10` | `toggle_menu` |
 | Overlay (T-52b) | `Ctrl+Alt+F9` | `toggle_overlay` |
 | A/B: bypass the whole CRT chain | `Ctrl+Alt+F7` | `toggle_bypass` |
+| A/B while held: bypass only as long as the key is down | `Ctrl+Alt+Insert` | `hold_bypass` |
 | Next preset / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` | `next_preset`, `previous_preset` |
 | Click-through on / off | `Ctrl+Alt+F6` | `toggle_click_through` |
 | Save a snapshot of the output (PNG) | `Ctrl+Alt+F2` | `snapshot` |
@@ -242,6 +253,7 @@ Global hotkeys are registered with `RegisterHotKey` on the output window (no key
 - **Click-through:** `[global.output] click_through = false` (the default, PLAN D-8), the `Ctrl+Alt+F6` hotkey (`toggle_click_through`) or the **Click-through** checkbox of the menu's Interface section. When on, the output window ignores the mouse (`WS_EX_TRANSPARENT | WS_EX_LAYERED` at full opacity, the picture unchanged): clicks, drags and the wheel reach the window under it, typically the captured game under a fullscreen output. While the settings menu or the window list is open the output takes the mouse again, and closing it returns to click-through; F10 and every other hotkey keep working, so the menu is always reachable. The hotkey and the checkbox print `output: click-through on` / `off` and write the setting at once; "Reset everything to defaults" turns it off. With click-through on, a framed output cannot be moved or resized by the mouse (open the menu, or switch it off). Known risk, not measured yet: a layered window may lose independent flip (one more compositor pass, a little more latency, QUESTIONS OUT-4); the style is set only while click-through is on.
 - **Presets:** next and previous step through the presets in menu order (the ten shipped ones, then the user ones in `%APPDATA%\Phoxium\presets\`), wrap around, print `preset next: <name> (<id>)`, and replace the tube parameters at once. The `source` group (scale mode, PAR, crop, surround) is kept; the parameter overrides of `settings.toml` belong to the preset they were made on and are not carried over. The choice is not written to the settings.
 - **A/B bypass:** `Ctrl+Alt+F7` disables every slot of the CRT chain (the picture then goes through source decoding, placement and output encoding only) and prints `bypass: on`; pressing it again restores the slot flags as they were and prints `bypass: off`.
+- **Hold to bypass:** `Ctrl+Alt+Insert` (`hold_bypass`) bypasses the chain only while its key (Insert) is down, and the picture is back when you let go: a quick before and after without a second press. It leaves the toggle alone: held while the toggle has the bypass on, nothing changes at the release; the toggle switched off while the key is down keeps the bypass until the release. A registered hotkey reports only the press, so the release is read from the keyboard state once per frame, which also means a tap shows the bypass for at least one frame. Rebindable like the others (Hotkeys section of the menu).
 - `scripts\check-hotkeys.ps1` is the live check (sends the keys with SendInput, needs a hands-off desktop, prints PASS, MITIGATED or FAIL). It has not been run yet.
 
 ## Tube presets and parameters

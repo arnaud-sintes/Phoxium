@@ -266,7 +266,20 @@ impl Capture {
         let direct3d_device = to_winrt_device(&device)?;
 
         let interop = factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
-        let item: GraphicsCaptureItem = unsafe { interop.CreateForWindow(hwnd)? };
+        // A whole monitor (the handle of `sources::monitor_handle`) or a window.
+        let monitor = crate::sources::monitor_index(hwnd.0 as isize);
+        let item: GraphicsCaptureItem = match monitor {
+            Some(i) => {
+                let handle = crate::output::monitor_handles()
+                    .get(i)
+                    .copied()
+                    .ok_or_else(|| windows::core::Error::from(windows::Win32::Foundation::E_INVALIDARG))?;
+                unsafe { interop.CreateForMonitor(handle)? }
+            }
+            None => unsafe { interop.CreateForWindow(hwnd)? },
+        };
+        // No client area on a monitor: the whole frame.
+        let crop = crop && monitor.is_none();
         let size = item.Size()?;
 
         let format = DirectXPixelFormat::B8G8R8A8UIntNormalized;

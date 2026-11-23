@@ -42,6 +42,7 @@ pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
     ("previous_preset", "Ctrl+Alt+PageUp"),
     ("toggle_click_through", "Ctrl+Alt+F6"),
     ("snapshot", "Ctrl+Alt+F2"),
+    ("hold_bypass", "Ctrl+Alt+Insert"),
 ];
 
 /// The generation of the default hotkeys a file was written with (`[global] hotkey_defaults`): 1 (the key is
