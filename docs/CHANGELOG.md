@@ -7,6 +7,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-23
+
 ### Added
 
 - **Composite decoder imperfections** (`docs/REFERENCE.md`, "The decoder's imperfections"): six advanced controls in the Composite video group, each neutral at its default (the output is bit for bit what it was): `composite_hue_slope_deg` (the decoder's phase error grows along the line), `composite_hue_jitter_deg` (a phase error per line and frame, which a PAL delay line cancels to a saturation loss), `composite_decoder_axis_error_deg` and `composite_decoder_v_gain` (the second demodulation axis and the red gain), `composite_decoder_green_ry` and `composite_decoder_green_by` (the green matrix). The per-pixel, per-line and per-frame carrier phase and the dot crawl were already in (T-31). Oracle `crt_model::composite`, GPU test `tests/stage_composite.rs`.
@@ -262,7 +264,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/arnaud-sintes/ultimateCRT/compare/v0.2.0...v0.3.0
