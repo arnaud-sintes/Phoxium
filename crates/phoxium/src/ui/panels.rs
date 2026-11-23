@@ -88,7 +88,7 @@ pub const PANELS: &[PanelDef] = &[
     },
     PanelDef {
         name: "Signal and amplifier",
-        stages: &["signal", "composite", "amp"],
+        stages: &["signal", "composite", "amp", "impair"],
         first: &[],
         empty_note: None,
         intro: None,

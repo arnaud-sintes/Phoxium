@@ -1,0 +1,295 @@
+# Analogue impairments (optional module, off by default; TODO "Analogue impairments"). Format: crates/paramgen/src/lib.rs.
+# Read by the `impair` slot (shaders/impair.comp, between the video amplifier and the gun; oracle crt_model::impair).
+# Every value is an estimate [E]: these are controls for the look of a poor signal, not the model of one set.
+# With the module on and every amount at 0 the slot is skipped as an identity.
+
+[[param]]
+id = "impair_enable"
+stage = "impair"
+type = "bool"
+unit = "1"
+default = false
+tag = "E"
+source = "TODO.md analogue impairments: off by default"
+description = "Analogue impairments of the signal: hum bar, line jitter and crawl, ghost, noise and snow, line tracking. Each has its own amount below (0 turns that one off); they act on the signal after the video amplifier, in drive voltage. Off: the picture is untouched."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_field_rate_hz"
+stage = "impair"
+type = "f32"
+unit = "Hz"
+default = 60.0
+min = 24.0
+max = 120.0
+hard_min = 1.0
+hard_max = 1000.0
+hard_why = "a positive frame rate"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Frame rate of the source: the time base of the impairments (hum rolls, crawl drifts and the tracking band moves at this many frames a second). 60 for most consoles and arcade boards, 50 for PAL."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_hum_amount"
+stage = "impair"
+type = "f32"
+unit = "1"
+default = 0.03
+min = 0.0
+max = 0.5
+hard_min = 0.0
+hard_max = 2.0
+hard_why = "a voltage amplitude, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Hum bar: amplitude of the mains interference added to the signal, in drive voltage (1 is full white). One bar per picture rolls slowly up or down at the beat between the mains and the frame rate. 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_hum_hz"
+stage = "impair"
+type = "f32"
+unit = "Hz"
+default = 50.0
+min = 1.0
+max = 400.0
+hard_min = 0.1
+hard_max = 2000.0
+hard_why = "a positive frequency"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Mains frequency of the hum: 50 or 60 Hz. The bars on the picture are this over the frame rate; equal rates give one still bar, 50 Hz mains against 60 Hz frames a bar that rolls once every 6 frames."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_jitter_px"
+stage = "impair"
+type = "f32"
+unit = "px"
+default = 0.15
+min = 0.0
+max = 4.0
+hard_min = 0.0
+hard_max = 64.0
+hard_why = "a displacement in source pixels, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Line jitter: each line starts a random distance to the left or right, up to this many source pixels, drawn again every line and frame (a deflection that is not locked exactly). 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_crawl_px"
+stage = "impair"
+type = "f32"
+unit = "px"
+default = 0.3
+min = 0.0
+max = 8.0
+hard_min = 0.0
+hard_max = 128.0
+hard_why = "a displacement in source pixels, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Line crawl: amplitude, in source pixels, of a slow wave that bends the picture sideways down its height and drifts with time. 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_crawl_period_lines"
+stage = "impair"
+type = "f32"
+unit = "lines"
+default = 90.0
+min = 8.0
+max = 1000.0
+hard_min = 1.0
+hard_max = 100000.0
+hard_why = "a positive period"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Height of one period of the line crawl wave, in source lines."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_crawl_speed_hz"
+stage = "impair"
+type = "f32"
+unit = "Hz"
+default = 0.25
+min = -10.0
+max = 10.0
+hard_min = -1000.0
+hard_max = 1000.0
+hard_why = "a drift speed in cycles a second"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Drift of the line crawl wave, in cycles a second (negative: the other way)."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_ghost_gain"
+stage = "impair"
+type = "f32"
+unit = "1"
+default = 0.06
+min = -0.5
+max = 0.5
+hard_min = -1.0
+hard_max = 1.0
+hard_why = "a gain, negative for an inverted ghost"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Ghost: a copy of the signal, this fraction as strong, arrives late (a reflection in the cable or an echo). Negative gives a dark, inverted ghost. 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_ghost_delay_px"
+stage = "impair"
+type = "f32"
+unit = "px"
+default = 5.0
+min = 0.0
+max = 64.0
+hard_min = 0.0
+hard_max = 512.0
+hard_why = "a delay in source pixels, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Delay of the ghost, in source pixels, to the right of the picture."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_noise"
+stage = "impair"
+type = "f32"
+unit = "1"
+default = 0.01
+min = 0.0
+max = 0.5
+hard_min = 0.0
+hard_max = 2.0
+hard_why = "a standard deviation in drive voltage, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Noise: standard deviation of the random brightness added to each source pixel, in drive voltage, new every frame (the same on the three colours). 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_snow"
+stage = "impair"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a probability from 0 to 1"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Snow: the share of the picture hit by white-noise speckles every frame (receiver noise at full strength, in short streaks). 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_snow_length"
+stage = "impair"
+type = "i32"
+unit = "px"
+default = 3
+min = 1
+max = 32
+hard_why = "a streak of 1 to 32 source pixels"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Length of a snow speckle streak, in source pixels."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_tracking_px"
+stage = "impair"
+type = "f32"
+unit = "px"
+default = 0.0
+min = 0.0
+max = 32.0
+hard_min = 0.0
+hard_max = 256.0
+hard_why = "a displacement in source pixels, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Line tracking: a band of lines (a tape that is not tracked, a failing sync) that lean and tear sideways, up to this many source pixels at its centre, with more noise inside it. 0 turns it off."
+group = "Analogue impairments"
+
+[[param]]
+id = "impair_tracking_lines"
+stage = "impair"
+type = "f32"
+unit = "lines"
+default = 24.0
+min = 2.0
+max = 200.0
+hard_min = 1.0
+hard_max = 100000.0
+hard_why = "a positive height"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Height of the tracking band, in source lines."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_tracking_position"
+stage = "impair"
+type = "f32"
+unit = "1"
+default = 0.9
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a position from the top (0) to the bottom (1) of the picture"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Where the centre of the tracking band sits, from the top (0) to the bottom (1) of the picture; the band starts there and rolls from there."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_tracking_roll_hz"
+stage = "impair"
+type = "f32"
+unit = "Hz"
+default = 0.0
+min = -2.0
+max = 2.0
+hard_min = -100.0
+hard_max = 100.0
+hard_why = "a roll speed in picture heights a second"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Roll of the tracking band, in picture heights a second (0: it stays where it is; negative: it rolls up)."
+group = "Analogue impairments"
+advanced = true
+
+[[param]]
+id = "impair_tracking_noise"
+stage = "impair"
+type = "f32"
+unit = "1"
+default = 0.2
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 2.0
+hard_why = "a standard deviation in drive voltage, not negative"
+tag = "E"
+source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
+description = "Extra noise inside the tracking band, in drive voltage, strongest at its centre."
+group = "Analogue impairments"
+advanced = true

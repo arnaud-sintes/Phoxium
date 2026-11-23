@@ -63,6 +63,23 @@
 //! "artifact colours" of 8-bit era games when f_px is close to 2 f_sc); chroma left in the luma by an
 //! imperfect notch moves with the line and frame phase (dot crawl).
 //!
+//! # The decoder's imperfections (off by default, every one exactly neutral at its default)
+//!
+//! A real decoder is locked to the burst only to a degree and does not match the broadcast matrix exactly
+//! [E, no measured set of values in `CRT.md`; they are controls, not a model of one set]:
+//! - **Hue slope** `hue_slope_deg`: the reference oscillator drifts along the line, so the phase error h of 4 grows
+//!   linearly from 0 at the left edge to the slope at the right edge: h(x) = h0 + slope x / W (x in samples, W the
+//!   line width in samples), a hue that shifts across the picture.
+//! - **Burst jitter** `hue_jitter_deg`: the lock differs from line to line: every line gets its own phase error,
+//!   uniform in +-jitter, drawn from [`crate::noise`] by the line and the frame (a hue that shimmers from line to
+//!   line; in PAL with the delay line it cancels to a saturation loss, since each line carries its own error).
+//! - **Decoder matrix**: the second demodulation axis is off by `decoder_axis_error_deg` (a share of the first
+//!   colour difference leaks into the second: V' = V cos d + U sin d), the second colour difference has the gain
+//!   `decoder_v_gain` relative to the first (red against blue), and the green matrix is
+//!   G' = Y - g_ry (R' - Y) - g_by (B' - Y) with `decoder_green_ry` and `decoder_green_by` (0 keeps the
+//!   standard 0.299 / 0.587 and 0.114 / 0.587 that make G' exact). The axis error and the gain apply after
+//!   the PAL delay-line average, before the saturation.
+//!
 //! Not modelled: the sync and burst themselves (the decoder is locked), the 7.5 IRE set-up, an encoder
 //! I/Q filter, VSB/RF artefacts, adaptive (2D or 3D) comb filters, the PAL 25 Hz offset beyond its effect
 //! on f_sc / f_line, the per-frame flip of the PAL V switch.
@@ -160,7 +177,22 @@ pub struct Composite {
     pub hue_deg: f64,
     /// Chroma gain (colour).
     pub saturation: f64,
+    /// Decoder phase error added across the line, degrees at the right edge (0 at the left).
+    pub hue_slope_deg: f64,
+    /// Peak of the per-line decoder phase error, degrees (uniform, per line and frame).
+    pub hue_jitter_deg: f64,
+    /// Error of the second demodulation axis, degrees.
+    pub decoder_axis_error_deg: f64,
+    /// Gain of the second colour difference relative to the first.
+    pub decoder_v_gain: f64,
+    /// Green matrix coefficient of R' - Y; 0 = the standard.
+    pub decoder_green_ry: f64,
+    /// Green matrix coefficient of B' - Y; 0 = the standard.
+    pub decoder_green_by: f64,
 }
+
+/// The noise seed of the decoder's per-line phase error (`crate::noise::cell`).
+pub const SEED_HUE_JITTER: u32 = 0x4855_4531;
 
 impl Composite {
     /// The NTSC defaults of `params/composite.toml` at the pixel clock `f_px` MHz.
@@ -179,6 +211,12 @@ impl Composite {
             channel_bandwidth_mhz: 4.2,
             hue_deg: 0.0,
             saturation: 1.0,
+            hue_slope_deg: 0.0,
+            hue_jitter_deg: 0.0,
+            decoder_axis_error_deg: 0.0,
+            decoder_v_gain: 1.0,
+            decoder_green_ry: 0.0,
+            decoder_green_by: 0.0,
         }
     }
 
@@ -297,6 +335,50 @@ impl Composite {
         }
     }
 
+    /// The decoder's phase error of line `y` of frame `frame`, radians: the burst jitter (uniform in
+    /// +-`hue_jitter_deg`, 0 without jitter).
+    pub fn hue_jitter_rad(&self, y: u32, frame: u32) -> f64 {
+        if self.hue_jitter_deg == 0.0 {
+            return 0.0;
+        }
+        self.hue_jitter_deg.to_radians() * crate::noise::symmetric(crate::noise::cell(SEED_HUE_JITTER, y, frame, 0))
+    }
+
+    /// Whether the second axis error or the second colour difference gain is not neutral.
+    pub fn has_decoder_matrix(&self) -> bool {
+        self.decoder_axis_error_deg != 0.0 || self.decoder_v_gain != 1.0
+    }
+
+    /// Whether the green matrix is not the standard one.
+    pub fn has_green_matrix(&self) -> bool {
+        self.decoder_green_ry != 0.0 || self.decoder_green_by != 0.0
+    }
+
+    /// The decoded (U, V) after the second axis error and the second colour difference gain.
+    pub fn decoder_uv(&self, u: f64, v: f64) -> (f64, f64) {
+        if !self.has_decoder_matrix() {
+            return (u, v);
+        }
+        let d = self.decoder_axis_error_deg.to_radians();
+        (u, self.decoder_v_gain * (v * d.cos() + u * d.sin()))
+    }
+
+    /// R'G'B' of a decoded (Y, U, V), clamped to [0, 1], with the decoder's green matrix (the standard
+    /// [`yuv_to_rgb`] when it is neutral).
+    pub fn yuv_to_rgb(&self, yuv: [f64; 3]) -> [f64; 3] {
+        if !self.has_green_matrix() {
+            return yuv_to_rgb(yuv);
+        }
+        let [y, u, v] = yuv;
+        let r = y + v / V_SCALE;
+        let b = y + u / U_SCALE;
+        let or = |c: f64, standard: f64| if c != 0.0 { c } else { standard };
+        let g = y
+            - or(self.decoder_green_ry, LUMA[0] / LUMA[1]) * (r - y)
+            - or(self.decoder_green_by, LUMA[2] / LUMA[1]) * (b - y);
+        [r, g, b].map(|x| x.clamp(0.0, 1.0))
+    }
+
     /// Sigmas (samples) of the two demodulator low-passes A and B.
     pub fn demod_sigmas(&self) -> (f64, f64) {
         let a = self.sigma_samples(self.i_bandwidth_mhz);
@@ -326,7 +408,7 @@ impl Composite {
     pub fn decode_frame(&self, rows: &[Vec<[f64; 3]>], frame: u32) -> Vec<Vec<[f64; 3]>> {
         self.decode_frame_yuv(rows, frame)
             .iter()
-            .map(|row| row.iter().map(|&yuv| yuv_to_rgb(yuv)).collect())
+            .map(|row| row.iter().map(|&yuv| self.yuv_to_rgb(yuv)).collect())
             .collect()
     }
 
@@ -349,6 +431,7 @@ impl Composite {
                             Some(p) => ((u + p[j].0) / 2.0, (v + p[j].1) / 2.0),
                             None => (u, v),
                         };
+                        let (u, v) = self.decoder_uv(u, v);
                         [l, u * self.saturation, v * self.saturation]
                     })
                     .collect()
@@ -425,12 +508,14 @@ impl Composite {
         // Demodulation.
         let c = self.cycles_per_px();
         let line = self.line_phase_cycles(y, frame);
-        let angle = self.axis_turn_rad() + self.hue_deg.to_radians();
+        let angle = self.axis_turn_rad() + self.hue_deg.to_radians() + self.hue_jitter_rad(y, frame);
+        let slope = self.hue_slope_deg.to_radians();
         let s = SAMPLES_PER_PX as f64;
+        let line_samples = width as f64 * s;
         let (ma, mb): (Vec<f64>, Vec<f64>) = (0..n)
             .map(|i| {
                 let g = i as f64 - pad as f64;
-                let t = 2.0 * PI * (c * (g + 0.5) / s + line) + angle;
+                let t = 2.0 * PI * (c * (g + 0.5) / s + line) + angle + slope * (g + 0.5) / line_samples;
                 (2.0 * chroma[i] * t.cos(), 2.0 * chroma[i] * t.sin())
             })
             .unzip();
@@ -950,5 +1035,122 @@ mod tests {
         }
         let g = gaussian_filter(&vec![0.7; 50], 2.0);
         assert!((g[25] - 0.7).abs() < 1e-12);
+    }
+    /// The turn of the decoded hue of the pixel `yuv` against the input colour's, radians in (-pi, pi].
+    fn hue_turn(yuv: [f64; 3], input: [f64; 3]) -> f64 {
+        let [_, u0, v0] = rgb_to_yuv(input);
+        let d = yuv[2].atan2(yuv[1]) - v0.atan2(u0);
+        (d + PI).rem_euclid(2.0 * PI) - PI
+    }
+
+    /// The hue slope: a flat colour decodes with its hue turned by slope x (x + 1/2) / W at pixel x (the phase
+    /// error grows linearly from 0 at the left edge to the slope at the right), the same way at every pixel;
+    /// the default slope 0 turns nothing.
+    #[test]
+    fn the_hue_slope_turns_the_hue_across_the_line() {
+        let colour = [0.8, 0.3, 0.2];
+        let rows = flat(300, 3, colour);
+        let base = Composite::ntsc(NES_CLOCK_MHZ);
+        let flat_yuv = base.decode_frame_yuv(&rows, 0);
+        let t0 = hue_turn(flat_yuv[1][150], colour);
+        assert!(t0.abs() < 1e-4, "no slope: no turn ({t0})");
+        let slanted = Composite {
+            hue_slope_deg: 30.0,
+            ..base
+        };
+        let yuv = slanted.decode_frame_yuv(&rows, 0);
+        let turns: Vec<f64> = [75usize, 150, 225]
+            .iter()
+            .map(|&x| hue_turn(yuv[1][x], colour))
+            .collect();
+        for (&x, &t) in [75usize, 150, 225].iter().zip(&turns) {
+            let want = 30.0_f64.to_radians() * (x as f64 + 0.5) / 300.0;
+            assert!((t.abs() - want).abs() < 0.01, "x {x}: turn {t}, want +-{want}");
+        }
+        assert!(turns.iter().all(|t| t.signum() == turns[0].signum()), "{turns:?}");
+    }
+
+    /// The burst jitter: each line's hue is turned by its own draw, uniform in +-jitter and the one the shared
+    /// noise gives for that line and frame; lines differ, the next frame draws again, no jitter turns nothing.
+    #[test]
+    fn the_burst_jitter_turns_each_line_by_its_own_draw() {
+        let colour = [0.2, 0.7, 0.4];
+        let rows = flat(200, 40, colour);
+        let jitter = 20.0_f64;
+        let cfg = Composite {
+            hue_jitter_deg: jitter,
+            ..Composite::ntsc(NES_CLOCK_MHZ)
+        };
+        let yuv = cfg.decode_frame_yuv(&rows, 3);
+        let mut distinct = std::collections::BTreeSet::new();
+        for (y, row) in yuv.iter().enumerate() {
+            let t = hue_turn(row[100], colour);
+            let draw =
+                jitter.to_radians() * crate::noise::symmetric(crate::noise::cell(SEED_HUE_JITTER, y as u32, 3, 0));
+            assert!((t.abs() - draw.abs()).abs() < 0.01, "line {y}: turn {t}, draw {draw}");
+            assert!(t.abs() <= jitter.to_radians() + 0.01);
+            distinct.insert((t * 1000.0).round() as i64);
+        }
+        assert!(distinct.len() > 25, "{} distinct turns in 40 lines", distinct.len());
+        let next = cfg.decode_frame_yuv(&rows, 4);
+        assert!(
+            (0..40).any(|y| (next[y][100][1] - yuv[y][100][1]).abs() > 1e-3),
+            "another frame, another draw"
+        );
+        let still = Composite::ntsc(NES_CLOCK_MHZ).decode_frame_yuv(&rows, 3);
+        assert!((0..40).all(|y| hue_turn(still[y][100], colour).abs() < 1e-4));
+    }
+
+    /// The decoder matrix, hand numbers: an axis error of 90 degrees puts U in V's place (V' = V cos d + U
+    /// sin d = U), 10 degrees with gain 1.2 gives 1.2 (V cos 10 + U sin 10); U never changes; the neutral
+    /// matrix returns its input bit for bit. The green matrix leaves grey alone and, with g_ry 0.4 and
+    /// g_by 0.2, gives G = Y - 0.4 (R - Y) - 0.2 (B - Y); a coefficient of 0 keeps the standard one.
+    #[test]
+    fn the_decoder_matrix_and_the_green_coefficients() {
+        let base = Composite::ntsc(NES_CLOCK_MHZ);
+        assert_eq!(base.decoder_uv(0.3, -0.2), (0.3, -0.2));
+        assert!(!base.has_decoder_matrix() && !base.has_green_matrix());
+        let quarter = Composite {
+            decoder_axis_error_deg: 90.0,
+            ..base
+        };
+        let (u, v) = quarter.decoder_uv(0.3, -0.2);
+        assert!((u - 0.3).abs() < 1e-12 && (v - 0.3).abs() < 1e-12, "{u} {v}");
+        let skew = Composite {
+            decoder_axis_error_deg: 10.0,
+            decoder_v_gain: 1.2,
+            ..base
+        };
+        let d = 10.0_f64.to_radians();
+        let (u, v) = skew.decoder_uv(0.3, -0.2);
+        assert!((u - 0.3).abs() < 1e-12 && (v - 1.2 * (-0.2 * d.cos() + 0.3 * d.sin())).abs() < 1e-12);
+        let yuv = rgb_to_yuv([0.8, 0.3, 0.2]);
+        assert_eq!(
+            base.yuv_to_rgb(yuv),
+            yuv_to_rgb(yuv),
+            "standard matrix: the same function"
+        );
+        let grey = Composite {
+            decoder_green_ry: 0.4,
+            decoder_green_by: 0.2,
+            ..base
+        };
+        assert!(grey.has_green_matrix());
+        let g = grey.yuv_to_rgb(rgb_to_yuv([0.5, 0.5, 0.5]));
+        assert!(g.iter().all(|c| (c - 0.5).abs() < 1e-12), "grey stays grey: {g:?}");
+        let [y, u, v] = yuv;
+        let [r, green, b] = grey.yuv_to_rgb(yuv);
+        let (rr, bb) = (y + v / V_SCALE, y + u / U_SCALE);
+        assert!((r - rr).abs() < 1e-12 && (b - bb).abs() < 1e-12);
+        assert!((green - (y - 0.4 * (rr - y) - 0.2 * (bb - y))).abs() < 1e-12);
+        let half = Composite {
+            decoder_green_ry: 0.4,
+            ..base
+        };
+        let want = y - 0.4 * (rr - y) - (LUMA[2] / LUMA[1]) * (bb - y);
+        assert!(
+            (half.yuv_to_rgb(yuv)[1] - want).abs() < 1e-12,
+            "0 keeps the standard coefficient"
+        );
     }
 }

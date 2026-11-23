@@ -406,6 +406,29 @@ Off by default (`composite_enable`); the picture is then exactly the same as wit
 - `composite_frame_advance_deg`: 180 makes the dot pattern and artifact colours alternate every frame (broadcast NTSC), 0 keeps them still. `composite_hue_deg` (tint) and `composite_saturation` (colour) are the TV's knobs; `composite_i_bandwidth_mhz` and `composite_q_bandwidth_mhz` set how far colour bleeds past edges.
 - Advanced: the subcarrier and line rate (0 = the standard's), the channel bandwidth, and `composite_phase_deg`, which picks the hues of the artifact colours (machine specific, try values to match a known screenshot).
 
+### The decoder's imperfections (Composite video group, Advanced)
+
+The phase of the colour subcarrier is already followed per pixel, per line (`composite_line_rate_khz`) and per frame (`composite_frame_advance_deg`), which is what makes the dot crawl and the artifact colours. Six more controls make the decoder a real, imperfect one; each is neutral at its default, so nothing changes until you move it. They are controls with no measured values behind them (`CRT.md` has none), to be set by eye against a known screenshot:
+
+- `composite_hue_slope_deg`: the decoder's reference drifts along the line, so the hue error grows from 0 at the left edge to this many degrees at the right edge (a hue that shifts across the picture).
+- `composite_hue_jitter_deg`: the burst lock differs from line to line: each line gets its own phase error, up to this many degrees either way, drawn again every frame (a hue that shimmers from line to line). With the PAL delay line (`composite_separation` `comb`) it only costs saturation, as on a real PAL set.
+- `composite_decoder_axis_error_deg` and `composite_decoder_v_gain`: the decoder's second demodulation axis is off by this angle (some blue leaks into red) and the red colour difference has this gain against the blue one (above 1 pushes reds).
+- `composite_decoder_green_ry` and `composite_decoder_green_by`: the coefficients of the green matrix, G' = Y - a (R' - Y) - b (B' - Y). 0 keeps the standard 0.5094 and 0.1942, which make green exact; other values shift greens and skin tones.
+
+Checked: the GPU against the f64 oracle for all of them, NTSC and PAL, to the FP16 step (`tests/stage_composite.rs`).
+
+## Analogue impairments (optional)
+
+Off by default (`impair_enable`, menu panel "Signal and amplifier", group "Analogue impairments"): the faults of a poor signal, applied after the video amplifier, in drive voltage, before the gun. Each has an amount (0 turns that one off) and the module does nothing, and costs nothing, while it is off or every amount is 0. With **Enable** on, the defaults are mild amounts of hum, jitter, crawl, ghost and noise, so the switch alone shows something; snow and line tracking stay at 0 until you raise them.
+
+- **Hum bar** (`impair_hum_amount`, `impair_hum_hz`): mains interference added to the signal. One picture holds mains over frame rate bars: 50 Hz on 60 Hz frames is a bar that rolls slowly up the picture, equal rates a bar that stands still.
+- **Line jitter and crawl** (`impair_jitter_px`; `impair_crawl_px`, `impair_crawl_period_lines`, `impair_crawl_speed_hz`): each line starts a little to the left or right (jitter, random per line and frame) and the picture bends in a slow wave down its height that drifts with time (crawl). Amounts are in source pixels.
+- **Ghost** (`impair_ghost_gain`, `impair_ghost_delay_px`): a copy of the signal, a fraction as strong, arrives late (a cable reflection, an echo). Negative gain makes a dark, inverted ghost.
+- **Noise and snow** (`impair_noise`; `impair_snow`, `impair_snow_length`): random brightness on every source pixel, new every frame (noise), and speckles of white noise in short streaks (snow, the share of the picture hit).
+- **Line tracking** (`impair_tracking_px`, `impair_tracking_lines`, `impair_tracking_position`, `impair_tracking_roll_hz`, `impair_tracking_noise`): a band of lines, at the bottom by default, that lean and tear sideways with more noise inside, as a tape that is not tracked; it can roll slowly.
+- **Time base:** `impair_field_rate_hz` (Advanced, 60; 50 for PAL) is the rate the source delivers frames, from which hum, crawl and the tracking roll take their time. Every effect is a pure function of the line, the frame and the pixel (a fixed integer hash, not a random generator): the same frame is impaired the same way twice, and a snapshot is reproducible.
+- **Limits:** the impairments act on the decoded R'G'B' (the composite module comes before them), so a ghost is a ghost of the colour picture, not of the chroma; sync and burst loss, and head-switching noise, are not modelled. Every amount is an estimate, with no measured values behind it. Checked: the GPU against the f64 oracle for each effect and all together, to the FP16 step (`tests/stage_impair.rs`); not checked by eye on a real source in motion.
+
 ## Interlace (T-32, optional)
 
 Off by default; the picture is then exactly the same as without it. In the menu panel "Beam and scanlines" (the field lock is an Advanced setting), or with `--set` on the command line and in presets.

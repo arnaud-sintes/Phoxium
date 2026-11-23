@@ -1,0 +1,125 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `impair` (analogue impairments, optional, off by default): amp domain -> amp domain, drive voltage R'G'B'
+// between the video amplifier and the gun. Skipped as an exact identity while `impair_enable` is off or every
+// amount is 0 (`Stage::is_identity`).
+//
+// The model and every formula are those of the f64 oracle `crates/crt-model/src/impair.rs` (read it first); the
+// CPU computes the per-frame constants from it (`stages/impair.rs`, push constants below): the hum and crawl
+// phases of line 0 and their advance per line, the tracking band's centre, the ghost delay in samples.
+//
+// One thread per sample (amp domain: K samples per source pixel, one row per scanline), in this order:
+//   1. line displacement d (jitter, crawl, tracking band): the signal is read at the sample u = s - d K, linear
+//      between the neighbours, black beyond the line's ends;
+//   2. ghost: plus `ghost_gain` times the same signal `ghost_delay` samples earlier;
+//   3. hum (the same on the three channels) and noise (near-Gaussian, one draw per source pixel, line and frame,
+//      the same on the three channels), added;
+//   4. snow: a hit cell of `snow_length` pixels is replaced by a grey level;
+//   5. clamped to >= 0 (no negative light).
+// Alpha is copied.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "noise.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // amp domain
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // amp domain
+
+// Per-frame constants (std430 push block, 64 bytes; `impair::Push`).
+layout(push_constant) uniform Push {
+    float hum_amount;        // drive voltage amplitude (0: none)
+    float hum_phase;         // cycles at line 0, [0, 1)
+    float hum_per_line;      // cycles per line
+    float jitter_px;         // peak line start jitter, source pixels
+    float crawl_px;          // amplitude of the line wave, source pixels
+    float crawl_phase;       // cycles at line 0, [0, 1)
+    float crawl_per_line;    // cycles per line
+    float ghost_gain;
+    float ghost_delay;       // samples
+    float noise;             // standard deviation
+    float snow;              // probability a cell is hit
+    uint snow_length;        // pixels per cell, at least 1
+    float tracking_px;       // peak displacement in the band, source pixels (0: no band)
+    float tracking_half;     // half the band height, lines
+    float tracking_centre;   // centre of the band, lines from the top
+    float tracking_noise;    // extra noise standard deviation at the band's centre
+} pc;
+
+// Seeds of crt_model::impair.
+const uint SEED_JITTER = 0x4a495431u;
+const uint SEED_TRACK = 0x54524b31u;
+const uint SEED_NOISE = 0x4e4f4931u;
+const uint SEED_SNOW = 0x534e4f31u;
+const uint SNOW_LEVEL_MIX = 0x5bd1e995u;
+const float TWO_PI = 6.283185307179586;
+
+// The input row `y` at the continuous sample index `u`: linear between the neighbouring samples, black outside.
+vec3 sample_row(int y, float u, int width) {
+    float i0 = floor(u);
+    float t = u - i0;
+    int a = int(i0);
+    vec3 va = (a >= 0 && a < width) ? texelFetch(drive_in, ivec2(a, y), 0).rgb : vec3(0.0);
+    vec3 vb = (a + 1 >= 0 && a + 1 < width) ? texelFetch(drive_in, ivec2(a + 1, y), 0).rgb : vec3(0.0);
+    return va * (1.0 - t) + vb * t;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(drive_out);
+    if (any(greaterThanEqual(p, size))) {
+        return;
+    }
+    int y = p.y;
+    int k = frame.amp_k;
+    uint frame_index = frame.frame_index;
+    float kf = float(k);
+
+    // Tracking band weight of this line (a triangle), 0 without a displacement amount.
+    float w = 0.0;
+    if (pc.tracking_px != 0.0) {
+        w = max(1.0 - abs(float(y) + 0.5 - pc.tracking_centre) / pc.tracking_half, 0.0);
+    }
+    // 1. Line displacement, source pixels.
+    float d = 0.0;
+    if (pc.jitter_px != 0.0) {
+        d += pc.jitter_px * noise_symmetric(noise_cell(SEED_JITTER, uint(y), frame_index, 0u));
+    }
+    if (pc.crawl_px != 0.0) {
+        d += pc.crawl_px * sin(TWO_PI * (pc.crawl_phase + float(y) * pc.crawl_per_line));
+    }
+    if (w > 0.0) {
+        float u = noise_symmetric(noise_cell(SEED_TRACK, uint(y), frame_index, 0u));
+        d += pc.tracking_px * w * (0.5 + 0.5 * u);
+    }
+    float u = float(p.x) - d * kf;
+    vec3 v = sample_row(y, u, size.x);
+    // 2. Ghost.
+    if (pc.ghost_gain != 0.0) {
+        v += pc.ghost_gain * sample_row(y, u - pc.ghost_delay, size.x);
+    }
+    // 3. Hum and noise (the same on the three channels).
+    uint px = uint(p.x / k);
+    float add = 0.0;
+    if (pc.hum_amount != 0.0) {
+        add += pc.hum_amount * sin(TWO_PI * (pc.hum_phase + float(y) * pc.hum_per_line));
+    }
+    float sigma = pc.noise + pc.tracking_noise * w;
+    if (sigma != 0.0) {
+        add += sigma * noise_gaussian(noise_cell(SEED_NOISE, px, uint(y), frame_index));
+    }
+    v += vec3(add);
+    // 4. Snow.
+    if (pc.snow > 0.0) {
+        uint h = noise_cell(SEED_SNOW, px / pc.snow_length, uint(y), frame_index);
+        if (noise_unit(h) < pc.snow) {
+            v = vec3(noise_unit(noise_hash(h ^ SNOW_LEVEL_MIX)));
+        }
+    }
+    // 5. No negative light.
+    v = max(v, vec3(0.0));
+    float alpha = texelFetch(drive_in, p, 0).a;
+    imageStore(drive_out, p, round_f16(vec4(v, alpha)));
+}

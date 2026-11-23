@@ -15,7 +15,7 @@
 //!
 //! Stages: `decode` (compute, captured frame -> native raster) and `encode` (fragment, linear light ->
 //! output target) are owned by the pipeline directly; between them runs the fixed ordered chain of
-//! slots [`CHAIN`] (T-20b, A11, TEC-6), in physical order: `signal`, `amp`, `gun`, `abl`, `screen`,
+//! slots [`CHAIN`] (T-20b, A11, TEC-6), in physical order: `signal`, `amp`, `impair`, `gun`, `abl`, `screen`,
 //! `wear` (ageing and burn-in, T-42, T-43), `phosphor`, `optics`.
 //!
 //! # Chain slots (T-20b)
@@ -55,6 +55,7 @@ pub(super) mod abl;
 pub(super) mod amp;
 pub(super) mod composite;
 pub(super) mod gun;
+pub(super) mod impair;
 pub(super) mod optics;
 pub(super) mod phosphor;
 pub(super) mod screen;
@@ -69,6 +70,7 @@ pub(super) mod dummy;
 pub(super) const CHAIN: &[Registration] = &[
     signal::SLOT,
     amp::SLOT,
+    impair::SLOT,
     gun::SLOT,
     abl::SLOT,
     screen::SLOT,

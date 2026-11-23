@@ -11,7 +11,7 @@
 
 use ash::vk;
 use crt_model::composite::{Composite, Connection, Separation, Standard, NTSC_LINE_RATE_KHZ, PAL_LINE_RATE_KHZ};
-use crt_model::composite::{NTSC_SUBCARRIER_MHZ, PAL_SUBCARRIER_MHZ};
+use crt_model::composite::{LUMA, NTSC_SUBCARRIER_MHZ, PAL_SUBCARRIER_MHZ};
 
 use super::{ComputePass, Stage};
 use crate::gpu::{Context, FrameConstants};
@@ -23,7 +23,7 @@ const SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/composite.comp.spv"
 /// Output pixels per workgroup (`TILE` and `local_size_x` of the shader).
 const TILE: u32 = 64;
 
-/// The push constants of `composite.comp` (std430, 48 bytes).
+/// The push constants of `composite.comp` (std430, 72 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -39,12 +39,20 @@ pub(super) struct Push {
     axis_turn: f32,
     saturation: f32,
     flags: u32,
+    hue_slope: f32,
+    hue_jitter: f32,
+    axis_error: f32,
+    v_gain: f32,
+    green_ry: f32,
+    green_by: f32,
 }
 
 /// Flag bits of [`Push::flags`].
 const FLAG_SVIDEO: u32 = 1;
 const FLAG_PAL: u32 = 2;
 const FLAG_COMB: u32 = 4;
+const FLAG_MATRIX: u32 = 8;
+const FLAG_GREEN: u32 = 16;
 
 /// The oracle's settings for `params`: the pixel clock of the amplifier (`amp_pixel_clock_mhz`); 0 for the
 /// subcarrier or the line rate means the standard's value; non-positive clocks and bandwidths are lifted
@@ -80,6 +88,12 @@ pub(crate) fn model(p: &Params) -> Composite {
         channel_bandwidth_mhz: f64::from(p.composite_bandwidth_mhz).max(0.0),
         hue_deg: f64::from(p.composite_hue_deg),
         saturation: f64::from(p.composite_saturation),
+        hue_slope_deg: f64::from(p.composite_hue_slope_deg),
+        hue_jitter_deg: f64::from(p.composite_hue_jitter_deg),
+        decoder_axis_error_deg: f64::from(p.composite_decoder_axis_error_deg),
+        decoder_v_gain: f64::from(p.composite_decoder_v_gain),
+        decoder_green_ry: f64::from(p.composite_decoder_green_ry),
+        decoder_green_by: f64::from(p.composite_decoder_green_by),
     }
 }
 
@@ -100,6 +114,14 @@ pub(super) fn plan(p: &Params, frame: u32) -> Push {
     if m.separation == Separation::Comb {
         flags |= FLAG_COMB;
     }
+    if m.has_decoder_matrix() {
+        flags |= FLAG_MATRIX;
+    }
+    if m.has_green_matrix() {
+        flags |= FLAG_GREEN;
+    }
+    // The green coefficients with the standard ones filled in for 0 (the shader takes them as they are).
+    let green = |c: f64, standard: f64| if c != 0.0 { c } else { standard };
     Push {
         cycles_per_px: m.cycles_per_px() as f32,
         line_advance: m.line_advance_cycles() as f32,
@@ -113,6 +135,12 @@ pub(super) fn plan(p: &Params, frame: u32) -> Push {
         axis_turn: m.axis_turn_rad() as f32,
         saturation: m.saturation as f32,
         flags,
+        hue_slope: m.hue_slope_deg.to_radians() as f32,
+        hue_jitter: m.hue_jitter_deg.to_radians() as f32,
+        axis_error: m.decoder_axis_error_deg.to_radians() as f32,
+        v_gain: m.decoder_v_gain as f32,
+        green_ry: green(m.decoder_green_ry, LUMA[0] / LUMA[1]) as f32,
+        green_by: green(m.decoder_green_by, LUMA[2] / LUMA[1]) as f32,
     }
 }
 
@@ -145,7 +173,7 @@ impl Stage for CompositeStage {
     }
 
     unsafe fn record(&self, d: &ash::Device, cb: vk::CommandBuffer, set: vk::DescriptorSet, size: (u32, u32)) {
-        // SAFETY: `Push` is `#[repr(C)]` plain data of 12 four-byte fields, no padding.
+        // SAFETY: `Push` is `#[repr(C)]` plain data of 18 four-byte fields, no padding.
         let bytes = std::slice::from_raw_parts((&self.push as *const Push).cast::<u8>(), size_of::<Push>());
         self.pass.dispatch_group(d, cb, set, bytes, size, (TILE, 1));
     }
@@ -159,12 +187,13 @@ impl Stage for CompositeStage {
 mod tests {
     use super::*;
 
-    /// The push block is 48 bytes in the shader's order.
+    /// The push block is 72 bytes in the shader's order.
     #[test]
     fn push_layout_matches_the_shader() {
-        assert_eq!(size_of::<Push>(), 48);
+        assert_eq!(size_of::<Push>(), 72);
         assert_eq!(std::mem::offset_of!(Push, box_len), 28);
         assert_eq!(std::mem::offset_of!(Push, flags), 44);
+        assert_eq!(std::mem::offset_of!(Push, green_by), 68);
         let glsl = include_str!("../../../../../shaders/composite.comp");
         let order = [
             "float cycles_per_px;",
@@ -179,6 +208,12 @@ mod tests {
             "float axis_turn;",
             "float saturation;",
             "uint flags;",
+            "float hue_slope;",
+            "float hue_jitter;",
+            "float axis_error;",
+            "float v_gain;",
+            "float green_ry;",
+            "float green_by;",
         ];
         let pos: Vec<usize> = order
             .iter()

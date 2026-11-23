@@ -113,6 +113,12 @@ fn oracle_of(p: &Params) -> Composite {
         channel_bandwidth_mhz: f64::from(p.composite_bandwidth_mhz),
         hue_deg: f64::from(p.composite_hue_deg),
         saturation: f64::from(p.composite_saturation),
+        hue_slope_deg: f64::from(p.composite_hue_slope_deg),
+        hue_jitter_deg: f64::from(p.composite_hue_jitter_deg),
+        decoder_axis_error_deg: f64::from(p.composite_decoder_axis_error_deg),
+        decoder_v_gain: f64::from(p.composite_decoder_v_gain),
+        decoder_green_ry: f64::from(p.composite_decoder_green_ry),
+        decoder_green_by: f64::from(p.composite_decoder_green_by),
         ..base
     }
 }
@@ -256,6 +262,32 @@ fn composite_slot_matches_the_oracle() {
                 ..ntsc
             },
             0,
+        ),
+        (
+            "NTSC decoder imperfections: hue slope 25, burst jitter 12, axis error 8, V gain 1.15, green matrix",
+            Params {
+                composite_hue_slope_deg: 25.0,
+                composite_hue_jitter_deg: 12.0,
+                composite_decoder_axis_error_deg: 8.0,
+                composite_decoder_v_gain: 1.15,
+                composite_decoder_green_ry: 0.45,
+                composite_decoder_green_by: 0.22,
+                ..ntsc
+            },
+            5,
+        ),
+        (
+            "PAL delay line, burst jitter 20, hue slope -30, axis error -6",
+            Params {
+                composite_standard: params::COMPOSITE_STANDARD_PAL,
+                composite_separation: params::COMPOSITE_SEPARATION_COMB,
+                composite_hue_jitter_deg: 20.0,
+                composite_hue_slope_deg: -30.0,
+                composite_decoder_axis_error_deg: -6.0,
+                amp_pixel_clock_mhz: 7.375,
+                ..ntsc
+            },
+            9,
         ),
     ];
     for (what, p, frame) in &cases {

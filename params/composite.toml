@@ -202,3 +202,95 @@ tag = "K"
 source = "CRT.md Controls table: Colour / tint act in the chroma decoder (composite/YC only)"
 description = "Colour: gain of the decoded chroma. 0 gives grey with the same luma."
 group = "Composite video"
+
+[[param]]
+id = "composite_hue_slope_deg"
+stage = "composite"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = -90.0
+max = 90.0
+hard_why = "a phase error across the line, a quarter turn at most"
+tag = "E"
+source = "TODO.md composite demodulator realism: a decoder whose reference oscillator is not held to the burst drifts along the line; no measured values in CRT.md"
+description = "Decoder phase drift along the line: the phase error of the decoder's reference grows linearly from 0 at the left edge to this value at the right edge, so the hue shifts across the picture. 0 (the default) is a decoder locked all along the line."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_hue_jitter_deg"
+stage = "composite"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = 0.0
+max = 45.0
+hard_why = "a peak phase error per line, under a quarter turn"
+tag = "E"
+source = "TODO.md composite demodulator realism: the burst lock differs from line to line; no measured values in CRT.md"
+description = "Burst jitter: every line gets its own decoder phase error, uniform up to this many degrees either way and drawn again each frame, so the hue shimmers from line to line. With the PAL delay line it only costs saturation. 0 (the default) is a decoder locked on every line."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_decoder_axis_error_deg"
+stage = "composite"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = -45.0
+max = 45.0
+hard_why = "an axis error of the second demodulator, under half a quarter turn"
+tag = "E"
+source = "TODO.md composite demodulator realism: consumer decoders do not demodulate on exactly orthogonal axes; no measured values in CRT.md"
+description = "Error of the decoder's second demodulation axis: a share of the first colour difference (U, blue) leaks into the second (V, red): V' = V cos d + U sin d. 0 (the default) is an ideal decoder."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_decoder_v_gain"
+stage = "composite"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.5
+max = 1.5
+hard_min = 0.0
+hard_max = 4.0
+hard_why = "a gain is not negative"
+tag = "E"
+source = "TODO.md composite demodulator realism: consumer decoders weight the red and the blue colour differences differently; no measured values in CRT.md"
+description = "Gain of the second colour difference (V, red) relative to the first (U, blue) in the decoder's matrix: above 1 pushes reds, below 1 pulls them. 1 (the default) is an ideal decoder."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_decoder_green_ry"
+stage = "composite"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.0
+hard_why = "a matrix coefficient of the green colour difference, not negative"
+tag = "E"
+source = "TODO.md composite demodulator realism: the decoder's green matrix G' = Y - a (R' - Y) - b (B' - Y); the standard a = 0.299 / 0.587 = 0.5094"
+description = "Coefficient a of R' - Y in the decoder's green matrix G' = Y - a (R' - Y) - b (B' - Y). 0 (the default) uses the standard 0.5094, which makes green exact; other values shift greens and skin tones the way a mismatched matrix does."
+group = "Composite video"
+advanced = true
+
+[[param]]
+id = "composite_decoder_green_by"
+stage = "composite"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 1.0
+hard_why = "a matrix coefficient of the green colour difference, not negative"
+tag = "E"
+source = "TODO.md composite demodulator realism: the decoder's green matrix G' = Y - a (R' - Y) - b (B' - Y); the standard b = 0.114 / 0.587 = 0.1942"
+description = "Coefficient b of B' - Y in the decoder's green matrix G' = Y - a (R' - Y) - b (B' - Y). 0 (the default) uses the standard 0.1942."
+group = "Composite video"
+advanced = true

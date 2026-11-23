@@ -29,13 +29,14 @@
 
 #include "params.glsl"
 #include "common.glsl"
+#include "noise.glsl"
 
 layout(local_size_x = 64, local_size_y = 1) in;
 
 layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // native domain
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // native domain
 
-// Derived constants (std430 push block, 48 bytes; `composite::Push`).
+// Derived constants (std430 push block, 72 bytes; `composite::Push`).
 layout(push_constant) uniform Push {
     float cycles_per_px; // f_sc / f_px
     float line_advance;  // frac(f_sc / f_line), cycles
@@ -48,7 +49,13 @@ layout(push_constant) uniform Push {
     float demod_angle;   // axis turn + hue, radians
     float axis_turn;     // 33 degrees (NTSC) or 0 (PAL), radians
     float saturation;
-    uint flags;          // 1: S-Video, 2: PAL, 4: comb (NTSC) or delay line (PAL)
+    uint flags;          // 1: S-Video, 2: PAL, 4: comb (NTSC) or delay line (PAL), 8: decoder matrix, 16: green matrix
+    float hue_slope;     // decoder phase error at the right edge of the line, radians (0 at the left)
+    float hue_jitter;    // peak per-line decoder phase error, radians (0: none)
+    float axis_error;    // error of the second demodulation axis, radians
+    float v_gain;        // gain of the second colour difference
+    float green_ry;      // green matrix coefficient of R' - Y (flag 16)
+    float green_by;      // green matrix coefficient of B' - Y (flag 16)
 } pc;
 
 const int S = 8;      // samples per source pixel (crt_model::composite::SAMPLES_PER_PX)
@@ -64,6 +71,7 @@ const float TWO_PI = 6.283185307179586;
 const vec3 LUMA = vec3(0.299, 0.587, 0.114);
 const float U_SCALE = 0.492111;
 const float V_SCALE = 0.877283;
+const uint SEED_HUE_JITTER = 0x48554531u; // crt_model::composite::SEED_HUE_JITTER
 
 shared float sh_sig[2 * N];  // raw composite (S-Video: C), then the products 2 chroma cos(t)
 shared float sh_flt[2 * N];  // channel output (S-Video: Y)
@@ -177,6 +185,10 @@ void main() {
     for (int r = 0; r < demod_rows; ++r) {
         int yy = y - r;
         float line_phase = fract(float(yy) * pc.line_advance + pc.frame_phase);
+        // The decoder's phase error of this line: the burst jitter (a draw per line and frame).
+        float jitter = pc.hue_jitter != 0.0
+            ? pc.hue_jitter * noise_symmetric(noise_cell(SEED_HUE_JITTER, uint(yy), frame.frame_index, 0u))
+            : 0.0;
         for (int k = lid; k < N; k += TILE) {
             int i = r * N + k;
             float luma;
@@ -199,7 +211,8 @@ void main() {
                 sh_luma[k] = luma;
             }
             int g = base + k;
-            float t = TWO_PI * fract(pc.cycles_per_px * (float(g) + 0.5) / float(S) + line_phase) + pc.demod_angle;
+            float t = TWO_PI * fract(pc.cycles_per_px * (float(g) + 0.5) / float(S) + line_phase) + pc.demod_angle
+                + jitter + pc.hue_slope * (float(g) + 0.5) / (float(width) * float(S));
             sh_sig[i] = 2.0 * chroma * cos(t);
             sh_b[i] = 2.0 * chroma * sin(t);
         }
@@ -238,11 +251,17 @@ void main() {
         u = -a * s + b * c;
         v = a * c + b * s;
     }
+    if ((pc.flags & 8u) != 0u) {
+        // The second axis error and gain (after the PAL average, before the saturation).
+        v = pc.v_gain * (v * cos(pc.axis_error) + u * sin(pc.axis_error));
+    }
     u *= pc.saturation;
     v *= pc.saturation;
     float red = luma + v / V_SCALE;
     float blue = luma + u / U_SCALE;
-    float green = (luma - LUMA.r * red - LUMA.b * blue) / LUMA.g;
+    float green = (pc.flags & 16u) != 0u
+        ? luma - pc.green_ry * (red - luma) - pc.green_by * (blue - luma)
+        : (luma - LUMA.r * red - LUMA.b * blue) / LUMA.g;
     vec3 rgb = clamp(vec3(red, green, blue), 0.0, 1.0);
     float alpha = texelFetch(drive_in, ivec2(j, y), 0).a;
     imageStore(drive_out, ivec2(j, y), round_f16(vec4(rgb, alpha)));
