@@ -60,8 +60,24 @@ pub struct Presenter {
     surface_lost: bool,
     /// Successful acquires so far, the clock of the retired semaphores.
     acquires: u64,
+    /// The swapchain images can be copied from (`TRANSFER_SRC` was offered): a snapshot of the output is possible.
+    can_copy: bool,
+    /// Asked for: present without waiting for the vertical blank when the surface offers it ([`choose_present_mode`]).
+    tearing: bool,
+    /// The present mode the swapchain was made with.
+    present_mode: vk::PresentModeKHR,
     /// Semaphores of replaced swapchains and the acquire count from which they may be destroyed.
     retired: Vec<(vk::Semaphore, u64)>,
+}
+
+/// The present mode for a surface that offers `offered`: `IMMEDIATE` (no wait for the vertical blank, may tear) when
+/// `tearing` is asked and offered, else `FIFO`, which every surface offers and which waits for the vertical blank.
+pub fn choose_present_mode(offered: &[vk::PresentModeKHR], tearing: bool) -> vk::PresentModeKHR {
+    if tearing && offered.contains(&vk::PresentModeKHR::IMMEDIATE) {
+        vk::PresentModeKHR::IMMEDIATE
+    } else {
+        vk::PresentModeKHR::FIFO
+    }
 }
 
 /// The swapchain extent for a window client of `size`: the surface's current extent when it has one, else `size`
@@ -129,6 +145,9 @@ impl Presenter {
             stale: true,
             surface_lost: false,
             acquires: 0,
+            tearing: false,
+            present_mode: vk::PresentModeKHR::FIFO,
+            can_copy: false,
             retired: Vec::new(),
         };
         let result = (|| -> Res<()> {
@@ -198,6 +217,25 @@ impl Presenter {
         self.stale = true;
     }
 
+    /// Present without waiting for the vertical blank (tearing, lower latency, variable refresh) or with vsync (FIFO).
+    /// A change recreates the swapchain before the next frame; the mode in force is [`Presenter::present_mode`].
+    pub fn set_tearing(&mut self, on: bool) {
+        if self.tearing != on {
+            self.tearing = on;
+            self.stale = true;
+        }
+    }
+
+    /// Whether the swapchain images can be copied to a buffer (a snapshot of the output).
+    pub fn can_copy(&self) -> bool {
+        self.can_copy
+    }
+
+    /// The present mode the swapchain was made with.
+    pub fn present_mode(&self) -> vk::PresentModeKHR {
+        self.present_mode
+    }
+
     /// Makes the swapchain fit a window client of `size` before a frame: recreates the lost surface, then the
     /// swapchain when the size changed, when it is stale, or when it is incomplete. Returns false when there is
     /// nothing to draw into (a 0 side: the old swapchain is kept and the frame is skipped).
@@ -246,6 +284,17 @@ impl Presenter {
             .get_physical_device_surface_formats(ctx.physical, self.surface)?;
         let offered: Vec<(vk::Format, vk::ColorSpaceKHR)> = formats.iter().map(|f| (f.format, f.color_space)).collect();
         let (format, color_space) = choose_format(&offered)?;
+        let modes = ctx
+            .surface_fn
+            .get_physical_device_surface_present_modes(ctx.physical, self.surface)
+            .unwrap_or_default();
+        let present_mode = choose_present_mode(&modes, self.tearing);
+        let can_copy = caps.supported_usage_flags.contains(vk::ImageUsageFlags::TRANSFER_SRC);
+        let usage = if can_copy {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC
+        } else {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT
+        };
         let mut count = caps.min_image_count + 1;
         if caps.max_image_count > 0 {
             count = count.min(caps.max_image_count);
@@ -259,11 +308,11 @@ impl Presenter {
                 .image_color_space(color_space)
                 .image_extent(extent)
                 .image_array_layers(1)
-                .image_usage(vk::ImageUsageFlags::COLOR_ATTACHMENT)
+                .image_usage(usage)
                 .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
                 .pre_transform(caps.current_transform)
                 .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
-                .present_mode(vk::PresentModeKHR::FIFO)
+                .present_mode(present_mode)
                 .clipped(true)
                 .old_swapchain(old),
             None,
@@ -275,6 +324,8 @@ impl Presenter {
             self.swapchain_fn.destroy_swapchain(old, None);
         }
         self.swapchain = new;
+        self.present_mode = present_mode;
+        self.can_copy = can_copy;
         self.format = format;
         self.extent = extent;
         self.ten_bit_offered = formats.iter().any(|f| {
@@ -523,6 +574,24 @@ mod tests {
     use super::*;
 
     const NL: vk::ColorSpaceKHR = vk::ColorSpaceKHR::SRGB_NONLINEAR;
+
+    #[test]
+    fn tearing_is_used_only_when_asked_and_offered() {
+        use vk::PresentModeKHR as M;
+        let all = [M::FIFO, M::MAILBOX, M::IMMEDIATE];
+        assert_eq!(choose_present_mode(&all, false), M::FIFO, "vsync is the default");
+        assert_eq!(choose_present_mode(&all, true), M::IMMEDIATE);
+        assert_eq!(
+            choose_present_mode(&[M::FIFO, M::MAILBOX], true),
+            M::FIFO,
+            "not offered: vsync"
+        );
+        assert_eq!(
+            choose_present_mode(&[], true),
+            M::FIFO,
+            "no list (a failed query): vsync"
+        );
+    }
 
     #[test]
     fn prefers_bgra_unorm_then_rgba_unorm() {

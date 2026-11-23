@@ -35,6 +35,7 @@ pub mod render_cmd;
 pub mod scaling;
 pub mod settings;
 pub mod shell;
+pub mod snapshot;
 pub mod source;
 pub mod sources;
 pub mod tube_state;

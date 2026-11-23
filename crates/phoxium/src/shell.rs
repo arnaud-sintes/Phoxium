@@ -72,6 +72,40 @@ pub fn copy_text(owner: isize, text: &str) -> Result<(), String> {
     }
 }
 
+/// Puts a device-independent bitmap (`CF_DIB`: header and pixels, see `crate::snapshot::dib`) on the clipboard, owned
+/// by `owner` (the output window; 0 for none).
+pub fn copy_dib(owner: isize, dib: &[u8]) -> Result<(), String> {
+    use windows::Win32::Foundation::GlobalFree;
+    use windows::Win32::System::DataExchange::{CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData};
+    use windows::Win32::System::Memory::{GlobalAlloc, GlobalLock, GlobalUnlock, GMEM_MOVEABLE};
+    /// `CF_DIB`.
+    const CF_DIB: u32 = 8;
+    // SAFETY: as `copy_text`: the standard clipboard sequence, the block is filled while locked and owned by the
+    // system once `SetClipboardData` succeeds (freed here only when it fails).
+    unsafe {
+        let owner = (owner != 0).then_some(HWND(owner as *mut std::ffi::c_void));
+        OpenClipboard(owner).map_err(|e| format!("the clipboard is busy ({e})"))?;
+        let result = (|| -> Result<(), String> {
+            EmptyClipboard().map_err(|e| e.to_string())?;
+            let mem = GlobalAlloc(GMEM_MOVEABLE, dib.len()).map_err(|e| e.to_string())?;
+            let ptr = GlobalLock(mem) as *mut u8;
+            if ptr.is_null() {
+                let _ = GlobalFree(Some(mem));
+                return Err("cannot lock the clipboard memory".to_string());
+            }
+            std::ptr::copy_nonoverlapping(dib.as_ptr(), ptr, dib.len());
+            let _ = GlobalUnlock(mem);
+            if let Err(e) = SetClipboardData(CF_DIB, Some(HANDLE(mem.0))) {
+                let _ = GlobalFree(Some(mem));
+                return Err(e.to_string());
+            }
+            Ok(())
+        })();
+        let _ = CloseClipboard();
+        result
+    }
+}
+
 /// Room for the path a dialog returns (characters).
 const PATH_CAPACITY: usize = 1024;
 

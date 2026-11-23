@@ -7,6 +7,12 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- **Display and pacing** menu section with three settings (details in `docs/REFERENCE.md`, "Frame pacing, tearing and capture rate"): a **frame rate cap** (`[global.output] frame_cap`; whole display refreshes, never above the cap), **Allow tearing** (`[global.output] tearing`; present with `IMMEDIATE` instead of `FIFO`, falls back to vsync when the surface does not offer it) and **Max capture rate** (`[global.capture] max_rate`, on by default; lifts the Windows 60 fps limit of a window capture through `MinUpdateInterval`, Windows 11 24H2 and later). Tests: `pacing` (fake clock), `present` (mode choice), `settings` (round trip, lenient reads) and `ui_extras` (the menu rows). Not checked live: tearing on a variable refresh display and capture above 60 fps (the development monitors are 60 Hz).
+
+- **Snapshot of the output** (`docs/REFERENCE.md`, "Snapshot of the output"): the hotkey `Ctrl+Alt+F2` (`snapshot`) or the **Save snapshot** button of the Display and pacing section writes a PNG of the picture the CRT drew (menu excluded) to the Phoxium folder of your Pictures; **Copy snapshot** puts it on the clipboard. The swapchain images are now created copyable when the surface allows it. `phoxium --snapshot <png>` saves one after about a second and exits (developer check). Tests: `snapshot` (PNG round trip, file names, clipboard bitmap), `gpu` (pixel order), `controls` and `hotkeys` (the new action), `ui_extras` (the buttons). Checked through the real window under the validation layer; not checked by hand: pasting the clipboard image in another program.
+
 ### Changed
 
 - The former project name is removed from the documentation (`CLAUDE.md`, README, `docs/REFERENCE.md`, `ARCHITECTURE.md`, `ENV.md`, `PLAN.md`, `QUESTIONS.md`), the release and package scripts and the code comments. What stays: the one-time copy of the old settings folder `%APPDATA%\ultimateCRT` (its console messages now say "settings of the earlier versions"), the burn-in file magic (saved wear maps stay readable) and the released changelog sections. The `ENV.md` rename procedure and the `release.ps1` rename hint are gone (the repository is renamed and `origin` points at it).

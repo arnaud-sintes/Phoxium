@@ -96,6 +96,17 @@ pub struct UiState {
     pub capture: CaptureView,
     /// `[global.output] click_through` (the Interface section's row shows and changes it).
     pub click_through: bool,
+    /// `[global.output] frame_cap` (frames per second, 0 = none): the Display and pacing section shows and changes it.
+    pub frame_cap: u32,
+    /// `[global.output] tearing` as asked.
+    pub tearing: bool,
+    /// Whether the swapchain presents without waiting for the vertical blank now (false when the surface offers no
+    /// such mode, whatever was asked).
+    pub tearing_active: bool,
+    /// `[global.capture] max_rate`.
+    pub max_capture_rate: bool,
+    /// The result of the last snapshot, for the Snapshot rows: success or not, and the text (the file or the error).
+    pub snapshot_message: Option<(bool, String)>,
     /// The session notices the menu shows (GPU and system): the output moved to a monitor of another adapter,
     /// the source is minimised or on another desktop. Also in the title bar.
     pub notices: Vec<String>,
@@ -282,6 +293,14 @@ pub struct UiOutput {
     pub dialog: Option<DialogRequest>,
     /// Click-through switched in the Interface section (`[global.output] click_through`).
     pub click_through: Option<bool>,
+    /// Frame rate cap chosen in the Display and pacing section (0 = none).
+    pub frame_cap: Option<u32>,
+    /// Tearing switched in the Display and pacing section.
+    pub tearing: Option<bool>,
+    /// Max capture rate switched in the Display and pacing section.
+    pub max_capture_rate: Option<bool>,
+    /// A snapshot asked in the Display and pacing section (save a PNG, or copy to the clipboard).
+    pub snapshot: Option<crate::snapshot::Kind>,
 }
 
 /// A burn-in action of the menu's ageing panel (T-43).
@@ -1402,6 +1421,21 @@ impl UiPass for Ui {
             }
             if r.click_through.is_some() {
                 self.out.click_through = r.click_through;
+            }
+            if r.frame_cap.is_some() {
+                self.out.frame_cap = r.frame_cap;
+                self.state.frame_cap = r.frame_cap.unwrap_or(0);
+            }
+            if let Some(on) = r.tearing {
+                self.out.tearing = Some(on);
+                self.state.tearing = on;
+            }
+            if let Some(on) = r.max_capture_rate {
+                self.out.max_capture_rate = Some(on);
+                self.state.max_capture_rate = on;
+            }
+            if r.snapshot.is_some() {
+                self.out.snapshot = r.snapshot;
             }
             if let Some(s) = r.scale {
                 // Between frames: the next frame is built at the new scale.

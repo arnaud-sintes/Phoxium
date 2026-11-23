@@ -284,6 +284,10 @@ pub fn run() -> Res<()> {
             stored.global.output.windowed,
         ),
     );
+    // The capture rate limit follows the setting from the first session on (a menu change applies to the running one).
+    capture::set_max_rate_wish(stored.global.capture.max_rate);
+    let mut applied_max_rate = stored.global.capture.max_rate;
+    let mut tearing_reported = false;
     let mut capture = match &initial {
         None => None,
         Some(entry) => match capture::Capture::start(hwnd_of(entry.hwnd), map.client_area, guess.capture_luid()) {
@@ -681,6 +685,12 @@ pub fn run() -> Res<()> {
     let mut was_idle = false;
     // OUT-6: each frame starts after the next desktop composition (steady pacing in the framed output too).
     let mut pacer = crate::pacing::Pacer::default();
+    // The frame rate cap (`[global.output] frame_cap`): extra composition waits after the pacer's one.
+    let mut frame_cap = crate::pacing::FrameCap::default();
+    // Snapshots (hotkey, menu buttons, `--snapshot`): asked before the render, delivered after the frame that carried it.
+    let mut snapshot_from_menu: Option<crate::snapshot::Kind> = None;
+    let mut snapshot_kind: Option<crate::snapshot::Kind> = None;
+    let mut cli_snapshot_asked = false;
 
     // R-01: the session loop. Every error in it (a `?`) ends the loop and comes out here as `outcome`; the
     // shutdown below then runs on every exit path, normal or not. D-05: so does a panic (`crash::guard`), and
@@ -699,6 +709,12 @@ pub fn run() -> Res<()> {
                     }
                     None => {}
                 }
+                frame_cap.hold(
+                    live.frame_cap(),
+                    std::time::Instant::now,
+                    crate::pacing::wait_for_composition,
+                    std::thread::sleep,
+                );
             }
             if !output::pump() {
                 break;
@@ -1291,6 +1307,30 @@ pub fn run() -> Res<()> {
                 output::set_click_through(win.hwnd, live.click_through());
             }
             ui_state.click_through = live.click_through();
+            // Presenting and capture rate follow the settings too (menu rows, "Reset everything").
+            renderer.set_tearing(live.tearing());
+            ui_state.frame_cap = live.frame_cap();
+            ui_state.tearing = live.tearing();
+            ui_state.tearing_active = renderer.tearing_active();
+            if tearing_reported != ui_state.tearing_active {
+                tearing_reported = ui_state.tearing_active;
+                println!(
+                    "output: presenting {}",
+                    if tearing_reported {
+                        "without waiting for the vertical blank (tearing allowed)"
+                    } else {
+                        "with vsync"
+                    }
+                );
+            }
+            ui_state.max_capture_rate = live.max_capture_rate();
+            if applied_max_rate != live.max_capture_rate() {
+                applied_max_rate = live.max_capture_rate();
+                capture::set_max_rate_wish(applied_max_rate);
+                if let Some(c) = capture.as_ref() {
+                    c.apply_max_rate();
+                }
+            }
             if ui.is_open() || ui.overlay_on() {
                 ui_state.params = params;
                 // The preset in force, also when a preset hotkey stepped to it.
@@ -1369,6 +1409,18 @@ pub fn run() -> Res<()> {
             }
             if let Some(on) = changes.click_through {
                 live.set_click_through(win.hwnd, on);
+            }
+            if changes.snapshot.is_some() {
+                snapshot_from_menu = changes.snapshot;
+            }
+            if let Some(cap) = changes.frame_cap {
+                live.set_frame_cap(cap);
+            }
+            if let Some(on) = changes.tearing {
+                live.set_tearing(on);
+            }
+            if let Some(on) = changes.max_capture_rate {
+                live.set_max_capture_rate(on);
             }
             if let Some(adapter) = changes.gpu_adapter {
                 println!("gpu: adapter for the next start set to \"{adapter}\" (restart to apply)");
@@ -1614,7 +1666,37 @@ pub fn run() -> Res<()> {
             } else {
                 // R-01: a lost device ends the loop (the shutdown saves, `fatal_message` tells the user); what the
                 // renderer recovers from is a status, not an error.
+                // A snapshot asked since the last frame: this frame is drawn without the menu and copied out.
+                if let Some(kind) = live.take_snapshot_request().or(snapshot_from_menu.take()) {
+                    if snapshot_kind.is_some() {
+                        // One at a time: the earlier one is still waiting for its frame.
+                    } else if renderer.request_snapshot() {
+                        snapshot_kind = Some(kind);
+                    } else {
+                        let text = "Snapshot is not available: the output surface cannot be copied from".to_string();
+                        println!("snapshot: {text}");
+                        ui_state.snapshot_message = Some((false, text));
+                    }
+                }
+                if args.snapshot.is_some() && !cli_snapshot_asked && renders >= 30 {
+                    cli_snapshot_asked = renderer.request_snapshot();
+                    if !cli_snapshot_asked {
+                        return Err("--snapshot: the output surface cannot be copied from".into());
+                    }
+                }
                 let status = renderer.render_source(upload, view, out_size, Some(&mut ui))?;
+                if let Some(img) = renderer.take_snapshot() {
+                    if let Some(path) = args.snapshot.as_ref().filter(|_| cli_snapshot_asked) {
+                        crate::snapshot::save_to(&img, std::path::Path::new(path))?;
+                        println!("snapshot: saved {}x{} to {path}", img.width, img.height);
+                        break;
+                    }
+                    if let Some(kind) = snapshot_kind.take() {
+                        let (ok, text) = crate::snapshot::deliver(kind, &img, win.hwnd.0 as isize);
+                        println!("snapshot: {text}");
+                        ui_state.snapshot_message = Some((ok, text));
+                    }
+                }
                 // The frame was staged for upload whatever the status: it is consumed.
                 fresh = false;
                 let presented = match status {

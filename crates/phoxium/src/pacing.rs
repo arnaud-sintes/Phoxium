@@ -57,9 +57,153 @@ pub fn wait_for_composition() -> bool {
     unsafe { windows::Win32::Graphics::Dwm::DwmFlush() }.is_ok()
 }
 
+/// A frame may start once this share of the cap interval has passed since the previous start: composition ticks
+/// come a little early or late, and a tick just short of the interval must not cost a whole extra refresh.
+const CAP_TOLERANCE: f64 = 0.9;
+
+/// The most waits one held frame makes (a guard: a cap is at least 10 fps, so at most a few refreshes are needed).
+const MAX_HOLD_WAITS: u32 = 64;
+
+/// Frame rate cap of the output loop: holds a frame back, in whole display refreshes, until the cap interval has
+/// passed since the previous frame started. The swapchain stays in its present mode; the cap only decides how many
+/// composition waits come before a frame, so the rate in force is the display rate divided by a whole number
+/// (never above the cap, but a cap of 60 on a 144 Hz display gives 48).
+#[derive(Clone, Copy, Debug, Default)]
+pub struct FrameCap {
+    last: Option<std::time::Instant>,
+}
+
+impl FrameCap {
+    /// Holds the frame until `1 / cap_hz` (less [`CAP_TOLERANCE`]) has passed since the previous frame started,
+    /// calling `wait` (one composition, true when it worked) and, when a wait fails and returns at once, `sleep` for
+    /// the time left. A `cap_hz` of 0 holds nothing. Returns the number of waits made.
+    pub fn hold(
+        &mut self,
+        cap_hz: u32,
+        mut now: impl FnMut() -> std::time::Instant,
+        mut wait: impl FnMut() -> bool,
+        mut sleep: impl FnMut(std::time::Duration),
+    ) -> u32 {
+        if cap_hz == 0 {
+            self.last = None;
+            return 0;
+        }
+        let interval = std::time::Duration::from_secs_f64(CAP_TOLERANCE / f64::from(cap_hz));
+        let mut waits = 0;
+        if let Some(last) = self.last {
+            while waits < MAX_HOLD_WAITS {
+                let elapsed = now().saturating_duration_since(last);
+                if elapsed >= interval {
+                    break;
+                }
+                if !wait() {
+                    sleep(interval - elapsed);
+                }
+                waits += 1;
+            }
+        }
+        self.last = Some(now());
+        waits
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{Duration, Instant};
+
+    /// A fake clock: `tick` is the refresh period, each wait advances by it.
+    fn run(cap: u32, tick_ms: f64, frames: usize) -> Vec<f64> {
+        let start = Instant::now();
+        let t = std::cell::Cell::new(0.0f64); // ms since start
+        let mut c = FrameCap::default();
+        let mut starts = Vec::new();
+        for _ in 0..frames {
+            // The loop's own composition wait comes first, then the hold.
+            t.set(t.get() + tick_ms);
+            c.hold(
+                cap,
+                || start + Duration::from_secs_f64(t.get() / 1000.0),
+                || {
+                    t.set(t.get() + tick_ms);
+                    true
+                },
+                |d| t.set(t.get() + d.as_secs_f64() * 1000.0),
+            );
+            starts.push(t.get());
+        }
+        starts.windows(2).map(|w| w[1] - w[0]).collect()
+    }
+
+    #[test]
+    fn no_cap_holds_nothing() {
+        let intervals = run(0, 16.667, 20);
+        assert!(intervals.iter().all(|i| (i - 16.667).abs() < 1e-6), "{intervals:?}");
+    }
+
+    #[test]
+    fn a_cap_at_the_display_rate_holds_nothing() {
+        let intervals = run(60, 16.667, 20);
+        assert!(intervals.iter().all(|i| (i - 16.667).abs() < 1e-6), "{intervals:?}");
+    }
+
+    #[test]
+    fn half_the_display_rate_skips_every_other_refresh() {
+        let intervals = run(30, 16.667, 20);
+        assert!(intervals.iter().all(|i| (i - 33.334).abs() < 1e-3), "{intervals:?}");
+    }
+
+    #[test]
+    fn a_cap_between_two_divisors_never_exceeds_the_cap() {
+        // 144 Hz display, cap 60: whole refreshes only, so 3 refreshes (48 fps), never 2 (72 fps).
+        let intervals = run(60, 1000.0 / 144.0, 40);
+        assert!(
+            intervals.iter().all(|i| (i - 3000.0 / 144.0).abs() < 1e-3),
+            "{intervals:?}"
+        );
+        // A cap of 72 is met exactly by 2 refreshes.
+        let intervals = run(72, 1000.0 / 144.0, 40);
+        assert!(
+            intervals.iter().all(|i| (i - 2000.0 / 144.0).abs() < 1e-3),
+            "{intervals:?}"
+        );
+    }
+
+    #[test]
+    fn a_failing_composition_wait_sleeps_instead_of_spinning() {
+        let start = Instant::now();
+        let t = std::cell::Cell::new(0.0f64);
+        let mut c = FrameCap::default();
+        let slept = std::cell::Cell::new(0.0f64);
+        let hold = |c: &mut FrameCap| {
+            c.hold(
+                30,
+                || start + Duration::from_secs_f64(t.get() / 1000.0),
+                || false,
+                |d| {
+                    slept.set(slept.get() + d.as_secs_f64() * 1000.0);
+                    t.set(t.get() + d.as_secs_f64() * 1000.0);
+                },
+            )
+        };
+        assert_eq!(hold(&mut c), 0, "the first frame is never held");
+        assert_eq!(hold(&mut c), 1);
+        assert!(
+            (slept.get() - 30.0).abs() < 1e-3,
+            "slept {} ms for a 30 fps cap",
+            slept.get()
+        );
+    }
+
+    #[test]
+    fn changing_the_cap_off_forgets_the_last_frame() {
+        let start = Instant::now();
+        let mut c = FrameCap::default();
+        assert_eq!(c.hold(30, || start, || true, |_| {}), 0);
+        assert_eq!(c.hold(0, || start, || true, |_| {}), 0);
+        // After an uncapped frame the next capped one is not held either.
+        assert_eq!(c.hold(30, || start, || true, |_| {}), 0);
+    }
 
     #[test]
     fn waits_before_every_frame_and_reports_nothing_while_it_works() {

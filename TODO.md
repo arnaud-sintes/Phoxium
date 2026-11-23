@@ -8,11 +8,9 @@ _(empty)_
 
 ## High
 
-- [ ] Frame rate cap, tearing and variable refresh rate option, Max Capture Rate (presenter is FIFO only today, no cap).
-- [ ] Performance: phosphor history bandwidth, curved-tube `screen` stage (PRF-1); re-measure first, 60 fps is a target, not a gate.
-- [ ] Host LCD subpixel layout (RGB/BGR) for resolving the mask.
-- [ ] Live snapshot of the output (PNG or clipboard); only `--save-capture` and the offline `render` exist.
 - [ ] Launcher automation: load a saved profile and capture by process name from the command line (`--window` title match and `--exit-on-lost` already exist).
+- [ ] Host LCD subpixel layout (RGB/BGR) for resolving the mask.
+- [ ] Performance: phosphor history bandwidth, curved-tube `screen` stage (PRF-1); re-measure first, 60 fps is a target, not a gate.
 
 ## Medium
 

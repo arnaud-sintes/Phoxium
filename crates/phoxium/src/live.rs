@@ -39,6 +39,8 @@ pub struct Live {
     last_follow: std::time::Instant,
     /// When the menu last changed the settings without them being written yet ([`Live::flush_settings`]).
     dirty_since: Option<std::time::Instant>,
+    /// A snapshot asked by its hotkey and not yet taken by the loop ([`Live::take_snapshot_request`]).
+    snapshot_request: Option<crate::snapshot::Kind>,
 }
 
 /// How long the settings wait after the last menu change before they are written (a drag writes once).
@@ -73,6 +75,7 @@ impl Live {
             default_outer,
             last_follow: std::time::Instant::now(),
             dirty_since: None,
+            snapshot_request: None,
         }
     }
 
@@ -169,6 +172,7 @@ impl Live {
                 println!("output: {}", describe(&placement, &monitors));
                 self.save_window_rect();
             }
+            Command::Snapshot => self.snapshot_request = Some(crate::snapshot::Kind::Save),
             Command::ToggleClickThrough => {
                 let on = !self.click_through();
                 self.set_click_through(hwnd, on);
@@ -268,6 +272,59 @@ impl Live {
     pub fn set_capture_path(&mut self, path: crate::zerocopy::CapturePath) {
         if self.settings.global.capture.path != path.id() {
             self.settings.global.capture.path = path.id().to_string();
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    /// The snapshot the hotkey asked for since the last call, if any.
+    pub fn take_snapshot_request(&mut self) -> Option<crate::snapshot::Kind> {
+        self.snapshot_request.take()
+    }
+
+    /// The frame rate cap in force (`[global.output] frame_cap`, 0 = none).
+    pub fn frame_cap(&self) -> u32 {
+        self.settings.global.output.frame_cap()
+    }
+
+    /// Sets the frame rate cap (0 = none, else clamped to [`crate::settings::FRAME_CAP_RANGE`]) and writes it.
+    pub fn set_frame_cap(&mut self, cap: u32) {
+        let cap = if cap == 0 {
+            0
+        } else {
+            cap.clamp(crate::settings::FRAME_CAP_RANGE.0, crate::settings::FRAME_CAP_RANGE.1)
+        };
+        if self.settings.global.output.frame_cap != cap {
+            self.settings.global.output.frame_cap = cap;
+            println!("{}", frame_cap_line(cap));
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    /// Whether the output presents without waiting for the vertical blank (`[global.output] tearing`).
+    pub fn tearing(&self) -> bool {
+        self.settings.global.output.tearing
+    }
+
+    /// Tearing on or off (the menu row), written at once.
+    pub fn set_tearing(&mut self, on: bool) {
+        if self.settings.global.output.tearing != on {
+            self.settings.global.output.tearing = on;
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
+    /// Whether the Windows limit on the capture rate is lifted (`[global.capture] max_rate`).
+    pub fn max_capture_rate(&self) -> bool {
+        self.settings.global.capture.max_rate
+    }
+
+    /// Lifts or restores the Windows limit on the capture rate (the menu row), written at once.
+    pub fn set_max_capture_rate(&mut self, on: bool) {
+        if self.settings.global.capture.max_rate != on {
+            self.settings.global.capture.max_rate = on;
             self.mark_dirty();
             self.flush_settings(true);
         }
@@ -500,6 +557,15 @@ impl Live {
 /// must not be overwritten (unreadable, or a newer schema: [`settings::Loaded::writable`]).
 pub fn writable_dir(dir: Option<&std::path::Path>, loaded: &settings::Loaded) -> Option<PathBuf> {
     dir.filter(|_| loaded.writable).map(std::path::Path::to_path_buf)
+}
+
+/// The console line for a frame cap change.
+pub fn frame_cap_line(cap: u32) -> String {
+    if cap == 0 {
+        "output: frame rate cap off (one frame per display refresh)".to_string()
+    } else {
+        format!("output: frame rate cap {cap} fps (whole display refreshes, never above the cap)")
+    }
 }
 
 /// The console line of a click-through change.

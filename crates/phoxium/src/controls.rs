@@ -72,6 +72,8 @@ pub enum Command {
     ToggleWindowMode,
     /// Click-through of the output on or off (the owner of the window and the settings applies it).
     ToggleClickThrough,
+    /// Save a snapshot of the output as a PNG (the renderer and the file system are the owner's).
+    Snapshot,
 }
 
 /// Applies `action`: updates `controls`, calls the UI, and returns the command that needs the window or the
@@ -98,6 +100,7 @@ pub fn dispatch(action: Action, controls: &mut Controls, ui: &mut dyn UiHook) ->
         Action::PreviousPreset => Some(Command::StepPreset(Step::Previous)),
         Action::ToggleFullscreen => Some(Command::ToggleWindowMode),
         Action::ToggleClickThrough => Some(Command::ToggleClickThrough),
+        Action::Snapshot => Some(Command::Snapshot),
     }
 }
 
@@ -261,7 +264,8 @@ mod tests {
         // Adding an action without a dispatch arm fails to compile; this checks the arms are the intended ones.
         let (mut c, mut ui) = (Controls::default(), NoUi);
         let commands: Vec<_> = Action::ALL.iter().map(|&a| dispatch(a, &mut c, &mut ui)).collect();
-        assert_eq!(commands.iter().filter(|c| c.is_some()).count(), 5);
+        assert_eq!(commands.iter().filter(|c| c.is_some()).count(), 6);
+        assert_eq!(dispatch(Action::Snapshot, &mut c, &mut ui), Some(Command::Snapshot));
         assert_eq!(
             dispatch(Action::ToggleClickThrough, &mut c, &mut ui),
             Some(Command::ToggleClickThrough)

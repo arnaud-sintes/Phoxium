@@ -29,7 +29,7 @@ use std::{
 
 use windows::{
     core::{factory, IInspectable, Interface, Result, PCWSTR},
-    Foundation::TypedEventHandler,
+    Foundation::{TimeSpan, TypedEventHandler},
     Graphics::{
         Capture::{Direct3D11CaptureFrame, Direct3D11CaptureFramePool, GraphicsCaptureItem, GraphicsCaptureSession},
         DirectX::{Direct3D11::IDirect3DDevice, DirectXPixelFormat},
@@ -74,6 +74,20 @@ const COPY_TIMEOUT: Duration = Duration::from_secs(1);
 fn lock_tolerant<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(PoisonError::into_inner)
 }
+
+/// The wish of the `[global.capture] max_rate` setting: read by every capture session when it starts, and applied to a
+/// running one by [`Capture::apply_max_rate`].
+static MAX_RATE: AtomicBool = AtomicBool::new(true);
+
+/// Records whether the Windows limit on the capture rate is to be lifted (the setting). Starts and the next
+/// [`Capture::apply_max_rate`] follow it.
+pub fn set_max_rate_wish(on: bool) {
+    MAX_RATE.store(on, Ordering::Release);
+}
+
+/// The minimum time between two captured frames when the limit is lifted: 1 ms (100 ns units), far below any frame
+/// period, so the session delivers every new frame of the window (the default is the 60 Hz period).
+const UNLIMITED_INTERVAL: TimeSpan = TimeSpan { Duration: 10_000 };
 
 /// One captured frame: tightly packed BGRA8, top-down.
 ///
@@ -237,6 +251,9 @@ pub struct Capture {
     pub adapter_luid: Luid,
     /// This session's id (`zerocopy::next_id`), given to every frame taken (`Frame::session`).
     session_id: u64,
+    /// `GraphicsCaptureSession.MinUpdateInterval` as the session started: restored when the limit is put back. `None`
+    /// where the system has no such property (before Windows 11 24H2) and for a synthetic capture.
+    default_interval: Option<TimeSpan>,
 }
 
 impl Capture {
@@ -258,6 +275,7 @@ impl Capture {
         let _ = session.SetIsCursorCaptureEnabled(false);
         // Needs a recent Windows build and may be refused; the yellow border then stays.
         let _ = session.SetIsBorderRequired(false);
+        let default_interval = session.MinUpdateInterval().ok();
 
         let shared = Shared::new();
         {
@@ -290,14 +308,17 @@ impl Capture {
         }
 
         session.StartCapture()?;
-        Ok(Self {
+        let capture = Self {
             shared,
             worker,
             session: Some((pool, session)),
             adapter,
             adapter_luid,
             session_id: crate::zerocopy::next_id(),
-        })
+            default_interval,
+        };
+        capture.apply_max_rate();
+        Ok(capture)
     }
 
     /// A capture without a window or a capture session, fed by [`SyntheticFeed::push`] with textures made by the
@@ -322,6 +343,7 @@ impl Capture {
             adapter: "synthetic".to_string(),
             adapter_luid,
             session_id: crate::zerocopy::next_id(),
+            default_interval: None,
         })
     }
 
@@ -331,6 +353,20 @@ impl Capture {
         SyntheticFeed {
             worker: self.worker.clone(),
         }
+    }
+
+    /// Applies the wish of [`set_max_rate_wish`] to this session: the 1 ms minimum interval when the limit is to be
+    /// lifted, else the interval the session started with. False where the system has no such property or refused it.
+    pub fn apply_max_rate(&self) -> bool {
+        let (Some((_, session)), Some(default)) = (&self.session, self.default_interval) else {
+            return false;
+        };
+        let target = if MAX_RATE.load(Ordering::Acquire) {
+            UNLIMITED_INTERVAL
+        } else {
+            default
+        };
+        session.SetMinUpdateInterval(target).is_ok()
     }
 
     /// Asks for a capture path from the next frame on (restart-free on the capture side).

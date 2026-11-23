@@ -749,6 +749,11 @@ fn preview_state() -> UiState {
         profiles: Vec::new(),
         capture: Default::default(),
         click_through: false,
+        frame_cap: 0,
+        tearing: false,
+        tearing_active: false,
+        max_capture_rate: false,
+        snapshot_message: None,
         notices: Vec::new(),
     }
 }

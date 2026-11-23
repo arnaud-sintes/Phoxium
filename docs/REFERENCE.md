@@ -42,6 +42,7 @@ At start (and from **Change source** in the menu) the output window lists the wi
 | A/B: bypass the whole CRT chain | `Ctrl+Alt+F7` |
 | Next / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` |
 | Click-through on / off (mouse to the game under the output) | `Ctrl+Alt+F6` |
+| Save a snapshot of the output (PNG) | `Ctrl+Alt+F2` |
 
 **These are global hotkeys.** They are registered system-wide (`RegisterHotKey`, no keyboard hook) while Phoxium runs: the plain keys F10 and F11 do not reach any other program during that time, the captured game included. That is why the two bare chords are function keys and the others use Ctrl+Alt with a function or navigation key: Ctrl+Alt with a letter would also fire on AltGr, which Windows sends as Ctrl+Alt on European keyboard layouts (AltGr+Q types `@` on a German keyboard), and that character could not be typed in any program while the app runs. All of them, Quit included, can be changed in the menu (GPU and system, Hotkeys: Change, then press the new keys) or in `settings.toml` (`[global.hotkeys]`; the detail and the fallback chords are in "Hotkeys and output modes"). If another program already owns a chord, the app tells you and keeps the old one (or, at start, uses a fallback). If you pick Ctrl+Alt with a letter or a digit that types a character with AltGr on one of your keyboard layouts, the menu warns you which one. Quit can never be left without a chord. While the menu key is changed, F10 keeps opening the menu too, and the menu says so. The hotkeys are released when the app quits.
 
@@ -196,6 +197,26 @@ path = "cpu"   # absent (or "zero_copy", "auto"): the default, zero-copy
 - The Vulkan device enables the sharing extension (`VK_KHR_external_memory_win32`) whenever the GPU can import the textures, whatever is chosen, so the switch needs no restart; the CPU copy does not use it and gives the same picture bit for bit.
 - Checked live only on the development laptop (the RTX and the Intel GPU) with the demo source: a five-minute run, source resizes, minimise and restore, the live switch of the Capture combo. Not validated: real games, other GPUs and drivers, a driver reset during a capture, a covered source (see CAP-2 in `QUESTIONS.md`). If the picture looks wrong, stutters or freezes, go back to the CPU copy: choose **CPU copy (most compatible)** in the Source section, or start once with `--capture-path cpu`.
 
+## Frame pacing, tearing and capture rate (menu: Display and pacing)
+
+Three settings in the menu's **Display and pacing** section, all applied at once and saved:
+
+- **Frame rate cap** (`[global.output] frame_cap`, frames per second, 0 or absent = none, otherwise 10 to 1000; the menu offers Off, 30, 60, 90, 120 and 144). Each frame starts after a display refresh (the composition wait of the loop, OUT-6); the cap adds whole refreshes until the cap interval has passed (90 % of it, to absorb timing jitter). So the rate in force is the display rate divided by a whole number and never above the cap: 30 on a 60 Hz display gives 30; 60 on a 144 Hz display gives 48 (3 refreshes), not 72. Use it to save power when the game runs slower than the display. The phosphor time base follows real time, so the afterglow does not change with the cap.
+- **Allow tearing** (`[global.output] tearing`, off by default): the swapchain presents with `IMMEDIATE` instead of `FIFO` (no wait for the vertical blank, lower latency, the picture may tear; variable refresh displays can follow the frame rate). The swapchain is recreated at the next frame. When the surface does not offer `IMMEDIATE`, vsync stays and the **Presenting** row says so. The frame cap and the composition wait still pace the loop, so the GPU is not run flat out.
+- **Max capture rate** (`[global.capture] max_rate`, on by default; stored only when off): sets `GraphicsCaptureSession.MinUpdateInterval` to 1 ms so a window above 60 fps is captured at its own rate (Windows 11 24H2 or later; older Windows has no such property and the setting is ignored). Applies to the running capture and to every later one.
+
+Not checked live: tearing on a variable refresh display, and the capture rate above 60 fps (the development monitors are 60 Hz). Covered by unit tests: the cap pacing against a fake clock, the present mode choice, the settings round trip and the menu rows.
+
+## Snapshot of the output
+
+The picture the CRT drew, as it is on the screen (display codes, dithering included), without the menu on it:
+
+- **Save:** the hotkey `Ctrl+Alt+F2` (`snapshot`, rebindable like the others) or the **Save snapshot** button of the menu's Display and pacing section writes an 8-bit RGB PNG of the output size to `the Phoxium folder of your Pictures (`Phoxium-YYYYMMDD-HHMMSS.png`)` (UTC; a `-2`, `-3` suffix when the name exists). The console prints the path and the menu shows it under the buttons.
+- **Copy:** the **Copy snapshot** button puts the same picture on the clipboard (`CF_DIB`, 32 bits per pixel). Only from the button: it replaces what the clipboard holds, so no hotkey does it.
+- How: the swapchain images are made copyable when the surface offers `TRANSFER_SRC`; the frame after the request is drawn without the menu (one frame of it is missing on screen), copied to a host buffer and read after the present. Where the surface does not offer it, the menu says the snapshot is not available.
+- `phoxium --pattern ramp --snapshot out.png` saves a snapshot after about a second and exits (a developer check of the path; any source works).
+- Checked: the PNG of a CRT-rendered ramp through the real window under the validation layer (no message), unit tests of the PNG, the file names, the clipboard bitmap and the pixel order, and the menu rows. Not checked by hand: the clipboard paste in another program, a snapshot with the menu open on screen.
+
 ## Hotkeys and output modes (T-54, T-57)
 
 Global hotkeys are registered with `RegisterHotKey` on the output window (no keyboard hook, no antivirus red flag). A registered chord is swallowed system-wide while phoxium runs, so the captured game does not receive it: that is why the chords below that use no modifier are function keys, and why the others use Ctrl+Alt with a function or navigation key (Ctrl+Alt with a letter also fires on AltGr on European keyboard layouts and would swallow the character, such as `@`, in every program). They work while the source has the focus and never change the foreground window.
@@ -209,6 +230,7 @@ Global hotkeys are registered with `RegisterHotKey` on the output window (no key
 | A/B: bypass the whole CRT chain | `Ctrl+Alt+F7` | `toggle_bypass` |
 | Next preset / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` | `next_preset`, `previous_preset` |
 | Click-through on / off | `Ctrl+Alt+F6` | `toggle_click_through` |
+| Save a snapshot of the output (PNG) | `Ctrl+Alt+F2` | `snapshot` |
 
 - **Chord text:** `Mod+Mod+Key`, case-insensitive. Modifiers `Ctrl`, `Alt`, `Shift`, `Win`; keys `F1` to `F24`, `A` to `Z`, `0` to `9`, `PageUp`, `PageDown` (`PgUp`, `PgDn`), `Home`, `End`, `Insert`, `Delete`, the arrows, `Space`, `Pause`, `ScrollLock`, `PrintScreen`. Only function keys may go without Ctrl, Alt or Win. Example: `toggle_menu = "Ctrl+Alt+F12"`.
 - **In the menu:** the GPU and system panel changes every chord, Quit included (see "Settings menu and overlay"); the chord is registered at once and written here. While `toggle_menu` is not `F10`, the first free chord of the menu's fallback list stays registered as well (a safety chord, never in the file), so the menu always opens. An unparsable chord, an unknown action, or a chord used by two actions prints a `warning:` line naming the entry and the default is used instead (a collision keeps the first action in the table order above and gives the other its default).

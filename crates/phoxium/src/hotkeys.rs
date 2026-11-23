@@ -244,11 +244,13 @@ pub enum Action {
     PreviousPreset,
     /// Click-through of the output on or off (`[global.output] click_through`).
     ToggleClickThrough,
+    /// Saves a snapshot of the output (the picture without the menu) as a PNG in the pictures folder.
+    Snapshot,
 }
 
 impl Action {
     /// Every action, in registration order (Quit first: it is the escape path).
-    pub const ALL: [Action; 8] = [
+    pub const ALL: [Action; 9] = [
         Action::Quit,
         Action::ToggleFullscreen,
         Action::ToggleMenu,
@@ -257,6 +259,7 @@ impl Action {
         Action::NextPreset,
         Action::PreviousPreset,
         Action::ToggleClickThrough,
+        Action::Snapshot,
     ];
 
     /// The key of the action in `[global.hotkeys]` of `settings.toml`.
@@ -270,6 +273,7 @@ impl Action {
             Action::NextPreset => "next_preset",
             Action::PreviousPreset => "previous_preset",
             Action::ToggleClickThrough => "toggle_click_through",
+            Action::Snapshot => "snapshot",
         }
     }
 
@@ -288,6 +292,7 @@ impl Action {
             Action::NextPreset => "Ctrl+Alt+PageDown",
             Action::PreviousPreset => "Ctrl+Alt+PageUp",
             Action::ToggleClickThrough => "Ctrl+Alt+F6",
+            Action::Snapshot => "Ctrl+Alt+F2",
         }
     }
 
@@ -319,6 +324,7 @@ impl Action {
             Action::NextPreset => &["Ctrl+Alt+Shift+PageDown"],
             Action::PreviousPreset => &["Ctrl+Alt+Shift+PageUp"],
             Action::ToggleClickThrough => &["Ctrl+Alt+Shift+F6"],
+            Action::Snapshot => &["Ctrl+Alt+Shift+F2"],
         }
     }
 
@@ -333,6 +339,7 @@ impl Action {
             Action::NextPreset => "next preset",
             Action::PreviousPreset => "previous preset",
             Action::ToggleClickThrough => "click-through",
+            Action::Snapshot => "snapshot",
         }
     }
 

@@ -80,6 +80,108 @@ pub fn click_through_tip(hotkey: &str) -> String {
     )
 }
 
+/// The frame rate caps the Display and pacing section offers (0 = none).
+pub const FRAME_CAP_CHOICES: [u32; 6] = [0, 30, 60, 90, 120, 144];
+
+/// The text of a frame cap: "Off" or "N fps".
+pub fn frame_cap_label(cap: u32) -> String {
+    if cap == 0 {
+        "Off (every refresh)".to_string()
+    } else {
+        format!("{cap} fps")
+    }
+}
+
+const FRAME_CAP_TOOLTIP: &str = "Most frames per second the output draws. The loop skips whole display refreshes, so the rate you get is the display rate divided by a whole number and never above the cap (a cap of 60 on a 144 Hz display gives 48). Lower it to save power when the game runs at 30 or 60 and the display is faster. Saved in [global.output] frame_cap.";
+
+const TEARING_TOOLTIP: &str = "Present frames without waiting for the vertical blank: lower latency, and variable refresh displays (G-Sync, FreeSync) can follow the frame rate, but the picture may tear. Not every window or driver allows it; the row below says what is in force. Saved in [global.output] tearing.";
+
+const SNAPSHOT_SAVE_TOOLTIP: &str = "Saves the picture the CRT drew, without this menu, as a PNG in the Phoxium folder of your Pictures. The hotkey (Ctrl+Alt+F2 by default, see GPU and system) does the same without opening the menu.";
+
+const SNAPSHOT_COPY_TOOLTIP: &str = "Puts the picture the CRT drew, without this menu, on the clipboard. It replaces what the clipboard holds, so it is only done from this button.";
+
+const MAX_RATE_TOOLTIP: &str = "Windows limits a window capture to about 60 frames per second. This lifts the limit (Windows 11 24H2 or later; ignored on older Windows) so a game above 60 fps is captured at its own rate. Saved in [global.capture] max_rate.";
+
+/// The Display and pacing section: frame rate cap, tearing and the capture rate limit.
+pub fn pacing_section(ui: &Frame, fonts: &Fonts, state: &super::UiState, r: &mut MenuResult) {
+    let (open, header) = theme::section_closed(ui, fonts, "Display and pacing");
+    r.items.push(("header:Display and pacing".to_string(), header));
+    if !open {
+        return;
+    }
+    let width = theme::row_label(ui, "Frame rate cap");
+    ui.set_next_item_width(width);
+    if let Some(_combo) = ui.begin_combo("##frame_cap", frame_cap_label(state.frame_cap)) {
+        let mut options = FRAME_CAP_CHOICES.to_vec();
+        if !options.contains(&state.frame_cap) {
+            options.push(state.frame_cap);
+        }
+        for cap in options {
+            let selected = cap == state.frame_cap;
+            if ui.selectable_config(frame_cap_label(cap)).selected(selected).build() && !selected {
+                r.frame_cap = Some(cap);
+            }
+            record(ui, r, &format!("frame_cap:{cap}"));
+        }
+    }
+    record(ui, r, "frame_cap");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, FRAME_CAP_TOOLTIP);
+    }
+    let mut tearing = state.tearing;
+    if ui.checkbox("Allow tearing (lower latency, variable refresh)", &mut tearing) {
+        r.tearing = Some(tearing);
+    }
+    record(ui, r, "tearing");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, TEARING_TOOLTIP);
+    }
+    theme::kv_row(
+        ui,
+        "Presenting",
+        &presenting_text(state.tearing, state.tearing_active),
+        PALETTE.text,
+    );
+    record(ui, r, "tearing:status");
+    let mut max_rate = state.max_capture_rate;
+    if ui.checkbox("Max capture rate (lift the 60 fps limit)", &mut max_rate) {
+        r.max_capture_rate = Some(max_rate);
+    }
+    record(ui, r, "max_capture_rate");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, MAX_RATE_TOOLTIP);
+    }
+    theme::subheading(ui, fonts, "Snapshot");
+    if theme::button(ui, "Save snapshot") {
+        r.snapshot = Some(crate::snapshot::Kind::Save);
+    }
+    record(ui, r, "snapshot:save");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, SNAPSHOT_SAVE_TOOLTIP);
+    }
+    ui.same_line();
+    if theme::button(ui, "Copy snapshot") {
+        r.snapshot = Some(crate::snapshot::Kind::Copy);
+    }
+    record(ui, r, "snapshot:copy");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, SNAPSHOT_COPY_TOOLTIP);
+    }
+    if let Some((ok, text)) = &state.snapshot_message {
+        small(ui, if *ok { PALETTE.ok } else { PALETTE.problem }, text);
+        record(ui, r, "snapshot:message");
+    }
+}
+
+/// What the Presenting row says: the mode in force, and why it is not the one asked for.
+pub fn presenting_text(asked: bool, active: bool) -> String {
+    match (asked, active) {
+        (_, true) => "Tearing allowed (no vsync wait)".to_string(),
+        (false, false) => "Vsync".to_string(),
+        (true, false) => "Vsync (tearing is not offered here)".to_string(),
+    }
+}
+
 /// The Interface section: UI scale, click-through and the two resets.
 pub fn interface(
     ui: &Frame,

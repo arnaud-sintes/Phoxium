@@ -41,6 +41,7 @@ pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
     ("next_preset", "Ctrl+Alt+PageDown"),
     ("previous_preset", "Ctrl+Alt+PageUp"),
     ("toggle_click_through", "Ctrl+Alt+F6"),
+    ("snapshot", "Ctrl+Alt+F2"),
 ];
 
 /// The generation of the default hotkeys a file was written with (`[global] hotkey_defaults`): 1 (the key is
@@ -73,6 +74,19 @@ fn lenient_opt_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<boo
 /// A boolean key that never makes the whole file unusable: a value of another type reads as `false`.
 fn lenient_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
     Ok(toml::Value::deserialize(d)?.as_bool().unwrap_or(false))
+}
+
+/// Like [`lenient_bool`] for a key that is on by default: a value of another type reads as `true`.
+fn lenient_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(toml::Value::deserialize(d)?.as_bool().unwrap_or(true))
+}
+
+/// A whole-number key that never makes the whole file unusable: a value of another type, or a negative one, reads as 0.
+fn lenient_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    Ok(toml::Value::deserialize(d)?
+        .as_integer()
+        .and_then(|i| u32::try_from(i).ok())
+        .unwrap_or(0))
 }
 
 fn default_version() -> u32 {
@@ -191,6 +205,30 @@ pub struct OutputState {
     /// (Interface, "Click-through").
     #[serde(deserialize_with = "lenient_bool")]
     pub click_through: bool,
+    /// Frame rate cap of the output loop in frames per second, 0 = no cap (every display refresh). The loop
+    /// skips whole display refreshes, so the rate in force is the display rate divided by a whole number (a cap of
+    /// 60 on a 144 Hz display gives 48). Read through [`OutputState::frame_cap`] (clamped). Menu: Display and pacing.
+    #[serde(deserialize_with = "lenient_u32")]
+    pub frame_cap: u32,
+    /// Present without waiting for the vertical blank (`IMMEDIATE`): lower latency, the picture may tear, and
+    /// variable refresh rate displays can follow the frame rate. Off by default (FIFO). Falls back to FIFO when the
+    /// surface does not offer it. Menu: Display and pacing.
+    #[serde(deserialize_with = "lenient_bool")]
+    pub tearing: bool,
+}
+
+/// The lowest and highest frame cap that is applied (a value in between is kept, outside it is clamped; 0 is off).
+pub const FRAME_CAP_RANGE: (u32, u32) = (10, 1000);
+
+impl OutputState {
+    /// The frame cap in force: 0 (none), else the stored value clamped to [`FRAME_CAP_RANGE`].
+    pub fn frame_cap(&self) -> u32 {
+        if self.frame_cap == 0 {
+            0
+        } else {
+            self.frame_cap.clamp(FRAME_CAP_RANGE.0, FRAME_CAP_RANGE.1)
+        }
+    }
 }
 
 /// The value of `gpu.adapter` that means the automatic choice.
@@ -226,12 +264,18 @@ pub struct CaptureSettings {
     /// every adapter pair). `auto` reads as the default. Any other value reads as the default with a note (the hard
     /// range of an enum, WP4). Stored only when it differs from the default. `--capture-path` wins over it.
     pub path: String,
+    /// Lift the Windows limit on the capture rate (`GraphicsCaptureSession.MinUpdateInterval`, Windows 11 24H2 and
+    /// later; the session otherwise delivers at most about 60 frames per second). On by default; ignored where the
+    /// system does not offer it. Stored only when off. Menu: Display and pacing.
+    #[serde(deserialize_with = "lenient_true")]
+    pub max_rate: bool,
 }
 
 impl Default for CaptureSettings {
     fn default() -> Self {
         Self {
             path: CapturePath::default().id().to_string(),
+            max_rate: true,
         }
     }
 }
@@ -242,9 +286,9 @@ impl CaptureSettings {
         CapturePath::parse(&self.path).unwrap_or_default()
     }
 
-    /// The default path: not written to the file.
+    /// The default path and capture rate: not written to the file.
     pub fn is_default(&self) -> bool {
-        self.path() == CapturePath::default()
+        self.path() == CapturePath::default() && self.max_rate
     }
 }
 
@@ -589,6 +633,8 @@ impl Settings {
         g.gpu = GpuSettings::default();
         g.capture = CaptureSettings::default();
         g.output.click_through = false;
+        g.output.frame_cap = 0;
+        g.output.tearing = false;
     }
 
     /// Inserts or replaces the profile with the same executable and class.
@@ -1826,6 +1872,83 @@ mod tests {
         assert_eq!(s.global.output.windowed, None);
         let s = Settings::from_toml("version = 1\n[global.output]\nwindowed = [10, 20, 1290, 740]\n").unwrap();
         assert_eq!(s.global.output.windowed, Some([10, 20, 1290, 740]));
+    }
+
+    /// Frame rate cap, tearing and the capture rate limit: defaults (no cap, vsync, limit lifted), absent in files of
+    /// earlier builds, round-trip, and a wrong type or value never makes the file unusable.
+    #[test]
+    fn frame_cap_tearing_and_max_rate_defaults_round_trip_and_read_leniently() {
+        let d = Settings::default();
+        assert_eq!(d.global.output.frame_cap(), 0);
+        assert!(!d.global.output.tearing);
+        assert!(d.global.capture.max_rate && d.global.capture.is_default());
+        let old = "version = 1
+[global.output]
+windowed = [10, 20, 1290, 740]
+";
+        let o = Settings::from_toml(old).unwrap();
+        assert_eq!(
+            (
+                o.global.output.frame_cap(),
+                o.global.output.tearing,
+                o.global.capture.max_rate
+            ),
+            (0, false, true)
+        );
+        let mut s = Settings::default();
+        s.global.output.frame_cap = 60;
+        s.global.output.tearing = true;
+        s.global.capture.max_rate = false;
+        let text = s.to_toml().unwrap();
+        assert!(
+            text.contains("frame_cap = 60") && text.contains("tearing = true"),
+            "{text}"
+        );
+        assert!(text.contains("max_rate = false"), "{text}");
+        let back = Settings::from_toml(&text).unwrap();
+        assert_eq!((back.global.output.frame_cap(), back.global.output.tearing), (60, true));
+        assert!(!back.global.capture.max_rate);
+        // Wrong types read as the defaults; the cap is clamped; a negative cap is none.
+        let bad = "version = 1
+[global.output]
+frame_cap = \"fast\"
+tearing = 3
+[global.capture]
+max_rate = \"yes\"
+";
+        let b = Settings::from_toml(bad).unwrap();
+        assert_eq!(
+            (
+                b.global.output.frame_cap(),
+                b.global.output.tearing,
+                b.global.capture.max_rate
+            ),
+            (0, false, true)
+        );
+        let low = Settings::from_toml(
+            "version = 1
+[global.output]
+frame_cap = 3
+",
+        )
+        .unwrap();
+        assert_eq!(low.global.output.frame_cap(), FRAME_CAP_RANGE.0);
+        let high = Settings::from_toml(
+            "version = 1
+[global.output]
+frame_cap = 99999
+",
+        )
+        .unwrap();
+        assert_eq!(high.global.output.frame_cap(), FRAME_CAP_RANGE.1);
+        let neg = Settings::from_toml(
+            "version = 1
+[global.output]
+frame_cap = -5
+",
+        )
+        .unwrap();
+        assert_eq!(neg.global.output.frame_cap(), 0);
     }
 
     /// `[global.output] click_through`: off by default and in a file of an earlier build (no key), round-trips,

@@ -247,6 +247,10 @@ impl Rig {
             m.library = o.library.or(m.library);
             m.preset = o.preset.or(m.preset);
             m.params = o.params.or(m.params);
+            m.frame_cap = o.frame_cap.or(m.frame_cap);
+            m.tearing = o.tearing.or(m.tearing);
+            m.max_capture_rate = o.max_capture_rate.or(m.max_capture_rate);
+            m.snapshot = o.snapshot.or(m.snapshot);
         }
         m
     }
@@ -712,6 +716,37 @@ fn interface_size_resets_and_about() {
     rig.click("about:licences");
     rig.item("about:table");
     rig.preview("menu-about");
+    rig.finish();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// The Display and pacing section: the frame rate cap combo, the tearing box with the mode in force, and the max
+/// capture rate box each hand their value to the app.
+#[test]
+fn display_and_pacing_rows_hand_their_values_to_the_app() {
+    let _g = lock();
+    let dir = temp_settings("pacing");
+    let config = files_config(&dir, 1400.0);
+    let Some(mut rig) = Rig::new("display_and_pacing", 1280, 1400, config) else {
+        return;
+    };
+    rig.open_menu();
+    rig.click("header:Display and pacing");
+    rig.click("frame_cap");
+    rig.click("frame_cap:60");
+    assert_eq!(rig.take().frame_cap, Some(60));
+    rig.frame(&[]);
+    rig.tick("tearing");
+    assert_eq!(rig.take().tearing, Some(true));
+    rig.frame(&[]);
+    rig.item("tearing:status");
+    rig.tick("max_capture_rate");
+    assert_eq!(rig.take().max_capture_rate, Some(true));
+    rig.click("snapshot:save");
+    assert_eq!(rig.take().snapshot, Some(phoxium::snapshot::Kind::Save));
+    rig.frame(&[]);
+    rig.click("snapshot:copy");
+    assert_eq!(rig.take().snapshot, Some(phoxium::snapshot::Kind::Copy));
     rig.finish();
     let _ = std::fs::remove_dir_all(&dir);
 }

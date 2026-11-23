@@ -63,6 +63,7 @@ Usage: phoxium [options]
   --log <file.csv>     write a diagnostics CSV: one row per second (capture and render fps, min/max/p99 intervals,
                        gaps over 50 ms, foreground window changes) and a summary at exit
   --save-capture <png>save the first captured frame and exit
+  --snapshot <png>     save a snapshot of the output (the picture the CRT drew) to this PNG after about a second, then exit
   --detect-bars <png>  offline: run the black-bar (picture area) detector on a saved capture (a --save-capture
                        PNG) with the settings' thresholds, print the picture found, the bars, the reason when
                        nothing is cropped and the per-edge statistics, then exit; opens no window
@@ -104,6 +105,8 @@ pub struct Args {
     pub validation: bool,
     pub stats: bool,
     pub save_capture: Option<String>,
+    /// `--snapshot <png>`: the output as a PNG after a while, then exit (a developer check of the snapshot path).
+    pub snapshot: Option<String>,
     /// `--detect-bars <png>`: the offline picture-area diagnostic.
     pub detect_bars: Option<String>,
     pub exit_after: Option<f64>,
@@ -272,6 +275,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             "--stats" => a.stats = true,
             "--reset-burnin" => a.reset_burnin = true,
             "--save-capture" => a.save_capture = Some(value("--save-capture")?),
+            "--snapshot" => a.snapshot = Some(value("--snapshot")?),
             "--detect-bars" => a.detect_bars = Some(value("--detect-bars")?),
             "--wait-source" => {
                 let secs: f64 = number("--wait-source", &value("--wait-source")?)?;

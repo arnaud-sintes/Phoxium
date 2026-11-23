@@ -190,6 +190,30 @@ pub enum Upload<'a> {
     Shared(SharedFrame),
 }
 
+/// A snapshot of the output: the picture the CRT chain drew, as it was presented, without the menu.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotImage {
+    pub width: u32,
+    pub height: u32,
+    /// RGBA8, top-down, tightly packed, alpha 255.
+    pub rgba: Vec<u8>,
+}
+
+/// The pixels of a swapchain image copied to a buffer (`raw`, tightly packed, 4 bytes per pixel) as RGBA8 with alpha
+/// 255; `format` is the swapchain format (`B8G8R8A8_UNORM` swaps red and blue, `R8G8B8A8_UNORM` keeps the order).
+pub fn swapchain_to_rgba(format: vk::Format, raw: &[u8]) -> Vec<u8> {
+    let bgra = format == vk::Format::B8G8R8A8_UNORM;
+    let mut out = Vec::with_capacity(raw.len());
+    for p in raw.as_chunks::<4>().0 {
+        if bgra {
+            out.extend_from_slice(&[p[2], p[1], p[0], 255]);
+        } else {
+            out.extend_from_slice(&[p[0], p[1], p[2], 255]);
+        }
+    }
+    out
+}
+
 /// Renders the captured frame into one output window.
 ///
 /// Every Vulkan handle starts null and is filled in by `new`, so `Drop` releases whatever was
@@ -214,6 +238,14 @@ pub struct Renderer {
     external_failure: Option<String>,
     /// The device offers `VK_KHR_external_memory_win32` (queried once).
     zero_copy_offered: bool,
+    /// A snapshot of the output was asked: the next frame is drawn without the menu and copied out ([`Renderer::request_snapshot`]).
+    snapshot_wanted: bool,
+    /// Host buffer the snapshot copy lands in (kept between snapshots; null until the first).
+    snapshot_buffer: headless::HostBuffer,
+    /// Pixels of `snapshot_buffer` (width, height) as it was made.
+    snapshot_size: (u32, u32),
+    /// The finished snapshot, until [`Renderer::take_snapshot`].
+    snapshot_done: Option<SnapshotImage>,
     /// Destroyed last: `Drop for Renderer` releases every child object above first, then the
     /// field drop of `ctx` destroys the device and the instance.
     ctx: Context,
@@ -249,6 +281,10 @@ impl Renderer {
                 shared: InFlight::default(),
                 external_failure: None,
                 zero_copy_offered: ctx.external_memory_offered(),
+                snapshot_wanted: false,
+                snapshot_buffer: headless::HostBuffer::default(),
+                snapshot_size: (0, 0),
+                snapshot_done: None,
                 ctx,
             };
             for s in &mut r.image_available {
@@ -302,6 +338,17 @@ impl Renderer {
     /// renderer on it, and must be dropped before the renderer.
     pub fn context(&self) -> &Context {
         &self.ctx
+    }
+
+    /// Presents without waiting for the vertical blank (tearing) or with vsync; the swapchain is recreated before
+    /// the next frame when this changes. Without tearing support in the surface the mode stays vsync.
+    pub fn set_tearing(&mut self, on: bool) {
+        self.presenter.set_tearing(on);
+    }
+
+    /// Whether frames are presented without waiting for the vertical blank now (the swapchain was made so).
+    pub fn tearing_active(&self) -> bool {
+        self.presenter.present_mode() == vk::PresentModeKHR::IMMEDIATE
     }
 
     /// Format of the swapchain images (`B8G8R8A8_UNORM` or `R8G8B8A8_UNORM`, A7): the UI renderer is created
@@ -408,6 +455,12 @@ impl Renderer {
     /// # Safety
     /// As [`Renderer::render`]; `index` was acquired with `acquired` as its semaphore.
     unsafe fn draw(&mut self, index: u32, acquired: vk::Semaphore, view: View, ui: Option<&mut dyn UiPass>) -> Res<()> {
+        // A snapshot is drawn without the menu: this one frame has no UI on it, and the copy leaves for the host.
+        let snapshot = std::mem::take(&mut self.snapshot_wanted) && self.presenter.can_copy();
+        let ui = if snapshot { None } else { ui };
+        if snapshot {
+            self.ensure_snapshot_buffer()?;
+        }
         let pipeline = self.pipeline.as_mut().expect("pipeline created in new");
         let target = Target {
             image: self.presenter.image(index),
@@ -417,19 +470,63 @@ impl Renderer {
         };
         let params = crate::quality::effective(&self.params, self.quality_drop);
         let cb = pipeline.record_ui(&self.ctx, view, &self.settings, &params, &target, ui)?;
-        barrier(
-            &self.ctx.device,
-            cb,
-            target.image,
-            vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
-            vk::ImageLayout::PRESENT_SRC_KHR,
-            vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
-            vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
-            vk::PipelineStageFlags2::NONE,
-            vk::AccessFlags2::NONE,
-        );
+        if snapshot {
+            // Colour attachment to transfer source, copy the picture out, transfer source to present.
+            barrier(
+                &self.ctx.device,
+                cb,
+                target.image,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags2::COPY,
+                vk::AccessFlags2::TRANSFER_READ,
+            );
+            self.ctx.device.cmd_copy_image_to_buffer(
+                cb,
+                target.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                self.snapshot_buffer.buffer,
+                &[vk::BufferImageCopy::default()
+                    .image_subresource(vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: 0,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: target.extent.width,
+                        height: target.extent.height,
+                        depth: 1,
+                    })],
+            );
+            barrier(
+                &self.ctx.device,
+                cb,
+                target.image,
+                vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::PipelineStageFlags2::COPY,
+                vk::AccessFlags2::TRANSFER_READ,
+                vk::PipelineStageFlags2::NONE,
+                vk::AccessFlags2::NONE,
+            );
+        } else {
+            barrier(
+                &self.ctx.device,
+                cb,
+                target.image,
+                vk::ImageLayout::COLOR_ATTACHMENT_OPTIMAL,
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::PipelineStageFlags2::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags2::COLOR_ATTACHMENT_WRITE,
+                vk::PipelineStageFlags2::NONE,
+                vk::AccessFlags2::NONE,
+            );
+        }
         let slot = pipeline.slot();
-        pipeline.submit(
+        let fence = pipeline.submit(
             &self.ctx,
             &[acquired],
             &[vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT],
@@ -437,7 +534,62 @@ impl Renderer {
         )?;
         // Zero-copy: the shared slot this frame read stays held until its fence (`frame_done` in `render_frame`).
         self.shared.submitted(slot, pipeline.submitted_external());
-        self.presenter.present(&self.ctx, index)
+        let presented = self.presenter.present(&self.ctx, index);
+        if snapshot {
+            // After the present, so the picture reaches the screen on time; the wait is one frame of GPU time.
+            self.finish_snapshot(fence, target.extent, target.format)?;
+        }
+        presented
+    }
+
+    /// Asks for a snapshot of the output: the next frame drawn is copied out without the menu on it ([`Renderer::take_snapshot`]).
+    /// False when the swapchain cannot be copied from (the surface did not offer `TRANSFER_SRC`).
+    pub fn request_snapshot(&mut self) -> bool {
+        if self.presenter.can_copy() {
+            self.snapshot_wanted = true;
+        }
+        self.presenter.can_copy()
+    }
+
+    /// The snapshot of the last request, once its frame was drawn (taken at most once).
+    pub fn take_snapshot(&mut self) -> Option<SnapshotImage> {
+        self.snapshot_done.take()
+    }
+
+    /// Makes the host buffer of the snapshot fit the swapchain extent.
+    ///
+    /// # Safety
+    /// The GPU no longer uses the previous buffer (its fence was waited in [`Renderer::finish_snapshot`]).
+    unsafe fn ensure_snapshot_buffer(&mut self) -> Res<()> {
+        let e = self.presenter.extent();
+        let size = (e.width, e.height);
+        if self.snapshot_buffer.buffer == vk::Buffer::null() || self.snapshot_size != size {
+            self.snapshot_buffer.destroy(&self.ctx.device);
+            self.snapshot_buffer = headless::HostBuffer::create(
+                &self.ctx,
+                size.0 as usize * size.1 as usize * 4,
+                vk::BufferUsageFlags::TRANSFER_DST,
+            )?;
+            self.snapshot_size = size;
+        }
+        Ok(())
+    }
+
+    /// Waits for the frame that carried the copy and converts the buffer to RGBA.
+    ///
+    /// # Safety
+    /// `fence` is the fence of the submission that copied into `snapshot_buffer`, made for `extent` and `format`.
+    unsafe fn finish_snapshot(&mut self, fence: vk::Fence, extent: vk::Extent2D, format: vk::Format) -> Res<()> {
+        wait_fences(&self.ctx.device, &[fence], "snapshot")?;
+        let len = extent.width as usize * extent.height as usize * 4;
+        // SAFETY: the buffer holds `len` mapped bytes (`ensure_snapshot_buffer`) and the GPU is done with them.
+        let raw = std::slice::from_raw_parts(self.snapshot_buffer.mapped, len);
+        self.snapshot_done = Some(SnapshotImage {
+            width: extent.width,
+            height: extent.height,
+            rgba: swapchain_to_rgba(format, raw),
+        });
+        Ok(())
     }
 
     /// The handle kind of the shared textures the device imports, when the device supports it (A29); `None`
@@ -759,6 +911,7 @@ impl Drop for Renderer {
             for s in self.image_available {
                 self.ctx.device.destroy_semaphore(s, None);
             }
+            self.snapshot_buffer.destroy(&self.ctx.device);
             self.presenter.destroy(&self.ctx);
         }
     }
@@ -767,6 +920,20 @@ impl Drop for Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The snapshot pixels leave the swapchain as RGBA with alpha 255, whichever channel order the swapchain has.
+    #[test]
+    fn swapchain_pixels_become_rgba() {
+        let raw = [10, 20, 30, 0, 40, 50, 60, 7];
+        assert_eq!(
+            swapchain_to_rgba(vk::Format::B8G8R8A8_UNORM, &raw),
+            vec![30, 20, 10, 255, 60, 50, 40, 255]
+        );
+        assert_eq!(
+            swapchain_to_rgba(vk::Format::R8G8B8A8_UNORM, &raw),
+            vec![10, 20, 30, 255, 40, 50, 60, 255]
+        );
+    }
 
     /// R-01: every Vulkan result the window path meets maps to one recovery.
     #[test]

@@ -321,6 +321,14 @@ pub struct MenuResult {
     pub scale: Option<crate::settings::UiScale>,
     /// Click-through switched (Interface section).
     pub click_through: Option<bool>,
+    /// Frame rate cap chosen (Display and pacing section; 0 = none).
+    pub frame_cap: Option<u32>,
+    /// Tearing switched (Display and pacing section).
+    pub tearing: Option<bool>,
+    /// Max capture rate switched (Display and pacing section).
+    pub max_capture_rate: Option<bool>,
+    /// A snapshot asked (Display and pacing section).
+    pub snapshot: Option<crate::snapshot::Kind>,
     /// A text to put on the clipboard (About: the settings folder).
     pub copy: Option<String>,
     pub rects: MenuRects,
@@ -514,6 +522,9 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     if open {
         system_rows(ui, m, r);
     }
+
+    // Display and pacing: frame rate cap, tearing, capture rate.
+    super::system_panels::pacing_section(ui, &fonts, m.state, r);
 
     // Interface (UI scale, resets) and About.
     super::system_panels::interface(ui, &fonts, m.layout.scale, m.state.click_through, m.extras, r);
