@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- **Capture card** (`docs/REFERENCE.md`, "Capture card"): a video capture device (a capture card, a camera) as the source, listed in the picker; read through Media Foundation as RGB, at the device's own picture size. Module `video`; the sample conversion is unit tested, and the laptop's camera lists, opens and delivers a frame; not checked with a real capture card.
+
 ## [0.7.0] - 2026-11-24
 
 ### Added

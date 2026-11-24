@@ -41,6 +41,7 @@ pub mod source;
 pub mod sources;
 pub mod tube_state;
 pub mod ui;
+pub mod video;
 pub mod white;
 pub mod zerocopy;
 

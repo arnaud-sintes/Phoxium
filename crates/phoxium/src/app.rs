@@ -18,7 +18,7 @@ use crate::{
     picker::{self, Event, Phase},
     placement, presets, scaling, settings, source, sources,
     ui::{AttachedView, SourceAction, SourcePrefs, SourceView},
-    zerocopy, Res,
+    video, zerocopy, Res,
 };
 
 /// The rectangle the output window will cover, as far as it is known before the window exists (HW-3): in
@@ -711,6 +711,11 @@ pub fn run() -> Res<()> {
     // Auto was in force at the previous loop (a switch to Auto by any path starts a detection).
     let mut auto_was_on = bars_state.auto.running();
     let mut list_due = 0.0f64; // next enumeration of the picker's list
+                               // A video capture device as the source (`video`), the devices the picker lists (enumerated when the picker opens
+                               // or Refresh is pressed, `video_refresh`).
+    let mut video: Option<video::VideoCapture> = None;
+    let mut video_list: Vec<video::Device> = Vec::new();
+    let mut video_refresh = true;
     let mut thumbs = picker::ThumbPlan::default();
     let mut thumb_capture: Option<(isize, capture::Capture)> = None;
     let own = win.hwnd.0 as isize;
@@ -796,6 +801,7 @@ pub fn run() -> Res<()> {
 
             // ---- A23: source requests of the picker and the menu ----
             let mut attach_request = None;
+            let mut still_switch: Option<(capture::Frame, String)> = None;
             let mut area_request: Option<SourceAction> = None;
             let mut multiplier_request: Option<scaling::Multiplier> = None;
             match source_request.take() {
@@ -824,6 +830,7 @@ pub fn run() -> Res<()> {
                         ui.show_picker(false);
                     }
                     list_due = 0.0;
+                    video_refresh = true;
                 }
                 Some(SourceAction::Detach) => {
                     if let Some(c) = capture.take() {
@@ -834,6 +841,7 @@ pub fn run() -> Res<()> {
                     lost_watch.update(now, true);
                     phase = picker::next(phase, Event::Detach);
                     synthetic = false;
+                    video = None;
                     frame = idle_frame();
                     fresh = true;
                     size_watch.request_history_clear();
@@ -850,55 +858,88 @@ pub fn run() -> Res<()> {
                         let image = source::Source::Image(path.clone());
                         match image.frame(0) {
                             Ok(Some(f)) => {
-                                // The capture (if any) ends; the still image is the source, with no game profile:
-                                // the preset's source settings, as without a source.
-                                if let Some(c) = capture.take() {
-                                    captured_base += c.frames_captured();
-                                }
-                                reattach = None;
-                                lost_at = None;
-                                lost_watch.update(now, true);
                                 *kind.borrow_mut() = image;
-                                synthetic = true;
                                 // The first frame is already here: a still image delivers it once.
                                 synthetic_n = 1;
-                                frame = f;
-                                fresh = true;
-                                target = None;
-                                profile = settings::SourceProfile::default();
-                                let mut p = params;
-                                for w in profile.switch_to(&mut p, &base_params(&live)) {
-                                    eprintln!("warning: {w}");
-                                }
-                                if let Err(e) = args.apply_source(&mut p) {
-                                    eprintln!("warning: {e}");
-                                }
-                                params = p;
-                                renderer.set_params(params);
-                                baseline = baseline_of(live.library(), live.current_preset(), &profile);
-                                map = resolve_map(&params, &profile, cli_crop, cli_divisor).0;
-                                size_watch.request_history_clear();
-                                bars_state.forget();
-                                detector.reset();
-                                detect_key = (0, 0, None);
-                                remap = true;
-                                output::set_source(HWND::default());
+                                video = None;
                                 let name = path
                                     .file_name()
                                     .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
-                                source_name = Some(format!("image {name}"));
-                                output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
-                                phase = picker::next(phase, Event::Attached);
-                                ui.image_attached();
-                                println!("source: image {}", path.display());
+                                still_switch = Some((f, format!("image {name}")));
                             }
                             Ok(None) => {}
                             Err(e) => ui.set_picker_message(Some((false, format!("Cannot open the image: {e}")))),
                         }
                     }
                 }
-                Some(SourceAction::Refresh) => list_due = 0.0,
+                Some(SourceAction::OpenVideo(i)) => {
+                    if let Some(device) = video_list.get(i).cloned() {
+                        match video::VideoCapture::open(&device) {
+                            Ok(v) => {
+                                // The first frame sizes the window, as a window capture's does: wait for it a moment.
+                                let mut first = capture::Frame::default();
+                                let deadline = Instant::now() + Duration::from_secs(3);
+                                while !v.take_frame(&mut first) && Instant::now() < deadline {
+                                    std::thread::sleep(Duration::from_millis(10));
+                                }
+                                if first.seq == 0 {
+                                    ui.set_picker_message(Some((
+                                        false,
+                                        format!("{} delivered no picture within 3 seconds.", device.name),
+                                    )));
+                                } else {
+                                    video = Some(v);
+                                    still_switch = Some((first, format!("video {}", device.name)));
+                                }
+                            }
+                            Err(e) => {
+                                ui.set_picker_message(Some((false, format!("Cannot open {}: {e}", device.name))));
+                            }
+                        }
+                    }
+                }
+                Some(SourceAction::Refresh) => {
+                    list_due = 0.0;
+                    video_refresh = true;
+                }
                 Some(SourceAction::RefreshPreview) => thumbs.refresh(),
+            }
+            if let Some((f, label)) = still_switch.take() {
+                // A still image or a video device becomes the source: the capture (if any) ends, and there is no game
+                // profile: the preset's source settings, as without a source.
+                if let Some(c) = capture.take() {
+                    captured_base += c.frames_captured();
+                }
+                reattach = None;
+                lost_at = None;
+                lost_watch.update(now, true);
+                synthetic = true;
+                frame = f;
+                fresh = true;
+                target = None;
+                profile = settings::SourceProfile::default();
+                let mut p = params;
+                for w in profile.switch_to(&mut p, &base_params(&live)) {
+                    eprintln!("warning: {w}");
+                }
+                if let Err(e) = args.apply_source(&mut p) {
+                    eprintln!("warning: {e}");
+                }
+                params = p;
+                renderer.set_params(params);
+                baseline = baseline_of(live.library(), live.current_preset(), &profile);
+                map = resolve_map(&params, &profile, cli_crop, cli_divisor).0;
+                size_watch.request_history_clear();
+                bars_state.forget();
+                detector.reset();
+                detect_key = (0, 0, None);
+                remap = true;
+                output::set_source(HWND::default());
+                source_name = Some(label.clone());
+                output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
+                phase = picker::next(phase, Event::Attached);
+                ui.image_attached();
+                println!("source: {label}");
             }
             if let Some(h) = attach_request {
                 let entry = entry_of(h, &ui.picker().rows);
@@ -922,6 +963,7 @@ pub fn run() -> Res<()> {
                         }
                         frame.seq = 0; // the new session counts from 1
                         synthetic = false;
+                        video = None;
                         println!("source: attached \"{}\" ({})", entry.title, t.describe());
                         if new_profile != settings::SourceProfile::default() {
                             println!("source profile: {}", t.describe());
@@ -976,6 +1018,7 @@ pub fn run() -> Res<()> {
                 ui.show_picker(false);
                 phase = picker::next(phase, Event::ShowPicker);
                 list_due = 0.0;
+                video_refresh = true;
             }
 
             // ---- Lifecycle of the attached window: reattach during the wait, then the picker ----
@@ -1064,6 +1107,11 @@ pub fn run() -> Res<()> {
 
             // ---- The picker's list, icons and preview (only while it is shown) ----
             if ui.picker_open() {
+                if video_refresh {
+                    video_refresh = false;
+                    video_list = video::list();
+                    ui.set_video_devices(video_list.iter().map(|d| d.name.clone()).collect());
+                }
                 if now >= list_due {
                     list_due = now + 1.0;
                     ui.set_picker_rows(picker_rows(&recent));
@@ -1124,9 +1172,15 @@ pub fn run() -> Res<()> {
             let got = match &capture {
                 _ if idle => false,
                 Some(c) => c.take_frame(&mut frame),
+                None if video.is_some() => video.as_ref().is_some_and(|v| v.take_frame(&mut frame)),
                 None if synthetic => synthetic_frame(&mut frame, &mut synthetic_n)?,
                 None => false,
             };
+            if video.as_ref().is_some_and(video::VideoCapture::ended) {
+                // The device was unplugged or stopped: the last picture stays; Change source picks another.
+                println!("source: the video device stopped delivering");
+                video = None;
+            }
             if got {
                 if size_watch.observe(frame.width, frame.height) {
                     // SRC-8: the renderer rebuilds its source-sized resources when it gets this frame

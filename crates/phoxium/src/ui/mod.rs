@@ -246,6 +246,8 @@ pub enum SourceAction {
     RefreshPreview,
     /// Choose a still image (a PNG) in a native dialog and use it as the source ("Open image").
     OpenImage,
+    /// Use the video capture device number `i` of the picker's list (`Ui::set_video_devices`) as the source.
+    OpenVideo(usize),
     /// Detect the picture area at once (the Source section's Detect now): Auto mode, the hysteresis reset.
     DetectNow,
     /// The picture area mode chosen (Auto, Manual from the limits in force, Whole client area).
@@ -741,6 +743,12 @@ impl Ui {
         }
     }
 
+    /// The names of the video capture devices the picker offers (capture cards, cameras), in the order of the
+    /// `OpenVideo` index.
+    pub fn set_video_devices(&mut self, names: Vec<String>) {
+        self.picker.video = names;
+    }
+
     /// A still image became the source ("Open image"): there is no window to hand the foreground to; the picker
     /// closes and its message is cleared.
     pub fn image_attached(&mut self) {
@@ -835,6 +843,7 @@ impl Ui {
             A::Refresh => self.out.source = Some(SourceAction::Refresh),
             A::RefreshPreview => self.out.source = Some(SourceAction::RefreshPreview),
             A::OpenImage => self.out.source = Some(SourceAction::OpenImage),
+            A::OpenVideo(i) => self.out.source = Some(SourceAction::OpenVideo(i)),
             A::AskAtStart(on) => {
                 self.prefs.ask_at_start = on;
                 self.out.source_prefs = Some(self.prefs);

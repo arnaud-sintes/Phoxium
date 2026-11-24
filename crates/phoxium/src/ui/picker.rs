@@ -50,6 +50,8 @@ pub enum PickerAction {
     RefreshPreview,
     /// Open a still image (a PNG) as the source instead of a window.
     OpenImage,
+    /// Use the video capture device number `i` of [`Picker::video`] as the source.
+    OpenVideo(usize),
     /// The "ask at every start" check box changed.
     AskAtStart(bool),
     /// The first-run hint was dismissed; `true`: "Do not show again" was ticked.
@@ -69,6 +71,8 @@ pub struct Thumb {
 pub struct Picker {
     /// The windows listed, sorted (`picker::sort_rows`).
     pub rows: Vec<Row>,
+    /// The video capture devices (capture cards, cameras) offered next to the windows, by name.
+    pub video: Vec<String>,
     /// The search text.
     pub query: String,
     pub selected: Option<isize>,
@@ -350,8 +354,30 @@ fn card(ui: &Frame, p: &mut Picker, fonts: &Fonts, menu_key: &str, r: &mut Picke
     if ui.is_item_hovered() {
         theme::tooltip(
             ui,
-            "List the windows again (the list also refreshes by itself every second).",
+            "List the windows again (the list also refreshes by itself every second). Also looks for video devices again.",
         );
+    }
+    // A video capture device (a capture card, a camera) as the source, when Windows lists one.
+    if !p.video.is_empty() {
+        ui.align_text_to_frame_padding();
+        ui.text_colored(PALETTE.text_muted, "Capture card");
+        ui.same_line();
+        ui.set_next_item_width(-f32::MIN_POSITIVE);
+        if let Some(_combo) = ui.begin_combo("##video_device", "Choose a video device") {
+            for (i, name) in p.video.iter().enumerate() {
+                if ui.selectable_config(format!("{name}##video{i}")).build() {
+                    r.action = Some(PickerAction::OpenVideo(i));
+                }
+            }
+        }
+        r.items.push(("picker:video".into(), rect(ui)));
+        if ui.is_item_hovered() {
+            theme::tooltip(
+                ui,
+                "Use a video capture device as the source instead of a window: a capture card with a console or a \
+                 computer plugged into it, or a camera. Its own picture size is the native raster.",
+            );
+        }
     }
     ui.dummy([0.0, 2.0 * s]);
 
