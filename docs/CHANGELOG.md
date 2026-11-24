@@ -7,6 +7,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-24
+
 ### Added
 
 - **Colour sets** (`docs/REFERENCE.md`, "Colour sets"): named primaries, white points and standards (SMPTE-C, EBU, Rec.709 / sRGB, NTSC 1953, NTSC-J 9300 K, Trinitron, P22, D65, D93, Illuminant C, ...) at the top of the Gun and white panel, from `CRT.md`; a pick writes the four `tube_*_xy` values, which stay editable.
@@ -282,7 +284,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.4.0...v0.5.0
 [0.4.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.3.0...v0.4.0
