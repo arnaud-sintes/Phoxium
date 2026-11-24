@@ -158,13 +158,13 @@ Add-Type -AssemblyName System.IO.Compression.FileSystem
 $archive = [IO.Compression.ZipFile]::OpenRead((Resolve-Path $zip).Path)
 try {
     $entries = @($archive.Entries | ForEach-Object { $_.FullName -replace '\\', '/' })
-    foreach ($need in 'LICENSE', 'THIRD-PARTY.md', 'README.md', 'docs/REFERENCE.md', 'CHANGELOG.md', 'RUNNING.txt', 'BUILD-INFO.txt', 'phoxium.exe') {
+    foreach ($need in 'LICENSE', 'THIRD-PARTY.md', 'README.md', 'CHANGELOG.md', 'BUILD-INFO.txt', 'phoxium.exe') {
         if ($entries -notcontains "$name/$need") { throw "$zip has no $need (expected $name/$need): run scripts/package.ps1 again." }
     }
-    $runningEntry = $archive.GetEntry("$name/RUNNING.txt")
-    $reader = New-Object IO.StreamReader($runningEntry.Open())
+    $infoEntry = $archive.GetEntry("$name/BUILD-INFO.txt")
+    $reader = New-Object IO.StreamReader($infoEntry.Open())
     try { $firstLine = $reader.ReadLine() } finally { $reader.Dispose() }
-    if ($firstLine -ne "Phoxium $version") { throw "RUNNING.txt of $zip says '$firstLine', expected 'Phoxium $version'." }
+    if ($firstLine -ne "Phoxium $version") { throw "BUILD-INFO.txt of $zip says '$firstLine', expected 'Phoxium $version'." }
 } finally { $archive.Dispose() }
 
 # Version agreement: the lock file, the changelog and the tag all name the version of [workspace.package].

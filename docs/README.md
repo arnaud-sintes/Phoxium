@@ -21,7 +21,7 @@ Phoxium is a personal project, below 1.0.0 (a minor version may still change beh
 3. Start the game or program you want to capture.
 4. Double-click `phoxium.exe`. It opens one window with the list of windows you can capture: type to search, Up and Down to choose, Enter or a double-click to capture.
 
-That is all: no command line is needed. The integer upscale of the game and the black bars around its picture are detected automatically, and the picture is scaled and centred for you. Every automatic choice can be overridden in the menu.
+That is all: no command line is needed. The integer upscale of the game and the black bars around its picture are detected automatically, and the picture is scaled and centred for you. Every automatic choice can be overridden in the menu. (Developer and diagnostic options: `phoxium.exe --help` from a terminal; the program does not need any of them.)
 
 ## First use
 
@@ -78,8 +78,6 @@ The program has no network code and sends nothing anywhere. It opens a video dev
 - A whole monitor can be captured ("Whole screen N" in the list); the output window is then hidden from screen captures, and the Manual picture-area limits give a fixed region. Not checked with an HDR monitor.
 - Opening the menu deactivates the game for the moment (some games pause).
 
-The full list, with the technical detail, is in [docs/REFERENCE.md](REFERENCE.md#known-limits).
-
 ## Unsigned binaries
 
 The executables are **not code-signed** (a personal project without a certificate). Windows SmartScreen may say "Windows protected your PC" on the first run: choose "More info", then "Run anyway", only after checking the hash. Antivirus tools may also warn about an unsigned program that captures windows and registers hotkeys.
@@ -105,7 +103,6 @@ The executables are `target\release\phoxium.exe` and `target\release\pixel-demo.
 
 ## More documentation
 
-- [docs/REFERENCE.md](REFERENCE.md): the detailed reference (developer command-line options, every menu section, hotkeys and their fallbacks, GPU choice, capture path, presets and parameters, recipes for glow, vignette and afterglow, the optional modules, source scaling, the target lifecycle).
 - [ENV.md](ENV.md): build, test, package and publish. [ARCHITECTURE.md](ARCHITECTURE.md) and [DESIGN.md](DESIGN.md): how it is built, coding rules.
 - [CRT.md](CRT.md): what real CRT monitors do and the data the model uses. [QUESTIONS.md](QUESTIONS.md): decisions, open questions, live-test findings. [CHANGELOG.md](CHANGELOG.md): changes per version.
 

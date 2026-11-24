@@ -9,6 +9,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Changed
 
+- The framed output window of a first start (nothing remembered) fills the work area of the source's monitor, as large as a maximised window (it was five sixths of the screen, a multiple of the source size); it is still a normal framed window, and the remembered rectangle wins afterwards (`output::default_work_area`).
+- The release zip is flatter: no `docs/` folder and no `REFERENCE.md` (the README no longer links to it; it stays in the repository), no `RUNNING.txt` (the README says the same), `BUILD-INFO.txt` stays. The links of the README to the documents that are not in the zip, and its icon image, point to the repository on GitHub, and `scripts/release.ps1` checks the version in `BUILD-INFO.txt`.
 - `quality_auto` (the automatic quality drop) is on by default (it was off): at the standard tier a source above about 800x600 misses 60 fps, and the next tier costs about 0.1 % MAE on game content (QUESTIONS REV-2 notes). The picture is that of the selected tier while the frames are on time; switch it off in the Performance section to keep the selected tier whatever the frame time. The drop reacts after 3 s of overrun and is shown in the title and the overlay.
 - `tests/quality_tiers.rs` takes `PHOXIUM_TIER_NATIVE` and `PHOXIUM_TIER_TARGET` (`WxH`) to measure the tiers at other sizes; the contracts are enforced for the default sizes only.
 

@@ -4,10 +4,10 @@
     SHA-256 file and a record of the commit it was built from.
 .DESCRIPTION
     Run it on a clean tree, after committing. The zip contains one top-level folder with the two
-    executables, LICENSE, README.md, docs/REFERENCE.md (the detailed reference the README links to), CHANGELOG.md,
+    executables, LICENSE, README.md, CHANGELOG.md,
     THIRD-PARTY.md (the licence texts of every dependency and the
-    notices of the bundled C/C++ code and font, from scripts/gen-third-party.ps1), BUILD-INFO.txt (commit,
-    toolchain) and RUNNING.txt. dist/<name>.commit holds the commit hash (with a `-dirty` and/or `-untested`
+    notices of the bundled C/C++ code and font, from scripts/gen-third-party.ps1) and BUILD-INFO.txt (commit,
+    toolchain). dist/<name>.commit holds the commit hash (with a `-dirty` and/or `-untested`
     suffix for a local trial) so scripts/release.ps1 can refuse a stale, dirty or untested zip.
 
     The executables are taken from the target directory that cargo reports (`cargo metadata`), so a CARGO_TARGET_DIR
@@ -127,12 +127,12 @@ New-Item -ItemType Directory -Force $stage | Out-Null
 Copy-Item -LiteralPath $exes -Destination $stage
 Copy-Item 'LICENSE' $stage
 Copy-Item 'docs\CHANGELOG.md' $stage
-# The README sits in docs/ in the repository (links to REFERENCE.md and ../LICENSE) and at the root of the zip, next to
-# docs/REFERENCE.md and LICENSE: the two links are rewritten for that place.
-$readme = [IO.File]::ReadAllText((Join-Path $root 'docs\README.md'), [Text.Encoding]::UTF8).Replace('](REFERENCE.md', '](docs/REFERENCE.md').Replace('](../LICENSE', '](LICENSE').Replace('](QUESTIONS.md', '](https://github.com/arnaud-sintes/Phoxium/blob/main/docs/QUESTIONS.md')
+# The README sits in docs/ in the repository (links to ../LICENSE and to the other documents) and at the root of the zip,
+# next to LICENSE and CHANGELOG.md: the link to LICENSE is rewritten for that place, and the links to the documents
+# that are not in the zip (and the icon image) point to the repository on GitHub.
+$readme = [IO.File]::ReadAllText((Join-Path $root 'docs\README.md'), [Text.Encoding]::UTF8).Replace('](../LICENSE', '](LICENSE').Replace('](../assets/icon/', '](https://raw.githubusercontent.com/arnaud-sintes/Phoxium/main/assets/icon/')
+$readme = [regex]::Replace($readme, '\]\((ENV|ARCHITECTURE|DESIGN|CRT|QUESTIONS)\.md', '](https://github.com/arnaud-sintes/Phoxium/blob/main/docs/$1.md')
 [IO.File]::WriteAllText((Join-Path $stage 'README.md'), $readme, (New-Object Text.UTF8Encoding($false)))
-New-Item -ItemType Directory -Force (Join-Path $stage 'docs') | Out-Null
-Copy-Item 'docs\REFERENCE.md' (Join-Path $stage 'docs')
 # The staged executables are byte-for-byte the ones of the target directory.
 foreach ($e in $exes) {
     $a = (Get-FileHash -LiteralPath $e -Algorithm SHA256).Hash
@@ -153,32 +153,6 @@ $glslcVersion = 'not found'
 try { $glslcVersion = ((& $glslc --version 2>&1) | ForEach-Object { "$_" }) -join "`n" } catch { }
 $info = @("Phoxium $version", "commit $commit", '', 'rustc -vV', $rustc, '', 'glslc --version', $glslcVersion.Trim(), '')
 [IO.File]::WriteAllText("$stage\BUILD-INFO.txt", (($info -join "`n") -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
-
-$running = @"
-Phoxium $version
-
-1. Start the program to capture (any window; a game must be windowed or borderless, not exclusive fullscreen).
-2. Start phoxium.exe (double-click) and choose that window in the list it shows (Enter or double-click).
-3. F11: fullscreen over the source, never taking focus. F10: settings (Change source, Detach, every parameter).
-   Quit with Ctrl+Alt+End or the close button. Developer options: phoxium.exe --help from a terminal.
-   F10 and F11 are registered system-wide while the program runs (no other program gets these keys meanwhile);
-   both can be rebound in the settings menu.
-
-Needs Windows 11 x64 and a GPU driver with Vulkan 1.3.
-
-The executables are NOT code-signed. Windows SmartScreen may show "Windows protected your PC" on first run
-(More info, then Run anyway), and antivirus tools may warn. To check that the zip is the one that was published,
-compare its SHA-256 with the .sha256 file of the release page:
-    PowerShell:  (Get-FileHash .\$name.zip -Algorithm SHA256).Hash
-    cmd:         certutil -hashfile $name.zip SHA256
-The two values must be identical (letters in upper or lower case). The source is on GitHub
-(arnaud-sintes/Phoxium) and the executables can be rebuilt from it (README.md, "Building from source").
-
-Phoxium is released under the MIT licence (LICENSE). Licences of the dependencies: THIRD-PARTY.md.
-At its first start Phoxium copies the settings folder of the earlier versions (%APPDATA%\ultimateCRT) to
-%APPDATA%\Phoxium and leaves the old one in place.
-"@
-[IO.File]::WriteAllText("$stage\RUNNING.txt", ($running -replace "`r?`n", "`r`n"), (New-Object Text.UTF8Encoding $false))
 
 # The folder itself goes into the zip, so unzipping never scatters files.
 # Compress-Archive of Windows PowerShell 5.1 writes backslashes in the entry names (non-standard: Linux unzip and

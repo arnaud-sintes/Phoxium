@@ -677,6 +677,18 @@ pub fn monitor_work_irects() -> Vec<(IRect, IRect)> {
         .collect()
 }
 
+/// The rectangle a framed output takes when no usable rectangle is remembered (a first start): the work area of
+/// a monitor, the whole screen without the taskbar, as a normal framed window (the same "maximised size" as a snap
+/// to the top edge, [`snap_rect`]). The monitor is `index` (`--monitor`) when it exists, else the one whose whole
+/// rectangle is `near` (the monitor of the source), else the first. `monitors` lists (monitor, work area). Pure.
+pub fn default_work_area(monitors: &[(IRect, IRect)], index: Option<usize>, near: Option<IRect>) -> Option<IRect> {
+    index
+        .and_then(|i| monitors.get(i))
+        .or_else(|| near.and_then(|n| monitors.iter().find(|(m, _)| *m == n)))
+        .or_else(|| monitors.first())
+        .map(|(_, work)| *work)
+}
+
 /// How close (px) to an outer screen edge the pointer must be released for [`snap_rect`].
 pub const SNAP_EDGE: i32 = 2;
 
@@ -841,7 +853,18 @@ pub fn create(opts: &Options) -> Result<Output> {
             // T-57: the rectangle of the last windowed run, when it is still on a monitor.
             let (x, y, w, h) = match opts.saved_rect.filter(|s| modes::usable_rect(s, &monitor_irects())) {
                 Some(s) => (s.left, s.top, s.width(), s.height()),
-                None => (CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top),
+                // A first start: the work area of the source's monitor (the size of a maximised window, still a
+                // normal framed window), else the size Windows picks for `client_size`.
+                None => {
+                    let near = (!opts.follow.is_invalid())
+                        .then(|| monitor_rect(MonitorFromWindow(opts.follow, MONITOR_DEFAULTTONEAREST)))
+                        .flatten()
+                        .map(irect);
+                    match default_work_area(&monitor_work_irects(), opts.monitor, near) {
+                        Some(w) => (w.left, w.top, w.width(), w.height()),
+                        None => (CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top),
+                    }
+                }
             };
             CreateWindowExW(
                 ex,
@@ -1244,12 +1267,27 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 mod tests {
     use super::{
         base_ex_style, behaviour, drag_rect, effective_no_activate, hand_back_target, on_activate, rebase_drag_on_dpi,
-        self_drag_hit, should_idle, snap_rect, styled, Behaviour, OnActivate,
+        self_drag_hit, should_idle, snap_rect, styled, default_work_area, Behaviour, OnActivate,
     };
     use crate::modes::IRect;
     use windows::Win32::UI::WindowsAndMessaging::{
         WS_EX_APPWINDOW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
     };
+
+    /// A first start opens as large as a maximised window: the work area of the chosen monitor, else the source's,
+    /// else the first.
+    #[test]
+    fn the_default_framed_rectangle_is_the_work_area_of_a_monitor() {
+        let m0 = (IRect::new(0, 0, 2560, 1440), IRect::new(0, 0, 2560, 1400));
+        let m1 = (IRect::new(2560, 0, 5120, 1440), IRect::new(2560, 0, 5120, 1400));
+        let both = [m0, m1];
+        assert_eq!(default_work_area(&both, None, None), Some(m0.1), "the first monitor");
+        assert_eq!(default_work_area(&both, None, Some(m1.0)), Some(m1.1), "the source's monitor");
+        assert_eq!(default_work_area(&both, Some(1), Some(m0.0)), Some(m1.1), "--monitor wins");
+        assert_eq!(default_work_area(&both, Some(7), Some(m1.0)), Some(m1.1), "a missing index falls back");
+        assert_eq!(default_work_area(&both, None, Some(IRect::new(9, 9, 10, 10))), Some(m0.1));
+        assert_eq!(default_work_area(&[], None, None), None, "no monitor: Windows decides");
+    }
 
     /// Click-through state machine: menu open x click-through x mode. The open menu always takes the mouse and
     /// the activation back (the user can always reach it); closing it returns to the setting; the mode does not
