@@ -283,7 +283,7 @@ impl Capture {
         let size = item.Size()?;
 
         let format = DirectXPixelFormat::B8G8R8A8UIntNormalized;
-        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&direct3d_device, format, 2, size)?;
+        let pool = Direct3D11CaptureFramePool::CreateFreeThreaded(&direct3d_device, format, 3, size)?;
         let session = pool.CreateCaptureSession(&item)?;
         let _ = session.SetIsCursorCaptureEnabled(false);
         // Needs a recent Windows build and may be refused; the yellow border then stays.
@@ -552,6 +552,12 @@ struct Worker {
     /// ([`Worker::cpu_frame`]), so the render thread never waits for a read-back.
     scratch: Vec<u8>,
     pending: Option<Pending>,
+    /// Zero-copy: the newest captured frame, kept so that a switch to the CPU copy can copy it at once. A window that
+    /// does not change sends no new frame, and the CPU path has nothing to copy until one comes (a static source
+    /// stayed blank after a zero-copy failure on the render side).
+    last: Option<Pending>,
+    /// The path of the last delivered frame was zero-copy and `last` was not given to the CPU copy yet.
+    was_zero_copy: bool,
     /// Test seam of a [`Capture::synthetic`] capture ([`SyntheticFeed::set_sample_hook`]): runs on the capture
     /// thread between the read-back of a zero-copy sample and its publication.
     sample_hook: Option<Box<dyn FnMut() + Send>>,
@@ -583,6 +589,8 @@ impl Worker {
             last_sample: None,
             scratch: Vec::new(),
             pending: None,
+            last: None,
+            was_zero_copy: false,
             sample_hook: None,
         }
     }
@@ -613,7 +621,7 @@ impl Worker {
         // The window was resized: the pool must follow or frames get cropped or stretched.
         if (content.Width, content.Height) != self.pool_size && content.Width > 0 && content.Height > 0 {
             self.pool_size = (content.Width, content.Height);
-            pool.Recreate(&self.direct3d_device, self.format, 2, content)?;
+            pool.Recreate(&self.direct3d_device, self.format, 3, content)?;
         }
         Ok(())
     }
@@ -630,6 +638,12 @@ impl Worker {
         self.pending = None;
         if crop.2 > 0 && crop.3 > 0 {
             if path_of(self.shared.path.load(Ordering::Acquire)) == CapturePath::ZeroCopy {
+                self.was_zero_copy = true;
+                self.last = Some(Pending {
+                    _frame: frame.clone(),
+                    texture: texture.clone(),
+                    crop,
+                });
                 if self.zero_copy(&texture, crop).is_some() {
                     self.pending = Some(Pending {
                         _frame: frame,
@@ -639,6 +653,8 @@ impl Worker {
                 }
             } else {
                 self.shared_pool = None;
+                self.last = None;
+                self.was_zero_copy = false;
                 self.cpu_frame(&texture, crop)?;
             }
         }
@@ -707,6 +723,9 @@ impl Worker {
         self.shared.path.store(0, Ordering::Release);
         self.shared_pool = None;
         self.pending = None;
+        // The frame being delivered goes through the CPU copy right after (`zero_copy`).
+        self.last = None;
+        self.was_zero_copy = false;
     }
 
     /// Copies the client area into a free slot of the pool (made for this size when needed), waits for the copy
@@ -782,8 +801,23 @@ impl Worker {
     /// Copies the frame kept for want of a slot, when one is free now. After a switch to the CPU copy it goes
     /// through the CPU copy at once (a switch loses no frame).
     fn retry_pending(&mut self) {
+        let cpu = path_of(self.shared.path.load(Ordering::Acquire)) != CapturePath::ZeroCopy;
+        if cpu && self.was_zero_copy {
+            // The path was switched to the CPU copy (the render side could not import the shared textures, or the user
+            // chose it) with no frame coming: copy the newest captured frame now, so a static source shows.
+            self.was_zero_copy = false;
+            let last = self.last.take();
+            if self.pending.is_none() {
+                if let Some(l) = last {
+                    self.shared_pool = None;
+                    if let Err(e) = self.cpu_frame(&l.texture, l.crop) {
+                        eprintln!("warning: capture: the CPU copy of the newest frame failed: {e}");
+                    }
+                }
+            }
+        }
         let Some(p) = self.pending.take() else { return };
-        if path_of(self.shared.path.load(Ordering::Acquire)) != CapturePath::ZeroCopy {
+        if cpu {
             self.shared_pool = None;
             if let Err(e) = self.cpu_frame(&p.texture, p.crop) {
                 eprintln!("warning: capture: the CPU copy of a kept frame failed: {e}");

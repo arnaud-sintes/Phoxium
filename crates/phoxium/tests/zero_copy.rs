@@ -709,6 +709,52 @@ fn switching_zero_copy_cpu_zero_copy_loses_and_repeats_no_frame() {
     common::assert_no_validation_messages(&counter);
 }
 
+/// A static source (a window that sends no new frame) when the path goes to the CPU copy, as it does after a zero-copy
+/// failure on the render side: the newest captured frame is copied at once, once, instead of the source staying blank
+/// until the window redraws.
+#[test]
+fn a_static_source_is_copied_at_once_when_the_path_switches_to_the_cpu_copy() {
+    let Some((mut gpu, d, _kind)) = setup("a_static_source_is_copied_at_once_when_the_path_switches_to_the_cpu_copy")
+    else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.set_read_stages(StageReadback::All);
+    let cap = synthetic_capture(&gpu, &d);
+    let feed = cap.synthetic_feed();
+    let window = window_texture(&d, WINDOW);
+    let mut frame = capture::Frame::default();
+    cap.set_path(CapturePath::ZeroCopy);
+    upload(&d, &window, WINDOW, &window_pixels(WINDOW, CROP, tagged(7)));
+    feed.push(&window, CROP).expect("push");
+    assert!(cap.take_frame(&mut frame), "the first frame");
+    let (path, r, hold) = render_taken(&mut gpu, &mut frame);
+    assert_eq!(path, CapturePath::ZeroCopy);
+    assert_tagged(&r, 7, "the zero-copy frame");
+    drop(hold);
+    // The render side cannot use zero-copy any more: the path goes to the CPU copy and the window sends nothing.
+    cap.set_path(CapturePath::Cpu);
+    assert!(
+        cap.take_frame(&mut frame),
+        "the static source was not copied after the switch"
+    );
+    let (path, r, _) = render_taken(&mut gpu, &mut frame);
+    assert_eq!(path, CapturePath::Cpu);
+    assert_tagged(&r, 7, "the re-copied frame");
+    assert!(!cap.take_frame(&mut frame), "copied twice");
+    // A new frame then goes through the CPU copy as usual, with nothing extra.
+    upload(&d, &window, WINDOW, &window_pixels(WINDOW, CROP, tagged(8)));
+    feed.push(&window, CROP).expect("push");
+    assert!(cap.take_frame(&mut frame));
+    let (path, r, _) = render_taken(&mut gpu, &mut frame);
+    assert_eq!(path, CapturePath::Cpu);
+    assert_tagged(&r, 8, "the next frame");
+    assert!(!cap.take_frame(&mut frame), "an extra frame after the switch");
+    assert_eq!(cap.take_failure(), None);
+    drop(gpu);
+    common::assert_no_validation_messages(&counter);
+}
+
 /// The live switch while frames flow: a writer thread captures frames as fast as it can (each from its own window
 /// texture of a ring of four, as successive capture frames are), while the render side takes the newest frame, renders
 /// it and flips the path every 20 frames, 300 frames in all. Every frame rendered is one whole frame at its place,

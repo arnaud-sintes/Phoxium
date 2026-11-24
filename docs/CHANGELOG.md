@@ -7,6 +7,16 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.9.2] - 2026-11-24
+
+### Fixed
+
+- A static source stayed blank after the zero-copy path failed on the render side (the capture went to the CPU copy, which had no frame to copy until the window redrew). The capture thread now keeps the newest captured frame while it runs zero-copy and copies it through the CPU path at once when the path switches; the capture frame pool has 3 buffers instead of 2 for it (`capture::Worker`, unit tested with the synthetic capture, and `check-capture` is exact on both paths).
+
+### Changed
+
+- Documentation only: the weak-GPU limit (no tier below `low`, the levers are a smaller output window and a lighter preset) is in the README and the reference; the FP16 phosphor history was dropped and the prefix reuse is planned (`docs/TODO.md`, `docs/QUESTIONS.md`).
+
 ## [0.9.1] - 2026-11-24
 
 ### Fixed
@@ -335,7 +345,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.1...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.2...HEAD
+[0.9.2]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.7.0...v0.8.0
