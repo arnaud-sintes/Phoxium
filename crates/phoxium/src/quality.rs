@@ -14,7 +14,7 @@
 //! - `low`: `fast`, plus a coarser line-image grid ([`warp_sigma_steps`]) and a beam reach of 3 sigma instead
 //!   of 4 ([`beam_reach_sigmas`]).
 //!
-//! The automatic drop ([`AutoQuality`], `quality_auto`, off by default) lowers the tier in force one step at a
+//! The automatic drop ([`AutoQuality`], `quality_auto`, on by default) lowers the tier in force one step at a
 //! time while the GPU frame time stays above the refresh period, and raises it back with hysteresis. It never
 //! writes the parameters: the renderer applies it on top of the selected tier ([`effective`]).
 
@@ -344,7 +344,7 @@ mod tests {
             assert_eq!(Tier::from_param(t.param()), t);
         }
         assert_eq!(tier(&Params::default()), Tier::Standard, "the default tier");
-        assert!(!Params::default().quality_auto, "the automatic drop is off by default");
+        assert!(Params::default().quality_auto, "the automatic drop is on by default");
         assert_eq!(Tier::Exact.lower(1), Tier::Standard);
         assert_eq!(Tier::Standard.lower(2), Tier::Low);
         assert_eq!(Tier::Fast.lower(5), Tier::Low);

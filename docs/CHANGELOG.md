@@ -7,6 +7,11 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Changed
+
+- `quality_auto` (the automatic quality drop) is on by default (it was off): at the standard tier a source above about 800x600 misses 60 fps, and the next tier costs about 0.1 % MAE on game content (QUESTIONS REV-2 notes). The picture is that of the selected tier while the frames are on time; switch it off in the Performance section to keep the selected tier whatever the frame time. The drop reacts after 3 s of overrun and is shown in the title and the overlay.
+- `tests/quality_tiers.rs` takes `PHOXIUM_TIER_NATIVE` and `PHOXIUM_TIER_TARGET` (`WxH`) to measure the tiers at other sizes; the contracts are enforced for the default sizes only.
+
 ## [0.8.0] - 2026-11-24
 
 ### Fixed

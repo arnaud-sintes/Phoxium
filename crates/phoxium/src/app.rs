@@ -556,7 +556,7 @@ pub fn run() -> Res<()> {
     // The output's monitor and DPI, followed once a second; the notice of a move onto another GPU's monitor.
     let mut monitor_watch = lifecycle::MonitorWatch::default();
     let mut monitor_notice: Option<String> = None;
-    // T-48, OUT-6: the automatic quality drop on sustained overrun (only with `quality_auto`, off by default).
+    // T-48, OUT-6: the automatic quality drop on sustained overrun (only with `quality_auto`, on by default).
     let mut auto_quality = crate::quality::AutoQuality::default();
     // Lost source (T-56, A23): reminders, reattach during the wait, then the picker (or an exit).
     let policy = lifecycle::LostPolicy {

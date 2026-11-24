@@ -26,8 +26,34 @@ use phoxium::params::{
 use phoxium::patterns::{generate, Pattern};
 use phoxium::presets::Library;
 
-const NATIVE: (u32, u32) = (320, 240);
-const TARGET: (u32, u32) = (1920, 1080);
+const DEFAULT_NATIVE: (u32, u32) = (320, 240);
+const DEFAULT_TARGET: (u32, u32) = (1920, 1080);
+
+/// `WxH` from an environment variable, else `default`.
+fn size_from_env(name: &str, default: (u32, u32)) -> (u32, u32) {
+    std::env::var(name)
+        .ok()
+        .and_then(|v| {
+            let (w, h) = v.split_once('x')?;
+            Some((w.trim().parse().ok()?, h.trim().parse().ok()?))
+        })
+        .unwrap_or(default)
+}
+
+/// The source size: 320 x 240 (the contract), or `PHOXIUM_TIER_NATIVE` (`WxH`) to measure other sizes.
+fn native_size() -> (u32, u32) {
+    size_from_env("PHOXIUM_TIER_NATIVE", DEFAULT_NATIVE)
+}
+
+/// The output size: 1920 x 1080 (the contract), or `PHOXIUM_TIER_TARGET`.
+fn target_size() -> (u32, u32) {
+    size_from_env("PHOXIUM_TIER_TARGET", DEFAULT_TARGET)
+}
+
+/// The contracts are enforced for the default sizes only; other sizes are measured and printed.
+fn enforcing() -> bool {
+    native_size() == DEFAULT_NATIVE && target_size() == DEFAULT_TARGET
+}
 
 /// Contracts (module header), in units of white.
 const STANDARD_MAE: f64 = 0.005;
@@ -48,7 +74,7 @@ fn hash(a: u32, b: u32) -> u32 {
 
 /// Codes (R, G, B) of the contents.
 fn contents() -> Vec<(&'static str, Vec<[u8; 3]>)> {
-    let (w, h) = NATIVE;
+    let (w, h) = native_size();
     let bgra = |p: &Pattern| -> Vec<[u8; 3]> { generate(p, w, h, 0).chunks(4).map(|b| [b[2], b[1], b[0]]).collect() };
     const PAL: [[u8; 3]; 8] = [
         [0, 0, 0],
@@ -130,7 +156,7 @@ fn configs() -> Vec<(&'static str, Params)> {
 
 /// The `screen` image of `native` (drive voltages) through amp, gun and screen with the live constants.
 fn screen(gpu: &mut Headless, p: &Params, native: &ImageF32) -> ImageF32 {
-    let fc = FrameConstants::placed(NATIVE, TARGET, false, p).with_skirt_margin(p);
+    let fc = FrameConstants::placed(native_size(), target_size(), false, p).with_skirt_margin(p);
     gpu.enable_only(&["amp", "gun", "screen"]).unwrap();
     let settings = Settings::identity();
     let run = StageRun {
@@ -183,8 +209,8 @@ fn each_tier_is_within_its_contract_of_exact() {
                 rgba.push(1.0);
             }
             let native = ImageF32 {
-                width: NATIVE.0,
-                height: NATIVE.1,
+                width: native_size().0,
+                height: native_size().1,
                 rgba,
             };
             let exact = screen(&mut gpu, &tier(&p, QUALITY_TIER_EXACT), &native);
@@ -202,10 +228,10 @@ fn each_tier_is_within_its_contract_of_exact() {
                 line.push_str(&format!(" | {name} MAE {:.4} % max {:.3} %", mae * 100.0, max * 100.0));
                 worst[k] = (worst[k].0.max(mae), worst[k].1.max(max));
                 assert!(
-                    mae <= mae_max && max <= max_max,
+                    !enforcing() || (mae <= mae_max && max <= max_max),
                     "{test}: {cname}, {kname}, {name}: MAE {mae}, max {max}"
                 );
-                if curved && t == QUALITY_TIER_STANDARD {
+                if enforcing() && curved && t == QUALITY_TIER_STANDARD {
                     assert_eq!(
                         img, exact,
                         "{test}: {cname}, {kname}: a curved tube is the same in standard"
