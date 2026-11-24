@@ -1266,8 +1266,8 @@ unsafe fn wndproc_body(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        base_ex_style, behaviour, drag_rect, effective_no_activate, hand_back_target, on_activate, rebase_drag_on_dpi,
-        self_drag_hit, should_idle, snap_rect, styled, default_work_area, Behaviour, OnActivate,
+        base_ex_style, behaviour, default_work_area, drag_rect, effective_no_activate, hand_back_target, on_activate,
+        rebase_drag_on_dpi, self_drag_hit, should_idle, snap_rect, styled, Behaviour, OnActivate,
     };
     use crate::modes::IRect;
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -1282,10 +1282,25 @@ mod tests {
         let m1 = (IRect::new(2560, 0, 5120, 1440), IRect::new(2560, 0, 5120, 1400));
         let both = [m0, m1];
         assert_eq!(default_work_area(&both, None, None), Some(m0.1), "the first monitor");
-        assert_eq!(default_work_area(&both, None, Some(m1.0)), Some(m1.1), "the source's monitor");
-        assert_eq!(default_work_area(&both, Some(1), Some(m0.0)), Some(m1.1), "--monitor wins");
-        assert_eq!(default_work_area(&both, Some(7), Some(m1.0)), Some(m1.1), "a missing index falls back");
-        assert_eq!(default_work_area(&both, None, Some(IRect::new(9, 9, 10, 10))), Some(m0.1));
+        assert_eq!(
+            default_work_area(&both, None, Some(m1.0)),
+            Some(m1.1),
+            "the source's monitor"
+        );
+        assert_eq!(
+            default_work_area(&both, Some(1), Some(m0.0)),
+            Some(m1.1),
+            "--monitor wins"
+        );
+        assert_eq!(
+            default_work_area(&both, Some(7), Some(m1.0)),
+            Some(m1.1),
+            "a missing index falls back"
+        );
+        assert_eq!(
+            default_work_area(&both, None, Some(IRect::new(9, 9, 10, 10))),
+            Some(m0.1)
+        );
         assert_eq!(default_work_area(&[], None, None), None, "no monitor: Windows decides");
     }
 

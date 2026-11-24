@@ -169,7 +169,7 @@ Before, `ui_menu` alone was about 160 s on an idle GPU and 950 s under contentio
 
 | Script | Use |
 |---|---|
-| `check.ps1` | The local gate. By default it runs the impact plan of `impact.ps1` (Test policy above); `-Full` runs everything below (the previous behaviour). `-Smoke` adds the 10 s live run, `-SkipTests` skips `cargo test` (full gate). |
+| `check.ps1` | The local gate. By default it runs the impact plan of `impact.ps1` (Test policy above); `-Full` runs everything below (the previous behaviour). `-Smoke` adds the 10 s live run, `-SkipTests` skips `cargo test` (full gate), `-SmokeGpu N` runs the smoke on Vulkan device N (default: the adapter of the monitor the output covers). |
 | `impact.ps1` | Impact analysis: prints or runs the checks and tests a change needs (Test policy above). `-Full`, `-Explain`, `-Run`, `-DryRun`, `-KeepGoing`, `-Files`, `-Rev`, `-Validate`, `-SelfTest`. |
 | `clean-targets.ps1` | Sizes of the shared and per-worktree `target` folders; deletes the shared one only when free disk < 30 GB or with `-Force`, only when it is a cargo target folder in an expected place (see the shared build cache above), after a confirmation. `-DryRun` reports what it would delete or refuse; `-SelfTest` tests the safety checks. |
 | `shared-paths.ps1` | Dot-sourced helper: the worktree root and the shared target folder, derived from the repository location (no machine path in any script). |

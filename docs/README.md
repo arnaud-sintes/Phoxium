@@ -52,7 +52,7 @@ F10 opens the settings menu inside the output window. Every parameter of the tub
 - **Phosphor:** saturation and the afterglow (persistence) behind moving objects; Persistence blend (0 to 1, default 0.5) sets how much of the trail you see. Type switches from the colour tube (P22) to a monochrome phosphor: white P4, green P31, P1 or P39, or a Philips yellow blend.
 - **Optics:** glow (bloom) around bright areas and the vignette; turn on its **Enable** switch first.
 - **Source:** what was detected, **Change source**, the picture area (Auto or manual limits), the scaling multiplier and the saved profile of each game.
-- **Performance:** the quality tier (how much work the model costs, never the look) and an optional automatic drop when the GPU cannot keep up.
+- **Performance:** the quality tier (how much work the model costs, never the look) and the automatic drop (on by default) that lowers it by itself while the GPU cannot keep up, and says so in the window title.
 - **Gun and white:** the gun law, the white balance and colour sets (SMPTE-C, EBU, NTSC-J, Trinitron primaries and white points).
 - Optional and off by default: ageing and burn-in (burn-in deliberately damages the picture and is kept between sessions), composite video and interlace, the faults of a poor analogue signal (hum, jitter, ghosts, snow), a VHS tape and a vertical roll, TV controls (tint, colour, black and white level, sharpness) and a refresh flicker, and a cabinet bezel with the glass reflecting it.
 
@@ -71,7 +71,7 @@ The program has no network code and sends nothing anywhere. It opens a video dev
 ## Known limits
 
 - Checked live mostly with a test source of the repository (`pixel-demo`, not part of the download) and a few windows on one PC, not yet with a wide range of real games.
-- Developed and tested on one NVIDIA laptop (RTX A2000, with an Intel GPU beside it). AMD and Intel GPUs and other PCs are untested: please report what you see.
+- Developed and tested on one NVIDIA laptop (RTX A2000, with an Intel GPU beside it). AMD GPUs and other PCs are untested: please report what you see. On an Intel UHD 770 the picture matched the NVIDIA one (largest difference 1 of 255 on a test pattern), but the Vulkan validation layer reports that the optics stage declares 22 storage images per shader stage against that GPU's limit of 16.
 - Zero-copy capture is not yet validated with a wide range of games and drivers (the CPU copy is the safe choice).
 - Several newer parts are covered by automated tests but not yet checked by hand; [QUESTIONS.md](QUESTIONS.md) and the [CHANGELOG](CHANGELOG.md) say which.
 - SDR output only; no HDR.

@@ -7,8 +7,15 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-24
+
+### Fixed
+
+- The automatic quality drop flapped on a source whose standard tier costs twice the refresh period (seen live: 1280x720 on the slot TV preset, a drop, a raise 10 s later, a drop again, 3 s at about 30 fps each time). A raise now also needs the tier above to be predicted to fit, from the cost ratio of the two tiers measured at the drop; otherwise it waits for 160 s of headroom in a row (`quality::AutoQuality`, unit tested).
+
 ### Changed
 
+- CPU-copy capture reads the frame back into a buffer of the capture thread and swaps it into the shared frame, so the render thread no longer waits on the frame lock during the read-back (the wait for the GPU copy, the map and the row copy); the pictures are unchanged (`check-capture` is exact on the CPU path).
 - The framed output window of a first start (nothing remembered) fills the work area of the source's monitor, as large as a maximised window (it was five sixths of the screen, a multiple of the source size); it is still a normal framed window, and the remembered rectangle wins afterwards (`output::default_work_area`).
 - The release zip is flatter: no `docs/` folder and no `REFERENCE.md` (the README no longer links to it; it stays in the repository), no `RUNNING.txt` (the README says the same), `BUILD-INFO.txt` stays. The links of the README to the documents that are not in the zip, and its icon image, point to the repository on GitHub, and `scripts/release.ps1` checks the version in `BUILD-INFO.txt`.
 - `quality_auto` (the automatic quality drop) is on by default (it was off): at the standard tier a source above about 800x600 misses 60 fps, and the next tier costs about 0.1 % MAE on game content (QUESTIONS REV-2 notes). The picture is that of the selected tier while the frames are on time; switch it off in the Performance section to keep the selected tier whatever the frame time. The drop reacts after 3 s of overrun and is shown in the title and the overlay.
@@ -321,7 +328,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.8.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.5.0...v0.6.0

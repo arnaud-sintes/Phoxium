@@ -548,6 +548,9 @@ struct Worker {
     shared_pool: Option<Arc<SharedTextures>>,
     /// When the last CPU sample of the zero-copy path was taken.
     last_sample: Option<Instant>,
+    /// The buffer the CPU copy reads back into, outside the frame lock; swapped with the frame's buffer
+    /// ([`Worker::cpu_frame`]), so the render thread never waits for a read-back.
+    scratch: Vec<u8>,
     pending: Option<Pending>,
     /// Test seam of a [`Capture::synthetic`] capture ([`SyntheticFeed::set_sample_hook`]): runs on the capture
     /// thread between the read-back of a zero-copy sample and its publication.
@@ -578,6 +581,7 @@ impl Worker {
             pool_size,
             shared_pool: None,
             last_sample: None,
+            scratch: Vec::new(),
             pending: None,
             sample_hook: None,
         }
@@ -641,24 +645,23 @@ impl Worker {
         Ok(())
     }
 
-    /// The CPU path: copies the client area to the staging texture, maps it and copies its rows into the frame.
+    /// The CPU path: copies the client area to the staging texture, maps it and copies its rows into a buffer of the
+    /// worker, then swaps that buffer into the frame under the lock. The read-back (the wait for the GPU copy, the
+    /// map, the row copy) runs without the frame lock, so the render thread's `take_frame` never waits for it;
+    /// the frame's old buffer (the one the render thread handed back, or the sample it never took) becomes the
+    /// worker's next scratch buffer.
     fn cpu_frame(&mut self, texture: &ID3D11Texture2D, crop: (u32, u32, u32, u32)) -> Result<()> {
         let t0 = Instant::now();
-        let shared = self.shared.clone();
-        let mut out = lock_tolerant(&shared.frame);
-        if let Err(e) = read_back_region(
-            &self.device,
-            &self.context,
-            &mut self.staging,
-            texture,
-            crop,
-            &mut out.data,
-        ) {
-            // The buffer may be half rewritten (another size): nothing in it is given out any more.
-            out.data_seq = 0;
-            out.data_size = (0, 0);
+        let mut buf = std::mem::take(&mut self.scratch);
+        let read = read_back_region(&self.device, &self.context, &mut self.staging, texture, crop, &mut buf);
+        if let Err(e) = read {
+            // Nothing was published: the frame keeps its last pixels; the buffer stays for the next try.
+            self.scratch = buf;
             return Err(e);
         }
+        let shared = self.shared.clone();
+        let mut out = lock_tolerant(&shared.frame);
+        self.scratch = std::mem::replace(&mut out.data, buf);
         out.width = crop.2;
         out.height = crop.3;
         out.seq += 1;

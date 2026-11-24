@@ -18,6 +18,10 @@
     Also run the live smoke test: `phoxium --pattern ramp --exit-after 10 --validation`. It opens
     an output window for 10 s, so it is opt-in. It fails on a non-zero exit or on any validation line
     on stderr.
+.PARAMETER SmokeGpu
+    Vulkan device index (`phoxium --list-gpus`) the smoke run uses (`--gpu`). Default: the automatic choice, the adapter of
+    the monitor the output covers, which depends on the monitor layout (an Intel UHD 770 reports a lower
+    `maxPerStageDescriptorStorageImages`, 16, than the optics layout declares, 22: one known validation line, QUESTIONS REV-2 notes).
 .PARAMETER SkipTests
     Skip `cargo test` (fmt, clippy and licences still run). Full gate only.
 .PARAMETER Full
@@ -25,7 +29,7 @@
 .PARAMETER Base
     Git ref the impact analysis diffs against (default: merge base with exec/integration, else HEAD~1).
 #>
-param([switch]$Smoke, [switch]$SkipTests, [switch]$Full, [string]$Base)
+param([switch]$Smoke, [switch]$SkipTests, [switch]$Full, [string]$Base, [int]$SmokeGpu = -1)
 
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
@@ -72,7 +76,9 @@ function Invoke-Smoke {
     $exe = Join-Path $targetDir 'debug\phoxium.exe'
     $errFile = [IO.Path]::GetTempFileName()
     try {
-        $p = Start-Process -FilePath $exe -ArgumentList '--pattern', 'ramp', '--exit-after', '10', '--validation' `
+        $smokeArgs = @('--pattern', 'ramp', '--exit-after', '10', '--validation')
+        if ($SmokeGpu -ge 0) { $smokeArgs += @('--gpu', "$SmokeGpu") }
+        $p = Start-Process -FilePath $exe -ArgumentList $smokeArgs `
             -RedirectStandardError $errFile -NoNewWindow -Wait -PassThru
         $err = @(Get-Content $errFile)
         $bad = @($err | Where-Object { $_ -match 'validation|VUID|\[(ERROR|WARNING)' })

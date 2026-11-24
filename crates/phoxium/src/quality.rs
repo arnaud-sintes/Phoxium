@@ -214,7 +214,12 @@ impl Change {
 /// refresh period. Over the period for [`Self::OVER_SECS`] seconds in a row: one tier lower (until `low`). Back up
 /// one tier after `wait` seconds in a row below [`Self::RAISE_FRACTION`] of the period; `wait` starts at
 /// [`Self::RAISE_SECS`] and doubles (up to [`Self::MAX_WAIT_SECS`]) when a drop follows a raise within
-/// [`Self::RELAPSE_SECS`], so a tier that does not fit is not retried every few seconds. Pure: no clock, no I/O.
+/// [`Self::RELAPSE_SECS`], so a tier that does not fit is not retried every few seconds. A raise also needs the
+/// tier above to be predicted to fit: at each drop the mean GPU time of the tier left is kept, and with the time the
+/// lower tier took when it settled it gives the cost ratio between the two; the raise needs the current time times
+/// that ratio to stay under [`Self::FIT_FRACTION`] of the period, else only after [`Self::MAX_WAIT_SECS`] seconds
+/// of headroom in a row (a live run showed the plain headroom rule flapping every 10 s on a source whose standard
+/// tier costs twice the period). Pure: no clock, no I/O.
 #[derive(Clone, Debug)]
 pub struct AutoQuality {
     drop: u32,
@@ -224,6 +229,27 @@ pub struct AutoQuality {
     /// Seconds fed so far, and the value at the last raise.
     t: u64,
     raised_at: Option<u64>,
+    /// One entry per tier dropped, the last one for the next raise.
+    probes: Vec<Probe>,
+}
+
+/// What a drop remembers about the tier it left.
+#[derive(Clone, Copy, Debug)]
+struct Probe {
+    /// The mean GPU time of the tier left, ms (the second the drop was decided on).
+    high_ms: f64,
+    /// The GPU time of the lower tier once settled (its second valid second), ms.
+    low_ms: Option<f64>,
+    /// Valid seconds seen at the lower tier.
+    seen: u32,
+}
+
+impl Probe {
+    /// The time the tier above would take now, ms: the current time times the cost ratio of the two tiers.
+    fn predicted_high_ms(&self, gpu_ms: f64) -> Option<f64> {
+        let low = self.low_ms?;
+        Some(gpu_ms * (self.high_ms / low).max(1.0))
+    }
 }
 
 impl Default for AutoQuality {
@@ -235,6 +261,7 @@ impl Default for AutoQuality {
             wait: Self::RAISE_SECS,
             t: 0,
             raised_at: None,
+            probes: Vec::new(),
         }
     }
 }
@@ -250,6 +277,8 @@ impl AutoQuality {
     /// A drop this soon after a raise doubles the wait before the next raise.
     pub const RELAPSE_SECS: u64 = 30;
     pub const MAX_WAIT_SECS: u32 = 160;
+    /// The tier above is predicted to fit when its predicted GPU time is below this fraction of the period.
+    pub const FIT_FRACTION: f64 = 0.9;
 
     /// Tiers dropped below the selected one.
     pub fn drop(&self) -> u32 {
@@ -282,6 +311,7 @@ impl AutoQuality {
             self.under = 0;
             self.wait = Self::RAISE_SECS;
             self.raised_at = None;
+            self.probes.clear();
             if self.drop > 0 {
                 self.drop = 0;
                 return Some(Change::Off { to: user });
@@ -293,11 +323,25 @@ impl AutoQuality {
         let under = valid && gpu_ms < Self::RAISE_FRACTION * period_ms;
         self.over = if over { self.over + 1 } else { 0 };
         self.under = if under { self.under + 1 } else { 0 };
+        // The lower tier settles for a second before its time is taken as the reference of the cost ratio.
+        if valid {
+            if let Some(probe) = self.probes.last_mut().filter(|p| p.low_ms.is_none()) {
+                probe.seen += 1;
+                if probe.seen >= 2 {
+                    probe.low_ms = Some(gpu_ms);
+                }
+            }
+        }
         let current = self.effective(user);
         if self.over >= Self::OVER_SECS && current < Tier::Low {
             self.over = 0;
             self.under = 0;
             self.drop += 1;
+            self.probes.push(Probe {
+                high_ms: gpu_ms,
+                low_ms: None,
+                seen: 0,
+            });
             if self.raised_at.is_some_and(|r| self.t - r <= Self::RELAPSE_SECS) {
                 self.wait = (self.wait * 2).min(Self::MAX_WAIT_SECS);
             }
@@ -307,10 +351,16 @@ impl AutoQuality {
                 period_ms,
             });
         }
-        if self.drop > 0 && self.under >= self.wait {
+        let fits = self
+            .probes
+            .last()
+            .and_then(|p| p.predicted_high_ms(gpu_ms))
+            .is_none_or(|predicted| predicted < Self::FIT_FRACTION * period_ms);
+        if self.drop > 0 && self.under >= self.wait && (fits || self.under >= Self::MAX_WAIT_SECS) {
             self.under = 0;
             self.over = 0;
             self.drop -= 1;
+            self.probes.pop();
             self.raised_at = Some(self.t);
             return Some(Change::Raised {
                 to: self.effective(user),
@@ -530,11 +580,38 @@ mod tests {
             run(&mut a, Tier::Standard, 1, 8.0),
             vec![Change::Raised { to: Tier::Standard }]
         );
-        // Overrun again within 30 s: dropped, and the next raise waits 20 s.
+        // Overrun again within 30 s: dropped, and the next raise waits 20 s. The tier left cost 20 ms and the
+        // lower one 14 ms: the ratio is 1.43, so 8 ms predicts 11.4 ms, which fits.
         run(&mut a, Tier::Standard, 3, 20.0);
         assert_eq!(a.effective(Tier::Standard), Tier::Fast);
+        run(&mut a, Tier::Standard, 2, 14.0);
         assert!(run(&mut a, Tier::Standard, 19, 8.0).is_empty());
         assert_eq!(run(&mut a, Tier::Standard, 1, 8.0).len(), 1);
+    }
+
+    /// A source whose standard tier costs twice the period and whose fast tier fits easily: the headroom rule alone
+    /// would climb back every 10 s and drop again (seen live, 1280x720 on the slot TV preset). The raise is
+    /// predicted from the cost ratio and refused; it happens when the load falls enough, or after the long wait.
+    #[test]
+    fn does_not_climb_back_to_a_tier_that_would_overrun() {
+        let mut a = AutoQuality::default();
+        let user = Tier::Standard;
+        run(&mut a, user, 3, 34.0);
+        assert_eq!(a.drop(), 1);
+        // Fast settles at 8 ms (ratio 4.25); two more seconds, then a long quiet stretch at the same load.
+        assert!(
+            run(&mut a, user, 150, 8.0).is_empty(),
+            "34 ms would come back: no raise"
+        );
+        assert_eq!(a.drop(), 1);
+        // The load falls (the preset or the source changed): 3 ms predicts 12.75 ms, which fits.
+        assert_eq!(run(&mut a, user, 1, 3.0), vec![Change::Raised { to: Tier::Standard }]);
+
+        // A stale reference is retried after the maximum wait: the same source, the same 8 ms.
+        let mut b = AutoQuality::default();
+        run(&mut b, user, 3, 34.0);
+        assert!(run(&mut b, user, 159, 8.0).is_empty());
+        assert_eq!(run(&mut b, user, 1, 8.0), vec![Change::Raised { to: Tier::Standard }]);
     }
 
     #[test]
