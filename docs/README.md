@@ -71,7 +71,7 @@ The program has no network code and sends nothing anywhere. It opens a video dev
 ## Known limits
 
 - Checked live mostly with a test source of the repository (`pixel-demo`, not part of the download) and a few windows on one PC, not yet with a wide range of real games.
-- Developed and tested on one NVIDIA laptop (RTX A2000, with an Intel GPU beside it). AMD GPUs and other PCs are untested: please report what you see. On an Intel UHD 770 the picture matched the NVIDIA one (largest difference 1 of 255 on a test pattern), but the Vulkan validation layer reports that the optics stage declares 22 storage images per shader stage against that GPU's limit of 16.
+- Developed and tested on one NVIDIA laptop (RTX A2000, with an Intel GPU beside it). AMD GPUs and other PCs are untested: please report what you see. On an Intel UHD 770 the picture matched the NVIDIA one (largest difference 1 of 255 on a test pattern), but the Vulkan validation layer reports that the optics stage declares 22 storage images per shader stage against that GPU's limit of 16, and that GPU only reaches about 24 frames per second on the slot-mask TV preset at 1920 x 1200 even at the lowest quality tier.
 - Zero-copy capture is not yet validated with a wide range of games and drivers (the CPU copy is the safe choice).
 - Several newer parts are covered by automated tests but not yet checked by hand; [QUESTIONS.md](QUESTIONS.md) and the [CHANGELOG](CHANGELOG.md) say which.
 - SDR output only; no HDR.

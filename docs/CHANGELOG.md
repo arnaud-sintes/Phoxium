@@ -7,6 +7,13 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-24
+
+### Fixed
+
+- F11 from a fullscreen output with no remembered window rectangle (a first start in fullscreen) gives the work area of the monitor, like the first start of the framed window, instead of a smaller centred window: leaving fullscreen no longer shrinks the display (`output::default_window_rect`, `modes::restore_rect`, unit tested).
+- The first-start framed window with no source yet (the window picker) opened on the first monitor of the enumeration, which is not always the primary one (seen on a PC with a secondary monitor above and to the right of the primary); it now opens on the primary monitor, as before 0.9.0 (`output::default_work_area`, unit tested). With a source it still opens on the source's monitor.
+
 ## [0.9.0] - 2026-11-24
 
 ### Fixed
@@ -328,7 +335,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.1...HEAD
+[0.9.1]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.8.0...v0.9.0
 [0.8.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.6.0...v0.7.0

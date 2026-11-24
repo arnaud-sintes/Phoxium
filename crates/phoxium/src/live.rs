@@ -177,11 +177,12 @@ impl Live {
             }
             Command::ToggleWindowMode => {
                 let monitors = output::monitor_irects();
+                let monitor = output::monitor_of(hwnd);
                 let placement = self.mode.toggle(
                     output::outer_rect(hwnd),
-                    output::monitor_of(hwnd),
+                    monitor,
                     &monitors,
-                    self.default_outer,
+                    output::default_window_rect(&monitor, self.default_outer),
                 );
                 // Non-activating in both modes, except while the settings menu is open (it needs the focus):
                 // `output::sync_activation` decides, so F11 works with the menu open or closed.
@@ -489,11 +490,12 @@ impl Live {
             return false;
         }
         let monitors = output::monitor_irects();
+        let monitor = output::monitor_of(hwnd);
         let placement = self.mode.toggle(
             output::outer_rect(hwnd),
-            output::monitor_of(hwnd),
+            monitor,
             &monitors,
-            self.default_outer,
+            output::default_window_rect(&monitor, self.default_outer),
         );
         output::apply_placement(hwnd, &placement);
         println!("output: {}", describe(&placement, &monitors));

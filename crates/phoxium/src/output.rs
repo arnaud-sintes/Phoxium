@@ -680,13 +680,28 @@ pub fn monitor_work_irects() -> Vec<(IRect, IRect)> {
 /// The rectangle a framed output takes when no usable rectangle is remembered (a first start): the work area of
 /// a monitor, the whole screen without the taskbar, as a normal framed window (the same "maximised size" as a snap
 /// to the top edge, [`snap_rect`]). The monitor is `index` (`--monitor`) when it exists, else the one whose whole
-/// rectangle is `near` (the monitor of the source), else the first. `monitors` lists (monitor, work area). Pure.
+/// rectangle is `near` (the monitor of the source), else the primary one (the monitor that holds the point 0, 0 of
+/// the virtual screen), else the first. `monitors` lists (monitor, work area). Pure.
 pub fn default_work_area(monitors: &[(IRect, IRect)], index: Option<usize>, near: Option<IRect>) -> Option<IRect> {
     index
         .and_then(|i| monitors.get(i))
         .or_else(|| near.and_then(|n| monitors.iter().find(|(m, _)| *m == n)))
+        .or_else(|| {
+            monitors
+                .iter()
+                .find(|(m, _)| m.left <= 0 && 0 < m.right && m.top <= 0 && 0 < m.bottom)
+        })
         .or_else(|| monitors.first())
         .map(|(_, work)| *work)
+}
+
+/// The rectangle of the framed output when nothing usable is remembered and F11 leaves fullscreen: the work area of
+/// `monitor` (the display does not shrink), else `fallback_size` centred on it.
+pub fn default_window_rect(monitor: &IRect, fallback_size: (i32, i32)) -> IRect {
+    monitor_work_irects()
+        .into_iter()
+        .find(|(m, _)| m == monitor)
+        .map_or_else(|| modes::center_in(fallback_size, monitor), |(_, work)| work)
 }
 
 /// How close (px) to an outer screen edge the pointer must be released for [`snap_rect`].
@@ -1281,7 +1296,15 @@ mod tests {
         let m0 = (IRect::new(0, 0, 2560, 1440), IRect::new(0, 0, 2560, 1400));
         let m1 = (IRect::new(2560, 0, 5120, 1440), IRect::new(2560, 0, 5120, 1400));
         let both = [m0, m1];
-        assert_eq!(default_work_area(&both, None, None), Some(m0.1), "the first monitor");
+        assert_eq!(default_work_area(&both, None, None), Some(m0.1), "the primary monitor");
+        // The primary monitor is not always the first one listed (a secondary monitor to its left or above).
+        let secondary = (IRect::new(2560, -116, 4480, 1084), IRect::new(2560, -116, 4480, 1054));
+        let listed_first = [secondary, m0];
+        assert_eq!(
+            default_work_area(&listed_first, None, None),
+            Some(m0.1),
+            "the monitor that holds 0, 0, not the first listed"
+        );
         assert_eq!(
             default_work_area(&both, None, Some(m1.0)),
             Some(m1.1),

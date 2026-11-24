@@ -114,12 +114,12 @@ pub fn center_in(size: (i32, i32), monitor: &IRect) -> IRect {
     IRect::new(left, top, left + w, top + h)
 }
 
-/// The rectangle of the windowed output: the remembered one when it is still usable, else `default_outer` centred
-/// on `fallback` (the monitor the output was on).
-pub fn restore_rect(saved: Option<IRect>, monitors: &[IRect], fallback: &IRect, default_outer: (i32, i32)) -> IRect {
+/// The rectangle of the windowed output: the remembered one when it is still usable, else `default_rect` (the
+/// work area of the monitor the output was on: the display does not shrink when F11 leaves fullscreen).
+pub fn restore_rect(saved: Option<IRect>, monitors: &[IRect], default_rect: IRect) -> IRect {
     match saved {
         Some(r) if usable_rect(&r, monitors) => r,
-        _ => center_in(default_outer, fallback),
+        _ => default_rect,
     }
 }
 
@@ -155,13 +155,13 @@ impl ModeState {
 
     /// F11. From windowed: remembers `outer` and goes fullscreen over `monitor_of_window`, so a window moved to
     /// another monitor goes fullscreen there. From fullscreen: back to the remembered rectangle (the same
-    /// monitor and size), or `default_outer` centred on `monitor_of_window` when none is usable.
+    /// monitor and size), or `default_rect` (the work area of `monitor_of_window`) when none is usable.
     pub fn toggle(
         &mut self,
         outer: IRect,
         monitor_of_window: IRect,
         monitors: &[IRect],
-        default_outer: (i32, i32),
+        default_rect: IRect,
     ) -> Placement {
         match self.mode {
             WindowMode::Windowed => {
@@ -172,7 +172,7 @@ impl ModeState {
                 }
             }
             WindowMode::Fullscreen => {
-                let rect = restore_rect(self.windowed, monitors, &monitor_of_window, default_outer);
+                let rect = restore_rect(self.windowed, monitors, default_rect);
                 self.windowed = Some(rect);
                 self.mode = WindowMode::Windowed;
                 Placement::Windowed { rect }
@@ -216,7 +216,10 @@ mod tests {
         right: 5120,
         bottom: 1440,
     };
-    const DEFAULT: (i32, i32) = (1296, 759);
+    /// The work area of a monitor in these tests: the whole monitor without a 30 px taskbar at the top.
+    fn work(m: &IRect) -> IRect {
+        IRect::new(m.left, m.top + 30, m.right, m.bottom)
+    }
 
     fn r(l: i32, t: i32, rr: i32, b: i32) -> IRect {
         IRect::new(l, t, rr, b)
@@ -226,26 +229,22 @@ mod tests {
     fn fullscreen_to_windowed_to_fullscreen_remembers_the_rectangle() {
         let mons = [M0, M1];
         let mut s = ModeState::new(WindowMode::Fullscreen, None);
-        // First F11 from fullscreen, nothing remembered: the default size centred on the monitor it covered.
-        let p = s.toggle(M1, M1, &mons, DEFAULT);
+        // First F11 from fullscreen, nothing remembered: the work area of the monitor it covered (the display does
+        // not shrink).
+        let p = s.toggle(M1, M1, &mons, work(&M1));
         let Placement::Windowed { rect } = p else {
             panic!("{p:?}")
         };
-        assert_eq!((rect.width(), rect.height()), DEFAULT);
-        assert_eq!(
-            rect.left + rect.width() / 2,
-            M1.left + M1.width() / 2,
-            "centred on monitor 1"
-        );
+        assert_eq!(rect, work(&M1), "the work area of monitor 1");
         assert_eq!(s.mode, WindowMode::Windowed);
         // The user moves and resizes it, then F11 to fullscreen: the covered monitor is the one it is on.
         let moved = r(100, 80, 1400, 880);
-        let p = s.toggle(moved, M0, &mons, DEFAULT);
+        let p = s.toggle(moved, M0, &mons, work(&M0));
         assert_eq!(p, Placement::Fullscreen { cover: M0 });
         assert_eq!(s.mode, WindowMode::Fullscreen);
         assert_eq!(s.windowed, Some(moved));
         // F11 again: exactly the rectangle it had.
-        assert_eq!(s.toggle(M0, M0, &mons, DEFAULT), Placement::Windowed { rect: moved });
+        assert_eq!(s.toggle(M0, M0, &mons, work(&M0)), Placement::Windowed { rect: moved });
     }
 
     #[test]
@@ -253,19 +252,22 @@ mod tests {
         let mons = [M0, M1];
         let mut s = ModeState::new(WindowMode::Windowed, None);
         let on_m1 = r(3000, 200, 4200, 900);
-        assert_eq!(s.toggle(on_m1, M1, &mons, DEFAULT), Placement::Fullscreen { cover: M1 });
+        assert_eq!(
+            s.toggle(on_m1, M1, &mons, work(&M1)),
+            Placement::Fullscreen { cover: M1 }
+        );
         // Whatever monitor is reported for the fullscreen window, the remembered rectangle wins.
-        assert_eq!(s.toggle(M1, M1, &mons, DEFAULT), Placement::Windowed { rect: on_m1 });
+        assert_eq!(s.toggle(M1, M1, &mons, work(&M1)), Placement::Windowed { rect: on_m1 });
     }
 
     #[test]
     fn a_remembered_rectangle_on_a_missing_monitor_is_not_used() {
         let mons = [M0]; // monitor 1 was unplugged
         let mut s = ModeState::new(WindowMode::Fullscreen, Some(r(3000, 200, 4200, 900)));
-        let Placement::Windowed { rect } = s.toggle(M0, M0, &mons, DEFAULT) else {
+        let Placement::Windowed { rect } = s.toggle(M0, M0, &mons, work(&M0)) else {
             panic!()
         };
-        assert_eq!((rect.width(), rect.height()), DEFAULT);
+        assert_eq!(rect, work(&M0));
         assert!(visible_fraction(&rect, &mons) >= 0.99);
     }
 
@@ -274,22 +276,16 @@ mod tests {
         let mons = [M0];
         // Minimised windows report coordinates like -32000.
         assert_eq!(
-            restore_rect(Some(r(-32000, -32000, -31840, -31880)), &mons, &M0, DEFAULT).width(),
-            DEFAULT.0
+            restore_rect(Some(r(-32000, -32000, -31840, -31880)), &mons, work(&M0)),
+            work(&M0)
         );
         // Too small.
-        assert_eq!(
-            restore_rect(Some(r(10, 10, 50, 40)), &mons, &M0, DEFAULT).width(),
-            DEFAULT.0
-        );
+        assert_eq!(restore_rect(Some(r(10, 10, 50, 40)), &mons, work(&M0)), work(&M0));
         // Mostly off screen (a quarter visible).
-        assert_eq!(
-            restore_rect(Some(r(2300, 100, 3320, 900)), &mons, &M0, DEFAULT).width(),
-            DEFAULT.0
-        );
+        assert_eq!(restore_rect(Some(r(2300, 100, 3320, 900)), &mons, work(&M0)), work(&M0));
         // Partly off screen but more than half visible is kept.
         let keep = r(1800, 100, 2900, 900);
-        assert_eq!(restore_rect(Some(keep), &mons, &M0, DEFAULT), keep);
+        assert_eq!(restore_rect(Some(keep), &mons, work(&M0)), keep);
     }
 
     #[test]
@@ -297,7 +293,7 @@ mod tests {
         let mons = [M0, M1];
         let span = r(2000, 100, 3200, 900);
         assert!((visible_fraction(&span, &mons) - 1.0).abs() < 1e-9);
-        assert_eq!(restore_rect(Some(span), &mons, &M0, DEFAULT), span);
+        assert_eq!(restore_rect(Some(span), &mons, work(&M0)), span);
     }
 
     #[test]
@@ -341,7 +337,7 @@ mod tests {
         assert_eq!(inverted.width(), i32::MIN, "saturated, negative");
         assert_eq!((inverted.area(), inverted.overlap(&M0)), (0, 0));
         assert!(!usable_rect(&inverted, &mons));
-        assert_eq!(restore_rect(Some(huge), &mons, &M0, DEFAULT).width(), DEFAULT.0);
+        assert_eq!(restore_rect(Some(huge), &mons, work(&M0)), work(&M0));
         let moved = ModeState::new(WindowMode::Windowed, None).display_change(all, &mons);
         assert!(matches!(moved, Some(Placement::Windowed { rect }) if usable_rect(&rect, &mons)));
     }
