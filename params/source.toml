@@ -65,10 +65,10 @@ stage = "source"
 type = "enum"
 unit = "1"
 default = "tube"
-values = ["tube", "native", "integer", "fit", "fit_free"]
+values = ["tube", "native", "integer", "fit", "fit_free", "manual"]
 tag = "E"
-source = "PLAN D-13 and D-18 (owner decisions 2026-11-19): scale modes of the source on any host monitor, QUESTIONS OUT-7"
-description = "How large the picture is in the output. tube: sized by the tube (visible height, aspect and height fraction), the physical default. native: one source row = one host pixel, centred (true 1:1). integer: source_scale host pixels per source row (0 = the largest whole factor that fits). fit: the largest whole factor that fits, below 1 a free fit. fit_free: the largest non-integer scale that fits, aspect kept (breaks the scanline and mask alignment with the host pixels). In every mode but tube the host px per mm follows from the picture height over the raster height in mm, so the mask pitch in px per triad scales with the picture."
+source = "PLAN D-13 and D-18 (owner decisions 2026-11-19): scale modes of the source on any host monitor, QUESTIONS OUT-7; manual: TODO Low, manual pixel size (source_pixel_size)"
+description = "How large the picture is in the output. tube: sized by the tube (visible height, aspect and height fraction), the physical default. native: one source row = one host pixel, centred (true 1:1). integer: source_scale host pixels per source row (0 = the largest whole factor that fits). fit: the largest whole factor that fits, below 1 a free fit. fit_free: the largest non-integer scale that fits, aspect kept (breaks the scanline and mask alignment with the host pixels). manual: source_pixel_size host pixels per source row, fractional allowed (the same breaking of the alignment unless it is whole). In every mode but tube the host px per mm follows from the picture height over the raster height in mm, so the mask pitch in px per triad scales with the picture."
 group = "Source"
 
 [[param]]
@@ -106,6 +106,46 @@ values = ["off", "counter_clockwise", "clockwise"]
 tag = "E"
 source = "TODO.md TATE (rotated tube); CRT.md: vertical arcade games run on a tube turned on its side, so the scanlines are the columns of the upright picture"
 description = "TATE: the tube is turned a quarter turn, as in a vertical arcade cabinet. The captured picture is upright (a portrait game); the scanlines, the beam, the mask, the geometry and the phosphor run along the tube's own axes, so on screen the scanlines are columns and the mask is turned with the tube. off: an ordinary tube. counter_clockwise: the tube is turned a quarter turn counter-clockwise (its top is on the left of the screen; the first scanline is the rightmost column of the picture). clockwise: turned clockwise (its top is on the right; the first scanline is the leftmost column). The tube (aspect, size) is the landscape tube before it is turned. The host LCD subpixel layout of the mask is not applied while the tube is turned."
+group = "Source"
+
+[[param]]
+id = "source_flip"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "off"
+values = ["off", "horizontal", "vertical", "both"]
+tag = "E"
+source = "TODO Low (owner request): flip. The picture is mirrored before the tube draws it; the tube itself (scanlines, mask, geometry, phosphor) is not mirrored. Applied to the upright picture, so with a quarter turn (source_rotation) it mirrors the picture the player sees"
+description = "Mirror the picture: horizontal (left and right swapped), vertical (top and bottom swapped) or both (a half turn). The tube is not mirrored: the scanlines still run in their own direction and the mask keeps its layout. With a quarter turn (TATE) the flip is of the upright picture."
+group = "Source"
+
+[[param]]
+id = "source_prefilter"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "point"
+values = ["point", "box", "triangle", "lanczos2", "lanczos3", "sinc"]
+tag = "E"
+source = "TODO Low (owner request): source pre-filters (sinc, lanczos). How a native pixel is read from a capture that is a whole number of times bigger than the native raster (a divisor above 1, source_divisor_mode); the kernels and their weights are crt_model::prefilter (box, triangle, Lanczos a = 2 and 3, sinc cut at 4 pixels). With a divisor of 1 every kernel is the identity"
+description = "How a native pixel is read when the captured window is scaled up by a whole divisor (see Divisor mode). point: the one captured pixel at the middle of the block (the default, exact). box: the mean of the block. triangle: a tent over two native pixels (smooth). lanczos2 and lanczos3: a windowed sinc (sharper, with a little ringing). sinc: a plain sinc cut at four pixels (the sharpest, the most ringing). With a 1:1 capture (divisor 1) every choice is the identity. The filter works on the captured code values and costs more with a larger divisor."
+group = "Source"
+
+[[param]]
+id = "source_pixel_size"
+stage = "source"
+type = "f32"
+unit = "px"
+default = 3.0
+min = 0.25
+max = 16.0
+hard_min = 0.05
+hard_max = 64.0
+hard_why = "host pixels per source row, positive"
+tag = "E"
+source = "TODO Low (owner request): manual pixel size. Used only by the manual scale mode (source_scale_mode = manual): a fractional number of host pixels per source row, not limited to whole factors; reduced to the largest that fits when the output is too small"
+description = "Manual scale mode only: the size of a source pixel (a source row) in host pixels, fractional values allowed (2.5, 3.33...). A non-whole size breaks the alignment of the scanlines and the mask with the host pixels, as fit_free does. Reduced to the largest that fits when the output is too small."
 group = "Source"
 
 [[param]]

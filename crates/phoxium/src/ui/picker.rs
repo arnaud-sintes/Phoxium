@@ -48,6 +48,8 @@ pub enum PickerAction {
     Refresh,
     /// Take the preview of the wanted row again now.
     RefreshPreview,
+    /// Open a still image (a PNG) as the source instead of a window.
+    OpenImage,
     /// The "ask at every start" check box changed.
     AskAtStart(bool),
     /// The first-run hint was dismissed; `true`: "Do not show again" was ticked.
@@ -323,10 +325,23 @@ fn card(ui: &Frame, p: &mut Picker, fonts: &Fonts, menu_key: &str, r: &mut Picke
 
     // Search field (the picker's own text, typed anywhere in the card) and Refresh.
     let refresh_w = ui.calc_text_size("Refresh")[0] + 20.0 * s;
+    let image_w = ui.calc_text_size("Open image")[0] + 20.0 * s;
     let avail = ui.content_region_avail()[0];
-    let field_w = (avail - refresh_w - ui.clone_style().item_spacing()[0]).max(80.0 * s);
+    let spacing = ui.clone_style().item_spacing()[0];
+    let field_w = (avail - refresh_w - image_w - 2.0 * spacing).max(80.0 * s);
     search_field(ui, p, field_w);
     r.items.push(("picker:search".into(), rect(ui)));
+    ui.same_line();
+    if ui.button_with_size("Open image", [image_w, ui.frame_height()]) {
+        r.action = Some(PickerAction::OpenImage);
+    }
+    r.items.push(("picker:open_image".into(), rect(ui)));
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Use a still image (a PNG file) as the source instead of a window: a screenshot, a test card, a reference picture.",
+        );
+    }
     ui.same_line();
     if ui.button_with_size("Refresh", [refresh_w, ui.frame_height()]) {
         r.action = Some(PickerAction::Refresh);

@@ -1,0 +1,84 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `tv` (the knobs of a television and the refresh flicker; amp domain -> amp domain, drive voltage R'G'B'
+// between the analogue impairments and the gun). Skipped as an exact identity while every knob is neutral
+// (`Stage::is_identity`).
+//
+// The model and every formula are those of the f64 oracle `crates/crt-model/src/tv.rs` (read it first). One thread
+// per sample (amp domain: K samples per source pixel), in this order, each step only when its flag is set (the
+// CPU sets them from the oracle's conditions, `stages/tv.rs`):
+//   1. sharpness: the luma change s (Y - LP(Y)) added to the three channels, LP a triangular low-pass of half
+//      width `radius` samples along the row (the ends repeated);
+//   2. tint and colour: the BT.601 colour differences turned by the angle (cos, sin) and scaled, green rebuilt;
+//   3. levels: black + (white - black) V;
+//   4. flicker: the frame's gain;
+//   5. clamped to >= 0.
+// Alpha is copied.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // amp domain
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // amp domain
+
+// Per-frame constants (std430 push block, 36 bytes; `tv::Push`).
+layout(push_constant) uniform Push {
+    float sharpness;
+    int radius;      // samples, at least 1 when the sharpness flag is set
+    float cos_tint;
+    float sin_tint;
+    float colour;
+    float black;
+    float white;
+    float gain;      // the flicker's gain at this frame
+    uint flags;      // 1 sharpness, 2 tint and colour, 4 levels, 8 flicker
+} pc;
+
+const float KR = 0.299;
+const float KG = 0.587;
+const float KB = 0.114;
+const float U_SCALE = 0.492;
+const float V_SCALE = 0.877;
+
+float luma(vec3 c) {
+    return KR * c.r + KG * c.g + KB * c.b;
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(drive_out);
+    if (any(greaterThanEqual(p, size))) {
+        return;
+    }
+    vec4 src = texelFetch(drive_in, p, 0);
+    vec3 c = src.rgb;
+    if ((pc.flags & 1u) != 0u) {
+        float norm = float((pc.radius + 1) * (pc.radius + 1));
+        float lp = 0.0;
+        for (int j = -pc.radius; j <= pc.radius; j++) {
+            float w = float(pc.radius + 1 - abs(j)) / norm;
+            lp += w * luma(texelFetch(drive_in, ivec2(clamp(p.x + j, 0, size.x - 1), p.y), 0).rgb);
+        }
+        c += vec3(pc.sharpness * (luma(c) - lp));
+    }
+    if ((pc.flags & 2u) != 0u) {
+        float y = luma(c);
+        float u = U_SCALE * (c.b - y);
+        float v = V_SCALE * (c.r - y);
+        float u2 = pc.colour * (u * pc.cos_tint - v * pc.sin_tint);
+        float v2 = pc.colour * (u * pc.sin_tint + v * pc.cos_tint);
+        float red = y + v2 / V_SCALE;
+        float blue = y + u2 / U_SCALE;
+        c = vec3(red, (y - KR * red - KB * blue) / KG, blue);
+    }
+    if ((pc.flags & 4u) != 0u) {
+        c = vec3(pc.black) + (pc.white - pc.black) * c;
+    }
+    if ((pc.flags & 8u) != 0u) {
+        c *= pc.gain;
+    }
+    imageStore(drive_out, p, round_f16(vec4(max(c, vec3(0.0)), src.a)));
+}

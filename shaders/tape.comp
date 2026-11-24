@@ -1,0 +1,154 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `tape` (a VHS tape and the vertical roll; optional, off by default): amp domain -> amp domain, drive voltage
+// R'G'B' between the analogue impairments and the TV controls. Skipped as an exact identity while `tape_enable` is
+// off or every amount is 0 (`Stage::is_identity`).
+//
+// The model and every formula are those of the f64 oracle `crates/crt-model/src/tape.rs` (read it first); the CPU
+// computes the per-frame constants from it (`stages/tape.rs`, push constants below). One thread per sample (amp
+// domain: K samples per source pixel, one row per scanline), in this order:
+//   1. roll: the output line shows source row (y - offset) mod lines; source rows under the bar are black;
+//   2. head switching: the lines of the band at the bottom read the row displaced by a tear, with ramped noise
+//      added at the end;
+//   3. bandwidth: the signal read at the displaced position u is split into BT.601 Y, U, V; Y is low-passed by a
+//      triangle of `ry` samples, U and V by one of `rc` samples taken `chroma_shift` samples later;
+//   4. dropout: the samples of the line's streak are white;
+//   5. head noise added, then clamped to >= 0 (no negative light).
+// The line's ends repeat. Alpha is copied.
+
+#include "params.glsl"
+#include "common.glsl"
+#include "noise.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // amp domain
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // amp domain
+
+// Per-frame constants (std430 push block, 56 bytes; `tape::Push`).
+layout(push_constant) uniform Push {
+    int ry;                  // half width of the luma low-pass, samples
+    int rc;                  // half width of the colour low-pass, samples
+    float chroma_shift;      // colour delay, samples
+    float head_first;        // first line of the head band (lines - head_lines)
+    float head_lines;        // band height (at least 1 when the head flag is set)
+    float head_shift_px;     // peak tear, source pixels
+    float head_noise;        // deviation at the last line
+    float dropout;           // probability per line and frame
+    float dropout_length_px;
+    int roll_offset;         // lines
+    float roll_bar;          // lines
+    uint flags;              // 1 bandwidth, 2 head switching, 4 dropouts, 8 roll
+    float width_px;          // source pixels per line (samples / K)
+    float pad;
+} pc;
+
+// Seeds and mixes of crt_model::tape.
+const uint SEED_HEAD = 0x48454431u;
+const uint SEED_HEAD_NOISE = 0x48444e31u;
+const uint SEED_DROPOUT = 0x44525031u;
+const uint MIX_LENGTH = 0x85ebca6bu;
+const uint MIX_POSITION = 0xc2b2ae35u;
+
+const float KR = 0.299;
+const float KG = 0.587;
+const float KB = 0.114;
+const float U_SCALE = 0.492;
+const float V_SCALE = 0.877;
+
+// The input row `y` at the continuous sample index `u`: linear between the neighbouring samples, the ends repeated.
+vec3 sample_row(int y, float u, int width) {
+    float i0 = floor(u);
+    float t = u - i0;
+    int a = clamp(int(i0), 0, width - 1);
+    int b = clamp(int(i0) + 1, 0, width - 1);
+    return texelFetch(drive_in, ivec2(a, y), 0).rgb * (1.0 - t) + texelFetch(drive_in, ivec2(b, y), 0).rgb * t;
+}
+
+vec3 to_yuv(vec3 c) {
+    float y = KR * c.r + KG * c.g + KB * c.b;
+    return vec3(y, U_SCALE * (c.b - y), V_SCALE * (c.r - y));
+}
+
+float tap_weight(int r, int j) {
+    return float(r + 1 - abs(j)) / float((r + 1) * (r + 1));
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    ivec2 size = imageSize(drive_out);
+    if (any(greaterThanEqual(p, size))) {
+        return;
+    }
+    int y = p.y;
+    int lines = size.y;
+    int width = size.x;
+    uint frame_index = frame.frame_index;
+    float kf = float(frame.amp_k);
+    float alpha = texelFetch(drive_in, p, 0).a;
+
+    // 1. Roll.
+    int row = y;
+    if ((pc.flags & 8u) != 0u) {
+        // No `%` of a negative number (undefined in GLSL): the offset is in [0, lines), so one addition wraps.
+        int src = y - pc.roll_offset;
+        if (src < 0) {
+            src += lines;
+        }
+        if (float(src) < pc.roll_bar) {
+            imageStore(drive_out, p, round_f16(vec4(0.0, 0.0, 0.0, alpha)));
+            return;
+        }
+        row = src;
+    }
+    // 2. Head switching: the ramp and the tear of this output line.
+    float w = 0.0;
+    float tear = 0.0;
+    if ((pc.flags & 2u) != 0u) {
+        float i = float(y) - pc.head_first;
+        w = i < 0.0 ? 0.0 : (i + 0.5) / pc.head_lines;
+        if (w > 0.0 && pc.head_shift_px != 0.0) {
+            tear = pc.head_shift_px * w * (0.5 + 0.5 * noise_symmetric(noise_cell(SEED_HEAD, uint(y), frame_index, 0u)));
+        }
+    }
+    float u = float(p.x) - tear * kf;
+    // 3. Bandwidth.
+    vec3 v;
+    if ((pc.flags & 1u) != 0u) {
+        float ly = 0.0;
+        for (int j = -pc.ry; j <= pc.ry; j++) {
+            ly += tap_weight(pc.ry, j) * to_yuv(sample_row(row, u + float(j), width)).x;
+        }
+        float cu = 0.0;
+        float cv = 0.0;
+        for (int j = -pc.rc; j <= pc.rc; j++) {
+            vec3 t = to_yuv(sample_row(row, u - pc.chroma_shift + float(j), width));
+            cu += tap_weight(pc.rc, j) * t.y;
+            cv += tap_weight(pc.rc, j) * t.z;
+        }
+        float red = ly + cv / V_SCALE;
+        float blue = ly + cu / U_SCALE;
+        v = vec3(red, (ly - KR * red - KB * blue) / KG, blue);
+    } else {
+        v = sample_row(row, u, width);
+    }
+    // 4. Dropout.
+    if ((pc.flags & 4u) != 0u) {
+        uint h = noise_cell(SEED_DROPOUT, uint(y), frame_index, 0u);
+        if (noise_unit(h) < pc.dropout) {
+            float length = pc.dropout_length_px * (0.5 + 0.5 * noise_unit(noise_hash(h ^ MIX_LENGTH)));
+            float start = noise_unit(noise_hash(h ^ MIX_POSITION)) * pc.width_px;
+            float xs = (float(p.x) + 0.5) / kf;
+            if (xs >= start && xs < start + length) {
+                v = vec3(1.0);
+            }
+        }
+    }
+    // 5. Head noise, then no negative light.
+    float sigma = pc.head_noise * w;
+    if (sigma != 0.0) {
+        v += vec3(sigma * noise_gaussian(noise_cell(SEED_HEAD_NOISE, uint(p.x / frame.amp_k), uint(y), frame_index)));
+    }
+    imageStore(drive_out, p, round_f16(vec4(max(v, vec3(0.0)), alpha)));
+}

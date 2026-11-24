@@ -27,6 +27,11 @@ pub enum ProfileAction {
     UseForCurrent { exe: String, class: String },
     /// Remove the profile of the program captured now and go back to the preset's source settings.
     ResetCurrent,
+    /// Make the profile of the program captured now the default profile, the one a program without a profile of
+    /// its own gets (`[default_source]`).
+    SetDefault,
+    /// Forget the default profile.
+    ClearDefault,
 }
 
 fn eq(a: &str, b: &str) -> bool {
@@ -66,6 +71,9 @@ pub fn summary(p: &SourceProfile) -> String {
         p.display_aspect.is_some(),
         p.raster_aspect.is_some(),
         p.rotation.is_some(),
+        p.flip.is_some(),
+        p.prefilter.is_some(),
+        p.pixel_size.is_some(),
     ]
     .iter()
     .filter(|b| **b)
@@ -91,6 +99,20 @@ pub fn rows(settings: &Settings, current: Option<(&str, &str)>) -> Vec<ProfileRo
             current: current.is_some_and(|(e, c)| eq(e, &p.exe) && eq(c, &p.class)),
         })
         .collect()
+}
+
+/// The default profile as a line of the list (`None` without one): the same summary as a program's profile.
+pub fn default_summary(settings: &Settings) -> Option<String> {
+    settings.default_source.as_ref().map(summary)
+}
+
+/// The default profile made of the profile of a program: the same settings with no executable and class.
+pub fn as_default(from: &SourceProfile) -> SourceProfile {
+    SourceProfile {
+        exe: String::new(),
+        class: String::new(),
+        ..from.clone()
+    }
 }
 
 /// The profile `from` for the program and class `exe`, `class` ("Use for current source").

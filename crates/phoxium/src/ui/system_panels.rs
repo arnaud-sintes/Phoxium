@@ -96,6 +96,8 @@ const FRAME_CAP_TOOLTIP: &str = "Most frames per second the output draws. The lo
 
 const TEARING_TOOLTIP: &str = "Present frames without waiting for the vertical blank: lower latency, and variable refresh displays (G-Sync, FreeSync) can follow the frame rate, but the picture may tear. Not every window or driver allows it; the row below says what is in force. Saved in [global.output] tearing.";
 
+const KEEP_AWAKE_TOOLTIP: &str = "Stops Windows from putting the PC or the display to sleep, and the screen saver from starting, while Phoxium runs: for a long session with a gamepad, where no key or mouse activity tells Windows that someone is there. It is released when Phoxium exits. Saved in [global.output] keep_awake.";
+
 const SNAPSHOT_SAVE_TOOLTIP: &str = "Saves the picture the CRT drew, without this menu, as a PNG in the Phoxium folder of your Pictures. The hotkey (Ctrl+Alt+F2 by default, see GPU and system) does the same without opening the menu.";
 
 const SNAPSHOT_COPY_TOOLTIP: &str = "Puts the picture the CRT drew, without this menu, on the clipboard. It replaces what the clipboard holds, so it is only done from this button.";
@@ -143,6 +145,14 @@ pub fn pacing_section(ui: &Frame, fonts: &Fonts, state: &super::UiState, r: &mut
         PALETTE.text,
     );
     record(ui, r, "tearing:status");
+    let mut keep_awake = state.keep_awake;
+    if ui.checkbox("Keep the PC awake", &mut keep_awake) {
+        r.keep_awake = Some(keep_awake);
+    }
+    record(ui, r, "keep_awake");
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, KEEP_AWAKE_TOOLTIP);
+    }
     let mut max_rate = state.max_capture_rate;
     if ui.checkbox("Max capture rate (lift the 60 fps limit)", &mut max_rate) {
         r.max_capture_rate = Some(max_rate);

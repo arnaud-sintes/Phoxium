@@ -1,0 +1,150 @@
+# The knobs of a television and the refresh flicker (TODO Low). Format: crates/paramgen/src/lib.rs. Each id is
+# defined once in the whole params/ folder. Slot `tv` (amp domain, between `tape` and `gun`); the model is
+# crt_model::tv (f64 oracle). Every knob is neutral at its default, and the slot is skipped as an exact identity
+# until one moves. Every amount is an estimate: CRT.md holds no measured knob law of any set.
+
+[[param]]
+id = "tv_sharpness"
+stage = "tv"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -1.0
+max = 1.0
+hard_min = -1.0
+hard_max = 4.0
+hard_why = "-1 is the pure low-pass; above 1 the peaking only exaggerates (the oracle is linear in it)"
+tag = "E"
+source = "Aperture correction of a TV's sharpness control, Y' = Y + s (Y - LP(Y)) on the luma with a triangular low-pass; the law of a real set is not documented in CRT.md [E]"
+description = "Sharpness: positive peaks the edges of the luma (overshoot), negative softens it, 0 leaves it alone. The colour does not move."
+group = "TV controls"
+
+[[param]]
+id = "tv_tint_deg"
+stage = "tv"
+type = "f32"
+unit = "deg"
+default = 0.0
+min = -45.0
+max = 45.0
+hard_min = -360.0
+hard_max = 360.0
+hard_why = "an angle, any turn is valid"
+tag = "E"
+source = "Tint (hue) control: a rotation of the BT.601 colour differences U = 0.492 (B' - Y) and V = 0.877 (R' - Y); the luma is untouched [S for the BT.601 scales, E for the control law]"
+description = "Tint: turns the hues, as a TV's tint or hue knob does (positive turns the colour differences counter-clockwise in the U-V plane). 0 leaves them alone. Works without the composite module."
+group = "TV controls"
+
+[[param]]
+id = "tv_colour"
+stage = "tv"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.0
+max = 2.0
+hard_min = 0.0
+hard_max = 8.0
+hard_why = "a gain on the colour differences; 0 is black and white"
+tag = "E"
+source = "Colour (saturation) control: the colour differences scaled, the luma untouched [E]"
+description = "Colour: the gain of the colour differences, 0 for black and white, 1 untouched, above 1 more saturated."
+group = "TV controls"
+
+[[param]]
+id = "tv_black_level"
+stage = "tv"
+type = "f32"
+unit = "1"
+default = 0.0
+min = -0.3
+max = 0.3
+hard_min = -1.0
+hard_max = 1.0
+hard_why = "a drive voltage on the signal's 0 to 1 scale"
+tag = "E"
+source = "Black level of the drive voltage V' = black + (white - black) V, the brightness knob of a set. Positive lifts black (and everything with it), negative crushes the darks [E]"
+description = "Black level: the drive voltage of black. Positive raises the blacks, negative crushes the darks. 0 is the signal's own black."
+group = "TV controls"
+
+[[param]]
+id = "tv_white_level"
+stage = "tv"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.5
+max = 1.5
+hard_min = 0.0
+hard_max = 4.0
+hard_why = "a drive voltage on the signal's 0 to 1 scale; 0 would black the picture out"
+tag = "E"
+source = "White level of the drive voltage, the contrast or picture knob of a set. Above 1 drives the tube harder (the highlights clip at the gun and the output); below 1 the picture is dimmer [E]"
+description = "White level: the drive voltage of white. Below 1 dims the picture, above 1 drives the tube harder. 1 is the signal's own white."
+group = "TV controls"
+
+[[param]]
+id = "tv_flicker_amount"
+stage = "tv"
+type = "f32"
+unit = "1"
+default = 0.0
+min = 0.0
+max = 0.5
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a depth of modulation, 1 goes to black at the trough"
+tag = "E"
+source = "Refresh flicker of a tube whose refresh rate is not a multiple of the display's: the picture's brightness beats at the difference of the rates. The depth is not sourced; CRT.md PHY-12 notes that flicker is a property of the refresh rate and the phosphor decay [E]"
+description = "Depth of the refresh flicker: the whole picture dims by up to this share and returns, at the rate below. 0 is off."
+group = "Refresh flicker"
+
+[[param]]
+id = "tv_flicker_hz"
+stage = "tv"
+type = "f32"
+unit = "Hz"
+default = 10.0
+min = 0.5
+max = 30.0
+hard_min = 0.0
+hard_max = 1000.0
+hard_why = "a frequency; 0 is a constant gain"
+tag = "E"
+source = "A 50 Hz tube seen on a 60 Hz display beats at 60 - 50 = 10 Hz (the default); a 72 Hz tube beats at 12 Hz [S, arithmetic]"
+description = "Rate of the flicker as you see it: the difference between the tube's refresh rate and the display's (a 50 Hz tube on a 60 Hz display: 10 Hz)."
+group = "Refresh flicker"
+
+[[param]]
+id = "tv_sharpness_px"
+stage = "tv"
+type = "f32"
+unit = "px"
+default = 1.0
+min = 0.25
+max = 4.0
+hard_min = 0.0
+hard_max = 8.0
+hard_why = "a width in source pixels; 0 leaves nothing to filter (the control is off)"
+tag = "E"
+source = "Width of the low-pass that the sharpness control works against, in source pixels; half a pixel to two is the range of a TV's aperture correction [E]"
+description = "Width of the sharpness filter, in source pixels: the size of the details that the sharpness control boosts or softens."
+group = "TV controls"
+advanced = true
+
+[[param]]
+id = "tv_frame_rate_hz"
+stage = "tv"
+type = "f32"
+unit = "Hz"
+default = 60.0
+min = 24.0
+max = 240.0
+hard_min = 1.0
+hard_max = 1000.0
+hard_why = "frames per second of the output; the time base of the flicker"
+tag = "E"
+source = "The rate at which the output frames are produced; the flicker's phase is the frame index over this rate (no clock is read)"
+description = "Frame rate of the output, the time base of the flicker. 60 for a 60 Hz display."
+group = "Refresh flicker"
+advanced = true

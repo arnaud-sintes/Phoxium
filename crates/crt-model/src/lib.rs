@@ -18,6 +18,7 @@ pub mod abl;
 pub mod ageing;
 pub mod beam;
 pub mod burnin;
+pub mod cabinet;
 pub mod colour;
 pub mod composite;
 pub mod geometry;
@@ -30,7 +31,10 @@ pub mod optics;
 pub mod output;
 pub mod phosphor;
 pub mod phosphor_types;
+pub mod prefilter;
+pub mod tape;
 pub mod tube;
+pub mod tv;
 pub mod units;
 
 /// Absolute-tolerance comparison used by the tests.

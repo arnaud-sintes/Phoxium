@@ -44,9 +44,10 @@ Usage: phoxium [options]
                        profile's (manual), or the whole window (none). --crop implies manual, --no-crop none
   --divisor-mode <auto|manual|none>  native raster: detected (auto), --divisor or the profile's (manual),
                        or the captured pixels (none, divisor 1). --divisor implies manual
-  --scale-mode <tube|native|integer|fit|fit-free>  picture size: by the tube (default, physical), 1:1 host
-                       pixels per source pixel, xN (--scale), the largest whole factor that fits, or the
-                       largest non-integer fit (breaks the scanline and mask alignment)
+  --scale-mode <tube|native|integer|fit|fit-free|manual>  picture size: by the tube (default, physical), 1:1
+                       host pixels per source pixel, xN (--scale), the largest whole factor that fits, the
+                       largest non-integer fit (breaks the scanline and mask alignment), or a fractional
+                       size set in the menu (manual, `source_pixel_size`)
   --scale <N>          host pixels per source row in the integer mode: 0 = largest that fits (default),
                        1 to 10 manual
   --align <center|top-left>  picture position in the output (default center)

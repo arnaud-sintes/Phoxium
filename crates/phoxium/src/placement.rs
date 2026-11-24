@@ -1,4 +1,4 @@
-//! Tube placement in the host output (T-30: QUESTIONS SRC-3, SRC-4, OUT-7, PHY-3).
+//! Tube placement in the host output (T-30: QUEOTIONO SRC-3, SRC-4, OUT-7, PHY-3).
 //!
 //! All lengths of the model are tube millimetres. This module maps the tube to host pixels once per frame
 //! on the CPU: it decides the picture shape (pixel aspect ratio or the whole visible area), the size of the
@@ -62,7 +62,7 @@ use crate::params::{
     Params, MASK_HOST_SUBPIXEL_BGR, MASK_HOST_SUBPIXEL_RGB, MASK_TIER_INTEGRATED, MASK_TIER_PREFILTERED,
     MASK_TYPE_DELTA, MASK_TYPE_SLOT_MASK, RASTER_ASPECT_FILL_TUBE, SOURCE_ROTATION_CLOCKWISE,
     SOURCE_ROTATION_COUNTER_CLOCKWISE, SOURCE_SCALE_MODE_FIT, SOURCE_SCALE_MODE_FIT_FREE, SOURCE_SCALE_MODE_INTEGER,
-    SOURCE_SCALE_MODE_NATIVE,
+    SOURCE_SCALE_MODE_MANUAL, SOURCE_SCALE_MODE_NATIVE,
 };
 
 /// The quarter turn of the tube (`params.source_rotation`, TATE; module documentation).
@@ -125,7 +125,7 @@ pub enum RasterAspect {
 }
 
 /// How large the picture is in the output (`params.source_scale_mode`, T-96).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub enum ScaleMode {
     /// Sized by the tube (visible area and height fraction), the physical default.
     #[default]
@@ -138,6 +138,9 @@ pub enum ScaleMode {
     Fit,
     /// The largest non-integer scale that fits.
     FitFree,
+    /// `source_pixel_size` host pixels per source row, fractional allowed (TODO Low, manual pixel size); the largest
+    /// that fits when the output is too small.
+    Manual(f64),
 }
 
 impl ScaleMode {
@@ -148,6 +151,7 @@ impl ScaleMode {
             SOURCE_SCALE_MODE_INTEGER => ScaleMode::Integer(p.source_scale.clamp(0, 10) as u32),
             SOURCE_SCALE_MODE_FIT => ScaleMode::Fit,
             SOURCE_SCALE_MODE_FIT_FREE => ScaleMode::FitFree,
+            SOURCE_SCALE_MODE_MANUAL => ScaleMode::Manual(f64::from(p.source_pixel_size).max(0.05)),
             _ => ScaleMode::Tube,
         }
     }
@@ -167,6 +171,7 @@ impl fmt::Display for ScaleMode {
             ScaleMode::Integer(n) => write!(f, "integer x{n}"),
             ScaleMode::Fit => write!(f, "fit"),
             ScaleMode::FitFree => write!(f, "fit_free"),
+            ScaleMode::Manual(px) => write!(f, "manual {px:.2} px"),
         }
     }
 }
@@ -220,6 +225,9 @@ pub struct PlacementInput {
     /// The quarter turn of the tube. `target` is always the output; with a turn the placement is in the tube's
     /// frame, the output with its sides swapped (module documentation).
     pub turn: Turn,
+    /// The cabinet bezel (`crt_model::cabinet`): whole pixels kept free on every side of the output, 0 without it.
+    /// The picture is placed in the output minus this band, and the rectangle is offset by it.
+    pub inset_px: f64,
 }
 
 impl PlacementInput {
@@ -245,6 +253,11 @@ impl PlacementInput {
                 center: params.source_center,
             },
             turn: Turn::from_params(params),
+            inset_px: if params.cabinet_enable {
+                crt_model::cabinet::inset_px(f64::from(params.cabinet_bezel_width), target)
+            } else {
+                0.0
+            },
         }
     }
 }
@@ -276,6 +289,9 @@ pub fn place(i: &PlacementInput) -> Placement {
     let (nw, nh) = (f64::from(i.native.0), f64::from(i.native.1));
     // In the tube's frame: with a turned tube the output's sides are swapped.
     let (tw, th) = i.turn.swap((f64::from(i.target.0), f64::from(i.target.1)));
+    // The bezel band is taken off every side: the picture is placed in what is left.
+    let inset = i.inset_px.max(0.0);
+    let (tw, th) = (tw - 2.0 * inset, th - 2.0 * inset);
     let (vw, vh) = i.visible_mm;
     let empty = Placement {
         rect_px: [0.0; 4],
@@ -333,6 +349,7 @@ pub fn place(i: &PlacementInput) -> Placement {
             Turn::Clockwise => (0.0, th - h),
         }
     };
+    let (x0, y0) = (x0 + inset, y0 + inset);
     Placement {
         rect_px: [x0 as f32, y0 as f32, (x0 + w) as f32, (y0 + h) as f32],
         px_per_mm: s,
@@ -371,6 +388,16 @@ fn host_row_px(mode: ScaleMode, nh: f64, aspect: f64, target: (f64, f64)) -> (f6
         ScaleMode::Integer(_) if largest >= 1.0 => (largest, Fit::Fits),
         ScaleMode::Integer(_) => (free, Fit::Downscaled),
         ScaleMode::Fit if largest >= 1.0 => (largest, Fit::Fits),
+        // A fractional size, as large as asked when it fits, else the free fit (reported as clamped to the whole
+        // number below).
+        ScaleMode::Manual(px) if px <= free => (px, Fit::Fits),
+        ScaleMode::Manual(px) => (
+            free,
+            Fit::Clamped {
+                requested: px.ceil() as u32,
+                used: free.floor() as u32,
+            },
+        ),
         ScaleMode::Fit | ScaleMode::FitFree | ScaleMode::Tube => (free, Fit::Fits),
     }
 }
@@ -767,6 +794,7 @@ mod tests {
             integer: false,
             fit: HostFit::default(),
             turn: Turn::None,
+            inset_px: 0.0,
         }
     }
 
@@ -934,6 +962,68 @@ mod tests {
         assert!((p.line_pitch_mm - 1.208_333).abs() < 1e-5);
         assert!((p.px_per_mm - 6.620_69).abs() < 1e-5);
         assert_eq!(p.rect_px, [0.0, 0.0, 2560.0, 1440.0]);
+    }
+
+    /// The cabinet bezel keeps a band free on every side (`inset_px`): the picture is placed in the output minus
+    /// the band and offset by it. 2560 x 1440 with a 100 px band leaves 2360 x 1240; the 4:3 tube (386.667 x 290
+    /// mm) is limited by the height, 1240 / 290 = 4.27586 px/mm, so the picture is round(386.667 x 4.27586) =
+    /// 1653 wide and 1240 high, centred in the area at x = floor((2360 - 1653) / 2) = 353, then offset: x0 = 453,
+    /// y0 = 100. A band that leaves no room gives the empty placement.
+    #[test]
+    fn the_bezel_band_is_taken_off_every_side() {
+        let mut i = pvm((256, 240), (2560, 1440), RasterAspect::FillTube);
+        i.inset_px = 100.0;
+        let p = place(&i);
+        assert!((p.px_per_mm - 1240.0 / 290.0).abs() < 1e-9, "{p:?}");
+        assert_eq!(p.rect_px, [453.0, 100.0, 2106.0, 1340.0]);
+        // Zero is the plain placement.
+        i.inset_px = 0.0;
+        assert_eq!(place(&i).rect_px, [320.0, 0.0, 2240.0, 1440.0]);
+        i.inset_px = 800.0;
+        assert_eq!(place(&i).rect_px, [0.0; 4]);
+        // From the parameters: off by default (no band), on it is the oracle's band.
+        let mut params = Params::default();
+        assert_eq!(
+            PlacementInput::from_params(&params, (256, 240), (1920, 1080), false).inset_px,
+            0.0
+        );
+        assert!(params.set("cabinet_enable", crate::params::ParamValue::Bool(true)));
+        assert_eq!(
+            PlacementInput::from_params(&params, (256, 240), (1920, 1080), false).inset_px,
+            76.0
+        );
+    }
+
+    /// The manual pixel size (TODO Low): a fractional number of host pixels per source row. 256 x 240 square pixels
+    /// in 2560 x 1440 can grow to min(2560 / 256, 1440 / 240) = 6 px per row. At 2.5 the picture is 600 rows high
+    /// (240 x 2.5) and 640 wide (256 x 2.5), centred at (960, 420); at 8 the request is too large and the free fit,
+    /// 6 px per row, is used and reported as clamped.
+    #[test]
+    fn manual_pixel_size_is_fractional_and_clamped_to_what_fits() {
+        let manual = |px: f64| {
+            place(&PlacementInput {
+                fit: HostFit {
+                    mode: ScaleMode::Manual(px),
+                    center: true,
+                },
+                ..pvm((256, 240), (2560, 1440), RasterAspect::Par(1.0))
+            })
+        };
+        let p = manual(2.5);
+        assert_eq!(p.rect_px, [960.0, 420.0, 1600.0, 1020.0]);
+        assert!((p.row_px - 2.5).abs() < 1e-9);
+        assert_eq!(p.fit, Fit::Fits);
+        let big = manual(8.0);
+        assert_eq!(big.rect_px, [512.0, 0.0, 2048.0, 1440.0]);
+        assert_eq!(big.fit, Fit::Clamped { requested: 8, used: 6 });
+        assert!(!ScaleMode::Manual(2.5).is_whole());
+        let mut params = Params::default();
+        assert!(params.set(
+            "source_scale_mode",
+            crate::params::ParamValue::Enum(SOURCE_SCALE_MODE_MANUAL)
+        ));
+        assert!(params.set("source_pixel_size", crate::params::ParamValue::F32(3.33)));
+        assert_eq!(ScaleMode::from_params(&params), ScaleMode::Manual(f64::from(3.33_f32)));
     }
 
     /// Whole pixels per source row. 2560 x 1440, 240 rows: 6.0 px per row, kept. At 1400 px high the

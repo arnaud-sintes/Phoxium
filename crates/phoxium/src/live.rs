@@ -334,6 +334,20 @@ impl Live {
         }
     }
 
+    /// Whether the PC is kept awake while the output runs (`[global.output] keep_awake`).
+    pub fn keep_awake(&self) -> bool {
+        self.settings.global.output.keep_awake
+    }
+
+    /// Keep-awake on or off (the menu row), written at once.
+    pub fn set_keep_awake(&mut self, on: bool) {
+        if self.settings.global.output.keep_awake != on {
+            self.settings.global.output.keep_awake = on;
+            self.mark_dirty();
+            self.flush_settings(true);
+        }
+    }
+
     /// Whether the Windows limit on the capture rate is lifted (`[global.capture] max_rate`).
     pub fn max_capture_rate(&self) -> bool {
         self.settings.global.capture.max_rate
@@ -540,6 +554,18 @@ impl Live {
         if !debounced {
             self.flush_settings(true);
         }
+    }
+
+    /// Stores (`Some`) or forgets (`None`) the default profile (`[default_source]`), written at once. True when
+    /// something changed.
+    pub fn set_default_source(&mut self, profile: Option<settings::SourceProfile>) -> bool {
+        if self.settings.default_source == profile {
+            return false;
+        }
+        self.settings.default_source = profile;
+        self.mark_dirty();
+        self.flush_settings(true);
+        true
     }
 
     /// At exit, on every exit path (the window still exists, hidden or not; a null `hwnd` skips the window):

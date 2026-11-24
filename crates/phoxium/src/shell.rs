@@ -146,13 +146,28 @@ pub fn save_dialog(owner: isize, folder: &Path, file_name: &str) -> Option<PathB
 
 /// The native Open dialog for one preset file, starting in `folder`. `None` when cancelled.
 pub fn open_dialog(owner: isize, folder: &Path) -> Option<PathBuf> {
+    open_file(owner, folder, "Import preset", preset_filter())
+}
+
+/// The native Open dialog for one still image (a PNG) to use as the source, starting in `folder`. `None` when
+/// cancelled.
+pub fn open_image_dialog(owner: isize, folder: &Path) -> Option<PathBuf> {
+    open_file(
+        owner,
+        folder,
+        "Open an image as the source",
+        filter_spec(&[("PNG images (*.png)", "*.png"), ("All files", "*.*")]),
+    )
+}
+
+/// The native Open dialog for one existing file: `title`, the `filter` ([`filter_spec`]), starting in `folder`.
+fn open_file(owner: isize, folder: &Path, title: &str, filter: Vec<u16>) -> Option<PathBuf> {
     use windows::Win32::UI::Controls::Dialogs::{
         GetOpenFileNameW, OFN_EXPLORER, OFN_FILEMUSTEXIST, OFN_NOCHANGEDIR, OFN_PATHMUSTEXIST, OPENFILENAMEW,
     };
     let mut buf = vec![0u16; PATH_CAPACITY];
-    let filter = preset_filter();
     let dir = utf16_z(&folder.display().to_string());
-    let title = utf16_z("Import preset");
+    let title = utf16_z(title);
     let mut ofn = OPENFILENAMEW {
         lStructSize: std::mem::size_of::<OPENFILENAMEW>() as u32,
         hwndOwner: HWND(owner as *mut std::ffi::c_void),

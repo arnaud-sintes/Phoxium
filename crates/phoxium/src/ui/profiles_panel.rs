@@ -28,12 +28,52 @@ fn small(ui: &Frame, colour: theme::Rgba, text: &str) {
     });
 }
 
+/// The default profile (TODO Low): what a program without a profile of its own gets. Its summary, the button that
+/// makes the profile of the program captured now the default, and the one that forgets it.
+fn default_profile_rows(ui: &Frame, profiles: &[ProfileRow], default_profile: Option<&str>, r: &mut MenuResult) {
+    ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+    ui.text_colored(PALETTE.text, "Default profile");
+    record(ui, r, "profiles:default");
+    match default_profile {
+        Some(summary) => small(ui, PALETTE.text_muted, summary),
+        None => small(
+            ui,
+            PALETTE.text_faint,
+            "None: a program without a profile of its own uses the preset's source settings.",
+        ),
+    }
+    let has_own = profiles.iter().any(|p| p.current);
+    let disabled = ui.begin_disabled_with_cond(!has_own);
+    if theme::button(ui, "Use this game's profile as the default") {
+        r.profile = Some(ProfileAction::SetDefault);
+    }
+    drop(disabled);
+    record(ui, r, "profiles:default_set");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Copy the saved profile of the program captured now (its scale mode, flip, filter and the other source \
+             settings; its picture area and multiplier too) as the profile that every program without one gets. A \
+             program that already has a profile keeps its own.",
+        );
+    }
+    same_line_if_fits(ui, "Clear default");
+    let disabled = ui.begin_disabled_with_cond(default_profile.is_none());
+    if theme::button(ui, "Clear default") {
+        r.profile = Some(ProfileAction::ClearDefault);
+    }
+    drop(disabled);
+    record(ui, r, "profiles:default_clear");
+    ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
+}
+
 /// The rows. `attached`: the program captured now (its executable, if known).
 pub fn rows(
     ui: &Frame,
     fonts: &Fonts,
     m: &mut ProfilesModel,
     profiles: &[ProfileRow],
+    default_profile: Option<&str>,
     attached: Option<&str>,
     r: &mut MenuResult,
 ) {
@@ -110,6 +150,7 @@ pub fn rows(
         }
         ui.dummy([0.0, 2.0 * theme::scale_of(ui)]);
     }
+    default_profile_rows(ui, profiles, default_profile, r);
     let Some(exe) = attached else {
         return;
     };

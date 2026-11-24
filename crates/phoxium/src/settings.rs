@@ -216,6 +216,10 @@ pub struct OutputState {
     /// surface does not offer it. Menu: Display and pacing.
     #[serde(deserialize_with = "lenient_bool")]
     pub tearing: bool,
+    /// Keep the PC and its display awake while Phoxium runs (`SetThreadExecutionState`): no sleep and no screen
+    /// saver during a long game session. Off by default. Menu: Display and pacing.
+    #[serde(deserialize_with = "lenient_bool")]
+    pub keep_awake: bool,
 }
 
 /// The lowest and highest frame cap that is applied (a value in between is kept, outside it is clamped; 0 is off).
@@ -465,10 +469,19 @@ pub struct SourceProfile {
     pub raster_aspect: Option<String>,
     /// `source_rotation` value name: `off`, `counter_clockwise` or `clockwise` (TATE: a vertical game).
     pub rotation: Option<String>,
+    /// `source_flip` value name: `off`, `horizontal`, `vertical` or `both`.
+    pub flip: Option<String>,
+    /// `source_prefilter` value name: `point`, `box`, `triangle`, `lanczos2`, `lanczos3` or `sinc`.
+    pub prefilter: Option<String>,
+    /// `source_pixel_size`: host px per source row in the manual scale mode.
+    pub pixel_size: Option<f32>,
 }
 
 /// The parameters a [`SourceProfile`] can set ([`SourceProfile::apply_to`]).
 pub const PROFILE_PARAM_IDS: &[&str] = &[
+    "source_flip",
+    "source_prefilter",
+    "source_pixel_size",
     "source_eotf",
     "source_crop_mode",
     "source_divisor_mode",
@@ -516,6 +529,8 @@ impl SourceProfile {
             ("source_scale_mode", &self.scale_mode, "scale_mode"),
             ("raster_aspect", &self.raster_aspect, "raster_aspect"),
             ("source_rotation", &self.rotation, "rotation"),
+            ("source_flip", &self.flip, "flip"),
+            ("source_prefilter", &self.prefilter, "prefilter"),
         ];
         for (id, value, field) in enums {
             if let Some(v) = value {
@@ -545,6 +560,12 @@ impl SourceProfile {
             warn(
                 c.iter().all(|v| (0.0..=1.0).contains(v)) && params.set("source_surround_color", ParamValue::Vec3(c)),
                 "surround_color",
+            );
+        }
+        if let Some(v) = self.pixel_size {
+            warn(
+                v.is_finite() && v > 0.0 && params.set("source_pixel_size", ParamValue::F32(v)),
+                "pixel_size",
             );
         }
         if let Some(v) = self.display_aspect {
@@ -598,6 +619,11 @@ pub struct Settings {
     pub global: Global,
     #[serde(rename = "source")]
     pub sources: Vec<SourceProfile>,
+    /// The profile of the programs that have none of their own (`[default_source]`, TODO Low "default profile"):
+    /// its `exe` and `class` are empty and unused; [`Settings::effective_source`] gives it to a program without a
+    /// `[[source]]` entry. A program that gets a profile of its own (a picture area or multiplier saved for it)
+    /// keeps what the default gave it from then on.
+    pub default_source: Option<SourceProfile>,
 }
 
 impl Default for Settings {
@@ -606,11 +632,24 @@ impl Default for Settings {
             version: SCHEMA_VERSION,
             global: Global::default(),
             sources: Vec::new(),
+            default_source: None,
         }
     }
 }
 
 impl Settings {
+    /// The profile that applies to a program: its own `[[source]]` entry, else the default profile (given the
+    /// program's `exe` and `class`), else none.
+    pub fn effective_source(&self, exe: &str, class: &str) -> Option<SourceProfile> {
+        self.find_source(exe, class).cloned().or_else(|| {
+            self.default_source.as_ref().map(|d| SourceProfile {
+                exe: exe.to_string(),
+                class: class.to_string(),
+                ..d.clone()
+            })
+        })
+    }
+
     /// Profile of a source, by executable file name and window class (case insensitive).
     pub fn find_source(&self, exe: &str, class: &str) -> Option<&SourceProfile> {
         self.sources
@@ -640,6 +679,7 @@ impl Settings {
         g.output.click_through = false;
         g.output.frame_cap = 0;
         g.output.tearing = false;
+        g.output.keep_awake = false;
     }
 
     /// Inserts or replaces the profile with the same executable and class.
@@ -1177,8 +1217,16 @@ mod tests {
             display_aspect: Some(4.0 / 3.0),
             raster_aspect: Some("par".into()),
             rotation: Some("clockwise".into()),
+            flip: Some("horizontal".into()),
+            prefilter: Some("lanczos2".into()),
+            pixel_size: Some(2.5),
             picture_area: Some("manual".into()),
             crop_client: Some([640, 480]),
+        });
+        s.default_source = Some(SourceProfile {
+            scale_mode: Some("fit".into()),
+            flip: Some("vertical".into()),
+            ..SourceProfile::default()
         });
         let mut p = Params::default();
         let m = some_id();
@@ -1850,6 +1898,69 @@ mod tests {
         for id in PROFILE_PARAM_IDS {
             assert!(Params::default().get(id).is_some(), "{id}");
         }
+    }
+
+    /// The default profile (TODO Low): a program without a profile of its own gets it, keyed to the program; a
+    /// program with one keeps its own whole (not merged); without a default there is none; the fields it sets
+    /// (flip, pre-filter, manual pixel size) reach the parameters.
+    #[test]
+    fn the_default_profile_goes_to_programs_without_one() {
+        use crate::params::{SOURCE_FLIP_HORIZONTAL, SOURCE_PREFILTER_LANCZOS3, SOURCE_SCALE_MODE_MANUAL};
+        let mut s = Settings::default();
+        assert!(s.effective_source("a.exe", "A").is_none());
+        s.default_source = Some(SourceProfile {
+            scale_mode: Some("manual".into()),
+            pixel_size: Some(2.5),
+            flip: Some("horizontal".into()),
+            prefilter: Some("lanczos3".into()),
+            ..SourceProfile::default()
+        });
+        let got = s.effective_source("a.exe", "A").unwrap();
+        assert_eq!((got.exe.as_str(), got.class.as_str()), ("a.exe", "A"));
+        s.upsert_source(SourceProfile {
+            exe: "b.exe".into(),
+            class: "B".into(),
+            scale_mode: Some("native".into()),
+            ..SourceProfile::default()
+        });
+        let own = s.effective_source("B.EXE", "b").unwrap();
+        assert_eq!(own.scale_mode.as_deref(), Some("native"));
+        assert!(own.flip.is_none(), "its own profile, not merged with the default");
+        let mut p = Params::default();
+        assert!(got.apply_to(&mut p).is_empty());
+        assert_eq!(p.source_scale_mode, SOURCE_SCALE_MODE_MANUAL);
+        assert_eq!(p.source_pixel_size, 2.5);
+        assert_eq!(p.source_flip, SOURCE_FLIP_HORIZONTAL);
+        assert_eq!(p.source_prefilter, SOURCE_PREFILTER_LANCZOS3);
+        // A bad value is skipped with a warning.
+        let bad = SourceProfile {
+            flip: Some("sideways".into()),
+            pixel_size: Some(-1.0),
+            ..SourceProfile::default()
+        };
+        assert_eq!(bad.apply_to(&mut Params::default()).len(), 2);
+        // The default round-trips in the file, as its own table.
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("[default_source]"), "{text}");
+    }
+
+    /// Keep-awake (TODO Low): off by default and in a file of an earlier build (no key), round-trips, a wrong type
+    /// reads as off, and "Reset everything" turns it off.
+    #[test]
+    fn keep_awake_defaults_off_and_round_trips() {
+        assert!(!Settings::default().global.output.keep_awake);
+        let mut s = Settings::default();
+        s.global.output.keep_awake = true;
+        let text = s.to_toml().unwrap();
+        assert!(text.contains("keep_awake = true"), "{text}");
+        let back: Settings = toml::from_str(&text).unwrap();
+        assert!(back.global.output.keep_awake);
+        let old: Settings = toml::from_str("version = 1\n[global.output]\nclick_through = true\n").unwrap();
+        assert!(!old.global.output.keep_awake);
+        let odd: Settings = toml::from_str("version = 1\n[global.output]\nkeep_awake = 3\n").unwrap();
+        assert!(!odd.global.output.keep_awake);
+        s.reset_everything();
+        assert!(!s.global.output.keep_awake);
     }
 
     /// R-41: the `[host]` table of earlier builds (an unused panel size) loads without a warning and is not

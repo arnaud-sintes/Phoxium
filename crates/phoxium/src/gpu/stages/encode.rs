@@ -208,7 +208,17 @@ impl Encode {
             offset: vk::Offset2D { x: 0, y: 0 },
             extent,
         };
-        let scissor = tube_scissor(tube_rect, extent);
+        // With the cabinet on, the draw covers the whole target: the shader draws the bezel outside the rectangle.
+        let scissor = tube_scissor(tube_rect, extent).map(|s| {
+            if params.cabinet_enable {
+                vk::Rect2D {
+                    offset: vk::Offset2D { x: 0, y: 0 },
+                    extent,
+                }
+            } else {
+                s
+            }
+        });
         d.cmd_begin_rendering(
             cb,
             &vk::RenderingInfo::default()

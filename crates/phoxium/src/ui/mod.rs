@@ -92,6 +92,8 @@ pub struct UiState {
     pub source: SourceView,
     /// The per-game profiles of the settings ("Saved profiles", `crate::profiles::rows`).
     pub profiles: Vec<crate::profiles::ProfileRow>,
+    /// The default profile's summary (`[default_source]`), `None` without one.
+    pub default_profile: Option<String>,
     /// The capture path (A29): asked, in force, why not zero-copy, the copy cost.
     pub capture: CaptureView,
     /// `[global.output] click_through` (the Interface section's row shows and changes it).
@@ -100,6 +102,8 @@ pub struct UiState {
     pub frame_cap: u32,
     /// `[global.output] tearing` as asked.
     pub tearing: bool,
+    /// `[global.output] keep_awake`: the PC is kept awake while the output runs.
+    pub keep_awake: bool,
     /// Whether the swapchain presents without waiting for the vertical blank now (false when the surface offers no
     /// such mode, whatever was asked).
     pub tearing_active: bool,
@@ -240,6 +244,8 @@ pub enum SourceAction {
     Refresh,
     /// Take the preview again now.
     RefreshPreview,
+    /// Choose a still image (a PNG) in a native dialog and use it as the source ("Open image").
+    OpenImage,
     /// Detect the picture area at once (the Source section's Detect now): Auto mode, the hysteresis reset.
     DetectNow,
     /// The picture area mode chosen (Auto, Manual from the limits in force, Whole client area).
@@ -297,6 +303,8 @@ pub struct UiOutput {
     pub frame_cap: Option<u32>,
     /// Tearing switched in the Display and pacing section.
     pub tearing: Option<bool>,
+    /// Keep-awake switched in the Display and pacing section.
+    pub keep_awake: Option<bool>,
     /// Max capture rate switched in the Display and pacing section.
     pub max_capture_rate: Option<bool>,
     /// A snapshot asked in the Display and pacing section (save a PNG, or copy to the clipboard).
@@ -733,6 +741,18 @@ impl Ui {
         }
     }
 
+    /// A still image became the source ("Open image"): there is no window to hand the foreground to; the picker
+    /// closes and its message is cleared.
+    pub fn image_attached(&mut self) {
+        self.set_source(None);
+        self.needs_source = false;
+        self.picker.attached = true;
+        self.picker.message = None;
+        if self.menu.is_open() {
+            self.close(CloseReason::Attached);
+        }
+    }
+
     /// The source is gone (detached, or given up after the wait): the menu mode cannot close any more and the
     /// app shows the picker ([`Ui::show_picker`]).
     pub fn source_gone(&mut self) {
@@ -814,6 +834,7 @@ impl Ui {
             }
             A::Refresh => self.out.source = Some(SourceAction::Refresh),
             A::RefreshPreview => self.out.source = Some(SourceAction::RefreshPreview),
+            A::OpenImage => self.out.source = Some(SourceAction::OpenImage),
             A::AskAtStart(on) => {
                 self.prefs.ask_at_start = on;
                 self.out.source_prefs = Some(self.prefs);
@@ -1425,6 +1446,10 @@ impl UiPass for Ui {
             if r.frame_cap.is_some() {
                 self.out.frame_cap = r.frame_cap;
                 self.state.frame_cap = r.frame_cap.unwrap_or(0);
+            }
+            if let Some(on) = r.keep_awake {
+                self.out.keep_awake = Some(on);
+                self.state.keep_awake = on;
             }
             if let Some(on) = r.tearing {
                 self.out.tearing = Some(on);

@@ -8,6 +8,7 @@ pub mod app;
 pub mod bars;
 pub mod capture;
 pub mod cli;
+pub mod colour_sets;
 pub mod controls;
 pub mod crash;
 pub mod diag;

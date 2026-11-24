@@ -201,6 +201,35 @@ pub fn click_through() -> bool {
     CLICK_THROUGH.load(Ordering::Relaxed)
 }
 
+/// The keep-awake state last handed to Windows (`[global.output] keep_awake`).
+static KEEP_AWAKE: AtomicBool = AtomicBool::new(false);
+
+/// The execution state that keeps the PC awake (`on`) or releases the request: `ES_CONTINUOUS` with the system
+/// and display required flags, or `ES_CONTINUOUS` alone (the flags cleared).
+pub fn keep_awake_flags(on: bool) -> u32 {
+    use windows::Win32::System::Power::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+    if on {
+        (ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED).0
+    } else {
+        ES_CONTINUOUS.0
+    }
+}
+
+/// Keeps the PC and its display awake while `on` (`SetThreadExecutionState` of the calling thread, which is the
+/// output loop's; Windows drops the request when the thread ends). Cheap to call every frame: Windows is only asked
+/// when the state changes.
+pub fn set_keep_awake(on: bool) {
+    use windows::Win32::System::Power::{SetThreadExecutionState, EXECUTION_STATE};
+    if KEEP_AWAKE.swap(on, Ordering::Relaxed) == on {
+        return;
+    }
+    // SAFETY: a plain call with a combination of the documented flags.
+    unsafe {
+        SetThreadExecutionState(EXECUTION_STATE(keep_awake_flags(on)));
+    }
+    println!("output: keep awake {}", if on { "on" } else { "off" });
+}
+
 /// Opens or closes the menu mode of the output window `hwnd` (T-52a, called by `crate::ui::menu::Menu`).
 /// Open: the output becomes activating and the T-07 hand-back stops ([`sync_activation`]), input is queued
 /// for the UI. Close: queueing stops, the activation behaviour of the current window mode comes back (a mode
@@ -1225,6 +1254,14 @@ mod tests {
     /// Click-through state machine: menu open x click-through x mode. The open menu always takes the mouse and
     /// the activation back (the user can always reach it); closing it returns to the setting; the mode does not
     /// change click-through.
+    /// Keep-awake asks Windows for `ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED` (0x80000003, the
+    /// documented values 0x80000000, 2 and 1); released, `ES_CONTINUOUS` alone (0x80000000) clears the request.
+    #[test]
+    fn keep_awake_asks_for_the_documented_flags() {
+        assert_eq!(super::keep_awake_flags(true), 0x8000_0003);
+        assert_eq!(super::keep_awake_flags(false), 0x8000_0000);
+    }
+
     #[test]
     fn click_through_follows_the_setting_and_the_open_menu_always_wins() {
         for mode in [true, false] {

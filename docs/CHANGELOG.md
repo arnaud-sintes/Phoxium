@@ -7,6 +7,24 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- **Colour sets** (`docs/REFERENCE.md`, "Colour sets"): named primaries, white points and standards (SMPTE-C, EBU, Rec.709 / sRGB, NTSC 1953, NTSC-J 9300 K, Trinitron, P22, D65, D93, Illuminant C, ...) at the top of the Gun and white panel, from `CRT.md`; a pick writes the four `tube_*_xy` values, which stay editable.
+- **Cabinet and bezel** (`docs/REFERENCE.md`, "Cabinet and bezel"): an optional moulded bezel around the picture, lit from the top left, with the glass reflecting it (`cabinet_*`, off by default); the picture is placed inside the output minus the bezel's band. Oracle `crt_model::cabinet`, GPU test `tests/cabinet.rs`.
+- **TV controls and refresh flicker** (`docs/REFERENCE.md`, "TV controls"): a slot `tv` with sharpness, tint, colour, black and white level and a flicker (`tv_*`), each neutral at its default, skipped while all are. Oracle `crt_model::tv`, GPU test `tests/stage_tv.rs`.
+- **VHS tape and vertical roll** (`docs/REFERENCE.md`, "VHS tape"): a slot `tape` with luma blur, colour smear and lag, a head-switching band, dropouts and a vertical roll (`tape_*`, off by default), the random numbers from the shared integer hash. Oracle `crt_model::tape`, GPU test `tests/stage_tape.rs`.
+- **Source pre-filters** (`source_prefilter`): box, triangle, Lanczos 2 and 3 and sinc kernels for reading a native pixel from a capture scaled up by a divisor (`point`, the default, is unchanged). Oracle `crt_model::prefilter`, GPU test `tests/prefilter.rs`.
+- **Flip** (`source_flip`): mirrors the picture horizontally, vertically or both, before the tube draws it (the tube is not mirrored; with a quarter turn it flips the upright picture).
+- **Manual pixel size** (`source_scale_mode = manual`, `source_pixel_size`): a fractional number of host pixels per source row.
+- **Keep the PC awake** (`[global.output] keep_awake`, Display and pacing): no sleep and no screen saver while Phoxium runs.
+- **Default profile** (`[default_source]`, Source section, Saved profiles): the profile of programs without one of their own; game profiles can also hold `flip`, `prefilter` and `pixel_size`.
+- **Open image** (the picker and the Source section): a PNG file as the source, in a native dialog.
+
+### Changed
+
+- The `encode` pass covers the whole output while the cabinet is on (it draws the bezel outside the picture); with it off nothing changes.
+
+
 ## [0.6.0] - 2026-11-23
 
 ### Added

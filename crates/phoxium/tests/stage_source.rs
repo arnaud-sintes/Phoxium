@@ -389,6 +389,7 @@ fn pvm_input(native: (u32, u32), aspect: RasterAspect) -> PlacementInput {
         integer: false,
         fit: HostFit::default(),
         turn: Turn::None,
+        inset_px: 0.0,
     }
 }
 

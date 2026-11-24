@@ -88,10 +88,11 @@ fn entry_of(h: isize, rows: &[picker::Row]) -> sources::WindowEntry {
         })
 }
 
-/// The source profile of a window (`[[source]]` by executable and class), if any.
+/// The source profile of a window: its own (`[[source]]` by executable and class), else the default profile
+/// (`[default_source]`), if any.
 fn profile_for(settings: &settings::Settings, target: &lifecycle::TargetKey) -> Option<settings::SourceProfile> {
     let (exe, class) = target.profile_key()?;
-    settings.find_source(exe, class).cloned()
+    settings.effective_source(exe, class)
 }
 
 /// The picker's rows now: candidates of the enumeration, recent windows first.
@@ -187,13 +188,18 @@ pub fn run() -> Res<()> {
     if let Ok(Some(line)) = std::panic::catch_unwind(crate::migrate::migrate_default_dir) {
         eprintln!("{line}");
     }
-    let kind = source::Source::choose(args.pattern.as_deref(), args.pattern_size, args.image.as_deref())?;
+    // A RefCell: "Open image" in the picker or the menu replaces a capture by a still image while the loop runs.
+    let kind = std::cell::RefCell::new(source::Source::choose(
+        args.pattern.as_deref(),
+        args.pattern_size,
+        args.image.as_deref(),
+    )?);
     // T-50: --preset (else the settings preset), then the settings overrides; an unknown preset stops here.
     let mut params = crate::render_cmd::live_params(args.preset.as_deref())?;
     // A23: the parameters without any source profile; a profile is swapped on every attach on top of the preset
     // in force (`SourceProfile::switch_to`).
     let start_base = params;
-    let mut synthetic = !matches!(kind, source::Source::Capture);
+    let mut synthetic = !matches!(*kind.borrow(), source::Source::Capture);
     let mut synthetic_n = 0u64;
     // T-54, T-57, HW-3, A23: the hotkey chords, the remembered window rectangle, the GPU choice and the source
     // selection come from the settings file.
@@ -327,8 +333,8 @@ pub fn run() -> Res<()> {
     };
     let mut frame = capture::Frame::default();
     let synthetic_frame = |frame: &mut capture::Frame, n: &mut u64| -> Res<bool> {
-        if *n == 0 || kind.is_animated() {
-            if let Some(f) = kind.frame(*n)? {
+        if *n == 0 || kind.borrow().is_animated() {
+            if let Some(f) = kind.borrow().frame(*n)? {
                 *frame = f;
             }
             *n += 1;
@@ -837,6 +843,59 @@ pub fn run() -> Res<()> {
                     bars_state.forget();
                     output::set_title(win.hwnd, &window_title(None, None));
                     println!("source: detached");
+                }
+                Some(SourceAction::OpenImage) => {
+                    let owner = win.hwnd.0 as isize;
+                    if let Some(path) = crate::shell::open_image_dialog(owner, std::path::Path::new("")) {
+                        let image = source::Source::Image(path.clone());
+                        match image.frame(0) {
+                            Ok(Some(f)) => {
+                                // The capture (if any) ends; the still image is the source, with no game profile:
+                                // the preset's source settings, as without a source.
+                                if let Some(c) = capture.take() {
+                                    captured_base += c.frames_captured();
+                                }
+                                reattach = None;
+                                lost_at = None;
+                                lost_watch.update(now, true);
+                                *kind.borrow_mut() = image;
+                                synthetic = true;
+                                // The first frame is already here: a still image delivers it once.
+                                synthetic_n = 1;
+                                frame = f;
+                                fresh = true;
+                                target = None;
+                                profile = settings::SourceProfile::default();
+                                let mut p = params;
+                                for w in profile.switch_to(&mut p, &base_params(&live)) {
+                                    eprintln!("warning: {w}");
+                                }
+                                if let Err(e) = args.apply_source(&mut p) {
+                                    eprintln!("warning: {e}");
+                                }
+                                params = p;
+                                renderer.set_params(params);
+                                baseline = baseline_of(live.library(), live.current_preset(), &profile);
+                                map = resolve_map(&params, &profile, cli_crop, cli_divisor).0;
+                                size_watch.request_history_clear();
+                                bars_state.forget();
+                                detector.reset();
+                                detect_key = (0, 0, None);
+                                remap = true;
+                                output::set_source(HWND::default());
+                                let name = path
+                                    .file_name()
+                                    .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
+                                source_name = Some(format!("image {name}"));
+                                output::set_title(win.hwnd, &window_title(source_name.as_deref(), None));
+                                phase = picker::next(phase, Event::Attached);
+                                ui.image_attached();
+                                println!("source: image {}", path.display());
+                            }
+                            Ok(None) => {}
+                            Err(e) => ui.set_picker_message(Some((false, format!("Cannot open the image: {e}")))),
+                        }
+                    }
                 }
                 Some(SourceAction::Refresh) => list_due = 0.0,
                 Some(SourceAction::RefreshPreview) => thumbs.refresh(),
@@ -1358,6 +1417,8 @@ pub fn run() -> Res<()> {
             renderer.set_tearing(live.tearing());
             ui_state.frame_cap = live.frame_cap();
             ui_state.tearing = live.tearing();
+            ui_state.keep_awake = live.keep_awake();
+            output::set_keep_awake(live.keep_awake());
             ui_state.tearing_active = renderer.tearing_active();
             if tearing_reported != ui_state.tearing_active {
                 tearing_reported = ui_state.tearing_active;
@@ -1409,6 +1470,7 @@ pub fn run() -> Res<()> {
                     .map(|r| (r.target().exe.clone().unwrap_or_default(), r.target().class.clone()));
                 ui_state.profiles =
                     crate::profiles::rows(live.settings(), current.as_ref().map(|(e, c)| (e.as_str(), c.as_str())));
+                ui_state.default_profile = crate::profiles::default_summary(live.settings());
             }
             // T-53: what the menu changed: the library (a preset saved or reloaded), the preset, the parameters
             // (applied live, recorded in the shared settings, written debounced), the adapter for the next start.
@@ -1466,6 +1528,9 @@ pub fn run() -> Res<()> {
             }
             if let Some(on) = changes.tearing {
                 live.set_tearing(on);
+            }
+            if let Some(on) = changes.keep_awake {
+                live.set_keep_awake(on);
             }
             if let Some(on) = changes.max_capture_rate {
                 live.set_max_capture_rate(on);
@@ -1555,6 +1620,32 @@ pub fn run() -> Res<()> {
                             live.save_source_profile(&copy, false);
                             println!("source profile of {exe} ({class}) used for {}", t.describe());
                             apply = Some(copy);
+                        }
+                    }
+                    crate::profiles::ProfileAction::SetDefault => {
+                        let own = key.as_ref().and_then(|t| {
+                            live.settings()
+                                .find_source(t.exe.as_deref().unwrap_or_default(), &t.class)
+                                .cloned()
+                        });
+                        if let Some(own) = own {
+                            if live.set_default_source(Some(crate::profiles::as_default(&own))) {
+                                println!("default profile set from the profile of the program captured");
+                            }
+                        }
+                    }
+                    crate::profiles::ProfileAction::ClearDefault => {
+                        if live.set_default_source(None) {
+                            println!("default profile cleared");
+                            // A program that had only the default goes back to the preset's source settings.
+                            let has_own = key.as_ref().is_some_and(|t| {
+                                live.settings()
+                                    .find_source(t.exe.as_deref().unwrap_or_default(), &t.class)
+                                    .is_some()
+                            });
+                            if !has_own && key.is_some() {
+                                apply = Some(settings::SourceProfile::default());
+                            }
                         }
                     }
                     crate::profiles::ProfileAction::ResetCurrent => {

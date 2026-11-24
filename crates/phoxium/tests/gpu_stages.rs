@@ -23,12 +23,14 @@ use phoxium::gpu::{
 use phoxium::params::{ParamValue, Params, SOURCE_EOTF_SRGB};
 use phoxium::scaling::View;
 
-const SLOTS: [&str; 9] = [
-    "signal", "amp", "impair", "gun", "abl", "screen", "wear", "phosphor", "optics",
+const SLOTS: [&str; 11] = [
+    "signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "phosphor", "optics",
 ];
 /// The slots that are still identity placeholders or copies. `screen` is excluded since T-36a: with the
 /// tube placed (T-30) it draws scanlines, so it is no longer an identity (its tests are `stage_beam_*`).
-const PASSTHROUGH: [&str; 8] = ["signal", "amp", "impair", "gun", "abl", "wear", "phosphor", "optics"];
+const PASSTHROUGH: [&str; 10] = [
+    "signal", "amp", "impair", "tape", "tv", "gun", "abl", "wear", "phosphor", "optics",
+];
 const W: u32 = 256;
 const H: u32 = 4;
 

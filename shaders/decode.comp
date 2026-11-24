@@ -24,6 +24,10 @@
 // three channels carry the BT.601 luma Y' = 0.299 R' + 0.587 G' + 0.114 B' of the gamma-encoded code values (the weights of
 // crt_model::composite::LUMA, oracle crt_model::phosphor_types::mono_drive), taken before the drive voltage and the gun
 // law. P22 does not take the branch (bit for bit unchanged).
+// Flip (`source_flip`, applied to the upright picture after the quarter turn) mirrors the block index.
+// Pre-filter (`source_prefilter`, oracle crt_model::prefilter): with a divisor above 1 a native pixel can be read as
+// a kernel-weighted sum of the captured texels around its block's centre (box, triangle, Lanczos 2 and 3, sinc)
+// instead of the one centre texel; with a divisor of 1 or `point` the texel is read as before, bit for bit.
 // pc.transfer and pc.gamma (Settings::source) remain only as an optional transfer applied to V after the
 // drive voltage, for tests of the pre-T-34 chain; the default is the identity.
 
@@ -42,6 +46,84 @@ layout(push_constant) uniform Push {
     uint transfer;
     float gamma;
 } pc;
+
+const float PI = 3.14159265358979;
+const int PREFILTER_MAX_TEXELS = 16;
+
+float sinc(float x) {
+    if (x == 0.0) {
+        return 1.0;
+    }
+    float t = PI * x;
+    return sin(t) / t;
+}
+
+// The kernel at distance x native pixels (crt_model::prefilter::weight).
+float prefilter_weight(float x) {
+    float a = abs(x);
+    switch (params.source_prefilter) {
+        case SOURCE_PREFILTER_BOX:
+            return a < 0.5 ? 1.0 : 0.0;
+        case SOURCE_PREFILTER_TRIANGLE:
+            return max(1.0 - a, 0.0);
+        case SOURCE_PREFILTER_LANCZOS2:
+            return a < 2.0 ? sinc(a) * sinc(a / 2.0) : 0.0;
+        case SOURCE_PREFILTER_LANCZOS3:
+            return a < 3.0 ? sinc(a) * sinc(a / 3.0) : 0.0;
+        case SOURCE_PREFILTER_SINC:
+            return a < 4.0 ? sinc(a) : 0.0;
+    }
+    return a == 0.0 ? 1.0 : 0.0;
+}
+
+float prefilter_radius() {
+    switch (params.source_prefilter) {
+        case SOURCE_PREFILTER_BOX:
+            return 0.5;
+        case SOURCE_PREFILTER_TRIANGLE:
+            return 1.0;
+        case SOURCE_PREFILTER_LANCZOS2:
+            return 2.0;
+        case SOURCE_PREFILTER_LANCZOS3:
+            return 3.0;
+        case SOURCE_PREFILTER_SINC:
+            return 4.0;
+    }
+    return 0.0;
+}
+
+// The captured code values of the native pixel whose block is `b` (the index in the upright picture).
+vec3 captured_code(ivec2 b) {
+    ivec2 size = textureSize(src, 0);
+    ivec2 start = pc.origin + b * pc.div;
+    if (params.source_prefilter == SOURCE_PREFILTER_POINT || pc.div == ivec2(1)) {
+        return texelFetch(src, clamp(start + pc.div / 2, ivec2(0), size - 1), 0).rgb;
+    }
+    float radius = prefilter_radius();
+    vec2 centre = vec2(start) + 0.5 * vec2(pc.div);
+    ivec2 c = ivec2(floor(centre));
+    ivec2 reach = clamp(ivec2(ceil(radius * vec2(pc.div))), ivec2(0), ivec2(PREFILTER_MAX_TEXELS));
+    vec3 acc = vec3(0.0);
+    float sum = 0.0;
+    for (int y = c.y - reach.y; y <= c.y + reach.y; y++) {
+        float wy = prefilter_weight((float(y) + 0.5 - centre.y) / float(pc.div.y));
+        if (wy == 0.0) {
+            continue;
+        }
+        for (int x = c.x - reach.x; x <= c.x + reach.x; x++) {
+            float w = wy * prefilter_weight((float(x) + 0.5 - centre.x) / float(pc.div.x));
+            if (w == 0.0) {
+                continue;
+            }
+            acc += w * texelFetch(src, clamp(ivec2(x, y), ivec2(0), size - 1), 0).rgb;
+            sum += w;
+        }
+    }
+    if (abs(sum) < 1e-12) {
+        return texelFetch(src, clamp(start + pc.div / 2, ivec2(0), size - 1), 0).rgb;
+    }
+    return clamp(acc / sum, 0.0, 1.0);
+}
 
 // Drive voltage V in [0, 1] of the captured code values (see the contract above).
 vec3 drive_voltage(vec3 code) {
@@ -67,8 +149,18 @@ void main() {
     } else if (params.source_rotation == SOURCE_ROTATION_CLOCKWISE) {
         b = ivec2(frame.native_size.y - 1 - p.y, p.x);
     }
-    ivec2 texel = clamp(pc.origin + b * pc.div + pc.div / 2, ivec2(0), textureSize(src, 0) - 1);
-    vec3 code = texelFetch(src, texel, 0).rgb;
+    // Flip of the upright picture (its size: the native size, with the sides swapped when turned).
+    if (params.source_flip != SOURCE_FLIP_OFF) {
+        bool turned = params.source_rotation != SOURCE_ROTATION_OFF;
+        ivec2 upright = turned ? frame.native_size.yx : frame.native_size;
+        if (params.source_flip == SOURCE_FLIP_HORIZONTAL || params.source_flip == SOURCE_FLIP_BOTH) {
+            b.x = upright.x - 1 - b.x;
+        }
+        if (params.source_flip == SOURCE_FLIP_VERTICAL || params.source_flip == SOURCE_FLIP_BOTH) {
+            b.y = upright.y - 1 - b.y;
+        }
+    }
+    vec3 code = captured_code(b);
     if (params.phosphor_type != PHOSPHOR_TYPE_P22) {
         code = vec3(dot(code, vec3(0.299, 0.587, 0.114)));
     }

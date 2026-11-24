@@ -77,6 +77,9 @@ fn params_for(mode: ScaleMode, center: bool) -> Params {
         ScaleMode::Integer(n) => (SOURCE_SCALE_MODE_INTEGER, n as i32),
         ScaleMode::Fit => (SOURCE_SCALE_MODE_FIT, 0),
         ScaleMode::FitFree => (SOURCE_SCALE_MODE_FIT_FREE, 0),
+        // Not an oracle mode (it has its own unit test in `placement`): the manual pixel size is set by its own
+        // parameter, which this helper does not carry.
+        ScaleMode::Manual(_) => unreachable!("the manual mode is tested in placement.rs"),
     };
     let mut p = Params::default();
     assert!(p.set("source_scale_mode", ParamValue::Enum(e)));

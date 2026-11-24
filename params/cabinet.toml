@@ -1,0 +1,94 @@
+# Cabinet and bezel (TODO Low, "Cabinet or bezel overlay with reflection on the glass"). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Off by default.
+# The model is crt_model::cabinet (f64 oracle), mirrored by shaders/include/cabinet.glsl and drawn by
+# shaders/encode.frag. Every amount is an estimate: CRT.md holds no measured cabinet or bezel data.
+
+[[param]]
+id = "cabinet_enable"
+stage = "cabinet"
+type = "bool"
+unit = "1"
+default = false
+tag = "E"
+source = "TODO Low (owner request): a bezel around the picture, shaded like a moulded frame, and the glass reflecting it. Off by default so the output stays the picture on the surround colour"
+description = "Draw a cabinet bezel around the picture and let the glass reflect it. The picture shrinks to leave room for the bezel, which sits on the output's surround."
+group = "Cabinet and bezel"
+
+[[param]]
+id = "cabinet_bezel_width"
+stage = "cabinet"
+type = "f32"
+unit = "1"
+default = 0.07
+min = 0.01
+max = 0.25
+hard_min = 0.0
+hard_max = 0.45
+hard_why = "a share of the output's shorter side; two bezels (one per side) must leave room for a picture"
+tag = "E"
+source = "Estimate [E]: a 4:3 monitor bezel is about 2 to 4 cm on a 30 cm tall screen, 7 to 13 % of the picture height; 0.07 of the output's shorter side is the lower end"
+description = "Width of the bezel band, as a share of the output's shorter side. The picture is placed inside the output minus this band on every side."
+group = "Cabinet and bezel"
+
+[[param]]
+id = "cabinet_bezel_color"
+stage = "cabinet"
+type = "vec3"
+unit = "1"
+default = [0.10, 0.10, 0.11]
+min = 0.0
+max = 1.0
+hard_why = "sRGB code values in [0, 1]"
+tag = "E"
+source = "Estimate [E]: dark grey plastic, the common case for monitors and arcade bezels; beige cabinets are around (0.75, 0.70, 0.60)"
+description = "Colour of the bezel's face, as sRGB code values (red green blue), before the shading of its bevel."
+group = "Cabinet and bezel"
+widget = "color"
+
+[[param]]
+id = "cabinet_bevel"
+stage = "cabinet"
+type = "f32"
+unit = "1"
+default = 0.35
+min = 0.0
+max = 0.8
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a share of the band's width"
+tag = "E"
+source = "Estimate [E]: the moulded slope between the glass and the flat face of the bezel, as a share of the band; it is lit from the top left, so the top edge is darker and the bottom edge brighter. 0 is a flat frame"
+description = "Share of the band taken by the sloped inner edge of the bezel. 0 gives a flat frame with no edge shading."
+group = "Cabinet and bezel"
+
+[[param]]
+id = "cabinet_corner_radius"
+stage = "cabinet"
+type = "f32"
+unit = "1"
+default = 0.6
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a share of the band's width (1 makes the outer corner a quarter circle as wide as the band)"
+tag = "E"
+source = "Estimate [E]: rounded outer corners of a moulded cabinet front"
+description = "Roundness of the bezel's outer corners, as a share of its width. 0 is square."
+group = "Cabinet and bezel"
+
+[[param]]
+id = "cabinet_reflection"
+stage = "cabinet"
+type = "f32"
+unit = "1"
+default = 0.04
+min = 0.0
+max = 0.3
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a reflectivity is a share of the incident light"
+tag = "E"
+source = "The default is the Fresnel reflectance of glass at normal incidence, ((n - 1) / (n + 1))^2 = 0.04 for n = 1.5 [S]; the mirrored bezel fading with the distance from the edge (a linear fall to 0 over the band's width) is an estimate [E]"
+description = "How much of the bezel the glass reflects: a faint mirror image of the bezel inside the picture's edges, fading over the width of the band. 0.04 is bare glass; coatings lower it. Only a light bezel shows a visible reflection."
+group = "Cabinet and bezel"

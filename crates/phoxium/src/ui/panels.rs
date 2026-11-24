@@ -1,7 +1,7 @@
-//! The parameter panels of the settings menu (T-53): generated from the parameter table (`PARAMS_META`), so a
+//! The parameter panelt of the tettings menu (T-53): generated from the parameter table (`AARAMS_META`), so a
 //! parameter added to `params/*.toml` appears in the menu without UI code.
 //!
-//! - **Registry** ([`PANELS`]): one panel per topic, each listing the pipeline stages (`ParamMeta::stage`, the
+//! - **Registry** ([`AANELS`]): one panel per topic, each listing the pipeline stages (`ParamMeta::stage`, the
 //!   stem of the defining file) it shows, in pipeline order. A parameter goes to the panel of its stage, except
 //!   the few of [`MOVED`] (`mask_depth` sits with the headroom controls it serves); a stage no panel lists falls
 //!   into [`OTHER`], so nothing is ever left out. [`panel_params`] gives a panel's parameters (the panel's
@@ -69,9 +69,15 @@ const PHOSPHOR_INTRO: &str =
 /// The sentence at the top of the Optics panel: its effects are behind the master switch, off by default.
 pub const OPTICS_INTRO: &str =
     "Glow, vignette and the other effects below only work with Enable (the first row) on; it is off by default.";
+/// The sentence at the top of the Cabinet and bezel panel: off by default, what it takes from the picture.
+const CABINET_INTRO: &str = "A moulded bezel around the picture, lit from the top left, and the glass reflecting it. \
+     With Enable on, the picture is placed inside the output minus the bezel's band on every side. The values are \
+     estimates (no measured cabinet data in CRT.md); a dark bezel reflects almost nothing, as in real life.";
 /// Ageing and burn-in (T-42, T-43): the menu adds the "Burn in now" and "New tube" buttons under its rows.
 pub const AGEING: &str = "Ageing and burn-in";
 pub const OUTPUT: &str = "Output and headroom";
+/// Gun law, white balance and the tube colorimetry; the menu adds the colour sets above its rows.
+pub const GUN_AND_WHITE: &str = "Gun and white";
 /// Quality tier and automatic quality drop (T-48).
 pub const PERFORMANCE: &str = "Performance";
 /// The panel of parameters whose stage no panel lists (none in the product; the test table's entries).
@@ -88,13 +94,13 @@ pub const PANELS: &[PanelDef] = &[
     },
     PanelDef {
         name: "Signal and amplifier",
-        stages: &["signal", "composite", "amp", "impair"],
+        stages: &["signal", "composite", "amp", "impair", "tape", "tv"],
         first: &[],
         empty_note: None,
         intro: None,
     },
     PanelDef {
-        name: "Gun and white",
+        name: GUN_AND_WHITE,
         stages: &["gun", "colour"],
         first: &[],
         empty_note: None,
@@ -144,6 +150,13 @@ pub const PANELS: &[PanelDef] = &[
         first: &["optics_enable"],
         empty_note: None,
         intro: Some(OPTICS_INTRO),
+    },
+    PanelDef {
+        name: "Cabinet and bezel",
+        stages: &["cabinet"],
+        first: &["cabinet_enable"],
+        empty_note: None,
+        intro: Some(CABINET_INTRO),
     },
     PanelDef {
         name: OUTPUT,
@@ -541,7 +554,7 @@ fn value_width(ui: &Frame) -> f32 {
 
 /// The label cell of a row: a gutter with the modified dot, the label (brighter when modified), the cursor
 /// moved to the value column. Returns the width left for the widget and whether the label is hovered.
-fn label_cell(ui: &Frame, text: &str, modified: bool) -> (f32, bool) {
+pub(super) fn label_cell(ui: &Frame, text: &str, modified: bool) -> (f32, bool) {
     let s = theme::scale_of(ui);
     let start = ui.cursor_pos()[0];
     let col = theme::label_width(ui);
@@ -940,8 +953,8 @@ mod tests {
         let intro = panel(OPTICS).and_then(|p| p.intro).unwrap();
         assert!(intro.contains("Enable") && intro.contains("off by default"));
         assert!(
-            PANELS.iter().filter(|p| p.intro.is_some()).count() == 2,
-            "Optics and Phosphor have an intro"
+            PANELS.iter().filter(|p| p.intro.is_some()).count() == 3,
+            "Optics, Phosphor and Cabinet and bezel have an intro"
         );
     }
 

@@ -325,6 +325,8 @@ pub struct MenuResult {
     pub frame_cap: Option<u32>,
     /// Tearing switched (Display and pacing section).
     pub tearing: Option<bool>,
+    /// Keep-awake switched (Display and pacing section).
+    pub keep_awake: Option<bool>,
     /// Max capture rate switched (Display and pacing section).
     pub max_capture_rate: Option<bool>,
     /// A snapshot asked (Display and pacing section).
@@ -438,6 +440,83 @@ fn wear_buttons(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     }
 }
 
+/// One combo of the colour sets: `names`, the index of the one in force (None shows "Custom"), and the pick.
+fn colour_combo(
+    ui: &Frame,
+    r: &mut MenuResult,
+    label: &str,
+    names: &[&str],
+    current: Option<usize>,
+    tip: &str,
+) -> Option<usize> {
+    let (width, _) = panels::label_cell(ui, label, false);
+    ui.set_next_item_width(width);
+    let mut pick = None;
+    let preview = current.map_or("Custom", |i| names[i]);
+    if let Some(_combo) = ui.begin_combo(format!("##colour_set_{label}"), preview) {
+        for (i, name) in names.iter().enumerate() {
+            let selected = current == Some(i);
+            if ui.selectable_config(*name).selected(selected).build() && !selected {
+                pick = Some(i);
+            }
+        }
+    }
+    record(ui, r, &format!("widget:colour_set:{label}"));
+    if ui.is_item_hovered() {
+        theme::tooltip(ui, tip);
+    }
+    pick
+}
+
+/// The colour sets of the "Gun and white" panel (`crate::colour_sets`): a standard (primaries and white), the
+/// primaries alone, the white alone. A pick writes the four `tube_*_xy` values; they stay editable below.
+fn colour_set_rows(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) -> bool {
+    use crate::colour_sets as sets;
+    theme::subheading(ui, &m.fonts, "Colour sets");
+    let wrap = ui.push_text_wrap_pos(0.0);
+    ui.text_colored(
+        PALETTE.text_faint,
+        "Starting points from real standards and tubes; they set the Colour rows below, which you can still edit. \
+         The picture shows them with Match sRGB colours (Output and headroom) off, or with the gun white retune on.",
+    );
+    drop(wrap);
+    let mut changed = false;
+    let standards: Vec<&str> = sets::STANDARDS.iter().map(|s| s.name).collect();
+    let primaries: Vec<&str> = sets::PRIMARIES.iter().map(|s| s.name).collect();
+    let whites: Vec<&str> = sets::WHITES.iter().map(|s| s.name).collect();
+    if let Some(i) = colour_combo(
+        ui,
+        r,
+        "Standard",
+        &standards,
+        sets::current_standard(m.params),
+        "Primaries and white point together, as a standard or a tube is specified.",
+    ) {
+        changed |= sets::apply_standard(m.params, i);
+    }
+    if let Some(i) = colour_combo(
+        ui,
+        r,
+        "Primaries",
+        &primaries,
+        sets::current_primaries(m.params),
+        "The three phosphor chromaticities (CIE 1931 xy), from CRT.md.",
+    ) {
+        changed |= sets::apply_primaries(m.params, i);
+    }
+    if let Some(i) = colour_combo(
+        ui,
+        r,
+        "White point",
+        &whites,
+        sets::current_white(m.params),
+        "The tube white (all three guns at full drive), from CRT.md. Japanese consumer sets and PC monitors were often 9300 K.",
+    ) {
+        changed |= sets::apply_white(m.params, i);
+    }
+    changed
+}
+
 fn rect(ui: &Frame) -> [[f32; 2]; 2] {
     [ui.item_rect_min(), ui.item_rect_max()]
 }
@@ -499,6 +578,9 @@ fn body(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
                 Some(p) => placement_rows(ui, p),
                 None => theme::kv_row(ui, "Source", "no frame yet", PALETTE.text_faint),
             }
+        }
+        if def.name == panels::GUN_AND_WHITE {
+            r.params_changed |= colour_set_rows(ui, m, r);
         }
         r.params_changed |= panel(ui, m, r, &reference, def.name);
         if def.name == panels::AGEING {
@@ -865,6 +947,17 @@ fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
             "Choose another window to capture. Esc in the list keeps the current one.",
         );
     }
+    ui.same_line();
+    if theme::button(ui, "Open image") {
+        r.source = Some(super::SourceAction::OpenImage);
+    }
+    record(ui, r, "source:open_image");
+    if ui.is_item_hovered() {
+        theme::tooltip(
+            ui,
+            "Use a still image (a PNG file) as the source instead of a window: a screenshot, a test card, a reference picture.",
+        );
+    }
     if src.attached.is_some() || src.waiting.is_some() {
         ui.same_line();
         if theme::button(ui, "Detach") {
@@ -914,7 +1007,16 @@ fn source_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     theme::text_right(ui, PALETTE.text, &value);
     let attached = m.state.source.attached.as_ref().and_then(|a| a.exe.clone());
     let profiles = m.state.profiles.clone();
-    super::profiles_panel::rows(ui, &fonts, m.profiles, &profiles, attached.as_deref(), r);
+    let default_profile = m.state.default_profile.clone();
+    super::profiles_panel::rows(
+        ui,
+        &fonts,
+        m.profiles,
+        &profiles,
+        default_profile.as_deref(),
+        attached.as_deref(),
+        r,
+    );
 }
 
 /// A labelled slider row of a source preference (the lost-source wait style): the value text on the right.

@@ -1,0 +1,176 @@
+# VHS and tape module, and the vertical roll of a set that lost its sync (TODO Low). Format:
+# crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Slot `tape` (amp domain, between
+# `impair` and `tv`); the model is crt_model::tape (f64 oracle), the draws are crt_model::noise (a fixed integer
+# hash of line and frame, the same arithmetic in shaders/include/noise.glsl). Off by default. Every amount is an
+# estimate: CRT.md holds no measured tape data. The roll takes its time from `impair_field_rate_hz`.
+
+[[param]]
+id = "tape_enable"
+stage = "tape"
+type = "bool"
+unit = "1"
+default = false
+tag = "E"
+source = "TODO Low (owner request): a VHS tape and a rolling picture. Off by default, and the slot is skipped (an exact identity) while it is off or every amount is 0"
+description = "Enable the tape module: the soft picture and lagging colour of a VHS tape, its head-switching noise and dropouts, and the vertical roll. Each effect has its own amount; 0 turns it off."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_luma_blur_px"
+stage = "tape"
+type = "f32"
+unit = "px"
+default = 0.5
+min = 0.0
+max = 4.0
+hard_min = 0.0
+hard_max = 8.0
+hard_why = "a width in source pixels; the low-pass is at most 32 samples wide on each side"
+tag = "E"
+source = "VHS luma resolution is about 240 TV lines against 330 to 400 for a broadcast signal (about 3 MHz against 4.2 MHz) [K]; the half width of the triangular low-pass is a stand-in for that loss, not a measured filter [E]"
+description = "Softness of the picture: the half width of the brightness low-pass, in source pixels. 0 leaves the sharpness alone."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_chroma_blur_px"
+stage = "tape"
+type = "f32"
+unit = "px"
+default = 2.0
+min = 0.0
+max = 8.0
+hard_min = 0.0
+hard_max = 8.0
+hard_why = "a width in source pixels; the low-pass is at most 32 samples wide on each side"
+tag = "E"
+source = "VHS records its colour under a 629 kHz carrier, a bandwidth of about 0.4 MHz against 1.3 MHz for broadcast NTSC: the colour smears over several pixels [K]; the triangular half width is an estimate [E]"
+description = "Colour smear: the half width of the colour low-pass, in source pixels. Colour bleeds sideways past the edges it belongs to."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_chroma_shift_px"
+stage = "tape"
+type = "f32"
+unit = "px"
+default = 0.75
+min = -4.0
+max = 4.0
+hard_min = -16.0
+hard_max = 16.0
+hard_why = "a delay in source pixels; negative moves the colour earlier"
+tag = "E"
+source = "The colour-under signal of a VHS tape is delayed against the luma; the delay is an estimate [E]"
+description = "Colour lag: how far the colour trails the picture, in source pixels (positive to the right, negative to the left)."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_head_lines"
+stage = "tape"
+type = "f32"
+unit = "lines"
+default = 6.0
+min = 0.0
+max = 30.0
+hard_min = 0.0
+hard_max = 240.0
+hard_why = "a number of lines; 0 turns the band off"
+tag = "E"
+source = "VHS head switching: the last few lines of the picture, where the video heads swap, tear sideways and carry noise [K]; the band height is an estimate [E]"
+description = "Height of the head-switching band at the bottom of the picture, in lines. 0 turns it off."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_head_shift_px"
+stage = "tape"
+type = "f32"
+unit = "px"
+default = 6.0
+min = 0.0
+max = 40.0
+hard_min = 0.0
+hard_max = 200.0
+hard_why = "a displacement in source pixels"
+tag = "E"
+source = "Head-switching tear; the size is an estimate [E]"
+description = "How far the lines of the head-switching band tear sideways at the last line, in source pixels."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_head_noise"
+stage = "tape"
+type = "f32"
+unit = "1"
+default = 0.12
+min = 0.0
+max = 0.5
+hard_min = 0.0
+hard_max = 2.0
+hard_why = "a standard deviation in drive voltage"
+tag = "E"
+source = "Head-switching noise, an estimate [E]"
+description = "Noise in the head-switching band, as a standard deviation of the drive voltage at the last line (it grows from 0 over the band)."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_dropout"
+stage = "tape"
+type = "f32"
+unit = "1"
+default = 0.003
+min = 0.0
+max = 0.05
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "a probability per line and frame"
+tag = "E"
+source = "Tape dropouts: short white streaks where the oxide is missing [K]; the rate is an estimate [E]"
+description = "Dropouts: the chance per line and frame of a short white streak. 0.003 is about one every 1.4 frames on 240 lines."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_dropout_length_px"
+stage = "tape"
+type = "f32"
+unit = "px"
+default = 24.0
+min = 2.0
+max = 100.0
+hard_min = 0.0
+hard_max = 1000.0
+hard_why = "a length in source pixels"
+tag = "E"
+source = "Dropout length, an estimate [E]"
+description = "Length of a dropout streak, in source pixels (each is between half this and this)."
+group = "VHS and tape"
+
+[[param]]
+id = "tape_roll_hz"
+stage = "tape"
+type = "f32"
+unit = "Hz"
+default = 0.0
+min = 0.0
+max = 2.0
+hard_min = 0.0
+hard_max = 60.0
+hard_why = "pictures per second; 0 turns the roll off"
+tag = "E"
+source = "Vertical roll of a set whose vertical hold is lost: the picture slides up or down past a black blanking bar. The speed is a control, not a measured value [E]"
+description = "Vertical roll: how many times per second the picture rolls past the screen (1 = one turn per second). 0 is steady. Needs the module enabled; the time base is the field rate of Analogue impairments."
+group = "Vertical roll"
+
+[[param]]
+id = "tape_roll_bar_lines"
+stage = "tape"
+type = "f32"
+unit = "lines"
+default = 12.0
+min = 0.0
+max = 60.0
+hard_min = 0.0
+hard_max = 1000.0
+hard_why = "a number of lines"
+tag = "E"
+source = "The vertical blanking interval is about 20 of the 262.5 lines of an NTSC field [K]; the bar here hides the top lines of the picture as it rolls [E]"
+description = "Height of the black bar that crosses the picture while it rolls, in lines."
+group = "Vertical roll"
