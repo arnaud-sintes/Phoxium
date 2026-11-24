@@ -199,7 +199,7 @@ pub fn guard<T>(body: impl FnOnce() -> Res<T>) -> Res<T> {
     }
 }
 
-/// Records a panic caught in a window procedure (`payload`), for the loop to report.
+/// Records a panic caught in a window procedure or in a capture callback (`payload`), for the loop to report.
 pub fn record_callback_panic(payload: &(dyn Any + Send)) {
     if let Ok(mut p) = CALLBACK_PANIC.lock() {
         if p.is_none() {
@@ -212,7 +212,7 @@ pub fn record_callback_panic(payload: &(dyn Any + Send)) {
 pub fn take_callback_panic() -> Option<String> {
     let message = CALLBACK_PANIC.lock().ok()?.take()?;
     Some(panic_text(
-        &format!("{message} (in a window procedure)"),
+        &format!("{message} (in a window procedure or a capture callback)"),
         last_report().as_deref(),
     ))
 }

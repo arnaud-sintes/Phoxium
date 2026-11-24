@@ -21,6 +21,7 @@ pub mod burnin;
 pub mod cabinet;
 pub mod colour;
 pub mod composite;
+pub mod fp16;
 pub mod geometry;
 pub mod gun;
 pub mod impair;

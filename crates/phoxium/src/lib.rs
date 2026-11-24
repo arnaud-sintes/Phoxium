@@ -15,6 +15,7 @@ pub mod diag;
 pub mod gpu;
 pub mod headroom;
 pub mod hotkeys;
+pub mod instance;
 pub mod interlace;
 pub mod keyboard_layout;
 pub mod lifecycle;

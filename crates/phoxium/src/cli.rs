@@ -79,6 +79,9 @@ Usage: phoxium [options]
                        0 = wait forever
   --exit-on-lost       exit when the captured window closes instead of waiting for it
   --exit-after <secs>  quit after some seconds (for automated tests)
+  --allow-multiple     do not refuse to start when another Phoxium runs (one at a time by default: two would
+                       share the settings and the burn-in state); runs with --exit-after, --snapshot or
+                       --save-capture are never refused
   --reset-burnin       start the burn-in wear map of the tube preset as a new tube (the saved wear is replaced
                        at the next save); the same as the menu button \"New tube\"
   render ...           (first argument) offline render of a pattern or image to PNG or PFM, no window; see `phoxium render --help`
@@ -127,6 +130,8 @@ pub struct Args {
     /// `--detect-bars <png>`: the offline picture-area diagnostic.
     pub detect_bars: Option<String>,
     pub exit_after: Option<f64>,
+    /// `--allow-multiple`: skip the one-instance guard (see [`crate::instance`]).
+    pub allow_multiple: bool,
     /// `--reset-burnin`: the burn-in wear map starts as a new tube (T-43).
     pub reset_burnin: bool,
     pub lost: lifecycle::LostPolicy,
@@ -327,6 +332,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                 a.wait_source_set = true;
             }
             "--exit-on-lost" => a.lost.exit_on_lost = true,
+            "--allow-multiple" => a.allow_multiple = true,
             "--exit-after" => a.exit_after = Some(number("--exit-after", &value("--exit-after")?)?),
             "--log" => a.log = Some(value("--log")?),
             "--pattern" => a.pattern = Some(value("--pattern")?),

@@ -16,10 +16,9 @@
 //! laptop's own camera only (see `docs/REFERENCE.md`); not checked with a real capture card.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::capture::Frame;
 
@@ -61,16 +60,54 @@ pub fn bgrx_to_bgra(src: &[u8], width: u32, height: u32, stride: i32) -> Option<
     Some(out)
 }
 
+/// The row pitch of a sample, signed as [`bgrx_to_bgra`] takes it. A device that reports `MF_MT_DEFAULT_STRIDE` (`attr`)
+/// is believed. Without the attribute Media Foundation's convention for uncompressed RGB applies: the rows are
+/// bottom-up (a negative stride), and the pitch is read from the sample itself when its length is a whole number of
+/// rows at least `width` pixels wide (a converter that pads its rows), else it is `width * 4`.
+#[must_use]
+pub fn effective_stride(attr: Option<i32>, width: u32, height: u32, len: usize) -> i32 {
+    if let Some(s) = attr {
+        return s;
+    }
+    let tight = (width as usize) * 4;
+    let rows = height as usize;
+    let pitch = if rows > 0 && len.is_multiple_of(rows) && len / rows >= tight {
+        len / rows
+    } else {
+        tight
+    };
+    -(i32::try_from(pitch).unwrap_or(i32::MAX))
+}
+
 /// A frame as the worker keeps it: its sequence number (from 1), width, height and BGRA8 pixels.
 type Sample = (u64, u32, u32, Vec<u8>);
+
+/// Where a video device is in its opening ([`VideoCapture::status`]).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Status {
+    /// The worker is opening the device (it can take seconds: a card that wakes up slowly).
+    #[default]
+    Opening,
+    /// The device is open and delivers frames of this size.
+    Running((u32, u32)),
+    /// The device could not be used: the reason.
+    Failed(String),
+}
+
+/// How long dropping a capture waits for its worker before leaving it behind (see `Drop for VideoCapture`).
+const STOP_WAIT: Duration = Duration::from_millis(1500);
 
 /// The newest frame of the worker, and the flags it shares with the owner.
 #[derive(Default)]
 struct Shared {
     frame: Mutex<Option<Sample>>,
+    status: Mutex<Status>,
     stop: AtomicBool,
     /// The worker ended (the device was unplugged, or stopped delivering).
     ended: AtomicBool,
+    /// Shuts the media source down: a worker blocked in a read (a card that sends nothing) returns with an error
+    /// as soon as it is called, from any thread. Set by the worker once the device is open.
+    shutdown: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl Shared {
@@ -80,6 +117,29 @@ impl Shared {
     fn lock_frame(&self) -> std::sync::MutexGuard<'_, Option<Sample>> {
         self.frame.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
+
+    fn set_status(&self, status: Status) {
+        *self.status.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = status;
+    }
+
+    fn status(&self) -> Status {
+        self.status
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    /// Calls the shutdown of the media source, once, if the worker has published one.
+    fn shut_source_down(&self) {
+        let f = self
+            .shutdown
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take();
+        if let Some(f) = f {
+            f();
+        }
+    }
 }
 
 /// An open video capture device (see the module documentation). Dropping it stops the worker.
@@ -88,37 +148,54 @@ pub struct VideoCapture {
     worker: Option<JoinHandle<()>>,
     /// The device's name, for the title.
     pub name: String,
-    /// The frame size of the device's current mode.
-    pub size: (u32, u32),
 }
 
 impl VideoCapture {
-    /// Opens `device` and starts reading. Waits for the worker to report the device's mode (5 s at most); an error
-    /// is the reason the device cannot be used.
-    pub fn open(device: &Device) -> Result<VideoCapture, String> {
+    /// Starts opening `device` on a worker thread and returns at once: the render thread never waits for a device
+    /// (a card can take seconds to wake up, or never answer). Poll [`VideoCapture::status`] and
+    /// [`VideoCapture::take_frame`]; an error is the reason the device cannot be used.
+    pub fn start(device: &Device) -> Result<VideoCapture, String> {
         let shared = Arc::new(Shared::default());
-        let (tx, rx) = mpsc::channel::<Result<(u32, u32), String>>();
         let link = device.link.clone();
         let worker_shared = Arc::clone(&shared);
         let worker = std::thread::Builder::new()
             .name("phoxium-video".into())
-            .spawn(move || platform::run(&link, &worker_shared, &tx))
+            .spawn(move || platform::run(&link, &worker_shared))
             .map_err(|e| e.to_string())?;
-        match rx.recv_timeout(Duration::from_secs(5)) {
-            Ok(Ok(size)) => Ok(VideoCapture {
-                shared,
-                worker: Some(worker),
-                name: device.name.clone(),
-                size,
-            }),
-            Ok(Err(e)) => {
-                let _ = worker.join();
-                Err(e)
+        Ok(VideoCapture {
+            shared,
+            worker: Some(worker),
+            name: device.name.clone(),
+        })
+    }
+
+    /// [`VideoCapture::start`], waiting for the device's mode (5 s at most; the tests and tools). An error is the
+    /// reason the device cannot be used.
+    pub fn open(device: &Device) -> Result<VideoCapture, String> {
+        let cap = VideoCapture::start(device)?;
+        let t0 = Instant::now();
+        loop {
+            match cap.status() {
+                Status::Running(_) => return Ok(cap),
+                Status::Failed(e) => return Err(e),
+                Status::Opening if t0.elapsed() > Duration::from_secs(5) => {
+                    return Err("the device did not answer within 5 seconds".into())
+                }
+                Status::Opening => std::thread::sleep(Duration::from_millis(10)),
             }
-            Err(_) => {
-                shared.stop.store(true, Ordering::Relaxed);
-                Err("the device did not answer within 5 seconds".into())
-            }
+        }
+    }
+
+    /// Where the opening is: still opening, running at a frame size, or failed with a reason.
+    pub fn status(&self) -> Status {
+        self.shared.status()
+    }
+
+    /// The frame size of the device's mode once it is open.
+    pub fn size(&self) -> Option<(u32, u32)> {
+        match self.shared.status() {
+            Status::Running(size) => Some(size),
+            _ => None,
         }
     }
 
@@ -146,10 +223,23 @@ impl VideoCapture {
 }
 
 impl Drop for VideoCapture {
+    /// Stops the worker without ever hanging the caller. A worker blocked in a read (a card that sends no picture) is
+    /// released by shutting its media source down from here; if it still has not finished after [`STOP_WAIT`] it is
+    /// left behind (it ends by itself when its read returns, and closes the device then) instead of freezing the app.
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Relaxed);
-        if let Some(w) = self.worker.take() {
+        self.shared.shut_source_down();
+        let Some(w) = self.worker.take() else {
+            return;
+        };
+        let t0 = Instant::now();
+        while !w.is_finished() && t0.elapsed() < STOP_WAIT {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        if w.is_finished() {
             let _ = w.join();
+        } else {
+            println!("video: the device did not stop within {STOP_WAIT:?}; left to finish in the background");
         }
     }
 }
@@ -166,9 +256,8 @@ pub fn list() -> Vec<Device> {
 }
 
 mod platform {
-    use super::{bgrx_to_bgra, unpack_size, Device, Shared};
+    use super::{bgrx_to_bgra, effective_stride, unpack_size, Device, Shared, Status};
     use std::sync::atomic::Ordering;
-    use std::sync::mpsc::Sender;
     use windows::core::{Error, PWSTR};
     use windows::Win32::Foundation::E_FAIL;
     use windows::Win32::Media::MediaFoundation::{
@@ -299,19 +388,36 @@ mod platform {
         Ok((source, reader))
     }
 
-    /// The size and row pitch of the reader's current RGB32 type.
-    unsafe fn mode_of(reader: &IMFSourceReader) -> Result<((u32, u32), i32), String> {
+    /// The size and the row pitch (`None` when the type has no `MF_MT_DEFAULT_STRIDE`, see [`effective_stride`]) of
+    /// the reader's current RGB32 type.
+    unsafe fn mode_of(reader: &IMFSourceReader) -> Result<((u32, u32), Option<i32>), String> {
         let t = reader
             .GetCurrentMediaType(MF_SOURCE_READER_FIRST_VIDEO_STREAM.0 as u32)
             .map_err(|e| e.to_string())?;
         let (w, h) = unpack_size(t.GetUINT64(&MF_MT_FRAME_SIZE).map_err(|e| e.to_string())?);
-        let stride = t.GetUINT32(&MF_MT_DEFAULT_STRIDE).map_or((w * 4) as i32, |v| v as i32);
+        let stride = t.GetUINT32(&MF_MT_DEFAULT_STRIDE).ok().map(|v| v as i32);
         Ok(((w, h), stride))
     }
 
-    /// The worker: opens the device, reports its mode (or the error) on `tx`, then reads samples until asked to stop
-    /// or the stream ends.
-    pub fn run(link: &str, shared: &Shared, tx: &Sender<Result<(u32, u32), String>>) {
+    /// A media source that another thread may shut down: media sources are free-threaded (the worker lives in a
+    /// multithreaded COM apartment) and `Shutdown` is the documented way to stop one from outside.
+    struct Agile(IMFMediaSource);
+
+    // SAFETY: see the type's documentation.
+    unsafe impl Send for Agile {}
+
+    impl Agile {
+        fn shutdown(&self) {
+            // SAFETY: a live media source; a second shutdown only returns an error.
+            unsafe {
+                let _ = self.0.Shutdown();
+            }
+        }
+    }
+
+    /// The worker: opens the device, publishes its mode (or the error) in `shared.status`, then reads samples until
+    /// asked to stop or the stream ends.
+    pub fn run(link: &str, shared: &Shared) {
         // Whatever ends the worker (the stream, an error, a panic), the owner sees `ended`.
         struct EndGuard<'a>(&'a Shared);
         impl Drop for EndGuard<'_> {
@@ -322,7 +428,7 @@ mod platform {
         let _end = EndGuard(shared);
         let started = Started::new();
         let Ok(_mf) = started else {
-            let _ = tx.send(Err("Media Foundation is not available".into()));
+            shared.set_status(Status::Failed("Media Foundation is not available".into()));
             return;
         };
         // SAFETY: Media Foundation is started on this thread; every COM object below lives and dies here.
@@ -330,18 +436,25 @@ mod platform {
             let (source, reader) = match open_reader(link) {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = tx.send(Err(e));
+                    shared.set_status(Status::Failed(e));
                     return;
                 }
             };
             let (mut size, mut stride) = match mode_of(&reader) {
                 Ok(v) => v,
                 Err(e) => {
-                    let _ = tx.send(Err(e));
+                    shared.set_status(Status::Failed(e));
+                    let _ = source.Shutdown();
                     return;
                 }
             };
-            let _ = tx.send(Ok(size));
+            // The owner can shut the source down from outside to release a blocked read.
+            let agile = Agile(source.clone());
+            *shared
+                .shutdown
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Box::new(move || agile.shutdown()));
+            shared.set_status(Status::Running(size));
             let mut seq = 0u64;
             while !shared.stop.load(Ordering::Relaxed) {
                 let mut flags = 0u32;
@@ -357,6 +470,7 @@ mod platform {
                 if read.is_err()
                     || flags & (MF_SOURCE_READERF_ENDOFSTREAM.0 as u32 | MF_SOURCE_READERF_ERROR.0 as u32) != 0
                 {
+                    // Stopped from outside (the source was shut down to release this read), or the device ended.
                     shared.ended.store(true, Ordering::Relaxed);
                     break;
                 }
@@ -376,7 +490,12 @@ mod platform {
                     continue;
                 }
                 let bytes = std::slice::from_raw_parts(ptr, len as usize);
-                let converted = bgrx_to_bgra(bytes, size.0, size.1, stride);
+                let converted = bgrx_to_bgra(
+                    bytes,
+                    size.0,
+                    size.1,
+                    effective_stride(stride, size.0, size.1, bytes.len()),
+                );
                 let _ = buffer.Unlock();
                 if let Some(data) = converted {
                     seq += 1;
@@ -392,6 +511,40 @@ mod platform {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The attribute wins; without it the rows are bottom-up (Media Foundation's RGB convention) with the pitch of the
+    /// sample when it holds whole padded rows, else the tight one.
+    #[test]
+    fn a_missing_stride_means_bottom_up_with_the_pitch_of_the_sample() {
+        assert_eq!(effective_stride(Some(12), 2, 2, 24), 12);
+        assert_eq!(effective_stride(Some(-8), 2, 2, 16), -8);
+        assert_eq!(effective_stride(None, 2, 2, 16), -8, "tight rows");
+        assert_eq!(effective_stride(None, 2, 2, 24), -12, "padded rows");
+        assert_eq!(
+            effective_stride(None, 2, 3, 25),
+            -8,
+            "not a whole number of rows: tight"
+        );
+        assert_eq!(
+            effective_stride(None, 4, 2, 16),
+            -16,
+            "a buffer shorter than the rows needs: tight, refused later"
+        );
+        assert_eq!(effective_stride(None, 2, 0, 16), -8, "no rows");
+    }
+
+    /// With no attribute a bottom-up sample comes out the right way up.
+    #[test]
+    fn a_sample_without_the_attribute_is_turned_over() {
+        let src = [
+            1, 1, 1, 0, 2, 2, 2, 0, // memory row 0 = the bottom row
+            3, 3, 3, 0, 4, 4, 4, 0, // memory row 1 = the top row
+        ];
+        let stride = effective_stride(None, 2, 2, src.len());
+        let out = bgrx_to_bgra(&src, 2, 2, stride).unwrap();
+        assert_eq!(&out[..4], &[3, 3, 3, 255], "the first output pixel is the top-left one");
+        assert_eq!(&out[12..], &[2, 2, 2, 255]);
+    }
 
     #[test]
     fn the_frame_size_is_unpacked_from_the_attribute() {
@@ -432,6 +585,83 @@ mod tests {
         assert!(bgrx_to_bgra(&[0; 16], 2, 2, 8).is_some());
     }
 
+    /// The owner releases a worker that is blocked in a read: the shutdown the worker published is called (once), the
+    /// drop returns as soon as the worker has finished, and a worker that never finishes does not hang the drop (it is
+    /// left behind after the wait). Both with a fake worker thread, no device.
+    #[test]
+    fn dropping_a_capture_never_hangs_on_a_blocked_worker() {
+        use std::sync::atomic::AtomicUsize;
+        // A worker that is "blocked in a read" until the shutdown is called: it then finishes.
+        let shared = Arc::new(Shared::default());
+        let shutdowns = Arc::new(AtomicUsize::new(0));
+        let released = Arc::new(AtomicBool::new(false));
+        {
+            let (count, flag) = (Arc::clone(&shutdowns), Arc::clone(&released));
+            *shared.shutdown.lock().unwrap() = Some(Box::new(move || {
+                count.fetch_add(1, Ordering::Relaxed);
+                flag.store(true, Ordering::Relaxed);
+            }));
+        }
+        let flag = Arc::clone(&released);
+        let worker = std::thread::spawn(move || {
+            while !flag.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(2));
+            }
+        });
+        let cap = VideoCapture {
+            shared: Arc::clone(&shared),
+            worker: Some(worker),
+            name: "blocked".into(),
+        };
+        let t0 = Instant::now();
+        drop(cap);
+        assert!(t0.elapsed() < Duration::from_millis(800), "{:?}", t0.elapsed());
+        assert_eq!(shutdowns.load(Ordering::Relaxed), 1, "the source was shut down once");
+        assert!(shared.stop.load(Ordering::Relaxed));
+
+        // A worker that ignores everything: the drop gives up after the wait instead of joining for ever.
+        let shared = Arc::new(Shared::default());
+        let gate = Arc::new(AtomicBool::new(false));
+        let g = Arc::clone(&gate);
+        let stuck = std::thread::spawn(move || {
+            while !g.load(Ordering::Relaxed) {
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        });
+        let cap = VideoCapture {
+            shared,
+            worker: Some(stuck),
+            name: "stuck".into(),
+        };
+        let t0 = Instant::now();
+        drop(cap);
+        let waited = t0.elapsed();
+        assert!(
+            waited >= STOP_WAIT && waited < STOP_WAIT + Duration::from_millis(1500),
+            "{waited:?}"
+        );
+        gate.store(true, Ordering::Relaxed); // let the left-behind thread end
+    }
+
+    /// The status moves from opening to running or failed, and `size` follows it.
+    #[test]
+    fn the_status_follows_the_opening() {
+        let shared = Arc::new(Shared::default());
+        let cap = VideoCapture {
+            shared: Arc::clone(&shared),
+            worker: None,
+            name: "t".into(),
+        };
+        assert_eq!((cap.status(), cap.size()), (Status::Opening, None));
+        shared.set_status(Status::Running((640, 480)));
+        assert_eq!(
+            (cap.status(), cap.size()),
+            (Status::Running((640, 480)), Some((640, 480)))
+        );
+        shared.set_status(Status::Failed("busy".into()));
+        assert_eq!((cap.status(), cap.size()), (Status::Failed("busy".into()), None));
+    }
+
     /// A panic while the frame slot is locked (the worker, or anything else) does not stop the frames for good: the
     /// poisoned lock is read through, and the worker's end is always reported.
     #[test]
@@ -448,7 +678,6 @@ mod tests {
             shared: Arc::clone(&shared),
             worker: None,
             name: "test".into(),
-            size: (1, 1),
         };
         *shared.lock_frame() = Some((1, 1, 1, vec![9; 4]));
         let mut into = Frame::default();
@@ -467,7 +696,6 @@ mod tests {
             shared: Arc::clone(&shared),
             worker: None,
             name: "test".into(),
-            size: (2, 1),
         };
         let mut into = Frame::default();
         assert!(!cap.take_frame(&mut into), "nothing yet");
@@ -504,14 +732,15 @@ mod tests {
             return;
         };
         let cap = VideoCapture::open(device).expect("open");
+        assert!(matches!(cap.status(), Status::Running(_)));
         let mut frame = Frame::default();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while !cap.take_frame(&mut frame) {
             assert!(std::time::Instant::now() < deadline, "no frame within 5 seconds");
             std::thread::sleep(Duration::from_millis(10));
         }
-        eprintln!("frame {}x{}, mode {:?}", frame.width, frame.height, cap.size);
-        assert_eq!((frame.width, frame.height), cap.size);
+        eprintln!("frame {}x{}, mode {:?}", frame.width, frame.height, cap.size());
+        assert_eq!(Some((frame.width, frame.height)), cap.size());
         assert_eq!(frame.data.len(), (frame.width * frame.height * 4) as usize);
     }
 }

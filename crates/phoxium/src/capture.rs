@@ -313,9 +313,21 @@ impl Capture {
         {
             let worker = worker.clone();
             pool.FrameArrived(&TypedEventHandler::<Direct3D11CaptureFramePool, IInspectable>::new(
-                move |pool, _| match pool.as_ref() {
-                    Some(pool) => lock_tolerant(&worker).on_frame(pool),
-                    None => Ok(()),
+                // A panic must not unwind into the WinRT dispatcher (undefined behaviour across that boundary):
+                // it is caught, recorded for the session loop to end on (D-05), and the frame is dropped.
+                move |pool, _| {
+                    let Some(pool) = pool.as_ref() else {
+                        return Ok(());
+                    };
+                    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        lock_tolerant(&worker).on_frame(pool)
+                    })) {
+                        Ok(r) => r,
+                        Err(payload) => {
+                            crate::crash::record_callback_panic(&*payload);
+                            Ok(())
+                        }
+                    }
                 },
             ))?;
         }

@@ -15,8 +15,8 @@
     Without a switch it creates the release as a DRAFT on the target repository (-Repo, printed with the tag and
     the assets), checks that the uploaded assets have the sizes of the local files, and stops: nothing is public
     yet and the tag does not exist yet. Look at the draft (the printed URL), then run it again with -Publish: the
-    same checks, plus a draft for the tag whose assets match the local files, then the draft becomes public and
-    GitHub creates the tag at HEAD. Errors of git and gh are shown with their text. If it fails half way, see
+    same checks, plus a draft for the tag whose assets match the local files (names, sizes and SHA-256) and whose
+    target commit is HEAD, then the draft becomes public and GitHub creates the tag at HEAD. Errors of git and gh are shown with their text. If it fails half way, see
     "Recovery" in ENV.md.
 .PARAMETER DryRun
     Run every check and print the target, the assets and the release notes, but create nothing.
@@ -66,7 +66,7 @@ function Get-WorkspaceVersion {
 function Get-Release([string]$tag) {
     $previous = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    try { $all = @(gh release view $tag --repo $Repo --json 'tagName,isDraft,url,assets' 2>&1) } finally { $ErrorActionPreference = $previous }
+    try { $all = @(gh release view $tag --repo $Repo --json 'tagName,isDraft,url,assets,targetCommitish' 2>&1) } finally { $ErrorActionPreference = $previous }
     $code = $LASTEXITCODE
     $text = (@($all | ForEach-Object { "$_" }) -join "`n").Trim()
     if ($code -eq 0) { return ($text | ConvertFrom-Json) }
@@ -74,7 +74,21 @@ function Get-Release([string]$tag) {
     throw "gh release view $tag --repo $Repo failed with exit code ${code}:`n$text"
 }
 
-# Throws unless the release's assets are exactly the local files $files (same names and sizes).
+# The SHA-256 (lower case hex) of a release asset as GitHub holds it: its `digest` when GitHub reports one, else the
+# asset downloaded through its API URL (a draft has no tag to download by) and hashed.
+function Get-RemoteSha($asset) {
+    if ($asset.PSObject.Properties.Name -contains 'digest' -and "$($asset.digest)" -match '^sha256:([0-9a-fA-F]{64})$') { return $Matches[1].ToLower() }
+    $tmp = Join-Path $env:TEMP ('phoxium-asset-' + [guid]::NewGuid().ToString('N'))
+    try {
+        $token = ((Invoke-Native 'gh auth token' { gh auth token }) -join '').Trim()
+        Invoke-Native "download of asset $($asset.name)" {
+            curl.exe --silent --show-error --fail --location -H "Authorization: Bearer $token" -H 'Accept: application/octet-stream' -o $tmp $asset.apiUrl
+        } | Out-Null
+        return (Get-FileHash -LiteralPath $tmp -Algorithm SHA256).Hash.ToLower()
+    } finally { try { [IO.File]::Delete($tmp) } catch { } }
+}
+
+# Throws unless the release's assets are exactly the local files $files (same names, sizes and SHA-256).
 function Assert-ReleaseAssets($release, [string[]]$files) {
     $assets = @($release.assets)
     $want = @($files | ForEach-Object { Split-Path $_ -Leaf })
@@ -86,7 +100,22 @@ function Assert-ReleaseAssets($release, [string[]]$files) {
         $a = $assets | Where-Object { $_.name -eq (Split-Path $f -Leaf) }
         $size = (Get-Item -LiteralPath $f).Length
         if ([int64]$a.size -ne $size) { throw "Asset $($a.name) of release $($release.tagName) has $($a.size) bytes, the local file $size." }
+        # Same size is not the same file: a draft left from an earlier build could match by size alone.
+        $local = (Get-FileHash -LiteralPath $f -Algorithm SHA256).Hash.ToLower()
+        $remote = Get-RemoteSha $a
+        if ($remote -ne $local) { throw "Asset $($a.name) of release $($release.tagName) has SHA-256 $remote, the local file ${local}: delete the draft and run scripts/release.ps1 again." }
     }
+}
+
+# Throws unless the release will be tagged at $head: GitHub creates the tag of a draft at its target commit when it is
+# published, so a draft made for another commit must never be published (the check after publishing could only report it).
+function Assert-ReleaseTarget($release, [string]$head) {
+    $target = "$($release.targetCommitish)"
+    if ($target -notmatch '^[0-9a-f]{40}$') {
+        # A branch name: the commit it is at on origin now.
+        $target = ((Invoke-Native 'git rev-parse' { git rev-parse "origin/$($release.targetCommitish)" }) -join '').Trim()
+    }
+    if ($target -ne $head) { throw "The draft $($release.tagName) targets $target, HEAD is ${head}: delete the draft and run scripts/release.ps1 again." }
 }
 
 $version = Get-WorkspaceVersion
@@ -172,6 +201,7 @@ if ($Publish) {
     if (-not $existing) { throw "No draft release $tag on ${Repo}: run scripts/release.ps1 (without -Publish) first." }
     if (-not $existing.isDraft) { throw "Release $tag on $Repo is already public: nothing to publish." }
     Assert-ReleaseAssets $existing $assetFiles
+    Assert-ReleaseTarget $existing $head
     if ($DryRun) {
         Write-Host "Dry run: would publish the draft $($existing.url)."
         return

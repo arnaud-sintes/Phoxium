@@ -183,6 +183,14 @@ pub fn run() -> Res<()> {
         return Ok(());
     }
 
+    // One live session at a time (two would share settings.toml and the wear maps). Automated runs (a time limit, a
+    // snapshot or a capture file) and --allow-multiple are not guarded. Held until `run` returns.
+    let automated = args.exit_after.is_some() || args.snapshot.is_some() || args.save_capture.is_some();
+    let _single_instance = if args.allow_multiple || automated {
+        None
+    } else {
+        crate::instance::acquire_app()?
+    };
     // REN-1: a live session first copies the settings folder of the earlier versions, once (before
     // anything reads the settings). Never fatal; the offline commands above leave the folders alone.
     if let Ok(Some(line)) = std::panic::catch_unwind(crate::migrate::migrate_default_dir) {
@@ -714,8 +722,12 @@ pub fn run() -> Res<()> {
                                // A video capture device as the source (`video`), the devices the picker lists (enumerated when the picker opens
                                // or Refresh is pressed, `video_refresh`).
     let mut video: Option<video::VideoCapture> = None;
+    // A device being opened, and since when: see `SourceAction::OpenVideo`.
+    let mut video_pending: Option<(video::VideoCapture, Instant)> = None;
     let mut video_list: Vec<video::Device> = Vec::new();
     let mut video_refresh = true;
+    // The last render error that skipped a frame (said once, not every frame).
+    let mut last_render_error: Option<String> = None;
     let mut thumbs = picker::ThumbPlan::default();
     let mut thumb_capture: Option<(isize, capture::Capture)> = None;
     let own = win.hwnd.0 as isize;
@@ -814,7 +826,10 @@ pub fn run() -> Res<()> {
                     | SourceAction::UndoCrop),
                 ) => area_request = Some(a),
                 Some(SourceAction::SetMultiplier(m)) => multiplier_request = Some(m),
-                Some(SourceAction::Attach(h)) => attach_request = Some(h),
+                Some(SourceAction::Attach(h)) => {
+                    video_pending = None;
+                    attach_request = Some(h);
+                }
                 Some(SourceAction::Cancel) => phase = picker::next(phase, Event::Cancel),
                 Some(SourceAction::ChangeSource) => {
                     phase = picker::next(phase, Event::ShowPicker);
@@ -842,6 +857,7 @@ pub fn run() -> Res<()> {
                     phase = picker::next(phase, Event::Detach);
                     synthetic = false;
                     video = None;
+                    video_pending = None;
                     frame = idle_frame();
                     fresh = true;
                     size_watch.request_history_clear();
@@ -881,6 +897,7 @@ pub fn run() -> Res<()> {
                                 // The first frame is already here: a still image delivers it once.
                                 synthetic_n = 1;
                                 video = None;
+                                video_pending = None;
                                 let name = path
                                     .file_name()
                                     .map_or_else(|| path.display().to_string(), |n| n.to_string_lossy().into_owned());
@@ -893,23 +910,13 @@ pub fn run() -> Res<()> {
                 }
                 Some(SourceAction::OpenVideo(i)) => {
                     if let Some(device) = video_list.get(i).cloned() {
-                        match video::VideoCapture::open(&device) {
+                        // The device opens on its own thread: a card that wakes up slowly, or never answers, must not
+                        // freeze the loop (polled below until its first frame, or the wait runs out).
+                        video_pending = None;
+                        match video::VideoCapture::start(&device) {
                             Ok(v) => {
-                                // The first frame sizes the window, as a window capture's does: wait for it a moment.
-                                let mut first = capture::Frame::default();
-                                let deadline = Instant::now() + Duration::from_secs(3);
-                                while !v.take_frame(&mut first) && Instant::now() < deadline {
-                                    std::thread::sleep(Duration::from_millis(10));
-                                }
-                                if first.seq == 0 {
-                                    ui.set_picker_message(Some((
-                                        false,
-                                        format!("{} delivered no picture within 3 seconds.", device.name),
-                                    )));
-                                } else {
-                                    video = Some(v);
-                                    still_switch = Some((first, format!("video {}", device.name)));
-                                }
+                                ui.set_picker_message(Some((true, format!("Opening {}...", device.name))));
+                                video_pending = Some((v, Instant::now()));
                             }
                             Err(e) => {
                                 ui.set_picker_message(Some((false, format!("Cannot open {}: {e}", device.name))));
@@ -922,6 +929,32 @@ pub fn run() -> Res<()> {
                     video_refresh = true;
                 }
                 Some(SourceAction::RefreshPreview) => thumbs.refresh(),
+            }
+            // A video device being opened (`SourceAction::OpenVideo`): it becomes the source with its first frame, or the
+            // reason it cannot is shown; never longer than `VIDEO_OPEN_WAIT`.
+            if let Some((v, since)) = video_pending.take() {
+                let mut first = capture::Frame::default();
+                match v.status() {
+                    video::Status::Failed(e) => {
+                        ui.set_picker_message(Some((false, format!("Cannot open {}: {e}", v.name))));
+                    }
+                    _ if since.elapsed() > VIDEO_OPEN_WAIT => {
+                        ui.set_picker_message(Some((
+                            false,
+                            format!(
+                                "{} delivered no picture within {} seconds.",
+                                v.name,
+                                VIDEO_OPEN_WAIT.as_secs()
+                            ),
+                        )));
+                    }
+                    _ if v.take_frame(&mut first) => {
+                        let label = format!("video {}", v.name);
+                        video = Some(v);
+                        still_switch = Some((first, label));
+                    }
+                    _ => video_pending = Some((v, since)),
+                }
             }
             if let Some((f, label)) = still_switch.take() {
                 // A still image or a video device becomes the source: the capture (if any) ends, and there is no game
@@ -1905,7 +1938,25 @@ pub fn run() -> Res<()> {
                         return Err("--snapshot: the output surface cannot be copied from".into());
                     }
                 }
-                let status = renderer.render_source(upload, view, out_size, Some(&mut ui))?;
+                // Only a GPU error (a lost device or surface, no memory, an unsupported device) ends the session; any other
+                // error is about this frame (a captured picture the GPU cannot take, an allocation for a size): the frame
+                // is skipped, said once, and the next one gets its chance (the output stays responsive).
+                let status = match renderer.render_source(upload, view, out_size, Some(&mut ui)) {
+                    Ok(s) => {
+                        last_render_error = None;
+                        s
+                    }
+                    Err(e) if render_error_is_fatal(&*e) => return Err(e),
+                    Err(e) => {
+                        let text = e.to_string();
+                        if last_render_error.as_deref() != Some(text.as_str()) {
+                            eprintln!("render: {text}: the frame is skipped");
+                            last_render_error = Some(text);
+                        }
+                        fresh = false;
+                        continue;
+                    }
+                };
                 if let Some(img) = renderer.take_snapshot() {
                     if let Some(path) = args.snapshot.as_ref().filter(|_| cli_snapshot_asked) {
                         crate::snapshot::save_to(&img, std::path::Path::new(path))?;
@@ -2139,6 +2190,10 @@ pub fn run() -> Res<()> {
         Ok(())
     });
 
+    // The video device goes first, while the window exists: its stop is bounded (`Drop for VideoCapture`), and it no
+    // longer outlives the output window it was shown in.
+    drop(video);
+    drop(video_pending);
     // R-01, R-16: the shutdown, on every exit path (quit, lost source, `--exit-after`, or an error above).
     let hwnd = win.hwnd;
     shut_down(
@@ -2156,6 +2211,15 @@ pub fn run() -> Res<()> {
         outcome,
     )
 }
+
+/// Whether a render error ends the session: the GPU errors (`gpu::GpuError`: a lost device or surface, no memory, an
+/// unsupported device) do, because the renderer cannot go on; anything else concerns one frame.
+fn render_error_is_fatal(e: &(dyn std::error::Error + 'static)) -> bool {
+    e.downcast_ref::<gpu::GpuError>().is_some()
+}
+
+/// How long a video device may take to deliver its first picture after it was chosen (`SourceAction::OpenVideo`).
+const VIDEO_OPEN_WAIT: Duration = Duration::from_secs(8);
 
 /// How long a minimised output sleeps between two loop iterations when no message wakes it (R-04): the lost
 /// source and reattach checks keep running at this rate.
@@ -2883,6 +2947,17 @@ mod tests {
             });
             assert_eq!(fatal_message(&*e), DEVICE_LOST_MESSAGE);
         }
+        // Only the GPU errors end the session; a plain error about one frame does not.
+        let lost: Box<dyn std::error::Error> = Box::new(gpu::GpuError::DeviceLost {
+            during: "x",
+            hung: false,
+        });
+        assert!(render_error_is_fatal(&*lost));
+        let oom: Box<dyn std::error::Error> = Box::new(gpu::GpuError::OutOfMemory { during: "x" });
+        assert!(render_error_is_fatal(&*oom));
+        let frame: Box<dyn std::error::Error> =
+            "pipeline: the captured frame is 40000x1, larger than this GPU's 16384 px image limit".into();
+        assert!(!render_error_is_fatal(&*frame));
         let e: Box<dyn std::error::Error> = Box::new(gpu::GpuError::OutOfMemory { during: "x" });
         let m = fatal_message(&*e);
         assert!(

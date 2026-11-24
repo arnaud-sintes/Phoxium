@@ -7,13 +7,18 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-24
+
 ### Fixed
 
 - **The cabinet bezel is drawn from the raster rectangle**, not from the tube rectangle grown by the beam's skirt margin: its inner edge sat about 10 px outside the picture and its outer edge past the output edge. It now covers the skirt strip and ends at the output's edge (test through a grown rectangle, `tests/cabinet.rs`).
 - **The analogue impairments, the tape and the TV flicker follow real time**, not the output frame counter: on a 144 Hz display (or with a frame cap) hum, crawl, tracking roll, tape roll and flicker ran too fast, and the random draws were redrawn every output frame. They are now redrawn once per source frame at `impair_field_rate_hz` (`tv_frame_rate_hz` for the flicker).
 - **Open image** refuses a picture larger than the GPU's image limit (it ended the session at the first render) and the decoder refuses a header that claims more than 32768 pixels a side or 128 Mpixel before allocating; the native dialog no longer closes the menu or the picker when it closes.
 - **A whole-monitor source is found again when its monitor comes back** (the reattach list had no monitors), and `--window "Whole screen N"` keeps the monitor's identity (profile, last choice).
-- **The video device**: a panic in its worker no longer stops its frames for good, and its end is always reported.
+- **The video device**: a panic in its worker no longer stops its frames for good, and its end is always reported. A device that stops delivering (a capture card with no signal) no longer hangs the application: opening runs on the worker and shows "Opening <device>..." (up to 8 s, then a message), and closing it (Detach, a source switch, exit) shuts the source down and waits at most 1.5 s for the worker.
+- **A render error that is not a lost device no longer ends the session**: the frame is skipped and the error is printed once; only a lost GPU device (`GpuError`) stops the loop, as before.
+- **A video device without `MF_MT_DEFAULT_STRIDE`** is read bottom-up, Media Foundation's convention for RGB, with the row pitch taken from the sample (it was read top-down); a device that reports the stride is unchanged. Not checked on a device that omits it.
+- **A panic in the capture's frame callback** is caught and ends the session with the crash report (it was a panic across the WinRT boundary).
 - **Default profile**: it keeps the source settings but not the program's crop, divisor or picture area; deleting or resetting a program's profile gives it the default profile.
 - **Source pre-filters** repeat the edge of the picture area instead of reading the bars or window chrome around a cropped picture.
 - **Presets**: a file in the presets folder that the library does not list under that id is never overwritten (rename, import, Save as new); the names Windows reserves for a device (`con`, `nul`, ...) and `default` get a `-preset` suffix; "Update" keeps a preset's label, notes and the provenance of the values that did not change.
@@ -28,6 +33,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Added
 
+- **One Phoxium at a time**: a second start is refused with a message (a named mutex of the Windows session, module `instance`): two would share `settings.toml` and the burn-in wear maps. `--allow-multiple` skips the check; runs with `--exit-after`, `--snapshot` or `--save-capture` are never refused.
+- **`scripts/release.ps1`** compares the SHA-256 of every asset of a draft release with the local file (the digest GitHub reports, else the downloaded asset), and refuses to publish a draft whose target commit is not HEAD (before publishing, not after).
 - **Capture card** (`docs/REFERENCE.md`, "Choosing the window to capture", **Capture card**): a video capture device (a capture card, a camera) as the source, listed in the picker; read through Media Foundation as RGB, at the device's own picture size. Module `video`; the sample conversion is unit tested, and the laptop's camera lists, opens and delivers a frame; not checked with a real capture card.
 
 ## [0.7.0] - 2026-11-24
@@ -307,7 +314,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.7.0...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.8.0...HEAD
+[0.8.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.6.0...v0.7.0
 [0.6.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.5.0...v0.6.0
 [0.5.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.4.0...v0.5.0
