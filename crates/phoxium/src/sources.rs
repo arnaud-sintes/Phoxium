@@ -77,10 +77,17 @@ pub struct WindowEntry {
 
 impl WindowEntry {
     pub fn from_info(info: &WinInfo) -> Self {
+        let hwnd = info.hwnd.0 as isize;
         WindowEntry {
-            hwnd: info.hwnd.0 as isize,
+            hwnd,
             title: info.title.clone(),
-            exe: executable_name(info.hwnd),
+            // A whole monitor has no window to ask: its program is the pseudo-program of the picker's rows, so
+            // the saved profile and the last choice are keyed the same however the source was found.
+            exe: if monitor_index(hwnd).is_some() {
+                Some(MONITOR_EXE.to_string())
+            } else {
+                executable_name(info.hwnd)
+            },
             class: info.class.clone(),
             width: info.width,
             height: info.height,
@@ -88,9 +95,29 @@ impl WindowEntry {
     }
 }
 
-/// The window list for the UI: title, executable and class of every candidate window.
+/// The window list for the UI and for the reattach: title, executable and class of every candidate window, then
+/// the connected monitors as pseudo-windows (a whole-monitor source that was lost is found again when its
+/// monitor comes back).
 pub fn list_entries() -> Vec<WindowEntry> {
-    list_windows().iter().map(WindowEntry::from_info).collect()
+    let mut entries: Vec<WindowEntry> = list_windows().iter().map(WindowEntry::from_info).collect();
+    entries.extend(monitor_entries(&crate::output::monitor_irects()));
+    entries
+}
+
+/// The monitors as list entries (title "Whole screen N", program [`MONITOR_EXE`], class with the monitor number,
+/// handle [`monitor_handle`]).
+pub fn monitor_entries(monitors: &[crate::modes::IRect]) -> Vec<WindowEntry> {
+    raw_monitors(monitors)
+        .into_iter()
+        .map(|w| WindowEntry {
+            hwnd: w.hwnd,
+            title: w.title,
+            exe: w.exe,
+            class: w.class,
+            width: w.width,
+            height: w.height,
+        })
+        .collect()
 }
 
 /// True while `hwnd` still designates a window (a destroyed window or a stale handle gives false), or, for the
@@ -551,6 +578,41 @@ mod tests {
             find_title_in(&raw, "whole screen 2").map(|w| w.hwnd),
             Some(monitor_handle(1))
         );
+    }
+
+    /// The reattach list holds the monitors too (a whole-monitor source that was lost is found when its monitor comes
+    /// back), and a monitor found by title keeps its identity: the pseudo-program "Display" and its class.
+    #[test]
+    fn monitors_are_in_the_reattach_list_and_keep_their_identity() {
+        let monitors = [
+            crate::modes::IRect::new(0, 0, 2560, 1440),
+            crate::modes::IRect::new(2560, 0, 4000, 2560),
+        ];
+        let entries = super::monitor_entries(&monitors);
+        assert_eq!(entries.len(), 2);
+        assert_eq!(
+            (entries[1].hwnd, entries[1].exe.as_deref(), entries[1].class.as_str()),
+            (monitor_handle(1), Some("Display"), "phoxium_monitor_2")
+        );
+        // The target of a lost "Whole screen 2" matches the entry of the same monitor, not the other one.
+        let target = crate::lifecycle::TargetKey::of(&entries[1]);
+        let known = std::collections::HashSet::new();
+        let found = crate::lifecycle::choose_reattach(&target, monitor_handle(1), &known, &entries);
+        assert_eq!(found.map(|e| e.hwnd), Some(monitor_handle(1)));
+        let other = crate::lifecycle::TargetKey::of(&entries[0]);
+        assert_eq!(
+            crate::lifecycle::choose_reattach(&other, monitor_handle(1), &known, &entries).map(|e| e.hwnd),
+            Some(monitor_handle(0))
+        );
+        // `from_info` of a monitor handle gives the pseudo-program without asking Windows about the handle.
+        let info = super::WinInfo {
+            hwnd: windows::Win32::Foundation::HWND(monitor_handle(1) as *mut std::ffi::c_void),
+            title: "Whole screen 2".into(),
+            class: "phoxium_monitor_2".into(),
+            width: 1440,
+            height: 2560,
+        };
+        assert_eq!(super::WindowEntry::from_info(&info).exe.as_deref(), Some("Display"));
     }
 
     /// A listable window of `exe` with a size.

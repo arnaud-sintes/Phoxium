@@ -21,9 +21,26 @@ pub enum Kind {
     Copy,
 }
 
-/// The folder snapshots are saved in: `%USERPROFILE%\Pictures\Phoxium`, or a `Phoxium` folder in the temporary
-/// folder when there is no user profile.
+/// The user's Pictures folder as Windows knows it (the known folder, which follows a redirection to OneDrive or
+/// another drive), `None` when it cannot be asked.
+fn known_pictures_folder() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Pictures, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: a plain query; the string it returns is copied and freed at once.
+    unsafe {
+        let p = SHGetKnownFolderPath(&FOLDERID_Pictures, KF_FLAG_DEFAULT, None).ok()?;
+        let path = p.to_string().ok().filter(|s| !s.is_empty());
+        CoTaskMemFree(Some(p.0 as *const _));
+        path.map(PathBuf::from)
+    }
+}
+
+/// The folder snapshots are saved in: `Phoxium` in the user's Pictures folder (the known folder, wherever it is
+/// redirected; else `%USERPROFILE%\Pictures`), or a `Phoxium` folder in the temporary folder when there is neither.
 pub fn pictures_dir() -> PathBuf {
+    if let Some(p) = known_pictures_folder() {
+        return p.join("Phoxium");
+    }
     match std::env::var_os("USERPROFILE") {
         Some(p) if !p.is_empty() => PathBuf::from(p).join("Pictures").join("Phoxium"),
         _ => std::env::temp_dir().join("Phoxium"),
@@ -125,6 +142,17 @@ pub fn deliver(kind: Kind, img: &SnapshotImage, owner: isize) -> (bool, String) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The snapshot folder is `Phoxium` inside a Pictures folder (the known one, or the profile's).
+    #[test]
+    fn the_snapshot_folder_is_phoxium_in_the_pictures_folder() {
+        let d = pictures_dir();
+        assert_eq!(d.file_name().and_then(|n| n.to_str()), Some("Phoxium"), "{d:?}");
+        if let Some(known) = known_pictures_folder() {
+            assert_eq!(d, known.join("Phoxium"));
+            assert!(known.is_absolute(), "{known:?}");
+        }
+    }
 
     fn image() -> SnapshotImage {
         // 2 x 2: red, green / blue, white.

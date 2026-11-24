@@ -555,7 +555,7 @@ pub fn run() -> Res<()> {
         wait_s: if args.wait_source_set {
             args.lost.wait_s
         } else {
-            stored.global.source.wait_s
+            settings::sane_wait_s(stored.global.source.wait_s)
         },
         exit_on_lost: args.lost.exit_on_lost,
     };
@@ -854,9 +854,28 @@ pub fn run() -> Res<()> {
                 }
                 Some(SourceAction::OpenImage) => {
                     let owner = win.hwnd.0 as isize;
-                    if let Some(path) = crate::shell::open_image_dialog(owner, std::path::Path::new("")) {
+                    // As for the preset dialogs: the output's deactivation while the dialog is open must not close the
+                    // menu or the picker (and the messages queued meanwhile are fed before it can).
+                    ui.begin_dialog();
+                    let chosen = crate::shell::open_image_dialog(owner, std::path::Path::new(""));
+                    for (m, w, l) in output::take_ui_messages() {
+                        ui.handle_win32_message(m, w, l);
+                    }
+                    ui.end_dialog();
+                    if let Some(path) = chosen {
                         let image = source::Source::Image(path.clone());
+                        let max = renderer.image_limits().max_dim;
                         match image.frame(0) {
+                            Ok(Some(f)) if f.width > max || f.height > max => {
+                                // A frame the GPU cannot take would end the session at the first render.
+                                ui.set_picker_message(Some((
+                                    false,
+                                    format!(
+                                        "The image is {} x {}: larger than this GPU's {max} px image limit.",
+                                        f.width, f.height
+                                    ),
+                                )));
+                            }
                             Ok(Some(f)) => {
                                 *kind.borrow_mut() = image;
                                 // The first frame is already here: a still image delivers it once.
@@ -1664,7 +1683,8 @@ pub fn run() -> Res<()> {
                             println!("source profile deleted: {exe} ({class})");
                         }
                         if is_current(&exe, &class) {
-                            apply = Some(settings::SourceProfile::default());
+                            // What the program gets now that its own profile is gone: the default profile, if any.
+                            apply = Some(live.settings().effective_source(&exe, &class).unwrap_or_default());
                         }
                     }
                     crate::profiles::ProfileAction::UseForCurrent { exe, class } => {
@@ -1706,7 +1726,12 @@ pub fn run() -> Res<()> {
                         if let Some(t) = &key {
                             live.remove_source_profile(t.exe.as_deref().unwrap_or_default(), &t.class);
                             println!("source profile reset: {}", t.describe());
-                            apply = Some(settings::SourceProfile::default());
+                            // Back to what the next attach gives it: the default profile, if any.
+                            apply = Some(
+                                live.settings()
+                                    .effective_source(t.exe.as_deref().unwrap_or_default(), &t.class)
+                                    .unwrap_or_default(),
+                            );
                         }
                     }
                 }
@@ -1856,6 +1881,9 @@ pub fn run() -> Res<()> {
             if idle {
                 // R-04: no busy loop while minimised; any message (a hotkey, the restore) wakes it at once.
                 output::wait_messages(IDLE_WAIT);
+            } else if placement::Turn::from_params(&params) != turn {
+                // The quarter turn was changed in this iteration (the menu, a reset): the view follows at the next one
+                // (`remap`), so no frame is drawn with the turned parameters and the unturned view.
             } else {
                 // R-01: a lost device ends the loop (the shutdown saves, `fatal_message` tells the user); what the
                 // renderer recovers from is a status, not an error.

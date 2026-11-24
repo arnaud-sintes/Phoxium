@@ -41,7 +41,7 @@ layout(push_constant) uniform Push {
     float roll_bar;          // lines
     uint flags;              // 1 bandwidth, 2 head switching, 4 dropouts, 8 roll
     float width_px;          // source pixels per line (samples / K)
-    float pad;
+    uint source_frame;       // the source frame of this moment (real time at the field rate): the hash counter
 } pc;
 
 // Seeds and mixes of crt_model::tape.
@@ -84,7 +84,7 @@ void main() {
     int y = p.y;
     int lines = size.y;
     int width = size.x;
-    uint frame_index = frame.frame_index;
+    uint frame_index = pc.source_frame;
     float kf = float(frame.amp_k);
     float alpha = texelFetch(drive_in, p, 0).a;
 

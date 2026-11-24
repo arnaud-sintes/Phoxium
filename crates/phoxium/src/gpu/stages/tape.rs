@@ -51,7 +51,9 @@ pub(super) struct Push {
     roll_bar: f32,
     flags: u32,
     width_px: f32,
-    pad: f32,
+    /// The source frame of this moment (`FrameConstants::source_frame` at `impair_field_rate_hz`): the frame counter of
+    /// the hash draws (head tear, head noise, dropouts).
+    source_frame: u32,
 }
 
 /// The oracle's settings for `params`.
@@ -81,6 +83,8 @@ pub(super) fn plan(p: &Params, fc: &FrameConstants) -> Push {
     let m = model(p);
     let k = fc.amp_k.max(1) as usize;
     let lines = fc.native_size[1].max(1) as u32;
+    // Real time: the source frames that have passed at the field rate, whatever the display rate.
+    let frame = fc.source_frame(m.field_rate_hz);
     let mut flags = 0;
     if m.has_filter(k) {
         flags |= FLAG_FILTER;
@@ -104,11 +108,11 @@ pub(super) fn plan(p: &Params, fc: &FrameConstants) -> Push {
         head_noise: m.head_noise as f32,
         dropout: m.dropout as f32,
         dropout_length_px: m.dropout_length_px as f32,
-        roll_offset: m.roll_offset(fc.frame_index, lines) as i32,
+        roll_offset: m.roll_offset(frame, lines) as i32,
         roll_bar: m.roll_bar_lines as f32,
         flags,
         width_px: fc.native_size[0].max(1) as f32,
-        pad: 0.0,
+        source_frame: frame,
     }
 }
 
@@ -161,7 +165,7 @@ mod tests {
     fn push_layout_and_seeds_match_the_shader() {
         assert_eq!(size_of::<Push>(), 56);
         assert_eq!(std::mem::offset_of!(Push, flags), 44);
-        assert_eq!(std::mem::offset_of!(Push, pad), 52);
+        assert_eq!(std::mem::offset_of!(Push, source_frame), 52);
         let glsl = include_str!("../../../../../shaders/tape.comp");
         let order = [
             "int ry;",
@@ -177,7 +181,7 @@ mod tests {
             "float roll_bar;",
             "uint flags;",
             "float width_px;",
-            "float pad;",
+            "uint source_frame;",
         ];
         let pos: Vec<usize> = order
             .iter()
@@ -235,9 +239,9 @@ mod tests {
             impair_field_rate_hz: 60.0,
             ..Params::default()
         };
-        let mut fc = FrameConstants::new((320, 240), (1280, 960), false);
-        fc.frame_index = 30;
+        let fc = FrameConstants::new((320, 240), (1280, 960), false).at_source_frame(30, 60.0);
         let push = plan(&p, &fc);
+        assert_eq!(push.source_frame, 30);
         let k = fc.amp_k;
         assert_eq!((push.ry, push.rc), ((0.5 * k as f32).round() as i32, 2 * k));
         assert_eq!(push.chroma_shift, 0.75 * k as f32);

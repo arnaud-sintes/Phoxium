@@ -27,7 +27,7 @@ hard_max = 1000.0
 hard_why = "a positive frame rate"
 tag = "E"
 source = "TODO.md analogue impairments; CRT.md Signal path (cable reflections, ghosts) and Scan jitter and swim (mains interference); the amounts are estimates"
-description = "Frame rate of the source: the time base of the impairments (hum rolls, crawl drifts and the tracking band moves at this many frames a second). 60 for most consoles and arcade boards, 50 for PAL."
+description = "Frame rate of the source: the time base of the impairments and of the tape's roll. They follow real time at this many source frames a second, whatever the display rate: the hum bar, the crawl and the tracking band move in real seconds, and the random jitter, noise and snow are redrawn once per source frame (a 144 Hz display shows the same source frame for a while). 60 for most consoles and arcade boards, 50 for PAL."
 group = "Analogue impairments"
 advanced = true
 

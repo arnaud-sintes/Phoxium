@@ -1,13 +1,15 @@
 //! Whole-chain GPU cost per stage (performance work, PLAN T-48 / T-93), headless, no window.
 //!
-//! `chain_profile` renders 320 x 240 sources through the full chain (as the live path: `Settings::default()`,
+//! `chain_profile` renders 320 x 240 sources (by default; `PHOXIUM_PROFILE_SOURCES` adds 640x480 and 1280x720, whose
+//! amp-domain images are native width x K wide: the cost of `amp`, `gun`, `abl` and `screen` grows with them) through the full chain (as the live path: `Settings::default()`,
 //! host 2.2, a `B8G8R8A8_UNORM` target) at three output sizes, for several tube configurations and contents,
 //! and prints the per-stage GPU milliseconds (median, and the spread p10..p90, of per-burst means). Every
 //! scenario runs once per round and the rounds are interleaved, so a clock change on the shared GPU hits all
 //! scenarios alike. Printed, not asserted. Run with
 //! `cargo test --release -p phoxium --test perf_profile -- --ignored --nocapture`.
 //! Filters (comma lists of prefixes): `PHOXIUM_PROFILE_SIZES` (e.g. `1920`), `PHOXIUM_PROFILE_CONFIGS`,
-//! `PHOXIUM_PROFILE_CONTENT`; `PHOXIUM_PROFILE_ROUNDS` (default 9), `PHOXIUM_PROFILE_BURST` (frames per burst, default
+//! `PHOXIUM_PROFILE_CONTENT`; `PHOXIUM_PROFILE_SOURCES` (comma list of `WxH` among `320x240` (the default), `640x480`,
+//! `1280x720`, e.g. `320x240,640x480`, or `all`); `PHOXIUM_PROFILE_ROUNDS` (default 9), `PHOXIUM_PROFILE_BURST` (frames per burst, default
 //! 6); `PHOXIUM_PROFILE_SET` (`id=value;id=value`, applied to every configuration).
 
 use phoxium::gpu::{Headless, SourceFrame, StageReadback, TargetFormat};
@@ -16,8 +18,9 @@ use phoxium::patterns::{generate, Pattern};
 use phoxium::render_cmd::{resolve_preset_in, set_param};
 use phoxium::scaling::View;
 
-const W: u32 = 320;
-const H: u32 = 240;
+/// The source sizes the profile can run: 320 x 240 (the default and the size of every measurement of the docs up
+/// to 2026-11-24), 640 x 480 and 1280 x 720.
+const SOURCES: [(u32, u32); 3] = [(320, 240), (640, 480), (1280, 720)];
 
 fn hash(a: u32, b: u32) -> u32 {
     let mut v = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_mul(0x85EB_CA77) ^ 0x1234_5678;
@@ -94,14 +97,18 @@ fn noise(w: u32, h: u32) -> Vec<u8> {
     out
 }
 
+/// A source size, and the contents generated at that size.
+type Size = (u32, u32);
+type Contents = Vec<(&'static str, Vec<u8>)>;
+
 /// The contents: (name, BGRA frame).
-fn contents() -> Vec<(&'static str, Vec<u8>)> {
+fn contents(w: u32, h: u32) -> Vec<(&'static str, Vec<u8>)> {
     vec![
-        ("game", game(W, H)),
-        ("checker1", generate(&Pattern::Checker(1), W, H, 0)),
-        ("noise", noise(W, H)),
-        ("ramp", generate(&Pattern::Ramp, W, H, 0)),
-        ("flat", generate(&Pattern::Flat(160), W, H, 0)),
+        ("game", game(w, h)),
+        ("checker1", generate(&Pattern::Checker(1), w, h, 0)),
+        ("noise", noise(w, h)),
+        ("ramp", generate(&Pattern::Ramp, w, h, 0)),
+        ("flat", generate(&Pattern::Flat(160), w, h, 0)),
     ]
 }
 
@@ -161,31 +168,56 @@ fn chain_profile() {
         .into_iter()
         .filter(|(n, _)| keep(&env("PHOXIUM_PROFILE_CONFIGS"), n))
         .collect();
-    let contents: Vec<_> = contents()
+    // The source sizes asked for (default 320x240), each with its contents.
+    let wanted = env("PHOXIUM_PROFILE_SOURCES");
+    let sources: Vec<(Size, Contents)> = SOURCES
         .into_iter()
-        .filter(|(n, _)| keep(&env("PHOXIUM_PROFILE_CONTENT"), n))
+        .filter(|&(w, h)| {
+            if wanted.is_empty() {
+                (w, h) == SOURCES[0]
+            } else {
+                wanted == "all" || keep(&wanted, &format!("{w}x{h}"))
+            }
+        })
+        .map(|(w, h)| {
+            let c: Vec<_> = contents(w, h)
+                .into_iter()
+                .filter(|(n, _)| keep(&env("PHOXIUM_PROFILE_CONTENT"), n))
+                .collect();
+            ((w, h), c)
+        })
         .collect();
     let names = gpu.timing_names();
     struct Run {
         label: String,
         size: (u32, u32),
         cfg: usize,
+        source: usize,
         content: usize,
         frame: Vec<f64>,
         stages: Vec<Vec<Option<f64>>>,
     }
     let mut runs = Vec::new();
     for &size in &sizes {
-        for (ci, (cn, _)) in configs.iter().enumerate() {
-            for (ki, (kn, _)) in contents.iter().enumerate() {
-                runs.push(Run {
-                    label: format!("{}x{} | {cn} | {kn}", size.0, size.1),
-                    size,
-                    cfg: ci,
-                    content: ki,
-                    frame: Vec::new(),
-                    stages: vec![Vec::new(); names.len()],
-                });
+        for (si, ((sw, sh), contents)) in sources.iter().enumerate() {
+            for (ci, (cn, _)) in configs.iter().enumerate() {
+                for (ki, (kn, _)) in contents.iter().enumerate() {
+                    // The label names the source size only when it is not the default one.
+                    let from = if (*sw, *sh) == SOURCES[0] {
+                        String::new()
+                    } else {
+                        format!(" (source {sw}x{sh})")
+                    };
+                    runs.push(Run {
+                        label: format!("{}x{}{from} | {cn} | {kn}", size.0, size.1),
+                        size,
+                        cfg: ci,
+                        source: si,
+                        content: ki,
+                        frame: Vec::new(),
+                        stages: vec![Vec::new(); names.len()],
+                    });
+                }
             }
         }
     }
@@ -194,18 +226,19 @@ fn chain_profile() {
         gpu.context().gpu.name,
         runs.len()
     );
-    let view = View::full(W, H);
     let settings = phoxium::gpu::Settings::default();
     for round in 0..=rounds {
         for r in &mut runs {
             let (_, params) = &configs[r.cfg];
+            let ((sw, sh), contents) = &sources[r.source];
             let bgra = &contents[r.content].1;
+            let view = View::full(*sw, *sh);
             let frames: Vec<_> = (0..burst)
                 .map(|_| {
                     (
                         Some(SourceFrame {
-                            width: W,
-                            height: H,
+                            width: *sw,
+                            height: *sh,
                             bgra,
                         }),
                         view,

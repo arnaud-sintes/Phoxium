@@ -58,7 +58,7 @@ mod tests {
     /// turning it off restores the exact identity; validation silent.
     #[test]
     fn a_new_stage_needs_its_files_and_one_registration_line() {
-        let required = std::env::var("PHOXIUM_REQUIRE_GPU").as_deref() == Ok("1");
+        let required = crate::gpu::gpu_required();
         let validation = validation_layer_available();
         assert!(!required || validation, "PHOXIUM_REQUIRE_GPU=1 but no validation layer");
         let mut gpu = match Headless::with_chain(validation, TEST_CHAIN) {

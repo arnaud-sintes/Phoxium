@@ -53,8 +53,8 @@ fn default_profile_rows(ui: &Frame, profiles: &[ProfileRow], default_profile: Op
         theme::tooltip(
             ui,
             "Copy the saved profile of the program captured now (its scale mode, flip, filter and the other source \
-             settings; its picture area and multiplier too) as the profile that every program without one gets. A \
-             program that already has a profile keeps its own.",
+             settings, not its picture area, crop or multiplier, which belong to its window) as the profile that \
+             every program without one gets. A program that already has a profile keeps its own.",
         );
     }
     same_line_if_fits(ui, "Clear default");

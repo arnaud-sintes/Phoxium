@@ -12,7 +12,8 @@ layout(push_constant) uniform ScreenPush {
     uint ox;
     int pad;
 } screen_push;
-#define GEOMETRY_ABL_RUNS (screen_push.abl_runs != 0u)
+// Bit 0 of `abl_runs`: the `abl` slot runs; bit 1 (warp path): the aligned grid (see beam_warp.glsl).
+#define GEOMETRY_ABL_RUNS ((screen_push.abl_runs & 1u) != 0u)
 #define ABL_STATE_QUALIFIER readonly
 #define BEAM_NO_TILE
 #include "abl.glsl"

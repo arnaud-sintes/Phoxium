@@ -109,8 +109,8 @@ fn quiet() -> Params {
 
 /// Runs only `impair` on `img` (injected after `amp`, native size `w` x `h`) at frame index `frame`.
 fn run(gpu: &mut Headless, img: &ImageF32, size: (u32, u32), p: &Params, frame: u32) -> ImageF32 {
-    let mut fc = FrameConstants::new(size, size, false);
-    fc.frame_index = frame;
+    // The source frame `frame` at the field rate, in real time (the plans take their time from `elapsed_ms`).
+    let fc = FrameConstants::new(size, size, false).at_source_frame(frame, f64::from(p.impair_field_rate_hz));
     let settings = Settings::identity();
     let r = gpu
         .render_stages(&StageRun {

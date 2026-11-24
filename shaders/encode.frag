@@ -80,12 +80,20 @@ void main() {
     vec2 f = gl_FragCoord.xy;
     vec4 r = params.source_rotation == SOURCE_ROTATION_OFF ? frame.tube_rect_px : pc.view_rect;
     float band = params.cabinet_enable ? cabinet_band(params.cabinet_bezel_width, frame.target_size) : 0.0;
-    if (f.x < r.x || f.y < r.y || f.x >= r.z || f.y >= r.w) {
+    // The picture's edge for the bezel: the raster rectangle, which is the tube rectangle without the margin that
+    // the beam's skirt grew it by (`FrameConstants::raster_margin`; turned with the tube). The bezel covers the
+    // skirt strip, as a real bezel hides the tube's edge, and its inner edge is the raster's.
+    vec4 edge = r;
+    if (band >= 1.0) {
+        vec2 margin = vec2(params.source_rotation == SOURCE_ROTATION_OFF ? frame.raster_margin : frame.raster_margin.yx);
+        edge = vec4(r.xy + margin, r.zw - margin);
+    }
+    if (f.x < edge.x || f.y < edge.y || f.x >= edge.z || f.y >= edge.w) {
         // Without the cabinet the scissor keeps every fragment inside the tube rectangle and this branch does
         // not run (the surround is the clear colour); with it, this draws the bezel over the surround.
-        vec3 surround = params.source_surround_color;
+        vec3 surround = clamp(params.source_surround_color, vec3(0.0), vec3(1.0));
         if (band >= 1.0) {
-            vec4 b = cabinet_bezel(f, r, band, params.cabinet_bezel_color, params.cabinet_bevel,
+            vec4 b = cabinet_bezel(f, edge, band, params.cabinet_bezel_color, params.cabinet_bevel,
                                    params.cabinet_corner_radius);
             vec3 v = dither(transfer_from_linear(min(b.rgb, vec3(1.0)), pc.transfer, pc.gamma), f);
             surround = mix(surround, v, b.a);
@@ -106,7 +114,7 @@ void main() {
     vec3 e = texelFetch(linear_in, q, 0).rgb * pc.exposure;
     vec3 c = vec3(dot(pc.m0.xyz, e), dot(pc.m1.xyz, e), dot(pc.m2.xyz, e));
     if (band >= 1.0) {
-        c += cabinet_reflection(f, r, band, params.cabinet_bezel_color, params.cabinet_bevel,
+        c += cabinet_reflection(f, edge, band, params.cabinet_bezel_color, params.cabinet_bevel,
                                 params.cabinet_reflection);
     }
 

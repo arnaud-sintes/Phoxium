@@ -298,6 +298,12 @@ impl Renderer {
         }
     }
 
+    /// What one chain image may be on this device (`maxImageDimension2D` and the memory budget): a source larger
+    /// than `max_dim` on a side cannot be rendered.
+    pub fn image_limits(&self) -> crate::quality::ImageLimits {
+        self.ctx.image_limits()
+    }
+
     /// Replaces the tube parameters used from the next frame on (the startup preset and settings overrides).
     pub fn set_params(&mut self, params: Params) {
         self.params = params;

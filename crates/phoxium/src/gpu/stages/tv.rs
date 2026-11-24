@@ -95,7 +95,8 @@ pub(super) fn plan(p: &Params, fc: &FrameConstants) -> Push {
         colour: m.colour as f32,
         black: m.black as f32,
         white: m.white as f32,
-        gain: m.flicker_gain(fc.frame_index) as f32,
+        // Real time: the frames that have passed at the flicker's sampling rate (`tv_frame_rate_hz`).
+        gain: m.flicker_gain(fc.source_frame(m.frame_rate_hz)) as f32,
         flags,
     }
 }
@@ -206,8 +207,7 @@ mod tests {
             tv_flicker_amount: 0.3,
             ..Params::default()
         };
-        let mut fc = FrameConstants::new((320, 240), (1280, 960), false);
-        fc.frame_index = 3;
+        let fc = FrameConstants::new((320, 240), (1280, 960), false).at_source_frame(3, 60.0);
         let push = plan(&p, &fc);
         assert!((f64::from(push.gain) - 0.7).abs() < 1e-6, "{}", push.gain);
         assert_eq!(push.flags, FLAG_FLICKER);

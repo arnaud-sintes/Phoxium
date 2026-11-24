@@ -30,7 +30,7 @@ fn new() -> Box<dyn Stage> {
     Box::<ImpairStage>::default()
 }
 
-/// The push constants of `impair.comp` (std430, 64 bytes).
+/// The push constants of `impair.comp` (std430, 68 bytes).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -50,6 +50,9 @@ pub(super) struct Push {
     tracking_half: f32,
     tracking_centre: f32,
     tracking_noise: f32,
+    /// The source frame of this moment (`FrameConstants::source_frame` at `impair_field_rate_hz`): the frame counter
+    /// of the hash draws (jitter, noise, snow, tracking), so they are redrawn once per source frame.
+    source_frame: u32,
 }
 
 /// The oracle's settings for `params`.
@@ -84,8 +87,10 @@ pub(crate) fn is_identity(p: &Params) -> bool {
 pub(super) fn plan(p: &Params, fc: &FrameConstants) -> Push {
     let m = model(p);
     let lines = fc.native_size[1].max(1) as u32;
-    let (hum_phase, hum_per_line) = m.hum_phase(fc.frame_index, lines);
-    let (crawl_phase, crawl_per_line) = m.crawl_phase(fc.frame_index);
+    // Real time: the source frames that have passed at the field rate, whatever the display rate.
+    let frame = fc.source_frame(m.field_rate_hz);
+    let (hum_phase, hum_per_line) = m.hum_phase(frame, lines);
+    let (crawl_phase, crawl_per_line) = m.crawl_phase(frame);
     Push {
         hum_amount: m.hum_amount as f32,
         hum_phase: hum_phase as f32,
@@ -101,8 +106,9 @@ pub(super) fn plan(p: &Params, fc: &FrameConstants) -> Push {
         snow_length: m.snow_length,
         tracking_px: m.tracking_px as f32,
         tracking_half: (0.5 * m.tracking_lines) as f32,
-        tracking_centre: m.tracking_centre_lines(fc.frame_index, lines) as f32,
+        tracking_centre: m.tracking_centre_lines(frame, lines) as f32,
         tracking_noise: m.tracking_noise as f32,
+        source_frame: frame,
     }
 }
 
@@ -135,7 +141,7 @@ impl Stage for ImpairStage {
     }
 
     unsafe fn record(&self, d: &ash::Device, cb: vk::CommandBuffer, set: vk::DescriptorSet, size: (u32, u32)) {
-        // SAFETY: `Push` is `#[repr(C)]` plain data of 16 four-byte fields, no padding.
+        // SAFETY: `Push` is `#[repr(C)]` plain data of 17 four-byte fields, no padding.
         let bytes = std::slice::from_raw_parts((&self.push as *const Push).cast::<u8>(), size_of::<Push>());
         self.pass.dispatch(d, cb, set, bytes, size);
     }
@@ -149,10 +155,10 @@ impl Stage for ImpairStage {
 mod tests {
     use super::*;
 
-    /// The push block is 64 bytes in the shader's order.
+    /// The push block is 68 bytes in the shader's order.
     #[test]
     fn push_layout_matches_the_shader() {
-        assert_eq!(size_of::<Push>(), 64);
+        assert_eq!(size_of::<Push>(), 68);
         assert_eq!(std::mem::offset_of!(Push, snow_length), 44);
         assert_eq!(std::mem::offset_of!(Push, tracking_noise), 60);
         let glsl = include_str!("../../../../../shaders/impair.comp");
@@ -173,6 +179,7 @@ mod tests {
             "float tracking_half;",
             "float tracking_centre;",
             "float tracking_noise;",
+            "uint source_frame;",
         ];
         let pos: Vec<usize> = order
             .iter()
@@ -230,20 +237,51 @@ mod tests {
             impair_tracking_position: 0.5,
             ..Params::default()
         };
-        let mut fc = FrameConstants::new((320, 240), (1280, 960), false);
-        fc.frame_index = 5;
+        let mut fc = FrameConstants::new((320, 240), (1280, 960), false).at_source_frame(5, 60.0);
         let push = plan(&p, &fc);
+        assert_eq!(push.source_frame, 5);
         assert_eq!(push.ghost_delay, 5.0 * fc.amp_k as f32);
         assert!((f64::from(push.hum_phase) - (50.0 * 5.0 / 60.0_f64).rem_euclid(1.0)).abs() < 1e-6);
         assert!((f64::from(push.hum_per_line) - 50.0 / (60.0 * 240.0)).abs() < 1e-9);
         assert_eq!((push.tracking_half, push.tracking_centre), (15.0, 120.0));
-        fc.frame_index = 3_000_000_001;
+        // Weeks of real time (4e9 ms is 46 days: 240 million source frames, far past f32 precision) keep the beat.
+        fc.elapsed_ms = 4_000_000_000;
         let far = plan(&p, &fc);
-        let want = (50.0 * 3_000_000_001.0_f64 / 60.0).rem_euclid(1.0);
+        assert_eq!(far.source_frame, 240_000_000);
+        let want = (50.0 * 240_000_000.0_f64 / 60.0).rem_euclid(1.0);
         assert!(
             (f64::from(far.hum_phase) - want).abs() < 1e-6,
             "{} {want}",
             far.hum_phase
         );
+    }
+
+    /// The time base is real time, not the number of output frames: one second of 144 Hz output frames and one
+    /// second of 60 Hz output frames (the frame times summed in `elapsed_ms`) give the same source frame, so the hum
+    /// bar rolls at the same speed on both displays.
+    #[test]
+    fn the_time_base_is_seconds_not_output_frames() {
+        let p = Params {
+            impair_enable: true,
+            impair_hum_hz: 50.0,
+            ..Params::default()
+        };
+        let at = |ms: u32, output_frames: u32| {
+            let mut fc = FrameConstants::new((320, 240), (1280, 960), false);
+            fc.elapsed_ms = ms;
+            fc.frame_index = output_frames;
+            plan(&p, &fc)
+        };
+        // 2 s: 120 output frames at 60 Hz, 288 at 144 Hz, the same moment.
+        let (a, b) = (at(2000, 120), at(2000, 288));
+        assert_eq!((a.source_frame, a.hum_phase), (b.source_frame, b.hum_phase));
+        assert_eq!(a.source_frame, 120, "60 source frames per second");
+        // Half a second later the phase has moved by 50 Hz x 0.5 s = 25 cycles, whatever the output rate: a whole
+        // number, so the phase is back where it was (up to f32).
+        let c = at(2500, 360);
+        assert_eq!(c.source_frame, 150);
+        assert!((f64::from(c.hum_phase) - f64::from(a.hum_phase)).abs() < 1e-5);
+        // A quarter of a hum cycle (5 ms) is not a whole source frame: the phase is the one of the frame in progress.
+        assert_eq!(at(2005, 361).source_frame, 120);
     }
 }

@@ -7,11 +7,11 @@ use phoxium::gpu::{Headless, Rendered, Settings, SourceFrame, TargetFormat};
 use phoxium::params::{ParamValue, Params};
 use phoxium::scaling::View;
 
-/// Measurement only (`PHOXIUM_SKIP_BENCH=1`): GPU time of the chain at 1920x1440 for the default parameters,
+/// Measurement only (runs only when `PHOXIUM_BENCH` is set): GPU time of the chain at 1920x1440 for the default parameters,
 /// best of many frames (the GPU may be shared). Prints, asserts nothing.
 #[test]
 fn measure_default_chain_cost() {
-    if std::env::var_os("PHOXIUM_SKIP_BENCH").is_none() {
+    if std::env::var_os("PHOXIUM_BENCH").is_none() {
         return;
     }
     let Some(mut gpu) = common::gpu_or_skip("measure_default_chain_cost") else {

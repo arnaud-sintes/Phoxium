@@ -106,11 +106,21 @@ pub fn default_summary(settings: &Settings) -> Option<String> {
     settings.default_source.as_ref().map(summary)
 }
 
-/// The default profile made of the profile of a program: the same settings with no executable and class.
+/// The default profile made of the profile of a program: its source settings (scale mode and size, flip, filter,
+/// aspect, rotation, colour interpretation, surround) with no executable and class. What belongs to one program's
+/// window is left out: the crop rectangle and the client size it was made for, the divisor and the picture area (a
+/// manual crop of one game would cut every other game's picture), and the crop and divisor modes.
 pub fn as_default(from: &SourceProfile) -> SourceProfile {
     SourceProfile {
         exe: String::new(),
         class: String::new(),
+        crop: None,
+        crop_client: None,
+        divisor: None,
+        divisor_v: None,
+        crop_mode: None,
+        divisor_mode: None,
+        picture_area: None,
         ..from.clone()
     }
 }
@@ -135,6 +145,52 @@ mod tests {
             class: class.into(),
             ..SourceProfile::default()
         }
+    }
+
+    /// The default profile keeps the source settings and drops what belongs to one program's window (its crop,
+    /// divisor and picture area), so a game's manual crop is not handed to every other game.
+    #[test]
+    fn the_default_profile_drops_the_window_specific_settings() {
+        let own = SourceProfile {
+            crop: Some([73, 41, 841, 713]),
+            crop_client: Some([914, 754]),
+            crop_mode: Some("manual".into()),
+            picture_area: Some("manual".into()),
+            divisor: Some(3),
+            divisor_v: Some(2),
+            divisor_mode: Some("manual".into()),
+            scale_mode: Some("manual".into()),
+            pixel_size: Some(2.5),
+            flip: Some("horizontal".into()),
+            prefilter: Some("box".into()),
+            par: Some(8.0 / 7.0),
+            rotation: Some("clockwise".into()),
+            ..profile("game.exe", "GameClass")
+        };
+        let d = as_default(&own);
+        assert_eq!((d.exe.as_str(), d.class.as_str()), ("", ""));
+        assert_eq!(
+            (
+                d.crop,
+                d.crop_client,
+                d.divisor,
+                d.divisor_v,
+                d.crop_mode,
+                d.divisor_mode,
+                d.picture_area
+            ),
+            (None, None, None, None, None, None, None)
+        );
+        assert_eq!(
+            (
+                d.scale_mode.as_deref(),
+                d.pixel_size,
+                d.flip.as_deref(),
+                d.prefilter.as_deref()
+            ),
+            (Some("manual"), Some(2.5), Some("horizontal"), Some("box"))
+        );
+        assert_eq!((d.par, d.rotation.as_deref()), (Some(8.0 / 7.0), Some("clockwise")));
     }
 
     #[test]

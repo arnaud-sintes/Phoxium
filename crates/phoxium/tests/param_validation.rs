@@ -169,6 +169,14 @@ fn every_parameter_at_its_hard_bounds_renders_a_finite_output() {
             ParamValue::Enum(phoxium::params::GEOMETRY_CURVATURE_SPHERICAL),
         ),
         ("beam_tail_weight", ParamValue::F32(0.05)),
+        // The slots added later are identities while off or neutral (the sweep would never reach their shaders): the
+        // analogue impairments, the tape and the cabinet on (their defaults are mild, non-zero amounts), and a TV
+        // sharpness so that its width, and the rest of the TV controls, run through the shader.
+        ("impair_enable", ParamValue::Bool(true)),
+        ("tape_enable", ParamValue::Bool(true)),
+        ("cabinet_enable", ParamValue::Bool(true)),
+        ("tv_sharpness", ParamValue::F32(0.5)),
+        ("tv_tint_deg", ParamValue::F32(10.0)),
     ] {
         assert!(base.set(id, v), "{id}");
     }

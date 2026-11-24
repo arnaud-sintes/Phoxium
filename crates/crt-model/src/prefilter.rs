@@ -16,7 +16,8 @@
 //! At `div` = 1 the block centre is a texel centre and every kernel is 1 there and 0 at the other integers, so
 //! each filter is the identity (the shader skips them). The window is limited to 16 texels on each side of the
 //! block's centre; the weights beyond are dropped (a large divisor with a wide kernel is a truncated one). Texels
-//! outside the frame repeat the edge. The filter acts on the captured code values (gamma-encoded), and the result
+//! outside the picture area (the crop rectangle of the view: `origin` to `origin + native x div`) repeat its edge
+//! texel: the bars or the window chrome around a cropped picture never leak into its edge pixels. The filter acts on the captured code values (gamma-encoded), and the result
 //! is clamped to [0, 1] (the negative lobes of the sinc family can overshoot).
 
 /// A pre-filter kernel.
@@ -109,17 +110,18 @@ pub fn axis_weights(kind: Kind, start: i64, div: i64) -> Vec<(i64, f64)> {
 }
 
 /// The filtered code values of the native pixel whose block starts at `start` = `origin + b x div` (texels), from
-/// `fetch(x, y)` (the captured frame's code values in [0, 1], called with unclamped coordinates), for a frame of
-/// `size` texels. `Point` is the single texel at `start + div / 2`, clamped.
+/// `fetch(x, y)` (the captured frame's code values in [0, 1], called with coordinates clamped into `area`), for a
+/// picture area `area` = (first texel, last texel), inclusive (the crop rectangle of the view, inside the frame).
+/// `Point` is the single texel at `start + div / 2`, clamped.
 #[must_use]
 pub fn filter(
     kind: Kind,
     start: (i64, i64),
     div: (i64, i64),
-    size: (i64, i64),
+    area: ((i64, i64), (i64, i64)),
     fetch: &dyn Fn(i64, i64) -> [f64; 3],
 ) -> [f64; 3] {
-    let at = |x: i64, y: i64| fetch(x.clamp(0, size.0 - 1), y.clamp(0, size.1 - 1));
+    let at = |x: i64, y: i64| fetch(x.clamp(area.0 .0, area.1 .0), y.clamp(area.0 .1, area.1 .1));
     if kind == Kind::Point || div == (1, 1) {
         return at(start.0 + div.0 / 2, start.1 + div.1 / 2);
     }
@@ -189,7 +191,11 @@ mod tests {
             Kind::Lanczos3,
             Kind::Sinc,
         ] {
-            assert_eq!(filter(kind, (5, 6), (1, 1), (32, 32), &fetch), fetch(5, 6), "{kind:?}");
+            assert_eq!(
+                filter(kind, (5, 6), (1, 1), ((0, 0), (31, 31)), &fetch),
+                fetch(5, 6),
+                "{kind:?}"
+            );
         }
     }
 
@@ -201,9 +207,9 @@ mod tests {
             let v = ((y - 3) * 3 + (x - 3) + 1) as f64 / 9.0;
             [v, v, v]
         };
-        let b = filter(Kind::Box, (3, 3), (3, 3), (16, 16), &fetch);
+        let b = filter(Kind::Box, (3, 3), (3, 3), ((0, 0), (15, 15)), &fetch);
         assert!(b.iter().all(|c| close(*c, 5.0 / 9.0, 1e-12)), "{b:?}");
-        let p = filter(Kind::Point, (3, 3), (3, 3), (16, 16), &fetch);
+        let p = filter(Kind::Point, (3, 3), (3, 3), ((0, 0), (15, 15)), &fetch);
         assert_eq!(p, fetch(4, 4));
     }
 
@@ -213,7 +219,7 @@ mod tests {
     fn flat_stays_flat_and_the_result_is_clamped() {
         let flat = |_: i64, _: i64| [0.4, 0.6, 0.2];
         for kind in [Kind::Box, Kind::Triangle, Kind::Lanczos2, Kind::Lanczos3, Kind::Sinc] {
-            let v = filter(kind, (8, 8), (4, 4), (64, 64), &flat);
+            let v = filter(kind, (8, 8), (4, 4), ((0, 0), (63, 63)), &flat);
             for (a, b) in v.iter().zip([0.4, 0.6, 0.2]) {
                 assert!(close(*a, b, 1e-12), "{kind:?}");
             }
@@ -223,8 +229,29 @@ mod tests {
         let step = |x: i64, _: i64| if x < 12 { [0.0; 3] } else { [1.0; 3] };
         for kind in [Kind::Lanczos2, Kind::Lanczos3, Kind::Sinc] {
             for start in (4..28).step_by(4) {
-                let v = filter(kind, (start, 8), (4, 4), (64, 64), &step);
+                let v = filter(kind, (start, 8), (4, 4), ((0, 0), (63, 63)), &step);
                 assert!(v.iter().all(|c| (0.0..=1.0).contains(c)), "{kind:?} {start} {v:?}");
+            }
+        }
+    }
+
+    /// The kernel never reads outside the picture area: a black 16 x 8 picture area inside white bars keeps its edge
+    /// blocks black under every kernel (the bars would leak in if the taps were clamped to the frame instead).
+    #[test]
+    fn the_picture_area_edge_repeats_and_the_bars_do_not_leak() {
+        let fetch = |x: i64, y: i64| {
+            if (8..=23).contains(&x) && (4..=11).contains(&y) {
+                [0.0; 3]
+            } else {
+                [1.0; 3]
+            }
+        };
+        let area = ((8, 4), (23, 11));
+        for kind in [Kind::Box, Kind::Triangle, Kind::Lanczos2, Kind::Lanczos3, Kind::Sinc] {
+            // The first block (texels 8..12, 4..8) and the last (20..24, 8..12) of the area.
+            for start in [(8, 4), (20, 8)] {
+                let v = filter(kind, start, (4, 4), area, &fetch);
+                assert_eq!(v, [0.0; 3], "{kind:?} at {start:?}");
             }
         }
     }

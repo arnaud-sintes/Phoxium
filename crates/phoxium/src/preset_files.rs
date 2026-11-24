@@ -104,6 +104,14 @@ pub fn rename(lib: &Library, dir: &Path, id: &str, new_name: &str) -> Result<Str
                 Origin::User(_) => format!("A user preset \"{new_id}\" exists; choose another name."),
             });
         }
+        // A file of that name that the library does not list under that id (another id inside, or unreadable) would
+        // be overwritten.
+        let target = dir.join(format!("{new_id}.toml"));
+        if target.exists() && target != old_path {
+            return Err(format!(
+                "A file {new_id}.toml is already in the presets folder; choose another name."
+            ));
+        }
     }
     let written = save_as(p, dir, &new_id, &name)?;
     if written != old_path {
@@ -242,6 +250,9 @@ pub fn install(prep: &Prepared, lib: &Library, dir: &Path, mode: ImportMode) -> 
         format!("{} (imported)", base.trim())
     };
     let (id, name) = match (prep.conflict, mode) {
+        // No preset of this id, but a file of the name (another id inside, or unreadable): not overwritten, the
+        // import takes a free id as for a copy.
+        (Conflict::None, _) if dir.join(format!("{}.toml", p.id)).exists() => (free_id(lib, dir, &p.id), copy_name()),
         (Conflict::None, _) => (p.id.clone(), p.name.clone()),
         (Conflict::User, ImportMode::New) => {
             return Err(format!(
@@ -330,6 +341,46 @@ mod tests {
         assert_eq!(clean_name(&"y".repeat(100)).chars().count(), MAX_PRESET_NAME);
     }
 
+    /// A file in the presets folder that the library does not list under its name (an id inside that differs from
+    /// the file name, or an unreadable file) is never overwritten: a rename onto it is refused, an import takes a free
+    /// id instead.
+    #[test]
+    fn a_stray_file_is_not_overwritten() {
+        let dir = temp("stray");
+        let (lib, id) = user(&dir, "Mine");
+        // `taken.toml` holds a preset whose id is `elsewhere`, so the library lists it as `elsewhere`.
+        let other = Preset::from_params("elsewhere", "Elsewhere", &Params::default()).unwrap();
+        fs::write(dir.join("taken.toml"), other.to_toml()).unwrap();
+        // And a file that does not parse at all.
+        fs::write(dir.join("junk.toml"), "not toml [[").unwrap();
+        let lib2 = Library::load(Some(&dir));
+        assert!(lib2.find("taken").is_none() && lib2.find("elsewhere").is_some());
+        let before = fs::read_to_string(dir.join("taken.toml")).unwrap();
+        // Rename onto the stray files: refused, nothing changes.
+        for target in ["Taken", "Junk"] {
+            let e = rename(&lib2, &dir, &id, target).unwrap_err();
+            assert!(e.contains("already in the presets folder"), "{e}");
+        }
+        assert_eq!(fs::read_to_string(dir.join("taken.toml")).unwrap(), before);
+        assert!(dir.join("mine.toml").exists());
+        // An import whose id is `taken` (no preset of that id, but the file of that name exists) gets a free id.
+        let mut prep = Prepared {
+            preset: Preset::from_params("taken", "Taken", &Params::default()).unwrap(),
+            file: dir.join("incoming.toml"),
+            conflict: Conflict::None,
+            warnings: Vec::new(),
+        };
+        prep.preset.origin = Origin::User(PathBuf::new());
+        let stored = install(&prep, &lib2, &dir, ImportMode::New).unwrap();
+        assert_eq!(stored, "taken-2");
+        assert_eq!(
+            fs::read_to_string(dir.join("taken.toml")).unwrap(),
+            before,
+            "not overwritten"
+        );
+        let _ = lib;
+        let _ = fs::remove_dir_all(&dir);
+    }
     #[test]
     fn rename_moves_the_file_and_refuses_shipped_and_taken_names() {
         let dir = temp("rename");

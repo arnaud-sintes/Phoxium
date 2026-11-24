@@ -19,14 +19,16 @@ const GREY: f32 = 0.1;
 const SURROUND: [f32; 3] = [0.2, 0.3, 0.4];
 const TOL: f64 = 2e-5;
 
-fn picture() -> ImageF32 {
+/// The tube image: the picture grown by the skirt `margin` on every side, a flat grey.
+fn picture(margin: u32) -> ImageF32 {
+    let (w, h) = (PICTURE.0 + 2 * margin, PICTURE.1 + 2 * margin);
     let mut rgba = Vec::new();
-    for _ in 0..PICTURE.0 * PICTURE.1 {
+    for _ in 0..w * h {
         rgba.extend_from_slice(&[GREY, GREY, GREY, 1.0]);
     }
     ImageF32 {
-        width: PICTURE.0,
-        height: PICTURE.1,
+        width: w,
+        height: h,
         rgba,
     }
 }
@@ -48,11 +50,19 @@ fn params(on: bool) -> Params {
 }
 
 fn render(gpu: &mut Headless, p: &Params) -> phoxium::gpu::Rendered {
+    render_with_margin(gpu, p, 0)
+}
+
+/// As the live pipeline does: the tube rectangle is the raster rectangle grown by the beam skirt `margin` (the
+/// bezel must still be drawn from the raster, `FrameConstants::raster_margin`).
+fn render_with_margin(gpu: &mut Headless, p: &Params, margin: u32) -> phoxium::gpu::Rendered {
     // The picture one texel per host pixel, centred: the letterbox of `new` would scale it to the target.
     let mut fc = FrameConstants::new(PICTURE, TARGET, false);
-    fc.tube_rect_px = [20.0, 20.0, 180.0, 80.0];
-    fc.tube_size = [PICTURE.0 as i32, PICTURE.1 as i32];
-    let tube = picture();
+    let m = margin as f32;
+    fc.tube_rect_px = [20.0 - m, 20.0 - m, 180.0 + m, 80.0 + m];
+    fc.tube_size = [(PICTURE.0 + 2 * margin) as i32, (PICTURE.1 + 2 * margin) as i32];
+    fc.raster_margin = [margin as i32, margin as i32];
+    let tube = picture(margin);
     let settings = Settings::identity();
     gpu.render_stages(&StageRun {
         input: StageInput::Image {
@@ -147,5 +157,49 @@ fn the_bezel_and_the_reflection_match_the_oracle() {
             "off, picture at {x},{y}: {v:?}"
         );
     }
+    common::assert_no_validation_messages(&counter);
+}
+
+/// With the beam's skirt margin (as the live pipeline places it: the tube rectangle is the raster grown by the
+/// margin) the bezel's inner edge is the raster's edge, not the grown rectangle's: the skirt strip is covered by the
+/// bezel and the reflection fades in over the picture. 8 px of margin on a 160 x 60 raster: the strip between
+/// x = 12 and 20 (and 180 to 188, y likewise) shows the bezel, the oracle's, exactly as without a margin.
+#[test]
+fn the_bezel_is_drawn_from_the_raster_not_the_skirt() {
+    let Some(mut gpu) = common::gpu_or_skip("the_bezel_is_drawn_from_the_raster_not_the_skirt") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    let on = params(true);
+    let cab = oracle(&on);
+    let with = render_with_margin(&mut gpu, &on, 8).output;
+    let without = render(&mut gpu, &on).output;
+    let mut strip = 0;
+    for y in 0..TARGET.1 {
+        for x in 0..TARGET.0 {
+            let p = [f64::from(x) + 0.5, f64::from(y) + 0.5];
+            let inside = p[0] >= RECT[0] && p[0] < RECT[2] && p[1] >= RECT[1] && p[1] < RECT[3];
+            let want: [f64; 3] = if inside {
+                let r = cab.reflection(p, RECT);
+                [0, 1, 2].map(|c| f64::from(GREY) + r[c])
+            } else {
+                let b = cab.bezel(p, RECT);
+                strip += usize::from(b.coverage > 0.0 && p[0] >= 12.0 && p[0] < 188.0 && p[1] >= 12.0 && p[1] < 88.0);
+                [0, 1, 2].map(|c| f64::from(SURROUND[c]) * (1.0 - b.coverage) + b.linear[c].min(1.0) * b.coverage)
+            };
+            let (a, b) = (with.pixel(x, y), without.pixel(x, y));
+            for c in 0..3 {
+                assert!(
+                    (f64::from(a[c]) - want[c]).abs() <= TOL,
+                    "with margin at ({x}, {y}) channel {c}: {} vs oracle {}",
+                    a[c],
+                    want[c]
+                );
+                assert_eq!(a[c], b[c], "the margin changes nothing at ({x}, {y})");
+            }
+        }
+    }
+    // The strip is a real part of the test: the bezel covers 8 px around the raster inside the grown rectangle.
+    assert!(strip > 2_000, "{strip}");
     common::assert_no_validation_messages(&counter);
 }

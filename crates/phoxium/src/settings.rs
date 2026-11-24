@@ -310,6 +310,16 @@ pub struct LastSource {
     pub title: String,
 }
 
+/// The wait for a lost source from the settings file, which anyone can edit: a NaN, an infinity or a negative number
+/// (that would mean "wait for ever") is the default.
+pub fn sane_wait_s(wait_s: f64) -> f64 {
+    if wait_s.is_finite() && wait_s >= 0.0 {
+        wait_s
+    } else {
+        DEFAULT_WAIT_S
+    }
+}
+
 /// Default of `[global.source] wait_s`: seconds a lost source is waited for (reattach to the same program and
 /// class) before the "Choose a window" screen comes back (`--wait-source` wins).
 pub const DEFAULT_WAIT_S: f64 = crate::lifecycle::DEFAULT_WAIT_SOURCE_S;
@@ -455,7 +465,7 @@ pub struct SourceProfile {
     pub crop_client: Option<[u32; 2]>,
     /// `source_divisor_mode` value name: `auto`, `manual` or `none` (T-96).
     pub divisor_mode: Option<String>,
-    /// `source_scale_mode` value name: `tube`, `native`, `integer`, `fit` or `fit_free` (T-96).
+    /// `source_scale_mode` value name: `tube`, `native`, `integer`, `fit`, `fit_free` or `manual` (T-96).
     pub scale_mode: Option<String>,
     /// `source_scale`: host px per source row in the integer mode, 0 = automatic (T-96).
     pub scale: Option<u32>,
@@ -798,6 +808,34 @@ pub(crate) fn to_value(v: ParamValue) -> toml::Value {
     }
 }
 
+/// [`to_value`] for the parameter `m`: an enum is written by its value name (`"counter_clockwise"`), so that
+/// reordering or inserting a value in `params/*.toml` never remaps a saved choice; an index past the list (not a
+/// value of the table) stays an integer.
+pub(crate) fn to_value_for(m: &crate::params::ParamMeta, v: ParamValue) -> toml::Value {
+    match v {
+        ParamValue::Enum(x) => m
+            .values
+            .get(x as usize)
+            .map_or(toml::Value::Integer(i64::from(x)), |name| {
+                toml::Value::String((*name).to_string())
+            }),
+        other => to_value(other),
+    }
+}
+
+/// [`from_value`] for the parameter `m`: an enum is read from its value name (`-` read as `_`, case ignored) or,
+/// as the files of earlier builds wrote it, from its index.
+pub(crate) fn from_value_for(m: &crate::params::ParamMeta, v: &toml::Value) -> Option<ParamValue> {
+    if m.ty == ParamType::Enum {
+        if let Some(name) = v.as_str() {
+            let name = name.trim().replace('-', "_");
+            let i = m.values.iter().position(|n| n.eq_ignore_ascii_case(&name))?;
+            return Some(ParamValue::Enum(i as u32));
+        }
+    }
+    from_value(m.ty, v)
+}
+
 fn floats<const N: usize>(v: &toml::Value) -> Option<[f32; N]> {
     let a = v.as_array()?;
     if a.len() != N {
@@ -828,7 +866,7 @@ pub fn overrides_from_params(params: &Params) -> BTreeMap<String, toml::Value> {
     for m in PARAMS_META {
         if let Some(v) = params.get(m.id) {
             if v != m.default {
-                out.insert(m.id.to_string(), to_value(v));
+                out.insert(m.id.to_string(), to_value_for(m, v));
             }
         }
     }
@@ -858,7 +896,7 @@ pub fn record_edit(
         if reference.get(m.id) == Some(a) {
             changed |= overrides.remove(m.id).is_some();
         } else {
-            let v = to_value(a);
+            let v = to_value_for(m, a);
             if overrides.get(m.id) != Some(&v) {
                 overrides.insert(m.id.to_string(), v);
                 changed = true;
@@ -952,8 +990,13 @@ pub fn load(dir: &Path) -> Loaded {
         } else {
             backup(dir, &path)
         };
-        let fate = if state == FileState::Invalid {
+        // An invalid file is replaced by this session's settings only when a copy of it is kept: if the copy could
+        // not be made (the 100 copies are taken, the folder is read-only), the file stays as it is.
+        let replace = state == FileState::Invalid && kept.is_some();
+        let fate = if replace {
             "it will be replaced by this session's settings"
+        } else if state == FileState::Invalid {
+            "no copy of it could be kept, so this session will not write the settings file (changes last until exit)"
         } else {
             "this session will not write the settings file (changes last until exit)"
         };
@@ -967,7 +1010,7 @@ pub fn load(dir: &Path) -> Loaded {
             settings: Settings::default(),
             warning: Some(warning),
             state,
-            writable: state == FileState::Invalid,
+            writable: replace,
             notes: Vec::new(),
         }
     };
@@ -1268,6 +1311,41 @@ mod tests {
         assert_eq!((l.state, l.writable), (FileState::Invalid, true));
         assert_eq!(
             fs::read_to_string(dir.join(BACKUP_FILE)).unwrap(),
+            "this is = = not toml [["
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// A hand-edited wait that is not a finite number of seconds (NaN, infinite, negative) is the default.
+    #[test]
+    fn a_silly_wait_is_the_default() {
+        assert_eq!(sane_wait_s(12.5), 12.5);
+        assert_eq!(sane_wait_s(0.0), 0.0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            assert_eq!(sane_wait_s(bad), DEFAULT_WAIT_S, "{bad}");
+        }
+    }
+
+    /// An invalid file is replaced only when a copy of it was kept: with all 100 copy names taken by other content, the
+    /// file stays as it is and the session does not write the settings.
+    #[test]
+    fn an_invalid_file_is_not_replaced_without_a_copy() {
+        let dir = temp_dir("nocopy");
+        fs::write(dir.join(SETTINGS_FILE), "this is = = not toml [[").unwrap();
+        for n in 0..100u32 {
+            let bak = if n == 0 {
+                dir.join(BACKUP_FILE)
+            } else {
+                dir.join(format!("{BACKUP_FILE}.{n}"))
+            };
+            fs::write(bak, format!("another file {n}")).unwrap();
+        }
+        let l = load(&dir);
+        assert_eq!(l.state, FileState::Invalid);
+        assert!(!l.writable, "no copy, no replacement");
+        assert!(l.warning.as_deref().unwrap().contains("no copy of it could be kept"));
+        assert_eq!(
+            fs::read_to_string(dir.join(SETTINGS_FILE)).unwrap(),
             "this is = = not toml [["
         );
         let _ = fs::remove_dir_all(&dir);
@@ -1898,6 +1976,51 @@ mod tests {
         for id in PROFILE_PARAM_IDS {
             assert!(Params::default().get(id).is_some(), "{id}");
         }
+    }
+
+    /// Enum overrides are written by value name, so reordering or inserting a value in `params/*.toml` cannot remap a
+    /// saved choice; a file of an earlier build (the index) and a name in any case, with `-` for `_`, still read.
+    #[test]
+    fn enum_overrides_are_stored_by_name_and_read_by_name_or_index() {
+        let mut p = Params::default();
+        assert!(p.set(
+            "source_rotation",
+            ParamValue::Enum(crate::params::SOURCE_ROTATION_COUNTER_CLOCKWISE)
+        ));
+        let o = overrides_from_params(&p);
+        assert_eq!(
+            o["source_rotation"],
+            toml::Value::String("counter_clockwise".into()),
+            "by name"
+        );
+        let text = toml::to_string(&o).unwrap();
+        assert!(text.contains("source_rotation = \"counter_clockwise\""), "{text}");
+        let read = |v: toml::Value| {
+            let mut q = Params::default();
+            let w = apply_overrides(&mut q, &BTreeMap::from([("source_rotation".to_string(), v)]));
+            (q.source_rotation, w.len())
+        };
+        let ccw = crate::params::SOURCE_ROTATION_COUNTER_CLOCKWISE;
+        assert_eq!(read(toml::Value::String("counter_clockwise".into())), (ccw, 0));
+        assert_eq!(read(toml::Value::String("Counter-Clockwise".into())), (ccw, 0));
+        assert_eq!(
+            read(toml::Value::Integer(i64::from(ccw))),
+            (ccw, 0),
+            "the index of earlier builds"
+        );
+        let (value, warnings) = read(toml::Value::String("sideways".into()));
+        assert_eq!(
+            (value, warnings),
+            (crate::params::SOURCE_ROTATION_OFF, 1),
+            "an unknown name is refused"
+        );
+        // The edit path writes names too.
+        let mut overrides = BTreeMap::new();
+        assert!(record_edit(&mut overrides, &Params::default(), &p, &Params::default()));
+        assert_eq!(
+            overrides["source_rotation"],
+            toml::Value::String("counter_clockwise".into())
+        );
     }
 
     /// The default profile (TODO Low): a program without a profile of its own gets it, keyed to the program; a

@@ -28,7 +28,7 @@ layout(local_size_x = 8, local_size_y = 8) in;
 layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // amp domain
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // amp domain
 
-// Per-frame constants (std430 push block, 64 bytes; `impair::Push`).
+// Per-frame constants (std430 push block, 68 bytes; `impair::Push`).
 layout(push_constant) uniform Push {
     float hum_amount;        // drive voltage amplitude (0: none)
     float hum_phase;         // cycles at line 0, [0, 1)
@@ -46,6 +46,7 @@ layout(push_constant) uniform Push {
     float tracking_half;     // half the band height, lines
     float tracking_centre;   // centre of the band, lines from the top
     float tracking_noise;    // extra noise standard deviation at the band's centre
+    uint source_frame;       // the source frame of this moment (real time at the field rate): the hash counter
 } pc;
 
 // Seeds of crt_model::impair.
@@ -74,7 +75,7 @@ void main() {
     }
     int y = p.y;
     int k = frame.amp_k;
-    uint frame_index = frame.frame_index;
+    uint frame_index = pc.source_frame;
     float kf = float(k);
 
     // Tracking band weight of this line (a triangle), 0 without a displacement amount.

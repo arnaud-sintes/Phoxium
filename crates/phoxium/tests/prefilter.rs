@@ -91,46 +91,69 @@ fn every_prefilter_matches_the_oracle() {
     };
     let counter = gpu.validation_counter();
     let bgra = frame();
-    // The block grid starts at the corner, so the windows of the first and last blocks leave the frame (clamped).
-    let view = View {
-        origin: (0, 0),
-        div: (3, 2),
-        native: (13, 12),
-    };
-    for (id, kind) in [
-        (SOURCE_PREFILTER_POINT, Kind::Point),
-        (SOURCE_PREFILTER_BOX, Kind::Box),
-        (SOURCE_PREFILTER_TRIANGLE, Kind::Triangle),
-        (SOURCE_PREFILTER_LANCZOS2, Kind::Lanczos2),
-        (SOURCE_PREFILTER_LANCZOS3, Kind::Lanczos3),
-        (SOURCE_PREFILTER_SINC, Kind::Sinc),
-    ] {
-        let native = decode(&mut gpu, &bgra, view, &params(id, 0, 0));
-        assert_eq!((native.width, native.height), (13, 12));
-        let mut distinct_from_point = 0;
-        for ny in 0..12_i64 {
-            for nx in 0..13_i64 {
-                let start = (nx * 3, ny * 2);
-                let fetch = |x: i64, y: i64| code(&bgra, x, y);
-                let want = filter(kind, start, (3, 2), (i64::from(SRC.0), i64::from(SRC.1)), &fetch);
-                assert_close(
-                    native.pixel(nx as u32, ny as u32),
-                    want,
-                    &format!("{kind:?} at ({nx}, {ny})"),
+    // Two views: the block grid at the corner of the frame, so the windows of the first and last blocks leave the
+    // frame (clamped), and a cropped one (the picture area inside bars: the taps must repeat the area's edge, not
+    // read the bars around it).
+    let views = [
+        View {
+            origin: (0, 0),
+            div: (3, 2),
+            native: (13, 12),
+        },
+        View {
+            origin: (4, 2),
+            div: (3, 2),
+            native: (8, 8),
+        },
+    ];
+    for view in views {
+        // The picture area, inclusive, as the shader clamps to it.
+        let (div, native) = (view.div, view.native);
+        let area = (
+            (i64::from(view.origin.0), i64::from(view.origin.1)),
+            (
+                i64::from(view.origin.0 + native.0 * div.0) - 1,
+                i64::from(view.origin.1 + native.1 * div.1) - 1,
+            ),
+        );
+        for (id, kind) in [
+            (SOURCE_PREFILTER_POINT, Kind::Point),
+            (SOURCE_PREFILTER_BOX, Kind::Box),
+            (SOURCE_PREFILTER_TRIANGLE, Kind::Triangle),
+            (SOURCE_PREFILTER_LANCZOS2, Kind::Lanczos2),
+            (SOURCE_PREFILTER_LANCZOS3, Kind::Lanczos3),
+            (SOURCE_PREFILTER_SINC, Kind::Sinc),
+        ] {
+            let out = decode(&mut gpu, &bgra, view, &params(id, 0, 0));
+            assert_eq!((out.width, out.height), native);
+            let mut distinct_from_point = 0;
+            for ny in 0..i64::from(native.1) {
+                for nx in 0..i64::from(native.0) {
+                    let start = (
+                        i64::from(view.origin.0) + nx * i64::from(div.0),
+                        i64::from(view.origin.1) + ny * i64::from(div.1),
+                    );
+                    let fetch = |x: i64, y: i64| code(&bgra, x, y);
+                    let d = (i64::from(div.0), i64::from(div.1));
+                    let want = filter(kind, start, d, area, &fetch);
+                    assert_close(
+                        out.pixel(nx as u32, ny as u32),
+                        want,
+                        &format!("{kind:?} at ({nx}, {ny}), origin {:?}", view.origin),
+                    );
+                    let point = filter(Kind::Point, start, d, area, &fetch);
+                    distinct_from_point += usize::from((0..3).any(|c| (want[c] - point[c]).abs() > 1e-3));
+                }
+            }
+            // Every filter but the point sample changes a good share of this noisy picture.
+            if kind != Kind::Point {
+                assert!(
+                    distinct_from_point > 30,
+                    "{kind:?} changed only {distinct_from_point} pixels"
                 );
-                let point = filter(Kind::Point, start, (3, 2), (i64::from(SRC.0), i64::from(SRC.1)), &fetch);
-                distinct_from_point += usize::from((0..3).any(|c| (want[c] - point[c]).abs() > 1e-3));
             }
         }
-        // Every filter but the point sample changes a good share of this noisy picture.
-        if kind != Kind::Point {
-            assert!(
-                distinct_from_point > 40,
-                "{kind:?} changed only {distinct_from_point} pixels"
-            );
-        }
-    }
-    // A divisor of 1 leaves every kernel the identity: the sinc of a 1:1 view is the point sample, bit for bit.
+    } // A divisor of 1 leaves every kernel the identity: the sinc of a 1:1 view is the point sample, bit for bit.
     let one = View::full(SRC.0, SRC.1);
     let plain = decode(&mut gpu, &bgra, one, &params(SOURCE_PREFILTER_POINT, 0, 0));
     let sinc = decode(&mut gpu, &bgra, one, &params(SOURCE_PREFILTER_SINC, 0, 0));

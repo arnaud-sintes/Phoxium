@@ -99,6 +99,12 @@ vec3 captured_code(ivec2 b) {
     if (params.source_prefilter == SOURCE_PREFILTER_POINT || pc.div == ivec2(1)) {
         return texelFetch(src, clamp(start + pc.div / 2, ivec2(0), size - 1), 0).rgb;
     }
+    // The picture area (the crop rectangle of the view, inside the frame): the taps repeat its edge texel, so the bars
+    // or the window chrome around a cropped picture never leak into its edge pixels (oracle prefilter::filter).
+    bool turned = params.source_rotation != SOURCE_ROTATION_OFF;
+    ivec2 upright = turned ? frame.native_size.yx : frame.native_size;
+    ivec2 area_lo = clamp(pc.origin, ivec2(0), size - 1);
+    ivec2 area_hi = clamp(pc.origin + upright * pc.div - 1, area_lo, size - 1);
     float radius = prefilter_radius();
     vec2 centre = vec2(start) + 0.5 * vec2(pc.div);
     ivec2 c = ivec2(floor(centre));
@@ -115,7 +121,7 @@ vec3 captured_code(ivec2 b) {
             if (w == 0.0) {
                 continue;
             }
-            acc += w * texelFetch(src, clamp(ivec2(x, y), ivec2(0), size - 1), 0).rgb;
+            acc += w * texelFetch(src, clamp(ivec2(x, y), area_lo, area_hi), 0).rgb;
             sum += w;
         }
     }

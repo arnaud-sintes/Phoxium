@@ -113,6 +113,9 @@ pub struct WarpPlan {
     pub pad: i32,
     /// Size of the line images: columns, raster lines.
     pub size: (u32, u32),
+    /// Every host pixel's footprint is exactly on a grid column (the separable, unscaled raster at `ox` 1): the
+    /// Catmull-Rom weights of pass 2 are exactly (0, 1, 0, 0), so it loads the one tap that has a weight.
+    pub aligned: bool,
 }
 
 /// Push constants of `screen_lines.comp` and `screen_warp.comp` (`ScreenPush`, 12 bytes).
@@ -214,6 +217,7 @@ pub fn warp_plan_with(fc: &FrameConstants, params: &Params, abl_runs: bool) -> O
         ox,
         pad,
         size: (cols, raster_lines(fc)),
+        aligned,
     })
 }
 
@@ -426,7 +430,8 @@ impl Screen {
         let bind = vk::PipelineBindPoint::COMPUTE;
         let sets = [set, self.state_set, self.lines_set];
         let pc = WarpPush {
-            abl_runs: u32::from(self.abl_runs.get()),
+            // Bit 0: the `abl` slot runs; bit 1: the aligned grid (pass 2 loads one tap, `beam_warp.glsl`).
+            abl_runs: u32::from(self.abl_runs.get()) | (u32::from(plan.aligned) << 1),
             ox: plan.ox,
             pad: plan.pad,
         };
@@ -695,6 +700,7 @@ mod tests {
             ox: 1,
             pad: 3,
             size: (w, h),
+            aligned: false,
         };
         assert!(lines_fit(&plan(2600, 1440), lim(16384)));
         assert!(lines_fit(&plan(16384, 1440), lim(16384)));
@@ -749,12 +755,31 @@ mod tests {
         // Standard tier: the line-image path for the identity (aligned, ox 1 whatever the spot) and for the
         // separable geometries (the sampling rule where the raster is scaled).
         let d = Params::default();
+        let tier_of = |p: Params, t: u32| Params { quality_tier: t, ..p };
         let tiny = Params {
             beam_fwhm_mid_mm: 0.05,
             beam_fwhm_peak_mm: 0.05,
             ..d
         };
         assert_eq!(warp_plan(&fc, &d).map(|w| w.ox), Some(1), "identity, standard");
+        // The aligned grid is flagged for pass 2 (one tap instead of four): the identity, the unscaled separable
+        // raster, a breathing setting without the abl slot; never a scaled raster (fast tier).
+        assert_eq!(warp_plan(&fc, &d).map(|w| w.aligned), Some(true), "identity is aligned");
+        assert_eq!(
+            warp_plan(&fc, &tiny).map(|w| w.aligned),
+            Some(true),
+            "tiny spot, aligned"
+        );
+        assert_eq!(
+            warp_plan(&fc, &tier_of(separable[1], d.quality_tier)).map(|w| w.aligned),
+            Some(true),
+            "a radius without curvature is unscaled"
+        );
+        assert_eq!(
+            warp_plan(&fc, &tier_of(separable[0], crate::params::QUALITY_TIER_FAST)).map(|w| w.aligned),
+            Some(false),
+            "overscan scales the raster: interpolated"
+        );
         assert_eq!(warp_plan(&fc, &tiny).map(|w| w.ox), Some(1), "aligned grid, tiny spot");
         // Overscan scales the raster: the line path would interpolate, so standard keeps the tile path and fast
         // takes the line path; the unscaled one (a radius without curvature) is aligned in both.

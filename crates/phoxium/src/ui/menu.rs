@@ -1509,6 +1509,17 @@ fn save_new_preset(m: &mut MenuModel<'_>, r: &mut MenuResult) {
     };
     let name = m.presets.name.trim().to_string();
     let result = panels::check_new_preset(&name, m.library)
+        .and_then(|id| {
+            // A file of that name the library does not list under that id (another id inside, or unreadable) would
+            // be overwritten.
+            if dir.join(format!("{id}.toml")).exists() {
+                Err(format!(
+                    "A file {id}.toml is already in the presets folder; choose another name."
+                ))
+            } else {
+                Ok(id)
+            }
+        })
         .and_then(|id| Preset::from_params(&id, &name, m.params).map_err(|e| e.to_string()))
         .and_then(|p| p.save(&dir).map(|path| (p.id, path)).map_err(|e| e.to_string()));
     match result {
@@ -1528,7 +1539,12 @@ fn update_preset(m: &mut MenuModel<'_>, r: &mut MenuResult, id: String, name: St
     let Some(dir) = m.presets.dir.clone() else {
         return;
     };
-    match Preset::from_params(&id, &name, m.params).and_then(|p| {
+    // The preset keeps its label, notes and the provenance of the values the user did not change.
+    let rebuilt = match m.library.find(&id) {
+        Some(old) => old.updated_with(m.params),
+        None => Preset::from_params(&id, &name, m.params),
+    };
+    match rebuilt.and_then(|p| {
         p.save(&dir).map_err(|e| crate::presets::PresetError {
             file: format!("{id}.toml"),
             message: e.to_string(),

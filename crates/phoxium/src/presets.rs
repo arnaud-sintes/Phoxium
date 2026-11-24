@@ -265,8 +265,19 @@ pub fn read_bounded(path: &Path, max: u64) -> Result<String, String> {
     String::from_utf8(bytes).map_err(|_| "not UTF-8 text, skipped".to_string())
 }
 
+/// Whether `id` is a name Windows reserves for a device (`con`, `prn`, `aux`, `nul`, `com1` to `com9`, `lpt1` to
+/// `lpt9`): a file called so (`con.toml` too) is the device, not a file.
+pub fn is_reserved_device_name(id: &str) -> bool {
+    matches!(id, "con" | "prn" | "aux" | "nul")
+        || ((id.starts_with("com") || id.starts_with("lpt"))
+            && id.len() == 4
+            && id.as_bytes()[3].is_ascii_digit()
+            && id.as_bytes()[3] != b'0')
+}
+
 /// The file id of a user preset called `name`: lower case ASCII letters and digits, every other run of
-/// characters one `-` (`My Trinitron 2` -> `my-trinitron-2`). `None` when nothing is left.
+/// characters one `-` (`My Trinitron 2` -> `my-trinitron-2`; a name Windows reserves for a device, `Con`, and
+/// `Default` (the wear map of the no-preset state) get `-preset` after them). `None` when nothing is left.
 pub fn preset_id_for(name: &str) -> Option<String> {
     let mut id = String::new();
     for c in name.trim().chars() {
@@ -276,7 +287,12 @@ pub fn preset_id_for(name: &str) -> Option<String> {
             id.push('-');
         }
     }
-    let id = id.trim_end_matches('-').to_string();
+    let mut id = id.trim_end_matches('-').to_string();
+    // `default` is the name of the wear map of the state with no preset (`tube_state::state_path`): a preset with that
+    // id would share the burn-in of every preset-less run.
+    if is_reserved_device_name(&id) || id == "default" {
+        id.push_str("-preset");
+    }
     (!id.is_empty()).then_some(id)
 }
 
@@ -487,6 +503,22 @@ impl Preset {
         })
     }
 
+    /// This preset rewritten with the live `params` ("Update"): the same id, name, label and notes, and the
+    /// provenance of every value that did not change (a hand-written or imported preset keeps its sources; only the
+    /// values the user moved become `E: user`).
+    pub fn updated_with(&self, params: &Params) -> Result<Preset, PresetError> {
+        let mut p = Preset::from_params(&self.id, &self.name, params)?;
+        p.label = self.label.clone();
+        p.notes = self.notes.clone();
+        for (id, v) in &p.values {
+            let same = self.values.iter().any(|(old_id, old)| old_id == id && old == v);
+            if let (true, Some(pv)) = (same, self.provenance.get(*id)) {
+                p.provenance.insert((*id).to_string(), pv.clone());
+            }
+        }
+        Ok(p)
+    }
+
     /// The preset file text, in the schema of the shipped files (`Preset::parse` reads it back).
     pub fn to_toml(&self) -> String {
         let mut t = toml::Table::new();
@@ -635,7 +667,7 @@ pub fn apply_overrides_checked(
             warnings.push(format!("{origin}: unknown parameter '{id}' ignored"));
             continue;
         };
-        let Some(v) = from_value(m.ty, val) else {
+        let Some(v) = crate::settings::from_value_for(m, val) else {
             warnings.push(format!("{origin}: invalid value for parameter '{id}' ignored"));
             continue;
         };
@@ -664,7 +696,7 @@ pub fn diff_overrides(base: &Params, params: &Params) -> BTreeMap<String, toml::
     for m in crate::params::PARAMS_META {
         if let (Some(a), Some(b)) = (base.get(m.id), params.get(m.id)) {
             if a != b {
-                out.insert(m.id.to_string(), to_value(b));
+                out.insert(m.id.to_string(), crate::settings::to_value_for(m, b));
             }
         }
     }
@@ -1693,6 +1725,60 @@ mod tests {
         assert!(bad.is_empty(), "{}", bad.join("\n"));
     }
 
+    /// A name Windows reserves for a device cannot be a file name (`con.toml` is the console): its id gets a suffix.
+    #[test]
+    fn reserved_device_names_get_a_suffix() {
+        for (name, id) in [
+            ("Con", "con-preset"),
+            ("NUL", "nul-preset"),
+            ("com1", "com1-preset"),
+            ("LPT9", "lpt9-preset"),
+            ("com0", "com0"),
+            ("com", "com"),
+            ("console", "console"),
+            ("My Con", "my-con"),
+            // The id `default` is the wear map of the no-preset state.
+            ("Default", "default-preset"),
+            ("My Default", "my-default"),
+        ] {
+            assert_eq!(preset_id_for(name).as_deref(), Some(id), "{name}");
+        }
+        assert!(is_valid_id("con-preset"));
+    }
+
+    /// "Update" keeps the label, the notes and the provenance of the values that did not change, and gives the
+    /// moved ones the provenance `E: user`.
+    #[test]
+    fn update_keeps_the_provenance_of_unchanged_values() {
+        let base = Params {
+            exposure: 1.5,
+            tube_aspect: 1.0,
+            ..Params::default()
+        };
+        let mut old = Preset::from_params("mine", "Mine", &base).unwrap();
+        old.label = "hand written".to_string();
+        old.notes = "from the service manual".to_string();
+        old.provenance.insert(
+            "exposure".to_string(),
+            Provenance {
+                tag: Confidence::Sourced,
+                source: "service manual p. 4".to_string(),
+            },
+        );
+        let mut moved = base;
+        moved.tube_aspect = 1.2;
+        let new = old.updated_with(&moved).unwrap();
+        assert_eq!(
+            (new.label.as_str(), new.notes.as_str()),
+            ("hand written", "from the service manual")
+        );
+        assert_eq!(new.provenance["exposure"].source, "service manual p. 4");
+        assert_eq!(new.provenance["tube_aspect"].source, "user");
+        assert!(new
+            .values
+            .iter()
+            .any(|(i, v)| *i == "tube_aspect" && *v == ParamValue::F32(1.2)));
+    }
     #[test]
     fn preset_tags_are_honest_and_not_stronger_than_the_parameter_without_a_new_source() {
         let mut bad = Vec::new();

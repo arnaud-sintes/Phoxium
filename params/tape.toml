@@ -2,7 +2,7 @@
 # crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder. Slot `tape` (amp domain, between
 # `impair` and `tv`); the model is crt_model::tape (f64 oracle), the draws are crt_model::noise (a fixed integer
 # hash of line and frame, the same arithmetic in shaders/include/noise.glsl). Off by default. Every amount is an
-# estimate: CRT.md holds no measured tape data. The roll takes its time from `impair_field_rate_hz`.
+# estimate: CRT.md holds no measured tape data. The roll takes its time from `impair_field_rate_hz`: real time, in source frames at that rate.
 
 [[param]]
 id = "tape_enable"

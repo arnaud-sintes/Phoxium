@@ -7,9 +7,28 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Fixed
+
+- **The cabinet bezel is drawn from the raster rectangle**, not from the tube rectangle grown by the beam's skirt margin: its inner edge sat about 10 px outside the picture and its outer edge past the output edge. It now covers the skirt strip and ends at the output's edge (test through a grown rectangle, `tests/cabinet.rs`).
+- **The analogue impairments, the tape and the TV flicker follow real time**, not the output frame counter: on a 144 Hz display (or with a frame cap) hum, crawl, tracking roll, tape roll and flicker ran too fast, and the random draws were redrawn every output frame. They are now redrawn once per source frame at `impair_field_rate_hz` (`tv_frame_rate_hz` for the flicker).
+- **Open image** refuses a picture larger than the GPU's image limit (it ended the session at the first render) and the decoder refuses a header that claims more than 32768 pixels a side or 128 Mpixel before allocating; the native dialog no longer closes the menu or the picker when it closes.
+- **A whole-monitor source is found again when its monitor comes back** (the reattach list had no monitors), and `--window "Whole screen N"` keeps the monitor's identity (profile, last choice).
+- **The video device**: a panic in its worker no longer stops its frames for good, and its end is always reported.
+- **Default profile**: it keeps the source settings but not the program's crop, divisor or picture area; deleting or resetting a program's profile gives it the default profile.
+- **Source pre-filters** repeat the edge of the picture area instead of reading the bars or window chrome around a cropped picture.
+- **Presets**: a file in the presets folder that the library does not list under that id is never overwritten (rename, import, Save as new); the names Windows reserves for a device (`con`, `nul`, ...) and `default` get a `-preset` suffix; "Update" keeps a preset's label, notes and the provenance of the values that did not change.
+- **`settings.toml`** stores enum overrides by value name (and still reads the index of earlier builds), so reordering a value in `params/*.toml` cannot remap a saved choice; an invalid settings file is not replaced when no copy of it could be kept; a NaN, infinite or negative wait for a lost source is the default; `--wait-window` refuses NaN and infinity.
+- **Snapshots** go to the Pictures known folder (a OneDrive redirection included); a manual pixel size too large for a tiny output is reported as downscaled, not "x0 used"; a change of the quarter turn no longer draws one frame with the new turn and the old view.
+
+### Changed
+
+- **`phosphor`**: the history is one image per channel and the red channel, which has no history at 60 Hz, is skipped (bit-exact: 48 frame hashes identical before and after, across 60, 144 and 50 Hz and a history restart); 1.3 to 1.0 ms at 1440p on preset 01.
+- **`screen` pass 2** loads one tap per image on the aligned grid (bit-exact: 22 offline renders byte-identical).
+- `tests/perf_profile.rs` takes `PHOXIUM_PROFILE_SOURCES` (320x240, 640x480, 1280x720 or `all`); `tests/phosphor_dump.rs` is a tool that prints per-frame hashes for before/after comparisons; the hard-bounds sweep of `tests/param_validation.rs` now enables the impairments, the tape, the cabinet and a TV sharpness.
+
 ### Added
 
-- **Capture card** (`docs/REFERENCE.md`, "Capture card"): a video capture device (a capture card, a camera) as the source, listed in the picker; read through Media Foundation as RGB, at the device's own picture size. Module `video`; the sample conversion is unit tested, and the laptop's camera lists, opens and delivers a frame; not checked with a real capture card.
+- **Capture card** (`docs/REFERENCE.md`, "Choosing the window to capture", **Capture card**): a video capture device (a capture card, a camera) as the source, listed in the picker; read through Media Foundation as RGB, at the device's own picture size. Module `video`; the sample conversion is unit tested, and the laptop's camera lists, opens and delivers a frame; not checked with a real capture card.
 
 ## [0.7.0] - 2026-11-24
 

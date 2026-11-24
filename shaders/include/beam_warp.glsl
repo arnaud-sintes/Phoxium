@@ -162,6 +162,8 @@ vec3 beam_warp_eval(ivec2 q) {
     float kf = floor(t);
     float f = t - kf;
     int k = int(kf);
+    // Bit 1 of the push block's `abl_runs`: the aligned grid (`WarpPlan::aligned`).
+    bool aligned = (screen_push.abl_runs & 2u) != 0u;
     // Catmull-Rom weights of the taps k - 1 .. k + 2 at the fraction f.
     vec4 cw = vec4(((-0.5 * f + 1.0) * f - 0.5) * f, (1.5 * f - 2.5) * f * f + 1.0, ((-1.5 * f + 2.0) * f + 0.5) * f,
         (0.5 * f - 0.5) * f * f);
@@ -178,17 +180,34 @@ vec3 beam_warp_eval(ivec2 q) {
         vec3 e0 = y0 - c;
         vec3 e1 = y1 - c;
         vec3 h1 = BEAM_LINES_LOAD(beam_lines_h, k, n);
-        vec3 h2 = BEAM_LINES_LOAD(beam_lines_h, k + 1, n);
-        vec3 h = cw.x * BEAM_LINES_LOAD(beam_lines_h, k - 1, n) + cw.y * h1 + cw.z * h2
-            + cw.w * BEAM_LINES_LOAD(beam_lines_h, k + 2, n);
-        vec3 hl = mix(h1, h2, f);
+        // The aligned grid: f is exactly 0, the weights are exactly (0, 1, 0, 0) and mix(a, b, 0) is exactly a, so the
+        // other taps contribute nothing and are not loaded (bit-exact: terms of 0 x a finite value; the taps are
+        // finite, the line images hold FP16 sums of finite terms).
+        vec3 h;
+        vec3 hl;
+        if (aligned) {
+            h = h1;
+            hl = h1;
+        } else {
+            vec3 h2 = BEAM_LINES_LOAD(beam_lines_h, k + 1, n);
+            h = cw.x * BEAM_LINES_LOAD(beam_lines_h, k - 1, n) + cw.y * h1 + cw.z * h2
+                + cw.w * BEAM_LINES_LOAD(beam_lines_h, k + 2, n);
+            hl = mix(h1, h2, f);
+        }
         vec3 s = fallback;
         vec3 var = vec3(0.0);
         if (growth) {
             // The tile path's moments (beam_eval_workgroup) of the linearly merged neighbours.
-            vec3 v = mix(BEAM_LINES_LOAD(beam_lines_v, k, n), BEAM_LINES_LOAD(beam_lines_v, k + 1, n), f) * norm;
-            vec3 v2 = mix(BEAM_LINES_LOAD(beam_lines_v2, k, n), BEAM_LINES_LOAD(beam_lines_v2, k + 1, n), f)
-                * (norm * norm);
+            vec3 v;
+            vec3 v2;
+            if (aligned) {
+                v = BEAM_LINES_LOAD(beam_lines_v, k, n) * norm;
+                v2 = BEAM_LINES_LOAD(beam_lines_v2, k, n) * (norm * norm);
+            } else {
+                v = mix(BEAM_LINES_LOAD(beam_lines_v, k, n), BEAM_LINES_LOAD(beam_lines_v, k + 1, n), f) * norm;
+                v2 = mix(BEAM_LINES_LOAD(beam_lines_v2, k, n), BEAM_LINES_LOAD(beam_lines_v2, k + 1, n), f)
+                    * (norm * norm);
+            }
             vec3 hs = max(hl, vec3(1e-30));
             vec3 m = v / hs;
             s = beam_mean_sigma(hl, v, fallback);
@@ -197,11 +216,21 @@ vec3 beam_warp_eval(ivec2 q) {
         sum += beam_y_line(max(h, vec3(0.0)) * wc, s * im.y, var * (im2 * im2), e0, e1, far_y);
         if (w > 0.0) {
             vec3 t1 = BEAM_LINES_LOAD(beam_lines_ht, k, n);
-            vec3 t2 = BEAM_LINES_LOAD(beam_lines_ht, k + 1, n);
-            vec3 ht = cw.x * BEAM_LINES_LOAD(beam_lines_ht, k - 1, n) + cw.y * t1 + cw.z * t2
-                + cw.w * BEAM_LINES_LOAD(beam_lines_ht, k + 2, n);
-            vec3 vt = mix(BEAM_LINES_LOAD(beam_lines_vt, k, n), BEAM_LINES_LOAD(beam_lines_vt, k + 1, n), f) * norm;
-            vec3 st = beam_mean_sigma(mix(t1, t2, f), vt * ratio * ratio, fallback * ratio) * im.y;
+            vec3 ht;
+            vec3 vt;
+            vec3 tl;
+            if (aligned) {
+                ht = t1;
+                vt = BEAM_LINES_LOAD(beam_lines_vt, k, n) * norm;
+                tl = t1;
+            } else {
+                vec3 t2 = BEAM_LINES_LOAD(beam_lines_ht, k + 1, n);
+                ht = cw.x * BEAM_LINES_LOAD(beam_lines_ht, k - 1, n) + cw.y * t1 + cw.z * t2
+                    + cw.w * BEAM_LINES_LOAD(beam_lines_ht, k + 2, n);
+                vt = mix(BEAM_LINES_LOAD(beam_lines_vt, k, n), BEAM_LINES_LOAD(beam_lines_vt, k + 1, n), f) * norm;
+                tl = mix(t1, t2, f);
+            }
+            vec3 st = beam_mean_sigma(tl, vt * ratio * ratio, fallback * ratio) * im.y;
             sum += beam_y_line(max(ht, vec3(0.0)) * w, st, vec3(0.0), e0, e1, far_y);
         }
     }

@@ -35,6 +35,7 @@ That is all: no command line is needed. The integer upscale of the game and the 
 | A/B while held: bypass only as long as the key is down | `Ctrl+Alt+Insert` |
 | Next / previous preset | `Ctrl+Alt+PageDown` / `Ctrl+Alt+PageUp` |
 | Click-through on / off | `Ctrl+Alt+F6` |
+| Save a snapshot of the picture | `Ctrl+Alt+F2` |
 
 - Once a window is captured, the output never takes the keyboard focus from it, except while the settings menu is open (it gives the focus back when it closes).
 - These keys are **global**: while Phoxium runs, F10 and F11 reach no other program, the game included. Every key, Quit included, can be changed in the menu (GPU and system, Hotkeys).
@@ -52,19 +53,20 @@ F10 opens the settings menu inside the output window. Every parameter of the tub
 - **Optics:** glow (bloom) around bright areas and the vignette; turn on its **Enable** switch first.
 - **Source:** what was detected, **Change source**, the picture area (Auto or manual limits), the scaling multiplier and the saved profile of each game.
 - **Performance:** the quality tier (how much work the model costs, never the look) and an optional automatic drop when the GPU cannot keep up.
-- Optional and off by default: ageing and burn-in (burn-in deliberately damages the picture and is kept between sessions), composite video and interlace.
+- **Gun and white:** the gun law, the white balance and colour sets (SMPTE-C, EBU, NTSC-J, Trinitron primaries and white points).
+- Optional and off by default: ageing and burn-in (burn-in deliberately damages the picture and is kept between sessions), composite video and interlace, the faults of a poor analogue signal (hum, jitter, ghosts, snow), a VHS tape and a vertical roll, TV controls (tint, colour, black and white level, sharpness) and a refresh flicker, and a cabinet bezel with the glass reflecting it.
 
 ## Capture
 
 By default the captured picture stays on the GPU (**zero-copy**). If the PC cannot do that, Phoxium falls back to a **CPU copy** by itself, which works everywhere. You can choose the CPU copy in the menu (Source, Capture) if the picture looks wrong, stutters or freezes.
 
-Only windows can be captured: a game in exclusive fullscreen cannot; run it in a window or borderless fullscreen. Protected content is captured black, and a minimised window sends no frames until it is restored.
+A window, a whole monitor ("Whole screen N"), a still image (a PNG file: **Open image**) or a video device (a capture card or a camera, in the list under **Capture card**) can be the source. A game in exclusive fullscreen cannot be captured; run it in a window or borderless fullscreen. Protected content is captured black, and a minimised window sends no frames until it is restored.
 
 ## Settings and privacy
 
 Everything Phoxium keeps is in `%APPDATA%\Phoxium\` (settings, your presets, game profiles, burn-in state). Delete that folder to go back to the defaults. On its first start Phoxium copies the folder of the old name, `%APPDATA%\ultimateCRT\`, if there is one; the old folder is left untouched.
 
-The program has no network code and sends nothing anywhere. The settings file keeps the title of the last captured window (to find it again after a restart); look at the file before you attach it to a bug report.
+The program has no network code and sends nothing anywhere. It opens a video device (a capture card, the PC's camera) only when you choose one in the list, and only to show its picture in the output window. The settings file keeps the title of the last captured window (to find it again after a restart); look at the file before you attach it to a bug report.
 
 ## Known limits
 

@@ -62,12 +62,25 @@ impl Source {
     }
 }
 
+/// The largest side of a PNG that is decoded (a PNG header can claim far more than any file holds).
+pub const MAX_PNG_SIDE: u32 = 32_768;
+/// The most pixels of a PNG that is decoded (128 Mpixel, 512 MiB as BGRA).
+pub const MAX_PNG_PIXELS: u64 = 128 * 1024 * 1024;
+
 /// Decodes a PNG of any colour type and depth to a BGRA frame. Transparency is flattened over
 /// black; 16-bit samples are reduced to 8 bits. Values are taken as stored (sRGB-coded).
 pub fn decode_png(bytes: &[u8]) -> Res<Frame> {
     let mut dec = png::Decoder::new(std::io::Cursor::new(bytes));
     dec.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut r = dec.read_info()?;
+    // Before anything is allocated: a header that asks for gigabytes (or a side no GPU takes) is refused.
+    let (hw, hh) = (r.info().width, r.info().height);
+    if hw > MAX_PNG_SIDE || hh > MAX_PNG_SIDE || u64::from(hw) * u64::from(hh) > MAX_PNG_PIXELS {
+        return Err(format!(
+            "the image is {hw} x {hh}, larger than the {MAX_PNG_SIDE} px side or {MAX_PNG_PIXELS} pixel limit"
+        )
+        .into());
+    }
     let mut buf = vec![0; r.output_buffer_size().ok_or("image too large")?];
     let info = r.next_frame(&mut buf)?;
     let (w, h) = (info.width, info.height);
@@ -177,6 +190,31 @@ mod tests {
     #[test]
     fn garbage_is_an_error() {
         assert!(decode_png(b"not a png").is_err());
+    }
+
+    /// A header that claims a side beyond the limit is refused before the pixel buffer is allocated (a 40000 x 1
+    /// grey PNG is 40 KB of data); the largest side allowed still decodes.
+    #[test]
+    fn an_oversized_png_is_refused_before_decoding() {
+        let wide = encode(
+            MAX_PNG_SIDE + 1,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            &vec![7; (MAX_PNG_SIDE + 1) as usize],
+            None,
+        );
+        let e = decode_png(&wide).err().expect("refused").to_string();
+        assert!(e.contains("larger than"), "{e}");
+        let ok = encode(
+            MAX_PNG_SIDE,
+            1,
+            png::ColorType::Grayscale,
+            png::BitDepth::Eight,
+            &vec![7; MAX_PNG_SIDE as usize],
+            None,
+        );
+        assert_eq!(decode_png(&ok).unwrap().width, MAX_PNG_SIDE);
     }
 
     #[test]

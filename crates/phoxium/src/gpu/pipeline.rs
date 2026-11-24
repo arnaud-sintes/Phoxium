@@ -236,8 +236,10 @@ pub struct FrameConstants {
     /// Horizontal supersampling factor K of the amp-domain images (`amp` and `gun` outputs): their size
     /// is `native_size * (K, 1)` (T-20b image contract, default [`stages::AMP_K`]).
     pub amp_k: i32,
-    /// Padding to the 16-byte alignment of the std140 `vec3` below (bytes 60 to 63).
-    pub(crate) pad0: i32,
+    /// Real time since the pipeline was created, in milliseconds (the sum of the frame times; wraps after 49 days).
+    /// The GLSL block has padding here (bytes 60 to 63, to the 16-byte alignment of the std140 `vec3` below): the
+    /// shaders do not read it; the CPU plans of the time-based modules do ([`FrameConstants::source_frame`]).
+    pub elapsed_ms: u32,
     /// White balance gains of the `gun` stage (T-34): per-channel factors on the beam current. `new` gives
     /// (1, 1, 1); `placed` computes them from the parameter table (`src/white.rs`).
     pub white_gain: [f32; 3],
@@ -255,6 +257,30 @@ pub struct FrameConstants {
 }
 
 impl FrameConstants {
+    /// The number of source frames that have passed at `rate_hz` frames per second of real time: the time base of
+    /// the signal impairments, the tape and the TV flicker, so that their hum, crawl, roll and flicker run in real
+    /// seconds on any display rate (a 144 Hz output redraws the same source frame for a while, as a real tube
+    /// shows the same field). Computed in f64 from [`FrameConstants::elapsed_ms`].
+    pub fn source_frame(&self, rate_hz: f64) -> u32 {
+        (f64::from(self.elapsed_ms) * rate_hz.max(1e-6) / 1000.0).floor() as u32
+    }
+
+    /// These constants at the real time of source frame `frame` at `rate_hz` (tests): the smallest whole
+    /// millisecond for which [`FrameConstants::source_frame`] gives `frame`.
+    pub fn at_source_frame(mut self, frame: u32, rate_hz: f64) -> Self {
+        let mut ms = (f64::from(frame) * 1000.0 / rate_hz).ceil() as u32;
+        while self.with_elapsed(ms).source_frame(rate_hz) < frame {
+            ms += 1;
+        }
+        self.elapsed_ms = ms;
+        self
+    }
+
+    fn with_elapsed(mut self, ms: u32) -> Self {
+        self.elapsed_ms = ms;
+        self
+    }
+
     /// The constants of a `native` raster letterboxed into `target` (see [`tube_rect_letterbox`]), with
     /// K = [`stages::AMP_K`], tube not placed (px per mm and line pitch 0), frame index and time 0.
     /// Stage tests start from this and set the fields they inject.
@@ -564,6 +590,8 @@ pub struct Pipeline {
     /// Per-frame routing scratch (no allocation in the render loop): (slot, mode, input).
     plan: Vec<(usize, Mode, ImgRef)>,
     frame_index: u32,
+    /// Real time since the pipeline was created, ms (the sum of the frame times).
+    elapsed_ms: f64,
     last_frame: Option<Instant>,
     /// Frame period, ms, given to every recorded frame instead of the measured one (headless tests of the
     /// real-time stages through the whole chain, `Headless::set_frame_time_ms`); `None` (the window loop):
@@ -678,6 +706,7 @@ impl Pipeline {
             routed: Vec::with_capacity(chain.len() + 1),
             plan: Vec::with_capacity(chain.len()),
             frame_index: 0,
+            elapsed_ms: 0.0,
             last_frame: None,
             frame_time_override: None,
             saved: Vec::with_capacity(chain.len() + 3),
@@ -1369,6 +1398,9 @@ impl Pipeline {
                 .map_or(0.0, |t| now.duration_since(t).as_secs_f32() * 1000.0)
         });
         self.last_frame = Some(now);
+        // Real time for the time-based modules: the sum of the frame times (the first frame is time 0).
+        self.elapsed_ms += f64::from(fc.frame_time_ms);
+        fc.elapsed_ms = (self.elapsed_ms as u64) as u32;
         self.record_frame(ctx, view, fc, settings, params, target, ui)
     }
 

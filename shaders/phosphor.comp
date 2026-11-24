@@ -20,9 +20,13 @@
 // arrive here as other rho_j, c_j and w0. The output y is then mixed with x by phosphor_persistence_blend
 // (persistence_blend below); the history recurrence does not see it.
 //
-// History: three RGBA32F storage images owned by the stage (set 1), read and written in place by the same
-// invocation (each texel by one invocation only). Term j < 3 is in image j (rgb), term 3 in the alpha of
-// image `channel`. mode 1: the history was cleared (new images, size change, explicit clear, stage not run
+// History: three RGBA32F storage images owned by the stage (set 1), one per channel (image 0 red, 1 green, 2
+// blue: its rgba are the four terms of that channel), read and written in place by the same invocation (each
+// texel by one invocation only). A channel whose terms are all below 2^-24 for any light the tube image can hold
+// (red at 60 Hz: rho about 1e-16, c about 1e-16) has a history that is exactly 0 at every frame (each term is
+// flushed); once the stage knows that image holds zeros (`skip`, decided on the CPU, src/gpu/stages/phosphor.rs)
+// the channel's image is neither read nor written: the same arithmetic with t = 0, 32 of the 112 bytes a pixel
+// of traffic. mode 1: the history was cleared (new images, size change, explicit clear, stage not run
 // on the previous frame), the images are not read and S_j is primed to the steady state of this frame's
 // input, S_j = c_j x / (1 - rho_j), so y = x at once (a static picture has no fade-in; a moving picture
 // starts as if the first frame had always been shown). A term below 2^-24 (the smallest FP16 value, the
@@ -40,12 +44,13 @@ layout(set = 1, binding = 0, rgba32f) uniform image2D history0;
 layout(set = 1, binding = 1, rgba32f) uniform image2D history1;
 layout(set = 1, binding = 2, rgba32f) uniform image2D history2;
 
-// std430, 116 bytes, mirrored by `Push` in src/gpu/stages/phosphor.rs.
+// std430, 120 bytes, mirrored by `Push` in src/gpu/stages/phosphor.rs.
 layout(push_constant) uniform Persistence {
     vec4 w0;     // rgb: weight per channel
     vec4 rho[3]; // [channel]: rho of terms 0 to 3
     vec4 c[3];   // [channel]: c of terms 0 to 3
     uint mode;   // 0: history valid, 1: history cleared
+    uint skip;   // bit per channel: its history image holds zeros and stays zero: not read, not written
 } pc;
 
 const float FLUSH = 5.9604645e-8; // 2^-24
@@ -71,6 +76,27 @@ vec4 finite_or_zero(vec4 v) {
     return mix(vec4(0.0), v, lessThanEqual(abs(v), vec4(3.4028235e38)));
 }
 
+// The history image of channel ch (the images are separate bindings: no dynamic indexing).
+vec4 load_history(int ch, ivec2 p) {
+    if (ch == 0) {
+        return imageLoad(history0, p);
+    }
+    if (ch == 1) {
+        return imageLoad(history1, p);
+    }
+    return imageLoad(history2, p);
+}
+
+void store_history(int ch, ivec2 p, vec4 v) {
+    if (ch == 0) {
+        imageStore(history0, p, v);
+    } else if (ch == 1) {
+        imageStore(history1, p, v);
+    } else {
+        imageStore(history2, p, v);
+    }
+}
+
 void main() {
     ivec2 p = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(p, imageSize(light_out)))) {
@@ -82,19 +108,14 @@ void main() {
         // holds light already emitted, which decays without saturating again.
         x.rgb = phosphor_saturate(x.rgb);
     }
-    vec4 h0 = vec4(0.0);
-    vec4 h1 = vec4(0.0);
-    vec4 h2 = vec4(0.0);
-    if (pc.mode == 0u) {
-        // A non-finite history (never decays) reads as 0: guard against an uninitialised image.
-        h0 = finite_or_zero(imageLoad(history0, p));
-        h1 = finite_or_zero(imageLoad(history1, p));
-        h2 = finite_or_zero(imageLoad(history2, p));
-    }
     vec4 s[3];
-    s[0] = vec4(h0.r, h1.r, h2.r, h0.a);
-    s[1] = vec4(h0.g, h1.g, h2.g, h1.a);
-    s[2] = vec4(h0.b, h1.b, h2.b, h2.a);
+    for (int ch = 0; ch < 3; ++ch) {
+        s[ch] = vec4(0.0);
+        if (pc.mode == 0u && ((pc.skip >> ch) & 1u) == 0u) {
+            // A non-finite history (never decays) reads as 0: guard against an uninitialised image.
+            s[ch] = finite_or_zero(load_history(ch, p));
+        }
+    }
     vec3 y;
     for (int ch = 0; ch < 3; ++ch) {
         vec4 t = s[ch];
@@ -111,7 +132,9 @@ void main() {
         s[ch] = mix(n, vec4(0.0), lessThan(abs(n), vec4(FLUSH)));
     }
     imageStore(light_out, p, round_f16(vec4(y, x.a)));
-    imageStore(history0, p, vec4(s[0].x, s[1].x, s[2].x, s[0].w));
-    imageStore(history1, p, vec4(s[0].y, s[1].y, s[2].y, s[1].w));
-    imageStore(history2, p, vec4(s[0].z, s[1].z, s[2].z, s[2].w));
+    for (int ch = 0; ch < 3; ++ch) {
+        if (((pc.skip >> ch) & 1u) == 0u) {
+            store_history(ch, p, s[ch]);
+        }
+    }
 }

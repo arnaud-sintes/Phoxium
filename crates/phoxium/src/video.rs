@@ -73,6 +73,15 @@ struct Shared {
     ended: AtomicBool,
 }
 
+impl Shared {
+    /// The frame slot, whoever panicked while holding it: a poisoned lock holds a whole `Option` (the worker stores it
+    /// in one assignment), so its content is as good as any, and the device keeps working instead of delivering
+    /// nothing for ever.
+    fn lock_frame(&self) -> std::sync::MutexGuard<'_, Option<Sample>> {
+        self.frame.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+}
+
 /// An open video capture device (see the module documentation). Dropping it stops the worker.
 pub struct VideoCapture {
     shared: Arc<Shared>,
@@ -116,9 +125,7 @@ impl VideoCapture {
     /// Hands over the newest frame if it is newer than `into.seq`: true when `into` now holds a new frame. The
     /// frames count from 1 in this session; `into.session` is 0 (a CPU frame).
     pub fn take_frame(&self, into: &mut Frame) -> bool {
-        let Ok(mut f) = self.shared.frame.lock() else {
-            return false;
-        };
+        let mut f = self.shared.lock_frame();
         match f.take() {
             Some((seq, w, h, data)) if seq != into.seq => {
                 *into = Frame::cpu(w, h, data);
@@ -305,6 +312,14 @@ mod platform {
     /// The worker: opens the device, reports its mode (or the error) on `tx`, then reads samples until asked to stop
     /// or the stream ends.
     pub fn run(link: &str, shared: &Shared, tx: &Sender<Result<(u32, u32), String>>) {
+        // Whatever ends the worker (the stream, an error, a panic), the owner sees `ended`.
+        struct EndGuard<'a>(&'a Shared);
+        impl Drop for EndGuard<'_> {
+            fn drop(&mut self) {
+                self.0.ended.store(true, Ordering::Relaxed);
+            }
+        }
+        let _end = EndGuard(shared);
         let started = Started::new();
         let Ok(_mf) = started else {
             let _ = tx.send(Err("Media Foundation is not available".into()));
@@ -365,9 +380,7 @@ mod platform {
                 let _ = buffer.Unlock();
                 if let Some(data) = converted {
                     seq += 1;
-                    if let Ok(mut f) = shared.frame.lock() {
-                        *f = Some((seq, size.0, size.1, data));
-                    }
+                    *shared.lock_frame() = Some((seq, size.0, size.1, data));
                 }
             }
             drop(reader);
@@ -417,6 +430,33 @@ mod tests {
         assert!(bgrx_to_bgra(&[0; 16], 2, 2, 4).is_none(), "pitch narrower than a row");
         assert!(bgrx_to_bgra(&[0; 15], 2, 2, 8).is_none(), "buffer too short");
         assert!(bgrx_to_bgra(&[0; 16], 2, 2, 8).is_some());
+    }
+
+    /// A panic while the frame slot is locked (the worker, or anything else) does not stop the frames for good: the
+    /// poisoned lock is read through, and the worker's end is always reported.
+    #[test]
+    fn a_poisoned_lock_does_not_stop_the_frames() {
+        let shared = Arc::new(Shared::default());
+        let held = Arc::clone(&shared);
+        let _ = std::thread::spawn(move || {
+            let _guard = held.frame.lock().unwrap();
+            panic!("a worker that panics while it holds the frame slot");
+        })
+        .join();
+        assert!(shared.frame.lock().is_err(), "the lock is poisoned");
+        let cap = VideoCapture {
+            shared: Arc::clone(&shared),
+            worker: None,
+            name: "test".into(),
+            size: (1, 1),
+        };
+        *shared.lock_frame() = Some((1, 1, 1, vec![9; 4]));
+        let mut into = Frame::default();
+        assert!(
+            cap.take_frame(&mut into),
+            "the frame is delivered through the poisoned lock"
+        );
+        assert_eq!(into.data, [9; 4]);
     }
 
     /// The newest frame is handed over once; the same sequence number again is not new; a newer one is.

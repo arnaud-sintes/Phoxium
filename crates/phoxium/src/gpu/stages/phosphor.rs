@@ -127,7 +127,7 @@ fn new() -> Box<dyn Stage> {
     Box::<Phosphor>::default()
 }
 
-/// Push constants of `phosphor.comp` (std430, 116 bytes, no padding).
+/// Push constants of `phosphor.comp` (std430, 120 bytes, no padding).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(in crate::gpu) struct Push {
@@ -139,6 +139,35 @@ pub(in crate::gpu) struct Push {
     pub c: [[f32; 4]; 3],
     /// 0: history valid, 1: history cleared (not read).
     pub mode: u32,
+    /// One bit per channel (bit `ch`): its history image holds zeros and stays zero ([`skippable`]), so the shader
+    /// neither reads nor writes it (the same arithmetic with the history term 0).
+    pub skip: u32,
+}
+
+/// The smallest FP16 value, 2^-24: a history term below it is flushed to 0 (`phosphor.comp`).
+const FLUSH: f64 = 5.960_464_5e-8;
+/// The largest finite FP16 light the tube image can hold.
+const LIGHT_MAX: f64 = 65_504.0;
+
+/// The channels whose history is exactly 0 after any frame with these weights (`phosphor.comp`), as soon as it was
+/// 0 or was written by one such frame: every term has `rho x LIGHT_MAX` and its steady-state drive `c / (1 - rho) x
+/// LIGHT_MAX` below half of [`FLUSH`], so the update `rho t + c x` of a stale `t` and of any light is flushed. The
+/// measured red of Kuhn's P22 is purely exponential with tau 442 us: at 60 Hz (rho about 1e-16) it qualifies, at 144
+/// Hz (rho about 1e-7) it does not; green and blue never do.
+fn skippable(p: &Push) -> [bool; 3] {
+    let limit = 0.5 * FLUSH;
+    std::array::from_fn(|ch| {
+        (0..4).all(|j| {
+            let (rho, c) = (f64::from(p.rho[ch][j]), f64::from(p.c[ch][j]));
+            let open = 1.0 - rho;
+            let drive = if open > 0.0 {
+                c / open * LIGHT_MAX < limit
+            } else {
+                c == 0.0
+            };
+            drive && rho * LIGHT_MAX < limit
+        })
+    })
 }
 
 /// The push constants (mode 0) of a frame rate, per-channel tail strengths and the artistic controls,
@@ -422,6 +451,11 @@ struct Phosphor {
     history: [GpuImage; HISTORY_IMAGES],
     /// Size of the history images, (0, 0) when none.
     history_size: (u32, u32),
+    /// Per channel: the history image is known to hold zeros (the last frame that touched it was a frame in which
+    /// the channel was [`skippable`], or it has been skipped since). A channel is skipped only then.
+    zero_known: [bool; 3],
+    /// `zero_known` before the frame being prepared: an abandoned frame never wrote its history.
+    zero_prev: [bool; 3],
     /// The history must not be read by the next run.
     reset: bool,
     /// The fits of the current frame and the inputs they were computed from (rate bits, tail bits, control
@@ -513,6 +547,8 @@ impl Phosphor {
             h.destroy(d);
         }
         self.history_size = (0, 0);
+        self.zero_known = [false; 3];
+        self.zero_prev = [false; 3];
     }
 
     /// # Safety
@@ -547,6 +583,9 @@ impl Phosphor {
             .collect();
         ctx.device.update_descriptor_sets(&writes, &[]);
         self.history_size = size;
+        // New images hold nothing known.
+        self.zero_known = [false; 3];
+        self.zero_prev = [false; 3];
         self.fresh = true;
         self.reset = true;
         Ok(())
@@ -636,8 +675,19 @@ impl Stage for Phosphor {
             fc.frame_time_ms,
         );
         self.reset |= refit;
+        // A channel is skipped only when it can have no history (`skippable`) and its image is known to hold
+        // zeros; after this frame the image is zero iff the channel qualified (a frame that qualifies writes only
+        // zeros, a skipped one does not write).
+        let qualifies = skippable(&weights);
+        let mut skip = 0;
+        for (ch, q) in qualifies.iter().enumerate() {
+            skip |= u32::from(*q && self.zero_known[ch]) << ch;
+        }
+        self.zero_prev = self.zero_known;
+        self.zero_known = qualifies;
         self.push = Push {
             mode: u32::from(self.reset),
+            skip,
             ..weights
         };
         self.transition = std::mem::take(&mut self.fresh);
@@ -655,6 +705,8 @@ impl Stage for Phosphor {
         if self.on {
             self.fresh |= self.transition;
             self.reset |= self.push.mode != 0;
+            // The frame wrote nothing: the images are as they were before it.
+            self.zero_known = self.zero_prev;
         }
         self.transition = false;
     }
@@ -723,17 +775,42 @@ impl Stage for Phosphor {
 mod tests {
     use super::*;
 
-    /// The push block is 116 bytes: w0 at 0, rho at 16, c at 64, mode at 112 (std430 of the shader).
+    /// The push block is 120 bytes: w0 at 0, rho at 16, c at 64, mode at 112, skip at 116 (std430 of the shader).
     #[test]
     fn push_layout_matches_the_shader() {
-        assert_eq!(size_of::<Push>(), 116);
+        assert_eq!(size_of::<Push>(), 120);
         assert_eq!(std::mem::offset_of!(Push, rho), 16);
         assert_eq!(std::mem::offset_of!(Push, c), 64);
         assert_eq!(std::mem::offset_of!(Push, mode), 112);
+        assert_eq!(std::mem::offset_of!(Push, skip), 116);
         let glsl = include_str!("../../../../../shaders/phosphor.comp");
-        for m in ["vec4 w0;", "vec4 rho[3];", "vec4 c[3];", "uint mode;"] {
+        for m in ["vec4 w0;", "vec4 rho[3];", "vec4 c[3];", "uint mode;", "uint skip;"] {
             assert!(glsl.contains(m), "{m}");
         }
+    }
+
+    /// Which channels have no history to keep: the measured red at 60 Hz (a purely exponential tau of 442 us, rho
+    /// about 1e-16 a frame) does, at 144 Hz (rho about 1e-7, a term of 1e-7 of the light) and with any extra
+    /// afterglow it does not, and green and blue (taus of tens of ms and seconds) never do.
+    #[test]
+    fn only_the_red_of_a_slow_refresh_has_no_history() {
+        let p60 = weights(60.0, [1.0; 3], Controls::PHYSICAL);
+        assert_eq!(skippable(&p60), [true, false, false], "60 Hz");
+        let p50 = weights(50.0, [1.0; 3], Controls::PHYSICAL);
+        assert_eq!(skippable(&p50), [true, false, false], "50 Hz");
+        let p144 = weights(144.0, [1.0; 3], Controls::PHYSICAL);
+        assert_eq!(skippable(&p144), [false, false, false], "144 Hz");
+        let extra = Controls {
+            extra: [1.0, 0.0, 0.0],
+            ..Controls::PHYSICAL
+        };
+        assert_eq!(
+            skippable(&weights(60.0, [1.0; 3], extra)),
+            [false; 3],
+            "extra red afterglow"
+        );
+        // A zero push (no terms: rho = c = 0) qualifies everywhere: nothing to keep.
+        assert_eq!(skippable(&Push::default()), [true; 3]);
     }
 
     /// The f32 weights keep the steady-state gain at 1 (f64 check of the rounded constants).

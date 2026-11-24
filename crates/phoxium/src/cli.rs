@@ -85,11 +85,18 @@ Usage: phoxium [options]
   --version            print the version and exit
   --help               print this text
 
-Quit: Ctrl+Alt+End (the output does not take the keyboard focus), or the close button of the framed window.
-Hotkeys (global, configurable in settings.toml [global.hotkeys]): F11 fullscreen or framed window, F10
-settings menu, Ctrl+Alt+F9 overlay, Ctrl+Alt+F7 A/B bypass of the CRT chain, Ctrl+Alt+PageDown and
-Ctrl+Alt+PageUp next and previous preset, all rebindable (Quit included) in the settings menu. No default
-uses Ctrl+Alt with a letter: that also fires on AltGr. A chord another program owns falls back and is reported.";
+The output does not take the keyboard focus. Hotkeys are global and configurable in settings.toml
+[global.hotkeys] or in the settings menu (Quit included); the defaults follow. No default uses Ctrl+Alt with a
+letter: that also fires on AltGr. A chord another program owns falls back and is reported.";
+
+/// The default hotkeys, one per line, from the table of the actions (`hotkeys::Action`): never a copy of the chords.
+pub fn hotkeys_help() -> String {
+    let mut s = String::from("Default hotkeys:");
+    for a in crate::hotkeys::Action::ALL {
+        s.push_str(&format!("\n  {:<14} {}", a.default_text(), a.describe()));
+    }
+    s
+}
 
 #[derive(Default)]
 pub struct Args {
@@ -282,7 +289,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             "--process" => a.process = Some(value("--process")?),
             "--wait-window" => {
                 let secs = number::<f64>("--wait-window", &value("--wait-window")?)?;
-                if secs < 0.0 {
+                if !secs.is_finite() || secs < 0.0 {
                     return Err("--wait-window expects seconds, 0 or more".into());
                 }
                 a.wait_window = Some(secs);
@@ -367,7 +374,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                 std::process::exit(0);
             }
             "-h" | "--help" => {
-                println!("{USAGE}");
+                println!("{USAGE}\n{}", hotkeys_help());
                 std::process::exit(0);
             }
             other => return Err(format!("unknown argument {other}").into()),
@@ -447,6 +454,15 @@ mod tests {
         assert_eq!(a.lost.wait_s, 5.0);
         assert_eq!(a.window.as_deref(), Some("pixel"));
         assert!(USAGE.contains("Without options"));
+        // The hotkeys come from the action table: every action with its default chord, and no chord is written twice.
+        let help = hotkeys_help();
+        for a in crate::hotkeys::Action::ALL {
+            assert!(help.contains(a.default_text()) && help.contains(a.describe()), "{a:?}");
+        }
+        assert!(
+            !USAGE.contains("Ctrl+Alt+F9"),
+            "the usage text holds no copy of a default chord"
+        );
     }
 
     #[test]

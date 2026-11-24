@@ -391,6 +391,9 @@ fn host_row_px(mode: ScaleMode, nh: f64, aspect: f64, target: (f64, f64)) -> (f6
         // A fractional size, as large as asked when it fits, else the free fit (reported as clamped to the whole
         // number below).
         ScaleMode::Manual(px) if px <= free => (px, Fit::Fits),
+        // Too large: the free fit, reported as clamped to the whole number below it, or as downscaled when the output
+        // is smaller than the native picture (below 1 px per row there is no whole number to report: not "x0").
+        ScaleMode::Manual(_) if free < 1.0 => (free, Fit::Downscaled),
         ScaleMode::Manual(px) => (
             free,
             Fit::Clamped {
@@ -1016,6 +1019,15 @@ mod tests {
         let big = manual(8.0);
         assert_eq!(big.rect_px, [512.0, 0.0, 2048.0, 1440.0]);
         assert_eq!(big.fit, Fit::Clamped { requested: 8, used: 6 });
+        // An output smaller than the native picture: downscaled (below 1 px per row), not "x0 used".
+        let tiny = place(&PlacementInput {
+            fit: HostFit {
+                mode: ScaleMode::Manual(3.0),
+                center: true,
+            },
+            ..pvm((256, 240), (128, 120), RasterAspect::Par(1.0))
+        });
+        assert_eq!(tiny.fit, Fit::Downscaled);
         assert!(!ScaleMode::Manual(2.5).is_whole());
         let mut params = Params::default();
         assert!(params.set(

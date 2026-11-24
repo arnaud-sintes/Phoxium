@@ -84,8 +84,8 @@ fn oracle_of(p: &Params) -> Tv {
 
 /// Runs only `tv` on `img` (injected after `amp`) at frame index `frame`.
 fn run(gpu: &mut Headless, img: &ImageF32, size: (u32, u32), p: &Params, frame: u32) -> ImageF32 {
-    let mut fc = FrameConstants::new(size, size, false);
-    fc.frame_index = frame;
+    // The frame `frame` at the flicker's sampling rate, in real time (the plan takes its time from `elapsed_ms`).
+    let fc = FrameConstants::new(size, size, false).at_source_frame(frame, f64::from(p.tv_frame_rate_hz));
     let settings = Settings::identity();
     let r = gpu
         .render_stages(&StageRun {
