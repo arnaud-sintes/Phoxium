@@ -1,0 +1,104 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `target` (the source colour target, `source_colour_target`; native domain -> native domain, drive voltage R'G'B'
+// right after `decode`, before the signal modules). Skipped as an exact identity while the target is `none`
+// (`Stage::is_identity`).
+//
+// One thread per native pixel: the colour a device (Game Boy Color, Game Boy Advance, SNES) would have shown, by the
+// formulas of the f64 oracle `crates/crt-model/src/target.rs` (read it first; the CPU builds the constants from the
+// target's data file, `stages/target.rs`, `src/targets.rs`). First the device codes are recovered when the pixel
+// allows it (`bits` > 0, the oracle's `device_codes`): when all three channels are exactly the expansion of a
+// `bits`-bit code to 8 bits (the bits repeated, `c << (8 - bits) | c >> (2 bits - 8)`), x is c / (2^bits - 1), so that
+// the formula sees the device codes exactly; any other colour is transformed as it is (x = V). Then, by `kind`:
+//   0 matrix: l = input_range x x^input_gamma, s = clamp(K l, 0, clamp), V' = out_scale (s / divisor)^inv_out_gamma;
+//   1 curve:  V' = out_scale x table[x x 31], linearly interpolated between two entries (32 entries of 8 bits, four to
+//             a word).
+// Alpha is copied.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D drive_in;                    // native domain
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D drive_out;  // native domain
+
+// The constants (std430 push block, 100 bytes; `target::Push`).
+layout(push_constant) uniform Push {
+    float k00;
+    float k01;
+    float k02;
+    float k10;
+    float k11;
+    float k12;
+    float k20;
+    float k21;
+    float k22;
+    float input_range;
+    float input_gamma;    // 1 = none
+    float clamp_sum;      // the largest sum
+    float divisor;
+    float inv_out_gamma;  // 1 = none
+    float out_scale;
+    uint table[8];        // the curve, entry i in byte i % 4 of word i / 4
+    int bits;             // bits per channel of the device code, 4 to 7; 0 = no recovery
+    int kind;             // 0 matrix, 1 curve
+} pc;
+
+// Tolerance of the recovery in 8-bit code units (`crt_model::target::RECOVERY_TOLERANCE`).
+const float RECOVERY_TOLERANCE = 0.1;
+const int CURVE_LAST = 31;
+
+// The input of the transform with the device codes recovered, when every channel is exactly an expansion.
+vec3 device_input(vec3 v) {
+    if (pc.bits == 0) {
+        return v;
+    }
+    vec3 code = clamp(v * 255.0, vec3(0.0), vec3(255.0));
+    vec3 r = round(code);
+    if (any(greaterThan(abs(code - r), vec3(RECOVERY_TOLERANCE)))) {
+        return v;
+    }
+    int shift = 8 - pc.bits;
+    ivec3 ci = ivec3(r);
+    ivec3 c = ci >> shift;
+    ivec3 expanded = (c << shift) | (c >> (pc.bits - shift));
+    if (any(notEqual(expanded, ci))) {
+        return v;
+    }
+    return vec3(c) / float((1 << pc.bits) - 1);
+}
+
+float curve_entry(int i) {
+    return float((pc.table[i >> 2] >> uint((i & 3) * 8)) & 255u);
+}
+
+float curve(float x) {
+    float pos = clamp(x, 0.0, 1.0) * float(CURVE_LAST);
+    int i = min(int(floor(pos)), CURVE_LAST - 1);
+    float f = pos - float(i);
+    return mix(curve_entry(i), curve_entry(i + 1), f);
+}
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(drive_out)))) {
+        return;
+    }
+    vec4 src = texelFetch(drive_in, p, 0);
+    vec3 x = device_input(src.rgb);
+    vec3 c;
+    if (pc.kind == 0) {
+        vec3 l = pc.input_range * (pc.input_gamma != 1.0 ? pow(max(x, vec3(0.0)), vec3(pc.input_gamma)) : x);
+        vec3 s = clamp(
+            vec3(dot(vec3(pc.k00, pc.k01, pc.k02), l), dot(vec3(pc.k10, pc.k11, pc.k12), l),
+                 dot(vec3(pc.k20, pc.k21, pc.k22), l)),
+            vec3(0.0), vec3(pc.clamp_sum));
+        vec3 y = s / pc.divisor;
+        c = pc.out_scale * (pc.inv_out_gamma != 1.0 ? pow(y, vec3(pc.inv_out_gamma)) : y);
+    } else {
+        c = pc.out_scale * vec3(curve(x.r), curve(x.g), curve(x.b));
+    }
+    imageStore(drive_out, p, round_f16(vec4(c, src.a)));
+}

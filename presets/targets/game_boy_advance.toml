@@ -1,0 +1,32 @@
+# Source colour target, data only (TODO, "A GBC target"; QUESTIONS.md, "Study: source colour targets" and "Audit of the
+# colour targets"). Format: crates/phoxium/src/targets.rs. Every key of [matrix] has a [provenance] entry
+# "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "game_boy_advance"
+name = "Nintendo Game Boy Advance"
+label = "the byuu/ares colour correction of the Game Boy Advance LCD (Talarubi's formula, eye-tuned, not a measurement)"
+kind = "matrix"
+notes = """
+The Game Boy Advance sends 5 bits per channel to an LCD with a steep response: the panel is dark and low in contrast in the shadows, and its channels leak into each other. This target is the formula that Talarubi contributed to the near.sh colour emulation article: the input raised to the power 4.0 (the LCD gamma), a 3 x 3 mix, the result raised to 1 / 2.2, scaled by 255 / 280 (280 is the largest row sum, the blue one; red and green stay below it).
+The audit (QUESTIONS.md, Audit of the colour targets) verified the numbers and the orientation against the article, and found: ares has used 240 instead of 255 for the red weight since April 2022 (a change tuned by eye on one GBA SP, not measured), the other seven weights are unchanged; the libretro and mGBA shaders (a different, independent family) have neutral whites (rows summing to 1, one factor 0.91 to 0.94) while this formula alone leaves a tinted white; and instrument readings of a backlit AGS-101 (a colorimeter, user-contributed, no licence) show an effective gamma of about 2.3 to 2.75 and primaries close to sRGB, so the gamma 4.0 is not supported by any measurement found and is plausible only for the reflective panels at one viewing angle. The matrix is tuned by eye, so the whole target is an estimate.
+The article value 255 is kept (the source of record). It is one formula for the two screens: the backlit AGS-101 is closer to a plain gamma 2.2, and the frontlit AGS-001 is bluish and lower in contrast, neither modelled. The article writes the matrix on (b, g, r); the file is on (R, G, B), the same numbers. Values are taken as numbers only; no emulator code is used.
+The transform works on the drive voltage code / 255 (Source meaning drive_voltage). A pixel whose three channels are all exact 5-bit expansions is read back to its 5-bit codes; any other colour is transformed on its value. The article states no clip and none is applied: white comes out at about 0.988, 0.935 and 0.950 of the range (red, green, blue), a slightly tinted white.
+"""
+
+[matrix]
+rows = [[255, 50, 0], [10, 230, 30], [50, 10, 220]]
+input_bits = 5
+input_range = 1
+input_gamma = 4.0
+divisor = 255
+output_gamma = 2.2
+output_scale = 0.9107142857142857
+
+[provenance]
+rows = "E: near.sh, Color emulation (ares archive), code credited to Talarubi (255 is the first weight of the red row here, current ares uses 240): r = (0 lb + 50 lg + 255 lr) / 255, g = (30 lb + 230 lg + 10 lr) / 255, b = (220 lb + 10 lg + 50 lr) / 255, here written on (R, G, B); tuned by eye"
+input_bits = "S: the console stores 5 bits per channel, codes 0 to 31 (the article divides by 31)"
+input_range = "E: near.sh, the formula works on the normalised value (code / 31)"
+input_gamma = "E: near.sh, lcdGamma = 4.0, the LCD response; measured AGS-101 readings give about 2.3 to 2.75 (audit)"
+divisor = "E: near.sh, the mixed sum is divided by 255"
+output_gamma = "E: near.sh, outGamma = 2.2, the result is raised to 1 / 2.2"
+output_scale = "E: near.sh, the 16-bit result is scaled by 0xffff x 255 / 280, that is 255 / 280 of the range"

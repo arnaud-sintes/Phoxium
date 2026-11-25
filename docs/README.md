@@ -10,7 +10,7 @@ Phoxium is a personal project, below 1.0.0 (a minor version may still change beh
 
 ## Requirements
 
-- Windows 11 x64.
+- Windows 11 x64 (the tested system). Windows 10 version 2004 or later is expected to work (the capture API needs it) but has not been tested.
 - A GPU and driver with Vulkan 1.3.
 - Nothing to install: the zip holds one plain executable, `phoxium.exe`.
 
@@ -51,7 +51,7 @@ F10 opens the settings menu inside the output window. Every parameter of the tub
 - **Geometry:** curvature, overscan, pincushion, convergence and colour fringes.
 - **Phosphor:** saturation and the afterglow (persistence) behind moving objects; Persistence blend (0 to 1, default 0.5) sets how much of the trail you see. Type switches from the colour tube (P22) to a monochrome phosphor: white P4, green P31, P1 or P39, or a Philips yellow blend.
 - **Optics:** glow (bloom) around bright areas and the vignette; turn on its **Enable** switch first.
-- **Source:** what was detected, **Change source**, the picture area (Auto or manual limits), the scaling multiplier and the saved profile of each game.
+- **Source:** what was detected, **Change source**, the picture area (Auto or manual limits), the scaling multiplier, the saved profile of each game and the **colour target** (off by default; the Game Boy Color and the Game Boy Advance transform the colours of an emulator picture into what that handheld's screen showed, as emulator conventions, not measurements; a SNES "black boost" look is also there).
 - **Performance:** the quality tier (how much work the model costs, never the look) and the automatic drop (on by default) that lowers it by itself while the GPU cannot keep up, and says so in the window title.
 - **Gun and white:** the gun law, the white balance and colour sets (SMPTE-C, EBU, NTSC-J, Trinitron primaries and white points).
 - Optional and off by default: ageing and burn-in (burn-in deliberately damages the picture and is kept between sessions), composite video and interlace, the faults of a poor analogue signal (hum, jitter, ghosts, snow), a VHS tape and a vertical roll, TV controls (tint, colour, black and white level, sharpness) and a refresh flicker, and a cabinet bezel with the glass reflecting it.

@@ -2400,7 +2400,7 @@ mod tests {
         let names: Vec<&str> = stages::CHAIN.iter().map(|r| r.name).collect();
         assert_eq!(
             names,
-            ["signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "phosphor", "optics"]
+            ["target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "phosphor", "optics"]
         );
         check_chain(stages::CHAIN).expect("valid chain");
         let domains: Vec<(Domain, Domain)> = stages::CHAIN.iter().map(|r| (r.input, r.output)).collect();
@@ -2408,6 +2408,7 @@ mod tests {
         assert_eq!(
             domains,
             [
+                (Native, Native),
                 (Native, Native),
                 (Native, Amp),
                 (Amp, Amp),

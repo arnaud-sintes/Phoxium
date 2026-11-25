@@ -1,0 +1,27 @@
+# Source colour target, data only (TODO, "A GBC target"; QUESTIONS.md, "Study: source colour targets"). Format:
+# crates/phoxium/src/targets.rs. Every key of [matrix] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "game_boy_color"
+name = "Nintendo Game Boy Color"
+label = "the emulator colour correction of the Game Boy Color (Gambatte 'fast' weights, near.sh clip), not a measurement"
+kind = "matrix"
+notes = """
+The Game Boy Color sends 5 bits per channel to a reflective LCD that mixes the channels: the red, green and blue the game asks for come out desaturated, and white is not as bright as an sRGB white. Emulators show the raw code expanded to 8 bits, saturated; this target applies the correction that circulates in the emulator community.
+The numbers are a formula quoted by the near.sh colour emulation article, which says it does not know who devised it. An independent audit (QUESTIONS.md, Audit of the colour targets) found the same weights in Gambatte as its 'fast' correction (13, 2, 1 over 16 and so on, GPL; numbers only are used here), without the clip at 960, which only near.sh, ares and higan have and which has no physical basis found: it costs white 6 percent (240 of 255). Emulators disagree about white (SameBoy and Gambatte keep 255, the libretro and mGBA shaders about 0.91 to 0.94, GBCC a warm 228, 219, 196). No measurement stands behind this formula, and it applies no gamma, so it is an emulator convention and an estimate. Better data exists as photographs matched by eye (the 8 x 8 x 8 lookup table of the GBCC emulator, MIT; the BGB 'reality' mode, closed) and as a few instrument readings of a reflective panel (a spectrophotometer, the Handheld-Color-Space-Project, no licence, angle-dependent: contrast about 3.2 to 3.8 to 1, white near x 0.335, y 0.362); they are a different kind of transform (a 3D table, or a colorimetric one) and are not shipped. Values are taken as numbers only; no emulator code is used.
+The transform works on the drive voltage code / 255 (Source meaning drive_voltage), without gamma or white point (the formula states none), and without the integer floor of the shift. A pixel whose three channels are all exact 5-bit expansions is read back to its 5-bit codes and the formula runs on them; any other colour (a source that is not quantised, a scaled picture) is transformed on its value, which differs by at most half an output code. The room matters on the real handheld (a reflective panel with no backlight); the Optics section has the ambient light and screen reflectance.
+"""
+
+[matrix]
+rows = [[26, 4, 2], [0, 24, 8], [6, 4, 22]]
+input_bits = 5
+input_range = 31
+clamp = 960
+divisor = 1020
+
+[provenance]
+rows = "E: near.sh, Color emulation (ares archive): R = r x 26 + g x 4 + b x 2, G = g x 24 + b x 8, B = r x 6 + g x 4 + b x 22 on 5-bit codes; author and method not stated; the same weights as the Gambatte 'fast' correction (audit 2026-11-25), a lineage that copies itself"
+input_bits = "S: the console stores 5 bits per channel, codes 0 to 31; an emulator shows them expanded to 8 bits by repeating the bits (near.sh)"
+input_range = "E: the formula works on the 5-bit codes themselves (0 to 31), no normalisation (near.sh)"
+clamp = "E: near.sh, ares and higan clip the sums at 960; Gambatte 'fast' has no clip and no physical basis for it was found"
+divisor = "E: near.sh, the clipped sum is shifted right by 2 bits (divide by 4) and the result is an 8-bit code (divide by 255): 4 x 255 = 1020"

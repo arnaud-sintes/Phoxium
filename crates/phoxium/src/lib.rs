@@ -39,6 +39,7 @@ pub mod shell;
 pub mod snapshot;
 pub mod source;
 pub mod sources;
+pub mod targets;
 pub mod tube_state;
 pub mod ui;
 pub mod video;

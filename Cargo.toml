@@ -1,4 +1,4 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
 members = ["crates/appres", "crates/crt-model","crates/paramgen", "crates/pixel-demo", "crates/phoxium"]
 
@@ -7,6 +7,13 @@ version = "0.9.4"
 edition = "2021"
 publish = false
 license = "MIT"
+
+# Debug information: line tables only (backtraces keep file and line, a debugger no longer shows local variables).
+# The full debug information made one `target\debug` folder 73 GB (33 GB of .pdb for about 800 test executables, one
+# per integration test file and per rebuild, and 29 GB of incremental cache). Put `debug = true` back, locally, to
+# step through code with a debugger. `cargo clean --profile dev` empties the folder (ENV.md section 8, Troubleshooting).
+[profile.dev]
+debug = "line-tables-only"
 
 # `cargo test` only (the `test` profile; `cargo build` and `cargo run` keep the plain dev profile). The GPU tests
 # spend most of their time on the CPU in debug code: the f64 oracles of crt-model, the readback conversions of

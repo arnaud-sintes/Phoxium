@@ -268,6 +268,7 @@ Check the result with `gh release view vX.Y.Z`.
 | `no such monitor` | `--monitor` index out of range: see the monitor lines of `--list-windows`. |
 | `cargo clippy` or `fmt` fails during packaging | Fix the warning or run `cargo fmt --all`, commit, package again. |
 | Capture reports few frames per second on a static window | Windows.Graphics.Capture only delivers a frame when the window content changes. |
+| The disk is full, `target\debug` is tens of gigabytes | Every rebuild of an integration test leaves a new executable and a new `.pdb` behind, and the incremental cache grows with it; with full debug information one folder reached 73 GB (33 GB of `.pdb` for about 800 test executables, 29 GB of incremental cache). `Cargo.toml` now sets `debug = "line-tables-only"` for the dev and test profiles (backtraces keep file and line; put `debug = true` back locally to step through code in a debugger), which makes a complete test build about 2.6 GB. Empty the folder with `cargo clean --profile dev` (the release folder, 6.5 GB, is `cargo clean --release`); the next build recompiles everything (about 2 minutes for `cargo test --no-run`). Run it again whenever `target` passes about 10 GB. |
 
 ### Foreground poll (focus checks)
 

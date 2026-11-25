@@ -34,6 +34,7 @@ pub mod phosphor;
 pub mod phosphor_types;
 pub mod prefilter;
 pub mod tape;
+pub mod target;
 pub mod tube;
 pub mod tv;
 pub mod units;

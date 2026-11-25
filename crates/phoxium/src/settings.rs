@@ -483,6 +483,8 @@ pub struct SourceProfile {
     pub flip: Option<String>,
     /// `source_prefilter` value name: `point`, `box`, `triangle`, `lanczos2`, `lanczos3` or `sinc`.
     pub prefilter: Option<String>,
+    /// `source_colour_target` value name: `none` or a target of `presets/targets/` (`game_boy_color`).
+    pub colour_target: Option<String>,
     /// `source_pixel_size`: host px per source row in the manual scale mode.
     pub pixel_size: Option<f32>,
 }
@@ -491,6 +493,7 @@ pub struct SourceProfile {
 pub const PROFILE_PARAM_IDS: &[&str] = &[
     "source_flip",
     "source_prefilter",
+    "source_colour_target",
     "source_pixel_size",
     "source_eotf",
     "source_crop_mode",
@@ -541,6 +544,7 @@ impl SourceProfile {
             ("source_rotation", &self.rotation, "rotation"),
             ("source_flip", &self.flip, "flip"),
             ("source_prefilter", &self.prefilter, "prefilter"),
+            ("source_colour_target", &self.colour_target, "colour_target"),
         ];
         for (id, value, field) in enums {
             if let Some(v) = value {
@@ -1262,6 +1266,7 @@ mod tests {
             rotation: Some("clockwise".into()),
             flip: Some("horizontal".into()),
             prefilter: Some("lanczos2".into()),
+            colour_target: Some("game_boy_color".into()),
             pixel_size: Some(2.5),
             picture_area: Some("manual".into()),
             crop_client: Some([640, 480]),
@@ -2028,7 +2033,10 @@ mod tests {
     /// (flip, pre-filter, manual pixel size) reach the parameters.
     #[test]
     fn the_default_profile_goes_to_programs_without_one() {
-        use crate::params::{SOURCE_FLIP_HORIZONTAL, SOURCE_PREFILTER_LANCZOS3, SOURCE_SCALE_MODE_MANUAL};
+        use crate::params::{
+            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_FLIP_HORIZONTAL, SOURCE_PREFILTER_LANCZOS3,
+            SOURCE_SCALE_MODE_MANUAL,
+        };
         let mut s = Settings::default();
         assert!(s.effective_source("a.exe", "A").is_none());
         s.default_source = Some(SourceProfile {
@@ -2036,6 +2044,7 @@ mod tests {
             pixel_size: Some(2.5),
             flip: Some("horizontal".into()),
             prefilter: Some("lanczos3".into()),
+            colour_target: Some("game_boy_color".into()),
             ..SourceProfile::default()
         });
         let got = s.effective_source("a.exe", "A").unwrap();
@@ -2055,13 +2064,15 @@ mod tests {
         assert_eq!(p.source_pixel_size, 2.5);
         assert_eq!(p.source_flip, SOURCE_FLIP_HORIZONTAL);
         assert_eq!(p.source_prefilter, SOURCE_PREFILTER_LANCZOS3);
+        assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR);
         // A bad value is skipped with a warning.
         let bad = SourceProfile {
             flip: Some("sideways".into()),
             pixel_size: Some(-1.0),
+            colour_target: Some("snes2".into()),
             ..SourceProfile::default()
         };
-        assert_eq!(bad.apply_to(&mut Params::default()).len(), 2);
+        assert_eq!(bad.apply_to(&mut Params::default()).len(), 3);
         // The default round-trips in the file, as its own table.
         let text = s.to_toml().unwrap();
         assert!(text.contains("[default_source]"), "{text}");

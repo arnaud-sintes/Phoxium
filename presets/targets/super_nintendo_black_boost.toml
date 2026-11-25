@@ -1,0 +1,29 @@
+# Source colour target, data only (TODO, "A GBC target"; QUESTIONS.md, "Study: source colour targets" and "Audit of the
+# colour targets"). Format: crates/phoxium/src/targets.rs. Every key of [curve] has a [provenance] entry
+# "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "super_nintendo_black_boost"
+name = "Super Nintendo: bsnes deep black boost (emulator look)"
+label = "an emulator look that darkens the shadows, NOT the console's output; do not stack it on a CRT gun law"
+kind = "curve"
+notes = """
+This is not what a Super Nintendo outputs. The console's colour DAC is close to linear in the 5-bit code (an oscilloscope measurement of one console, nesdev forum, lidnariq); the SNES picture on a CRT gets its shadows from the tube. This table is the 'deep black boost' that bsnes and ares offer for PC displays: 32 output codes that darken the lower half of the palette and leave the upper half nearly alone. It came from the Super Sleuth emulator (Overload) and was kept because people liked it; the near.sh article says it partly offsets an LCD's higher black level. No measurement or derivation was ever published, and the bsnes author later called the related display gamma an 'unprincipled kludge'.
+The table is an exact formula, found in an independent audit (2026-11-25): code i (0 to 31) maps to i (i + 1) / 2 for i below 16 (a quadratic: 0, 1, 3, 6, 10 ... 120) and to min(255, 8 (i + 1)) from 16 up. Code 8 shows 36 of 255 instead of 66, code 16 shows 136 instead of 132.
+Phoxium's tube already applies its own gamma (the gun law, default power 2.4). Stacked in front of it this table gives an effective exponent of about 3.5 at code 8 and crushes the shadows well below a real SNES on a CRT. Use it only to reproduce the look of bsnes' deep black boost, with a flat gun law, never as 'the SNES colours'. For the real console on a tube the right setting is none.
+A pixel whose three channels are all exact 5-bit expansions is read back to its 5-bit code and looked up; any other colour is interpolated linearly between the two nearest entries.
+"""
+
+[curve]
+table = [
+  0x00, 0x01, 0x03, 0x06, 0x0a, 0x0f, 0x15, 0x1c,
+  0x24, 0x2d, 0x37, 0x42, 0x4e, 0x5b, 0x69, 0x78,
+  0x88, 0x90, 0x98, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0,
+  0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0xf0, 0xf8, 0xff,
+]
+input_bits = 5
+output_max = 255
+
+[provenance]
+table = "E: near.sh, Color emulation (ares archive): gammaRamp, credited to Overload of Super Sleuth / Kindred; the same 32 values are the deepBlackBoost option of ares (ISC) and of bsnes (GPLv3, not copied); an audit found the exact form i(i+1)/2 below 16 and min(255, 8(i+1)) from 16; no measurement behind it"
+input_bits = "S: the SNES stores RGB555, 32 levels per channel (near.sh)"
+output_max = "K: 8-bit output code"

@@ -205,3 +205,15 @@ source = "QUESTIONS SRC-2 and PLAN D-13: integer upscale of the source detected 
 description = "How the native raster is recovered from an upscaled source. auto: the integer factor is detected from the first informative frames. manual: the divisor of the command line or of the source profile. none: the captured pixels are the native raster (divisor 1)."
 group = "Source"
 advanced = true
+
+[[param]]
+id = "source_colour_target"
+stage = "source"
+type = "enum"
+unit = "1"
+default = "none"
+values = ["none", "game_boy_color", "game_boy_advance", "super_nintendo_black_boost"]
+tag = "E"
+source = "TODO, A GBC target, and QUESTIONS.md, Study: source colour targets. Each target is a data file of presets/targets/ with the source of every value (src/targets.rs); the Game Boy Color matrix is a formula of unknown origin quoted by near.sh (colour emulation), so the whole target is an estimate"
+description = "The device the source came from: the colours of the picture are transformed into what that device's screen would have shown, before the CRT chain. none leaves the source colours alone (bit for bit). game_boy_color: Game Boy Color (the LCD mixed the three channels and clipped white at 240 of 255). game_boy_advance: Game Boy Advance (steep LCD response, channels mixed). super_nintendo_black_boost: the bsnes 'deep black boost' table (an emulator look, not the console output, never stack it on a gun law) that darkens the shadows for a CRT. It works on the drive voltage, so keep Source meaning on drive_voltage, and it acts on the colours as they come, whether the source was 5-bit quantised or not. For a monochrome phosphor type it acts on the grey the phosphor shows."
+group = "Source"

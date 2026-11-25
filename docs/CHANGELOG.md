@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- **Source colour target** (`source_colour_target`, Source section; the profile field `colour_target`): the colours of the source as the device it came from would have shown them, before the CRT chain, in a new slot `target` at the head of the chain, an exact identity (skipped) while it is `none` (the default). Three targets ship, all from the near.sh colour emulation article (no instrument measurement of any of these panels was found, so each is an estimate, and each file names the source of every value): the **Game Boy Color** (`game_boy_color`: the LCD's channel mixing, white at 240 of 255, an unattributed formula), the **Game Boy Advance** (`game_boy_advance`: Talarubi's LCD gamma 4.0 in, 2.2 out and a 3 x 3 mix) and a **SNES** emulator look (`super_nintendo_black_boost`: bsnes' 32-entry "deep black boost" table, credited to Overload; it is not the console's output and must not be stacked on a gun law). Pixels that are exact 5-bit expansions are read back to the 5-bit codes first; any other colour is transformed on its value. A target is a data file of one of two kinds, a `matrix` or a per-channel `curve`, with the numbers as the source gives them and their provenance, validated like a tube preset. Oracle `crt_model::target`, tests `tests/stage_target.rs` (the GPU against the oracle, largest difference 2.4e-4), `targets.rs`.
+
 ## [0.9.4] - 2026-11-25
 
 ### Removed
