@@ -69,6 +69,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "commodore_64.toml",
         include_str!("../../../presets/targets/commodore_64.toml"),
     ),
+    (
+        "nintendo_entertainment_system.toml",
+        include_str!("../../../presets/targets/nintendo_entertainment_system.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -226,25 +230,39 @@ impl DacFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SignalFile {
-    /// Chroma amplitude, in the units of the white-black span of the luma (the composite model's colour-difference scale).
-    amplitude: f64,
+    /// Chroma amplitude of a colour that has no `swing_mv`, in the units of the white-black span of the luma (the
+    /// composite model's colour-difference scale).
+    amplitude: Option<f64>,
+    /// The share of a square wave's swing that the decoder's fundamental keeps (0.6440 for the 12-sample window of the
+    /// NES, 2 / pi in the continuous limit): the chroma of a colour with a `swing_mv` is this times the swing.
+    chroma_factor: Option<f64>,
     threshold: f64,
-    black_index: usize,
-    white_index: usize,
+    /// The colours whose luma is the black and the white level, for a revision that does not give `black_mv` and
+    /// `white_mv`.
+    black_index: Option<usize>,
+    white_index: Option<usize>,
     /// The model of the reference palette the classification compares with.
     reference: SignalReference,
     colours: Vec<SignalColour>,
     revisions: Vec<SignalRevision>,
 }
 
+/// The reference palette of the classification: the colours of the file computed with these settings.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SignalReference {
-    /// The luma of each colour over 32.
-    luma_32: Vec<f64>,
-    amplitude: f64,
+    /// The level of each colour (replaces the colours' `level_mv`), in the units of `black_mv` and `white_mv`.
+    luma_mv: Option<Vec<f64>>,
+    black_mv: Option<f64>,
+    white_mv: Option<f64>,
+    phase_row_deg: Option<f64>,
+    /// The chroma amplitude of colours without a swing (replaces the file's).
+    amplitude: Option<f64>,
+    /// A factor on the chroma only (default 1).
+    saturation: Option<f64>,
     /// The contrast applied to luma and chroma.
     gain: f64,
+    /// The exponent a PC display applies, to compare with an emulator's colours.
     gamma: f64,
 }
 
@@ -254,6 +272,13 @@ struct SignalColour {
     name: String,
     /// The chroma phase in degrees on the U axis (U = cos, V = sin); none for a grey.
     angle: Option<f64>,
+    /// The luma row of the NES palette (0 to 3), which turns the phase by `phase_row_deg` degrees a row.
+    row: Option<u32>,
+    /// The level of the colour in mV (the mean of a square wave, the constant level of a grey), when the revision gives no
+    /// `luma_mv`.
+    level_mv: Option<f64>,
+    /// The peak-to-peak swing in mV of the square wave that makes the chroma.
+    swing_mv: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -261,89 +286,194 @@ struct SignalColour {
 struct SignalRevision {
     id: String,
     name: String,
-    /// The luma level of each colour, in the order of `colours`, in mV.
-    luma_mv: Vec<f64>,
+    /// The luma level of each colour, in the order of `colours`, in mV (replaces the colours' `level_mv`).
+    luma_mv: Option<Vec<f64>>,
+    black_mv: Option<f64>,
+    white_mv: Option<f64>,
+    /// The turn of the chroma phase for each luma row, in degrees (the differential phase distortion; none = 0).
+    phase_row_deg: Option<f64>,
+}
+
+/// The settings that turn the colours of a signal file into drive voltages (a revision, or the reference model).
+struct SignalSettings<'a> {
+    luma_mv: Option<&'a [f64]>,
+    black_mv: Option<f64>,
+    white_mv: Option<f64>,
+    phase_row_deg: f64,
+    amplitude: Option<f64>,
+    saturation: f64,
+    gain: f64,
+    gamma: f64,
 }
 
 impl SignalFile {
-    /// The revisions as variants: each colour's drive voltages from its luma, chroma angle and the amplitude.
+    /// The keys that are present, for the provenance check.
+    fn keys(&self) -> Vec<&'static str> {
+        let mut k = vec!["colours", "revisions", "reference", "threshold"];
+        for (name, present) in [
+            ("amplitude", self.amplitude.is_some()),
+            ("chroma_factor", self.chroma_factor.is_some()),
+            ("black_index", self.black_index.is_some()),
+            ("white_index", self.white_index.is_some()),
+        ] {
+            if present {
+                k.push(name);
+            }
+        }
+        k
+    }
+
+    /// The drive voltages of every colour under `s` (see [`SignalSettings`]).
+    fn colours_for(&self, file: &str, what: &str, s: &SignalSettings) -> Result<[[f64; 3]; SIGNAL_MAX], String> {
+        let n = self.colours.len();
+        let level = |i: usize| -> Result<f64, String> {
+            s.luma_mv
+                .map(|l| l[i])
+                .or(self.colours[i].level_mv)
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| format!("{file}: {what} has no level for colour {i}"))
+        };
+        let black = match (s.black_mv, self.black_index) {
+            (Some(b), _) => b,
+            (None, Some(i)) if i < n => level(i)?,
+            _ => return Err(format!("{file}: {what} has no black level (black_mv or black_index)")),
+        };
+        let white = match (s.white_mv, self.white_index) {
+            (Some(w), _) => w,
+            (None, Some(i)) if i < n => level(i)?,
+            _ => return Err(format!("{file}: {what} has no white level (white_mv or white_index)")),
+        };
+        if !(black.is_finite() && white.is_finite() && white > black) {
+            return Err(format!("{file}: {what}: white must be above black"));
+        }
+        let span = white - black;
+        let mut out = [[0.0; 3]; SIGNAL_MAX];
+        for (i, c) in self.colours.iter().enumerate() {
+            let y = (level(i)? - black) / span;
+            let amplitude = match (c.swing_mv, self.chroma_factor, s.amplitude.or(self.amplitude)) {
+                (Some(sw), Some(k), _) => k * sw / span,
+                (_, _, Some(a)) => a,
+                _ => 0.0,
+            };
+            let (u, v) = c.angle.map_or((0.0, 0.0), |a| {
+                let a = (a + s.phase_row_deg * f64::from(c.row.unwrap_or(0))).to_radians();
+                (amplitude * a.cos(), amplitude * a.sin())
+            });
+            out[i] =
+                decode_yuv(y * s.gain, u * s.gain * s.saturation, v * s.gain * s.saturation).map(|c| c.powf(s.gamma));
+        }
+        Ok(out)
+    }
+
+    /// The revisions as variants: each colour's drive voltages from its level, chroma angle and amplitude, and the
+    /// reference palette of the classification.
     fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
         let n = self.colours.len();
         if n == 0 || n > SIGNAL_MAX {
             return Err(format!("{file}: signal.colours must hold 1 to {SIGNAL_MAX} colours"));
         }
-        positive(file, "signal", "amplitude", self.amplitude)?;
-        positive(file, "signal.reference", "amplitude", self.reference.amplitude)?;
+        if let Some(a) = self.amplitude {
+            positive(file, "signal", "amplitude", a)?;
+        }
+        if let Some(k) = self.chroma_factor {
+            positive(file, "signal", "chroma_factor", k)?;
+        }
+        positive(file, "signal", "threshold", self.threshold)?;
         positive(file, "signal.reference", "gain", self.reference.gain)?;
         positive(file, "signal.reference", "gamma", self.reference.gamma)?;
-        if self.reference.luma_32.len() != n || self.reference.luma_32.iter().any(|l| !l.is_finite() || *l < 0.0) {
-            return Err(format!(
-                "{file}: signal.reference.luma_32 must hold {n} levels, not negative"
-            ));
+        let r = &self.reference;
+        for (key, v) in [("amplitude", r.amplitude), ("saturation", r.saturation)] {
+            if let Some(v) = v {
+                positive(file, "signal.reference", key, v)?;
+            }
         }
-        let angles: Vec<Option<f64>> = self.colours.iter().map(|c| c.angle).collect();
-        let references = Signal::reference_model(
-            &self.reference.luma_32,
-            &angles,
-            self.reference.amplitude,
-            self.reference.gain,
-            self.reference.gamma,
-        );
-        positive(file, "signal", "threshold", self.threshold)?;
-        if self.black_index >= n || self.white_index >= n || self.black_index == self.white_index {
-            return Err(format!(
-                "{file}: signal.black_index and signal.white_index must be two colours"
-            ));
+        for (what, l) in [("signal.reference.luma_mv", &r.luma_mv)] {
+            if l.as_ref()
+                .is_some_and(|l| l.len() != n || l.iter().any(|v| !v.is_finite() || *v < 0.0))
+            {
+                return Err(format!("{file}: {what} must hold {n} levels, not negative"));
+            }
         }
         if self.colours.iter().any(|c| c.name.trim().is_empty()) {
             return Err(format!("{file}: signal.colours name must not be empty"));
         }
-        if self.colours.iter().any(|c| c.angle.is_some_and(|a| !a.is_finite())) {
-            return Err(format!("{file}: signal.colours angle must be finite"));
+        if self.colours.iter().any(|c| {
+            [c.angle, c.level_mv, c.swing_mv]
+                .iter()
+                .flatten()
+                .any(|v| !v.is_finite())
+        }) {
+            return Err(format!(
+                "{file}: signal.colours angle, level_mv and swing_mv must be finite"
+            ));
+        }
+        if self.colours.iter().any(|c| c.swing_mv.is_some()) && self.chroma_factor.is_none() {
+            return Err(format!(
+                "{file}: signal.chroma_factor is needed by the colours with a swing_mv"
+            ));
         }
         if self.revisions.is_empty() || self.revisions.len() > MAX_PALETTES {
             return Err(format!(
                 "{file}: signal.revisions must hold 1 to {MAX_PALETTES} revisions"
             ));
         }
+        let references = self.colours_for(
+            file,
+            "signal.reference",
+            &SignalSettings {
+                luma_mv: r.luma_mv.as_deref(),
+                black_mv: r.black_mv,
+                white_mv: r.white_mv,
+                phase_row_deg: r.phase_row_deg.unwrap_or(0.0),
+                amplitude: r.amplitude,
+                saturation: r.saturation.unwrap_or(1.0),
+                gain: r.gain,
+                gamma: r.gamma,
+            },
+        )?;
         let mut out: Vec<Variant> = Vec::new();
-        for r in &self.revisions {
-            if r.id.is_empty()
-                || !r
+        for rev in &self.revisions {
+            if rev.id.is_empty()
+                || !rev
                     .id
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             {
                 return Err(format!(
                     "{file}: signal.revisions id \"{}\" must be lower case letters, digits and '_'",
-                    r.id
+                    rev.id
                 ));
             }
-            if out.iter().any(|v| v.id == r.id) {
-                return Err(format!("{file}: signal.revisions id \"{}\" is used twice", r.id));
+            if out.iter().any(|v| v.id == rev.id) {
+                return Err(format!("{file}: signal.revisions id \"{}\" is used twice", rev.id));
             }
-            if r.luma_mv.len() != n || r.luma_mv.iter().any(|l| !l.is_finite() || *l <= 0.0) {
+            if rev
+                .luma_mv
+                .as_ref()
+                .is_some_and(|l| l.len() != n || l.iter().any(|v| !v.is_finite() || *v <= 0.0))
+            {
                 return Err(format!(
                     "{file}: signal.revisions {} luma_mv must hold {n} positive levels",
-                    r.id
+                    rev.id
                 ));
             }
-            let (black, white) = (r.luma_mv[self.black_index], r.luma_mv[self.white_index]);
-            if white <= black {
-                return Err(format!("{file}: signal.revisions {} white must be above black", r.id));
-            }
-            let mut colours = [[0.0; 3]; SIGNAL_MAX];
-            for (i, c) in self.colours.iter().enumerate() {
-                let y = (r.luma_mv[i] - black) / (white - black);
-                let (u, v) = c.angle.map_or((0.0, 0.0), |a| {
-                    let a = a.to_radians();
-                    (self.amplitude * a.cos(), self.amplitude * a.sin())
-                });
-                colours[i] = decode_yuv(y, u, v);
-            }
+            let colours = self.colours_for(
+                file,
+                &format!("signal.revisions {}", rev.id),
+                &SignalSettings {
+                    luma_mv: rev.luma_mv.as_deref(),
+                    black_mv: rev.black_mv,
+                    white_mv: rev.white_mv,
+                    phase_row_deg: rev.phase_row_deg.unwrap_or(0.0),
+                    amplitude: None,
+                    saturation: 1.0,
+                    gain: 1.0,
+                    gamma: 1.0,
+                },
+            )?;
             out.push(Variant {
-                id: r.id.clone(),
-                name: r.name.clone(),
+                id: rev.id.clone(),
+                name: rev.name.clone(),
                 transform: Transform::Signal(Signal {
                     colours,
                     count: n,
@@ -533,18 +663,7 @@ impl Target {
             }
             ("signal", None, None, None, None, Some(s)) => {
                 variants = s.variants(file)?;
-                (
-                    variants[0].transform,
-                    vec![
-                        "colours",
-                        "revisions",
-                        "amplitude",
-                        "reference",
-                        "threshold",
-                        "black_index",
-                        "white_index",
-                    ],
-                )
+                (variants[0].transform, s.keys())
             }
             ("matrix" | "curve" | "palette" | "dac" | "signal", _, _, _, _, _) => {
                 return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
@@ -965,5 +1084,135 @@ mod tests {
         assert_ne!(s.apply(pepto_red), r4.apply(pepto_red));
         let odd = [0.2, 0.9, 0.95];
         assert_eq!(s.apply(odd), odd);
+    }
+
+    /// The 64 colours of published NES palettes, as emulators show them (plain lists: pally's two 2C02G palettes, MIT-0,
+    /// made with its phase distortion filter, and the Mesen2 default, GPL, compared only; it equals Nestopia's canonical
+    /// palette to within one level), hex RRGGBB in the order of the palette index.
+    const PALLY_J: [&str; 64] = [
+        "626262", "001C95", "1904AC", "42009D", "61006B", "6E0025", "650500", "491E00", "223700", "004900", "004F00",
+        "004816", "00355E", "000000", "000000", "000000", "ABABAB", "0C4EDB", "3D2EFF", "7115F3", "9B0BB9", "B01262",
+        "A92704", "894600", "576600", "237F00", "008900", "008332", "006D90", "000000", "000000", "000000", "FFFFFF",
+        "57A5FF", "8287FF", "B46DFF", "DF60FF", "F863C6", "F8746D", "DE9020", "B3AE00", "81C800", "56D522", "3DD36F",
+        "3EC1C8", "4E4E4E", "000000", "000000", "FFFFFF", "BEE0FF", "CDD4FF", "E0CAFF", "F1C4FF", "FCC4EF", "FDCACE",
+        "F5D4AF", "E6DF9C", "D3E99A", "C2EFA8", "B7EFC4", "B6EAE5", "B8B8B8", "000000", "000000",
+    ];
+    const PALLY_U: [&str; 64] = [
+        "575757", "000C8E", "0800A6", "340096", "550061", "630015", "5A0000", "3C0E00", "112800", "003B00", "004200",
+        "003A05", "002652", "000000", "000000", "000000", "A5A5A5", "0041D9", "2F1EFF", "6704F2", "9400B4", "AA0057",
+        "A31800", "803900", "4B5B00", "137600", "008100", "007923", "006288", "000000", "000000", "000000", "FFFFFF",
+        "4A9FFF", "797EFF", "AF63FF", "DD55FF", "F757C2", "F76A63", "DC8810", "AEA900", "78C400", "4AD211", "2FCF64",
+        "2FBDC4", "414141", "000000", "000000", "FFFFFF", "B9DDFF", "CAD1FF", "DEC6FF", "F0C0FF", "FCC0EE", "FDC6CA",
+        "F5D0AA", "E4DD95", "D0E892", "BDEEA2", "B2EEC0", "B0E8E3", "B3B3B3", "000000", "000000",
+    ];
+    const MESEN: [&str; 64] = [
+        "666666", "002A88", "1412A7", "3B00A4", "5C007E", "6E0040", "6C0600", "561D00", "333500", "0B4800", "005200",
+        "004F08", "00404D", "000000", "000000", "000000", "ADADAD", "155FD9", "4240FF", "7527FE", "A01ACC", "B71E7B",
+        "B53120", "994E00", "6B6D00", "388700", "0C9300", "008F32", "007C8D", "000000", "000000", "000000", "FFFEFF",
+        "64B0FF", "9290FF", "C676FF", "F36AFF", "FE6ECC", "FE8170", "EA9E22", "BCBE00", "88D800", "5CE430", "45E082",
+        "48CDDE", "4F4F4F", "000000", "000000", "FFFEFF", "C0DFFF", "D3D2FF", "E8C8FF", "FBC2FF", "FEC4EA", "FECCC5",
+        "F7D8A5", "E4E594", "CFEF96", "BDF4AB", "B3F3CC", "B5EBF2", "B8B8B8", "000000", "000000",
+    ];
+
+    fn hex(s: &str) -> [f64; 3] {
+        let v = u32::from_str_radix(s, 16).unwrap();
+        [(v >> 16) & 255, (v >> 8) & 255, v & 255].map(|c| f64::from(c) / 255.0)
+    }
+
+    fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
+        ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+    }
+
+    /// The NES file: four variants of 64 colours, the first the 2C02G with the black at the blank level; hand-derived
+    /// entries (the white, the black, two greys, and the yellow hue 8 of luma row 1): $18 has the level (312 + 840) / 2
+    /// = 576 mV and the swing 528 mV, so Y = (576 - 312) / 788 = 0.33503 and the chroma 0.6440 x 528 / 788 = 0.43151 at
+    /// 30 x 6 - 5 = 175 degrees: U = -0.42987, V = 0.037608, R = Y + V / 0.877283 = 0.3779, B = Y + U / 0.492111 = -0.5385
+    /// (clamped to 0 after the decode), G = (Y - 0.299 R - 0.114 B) / 0.587 = 0.4833 (the green is decoded from the unclamped red and blue, so the luma is kept).
+    #[test]
+    fn the_nes_file_and_its_hand_derived_colours() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM).expect("nes");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["2c02g_blank", "2c02g_setup", "2c02e_blank", "2c02e_setup"]);
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        assert_eq!(s.count, 64);
+        assert_eq!(s.colours[0x20], [1.0; 3], "$20 is white");
+        assert_eq!(s.colours[0x0F], [0.0; 3], "$0F is black");
+        assert_eq!(s.colours[0x0D], [0.0; 3], "$0D is blacker than black, clamped");
+        let grey = |i: usize, y: f64| {
+            assert!(
+                s.colours[i].iter().all(|c| (c - y).abs() < 1e-9),
+                "{i:#X}: {:?}",
+                s.colours[i]
+            )
+        };
+        grey(0x2D, (552.0 - 312.0) / 788.0);
+        grey(0x3D, (880.0 - 312.0) / 788.0);
+        grey(0x00, (616.0 - 312.0) / 788.0);
+        let [r, g, b] = s.colours[0x18];
+        assert!(
+            (r - 0.3779).abs() < 1e-3 && (g - 0.4833).abs() < 1e-3 && b == 0.0,
+            "{r} {g} {b}"
+        );
+        // The setup variant is darker (black 365.6 mV): the grey of $2D falls to (552 - 365.6) / 734.4.
+        let Transform::Signal(u) = t.transform_for(1) else {
+            panic!("signal")
+        };
+        assert!((u.colours[0x2D][0] - (552.0 - 365.6) / 734.4).abs() < 1e-9);
+        // The 2C02E turns less per row than the 2C02G: the colours of row 3 differ, the colours of row 0 do not.
+        let Transform::Signal(e) = t.transform_for(2) else {
+            panic!("signal")
+        };
+        assert_eq!(e.colours[0x01], s.colours[0x01]);
+        assert_ne!(e.colours[0x31], s.colours[0x31]);
+        // The references are the same for every variant.
+        assert_eq!(e.references, s.references);
+        assert_eq!(u.references, s.references);
+    }
+
+    /// The model against pally's 2C02G palettes (made with its phase distortion filter, which also lowers the chroma):
+    /// the mean distance in drive voltage stays under 0.1 (it is about 0.07), for Japan against the first variant and for
+    /// the United States against the setup one.
+    #[test]
+    fn the_nes_model_is_near_the_pally_2c02g_palettes() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM).expect("nes");
+        for (variant, pal, name) in [(0, &PALLY_J, "pally J"), (1, &PALLY_U, "pally U")] {
+            let Transform::Signal(s) = t.transform_for(variant) else {
+                panic!("signal")
+            };
+            let mean = (0..64).map(|i| dist(hex(pal[i]), s.colours[i])).sum::<f64>() / 64.0;
+            println!("{name}: mean distance to the model {mean:.3}");
+            assert!(mean < 0.1, "{name}: {mean}");
+        }
+    }
+
+    /// Recognition on the palettes of the emulators that decode the signal: every entry but at most 3 is recognised as a
+    /// colour whose hardware colour is the expected one (the duplicated blacks of a palette are one colour), within the
+    /// threshold.
+    #[test]
+    fn the_nes_palettes_of_the_emulators_are_recognised() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM).expect("nes");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        for (name, pal) in [("pally J", &PALLY_J), ("pally U", &PALLY_U), ("Mesen2", &MESEN)] {
+            let (mut worst, mut wrong) = (0.0f64, Vec::new());
+            for (i, entry) in pal.iter().enumerate() {
+                let p = hex(entry);
+                worst = worst.max(dist(p, s.references[i]));
+                match s.classify(p) {
+                    Some(j) if dist(s.colours[j], s.colours[i]) < 0.02 => {}
+                    got => wrong.push((i, got)),
+                }
+            }
+            println!(
+                "{name}: worst distance to its own reference {worst:.3}, {} wrong",
+                wrong.len()
+            );
+            // A few dark greens and blues of row 0 sit between two references: at most 3 of the 64 are confused.
+            assert!(wrong.len() <= 3, "{name}: {wrong:?}");
+            assert!(worst <= s.threshold, "{name}: {worst}");
+        }
     }
 }

@@ -12,7 +12,8 @@ use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
     Params, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
-    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
     SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
 };
 
@@ -83,9 +84,11 @@ fn transform(target: u32, variant: i32) -> Transform {
             _ => unreachable!(),
         },
         // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
-        SOURCE_COLOUR_TARGET_COMMODORE_64 => phoxium::targets::for_value(target)
-            .expect("c64")
-            .transform_for(usize::try_from(variant - 1).unwrap()),
+        SOURCE_COLOUR_TARGET_COMMODORE_64 | SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM => {
+            phoxium::targets::for_value(target)
+                .expect("signal target")
+                .transform_for(usize::try_from(variant - 1).unwrap())
+        }
         _ => unreachable!(),
     }
 }
@@ -95,6 +98,21 @@ const PEPTO: [u32; 16] = [
     0x000000, 0xFFFFFF, 0x68372B, 0x70A4B2, 0x6F3D86, 0x588D43, 0x352879, 0xB8C76F, 0x6F4F25, 0x433900, 0x9A6759,
     0x444444, 0x6C6C6C, 0x9AD284, 0x6C5EB5, 0x959595,
 ];
+
+/// The 64 colours of pally's 2C02G palette for Japan (MIT-0), as an emulator shows an NES picture.
+const PALLY_J: [&str; 64] = [
+    "626262", "001C95", "1904AC", "42009D", "61006B", "6E0025", "650500", "491E00", "223700", "004900", "004F00",
+    "004816", "00355E", "000000", "000000", "000000", "ABABAB", "0C4EDB", "3D2EFF", "7115F3", "9B0BB9", "B01262",
+    "A92704", "894600", "576600", "237F00", "008900", "008332", "006D90", "000000", "000000", "000000", "FFFFFF",
+    "57A5FF", "8287FF", "B46DFF", "DF60FF", "F863C6", "F8746D", "DE9020", "B3AE00", "81C800", "56D522", "3DD36F",
+    "3EC1C8", "4E4E4E", "000000", "000000", "FFFFFF", "BEE0FF", "CDD4FF", "E0CAFF", "F1C4FF", "FCC4EF", "FDCACE",
+    "F5D4AF", "E6DF9C", "D3E99A", "C2EFA8", "B7EFC4", "B6EAE5", "B8B8B8", "000000", "000000",
+];
+
+fn nes(i: usize) -> [f64; 3] {
+    let v = u32::from_str_radix(PALLY_J[i % 64], 16).unwrap();
+    [(v >> 16) & 255, (v >> 8) & 255, v & 255].map(|c| f64::from(c) / 255.0)
+}
 
 fn pepto(i: usize) -> [f64; 3] {
     let c = PEPTO[i % 16];
@@ -120,6 +138,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The C64 palette of Pepto, then the same a little off (a pixel the classification still takes).
                 (5, _) => pepto(x),
                 (6, _) => pepto(x).map(|v| (v + 0.012).min(1.0)),
+                // The NES palette of pally, then the same a little off.
+                (7, _) => nes(x),
+                (8, _) => nes(x).map(|v| (v + 0.012).min(1.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -189,6 +210,9 @@ fn target_slot_matches_the_oracle() {
         ("c64 6569R3", SOURCE_COLOUR_TARGET_COMMODORE_64, 1),
         ("c64 6569R4", SOURCE_COLOUR_TARGET_COMMODORE_64, 2),
         ("c64 6569R1", SOURCE_COLOUR_TARGET_COMMODORE_64, 4),
+        ("nes 2C02G blank", SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, 1),
+        ("nes 2C02G setup", SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, 2),
+        ("nes 2C02E blank", SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, 3),
     ] {
         let p = Params {
             source_colour_target: target,

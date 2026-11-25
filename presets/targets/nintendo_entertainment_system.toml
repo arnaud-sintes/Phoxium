@@ -1,0 +1,480 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets" and "Design
+# note: signal-driven colour targets"). Format: crates/phoxium/src/targets.rs. Every key of [signal] has a [provenance]
+# entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "nintendo_entertainment_system"
+name = "Nintendo Entertainment System / Famicom (computed from the signal)"
+label = "the NES's colours as a television decodes the 2C02's composite signal (Colour variant: the chip and the setup)"
+kind = "signal"
+notes = """
+The NES's video chip does not make RGB colours: it makes a composite signal. Each of the 64 palette entries is a luma row (0 to 3, from the two high bits) and a hue (0 to 15, the four low bits); a hue from 1 to 12 is a square wave that swings between the row's low and high voltage with 12 phases a colour cycle, hue 0 is a constant high, hue 13 a constant low, hues 14 and 15 the black level. The colour a screen shows is what the television's decoder made of that signal, and nesdev says it plainly: no single palette can match every game, Nintendo gave no reference monitor, and the result varies with the console, the television, its settings and its decoder. Emulators show one such palette as plain RGB. This target goes back to the signal: it recognises each pixel as the nearest of the 64 hardware colours and shows the colour a decoder drives the tube with, so the tube's own gamma, primaries and white take over.
+The voltages are measured: lidnariq's readings into a terminated 75 ohm television (nesdev, NTSC video; about 10 mV of noise, 4 mV of quantisation, so about 2 IRE): the four low levels 228, 312, 552 and 880 mV and the four high levels 616, 840, 1100 and 1100 mV; the blank level and $1D are 312 mV. The chroma of a hue is the fundamental of its square wave, 0.6440 of the swing (the 12-sample window of the nesdev decoder; 2 / pi = 0.6366 in the continuous limit); the phase of hue h is 30 x (h - 2) degrees on the U axis (hue 8, the colour burst's, is pure -U), turned by -5 degrees (2C02G) or -2.5 degrees (2C02E) for each luma row, the differential phase distortion the nesdev page reports from a hardware capture and a forum measurement. The decoder is SMPTE 170M: black at the blank level (Japan) or 7.5 IRE (53.6 mV) above it (the United States), white at the top level, 1100 mV; the decode matrix is the one of the composite model. These choices are the page's own defaults, not facts of the hardware.
+Recognition compares each pixel with a reference palette that does not depend on the chip: the same model at a chroma of 0.8 and a black of 335 mV, which sits among the palettes of the emulators that decode the signal (the 2C02G palettes of pally, the Mesen2 default, which equals Nestopia's canonical palette). The FCEUX default palette is a hand-tuned one that no decode of the signal reproduces: it is not recognised; use another palette in FCEUX. A pixel with no reference colour within the threshold (a scaled or smoothed picture, an edited palette) passes through unchanged. The emphasis bits are not modelled: an emphasised pixel is recognised as its base colour, and the dimmer, tinted colour the hardware gives is lost.
+Cross-check: pally's published 2C02G palettes (MIT-0) for Japan and the United States, made with its phase distortion filter, differ from this model by a mean of about 0.07 in drive voltage (its filter also lowers the chroma): the tests keep that. Not modelled: the emphasis bits, the NTSC square-wave harmonics (the colours are the fundamental; a 12-sample square-wave encoder is not planned), the television's contrast and brightness, the PAL 2C07, the RGB PPUs (2C03, 2C04, 2C05).
+"""
+
+[signal]
+chroma_factor = 0.6440
+threshold = 0.2
+black_index = 15
+white_index = 32
+
+[signal.reference]
+black_mv = 335
+white_mv = 1100
+phase_row_deg = -5
+saturation = 0.8
+gain = 1.0
+gamma = 1.0
+[[signal.colours]]
+name = "$00"
+row = 0
+level_mv = 616
+
+[[signal.colours]]
+name = "$01"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = -30
+
+[[signal.colours]]
+name = "$02"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 0
+
+[[signal.colours]]
+name = "$03"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 30
+
+[[signal.colours]]
+name = "$04"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 60
+
+[[signal.colours]]
+name = "$05"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 90
+
+[[signal.colours]]
+name = "$06"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 120
+
+[[signal.colours]]
+name = "$07"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 150
+
+[[signal.colours]]
+name = "$08"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 180
+
+[[signal.colours]]
+name = "$09"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 210
+
+[[signal.colours]]
+name = "$0A"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 240
+
+[[signal.colours]]
+name = "$0B"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 270
+
+[[signal.colours]]
+name = "$0C"
+row = 0
+level_mv = 422
+swing_mv = 388
+angle = 300
+
+[[signal.colours]]
+name = "$0D"
+row = 0
+level_mv = 228
+
+[[signal.colours]]
+name = "$0E"
+row = 0
+level_mv = 312
+
+[[signal.colours]]
+name = "$0F"
+row = 0
+level_mv = 312
+
+[[signal.colours]]
+name = "$10"
+row = 1
+level_mv = 840
+
+[[signal.colours]]
+name = "$11"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = -30
+
+[[signal.colours]]
+name = "$12"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 0
+
+[[signal.colours]]
+name = "$13"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 30
+
+[[signal.colours]]
+name = "$14"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 60
+
+[[signal.colours]]
+name = "$15"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 90
+
+[[signal.colours]]
+name = "$16"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 120
+
+[[signal.colours]]
+name = "$17"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 150
+
+[[signal.colours]]
+name = "$18"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 180
+
+[[signal.colours]]
+name = "$19"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 210
+
+[[signal.colours]]
+name = "$1A"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 240
+
+[[signal.colours]]
+name = "$1B"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 270
+
+[[signal.colours]]
+name = "$1C"
+row = 1
+level_mv = 576
+swing_mv = 528
+angle = 300
+
+[[signal.colours]]
+name = "$1D"
+row = 1
+level_mv = 312
+
+[[signal.colours]]
+name = "$1E"
+row = 1
+level_mv = 312
+
+[[signal.colours]]
+name = "$1F"
+row = 1
+level_mv = 312
+
+[[signal.colours]]
+name = "$20"
+row = 2
+level_mv = 1100
+
+[[signal.colours]]
+name = "$21"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = -30
+
+[[signal.colours]]
+name = "$22"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 0
+
+[[signal.colours]]
+name = "$23"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 30
+
+[[signal.colours]]
+name = "$24"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 60
+
+[[signal.colours]]
+name = "$25"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 90
+
+[[signal.colours]]
+name = "$26"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 120
+
+[[signal.colours]]
+name = "$27"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 150
+
+[[signal.colours]]
+name = "$28"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 180
+
+[[signal.colours]]
+name = "$29"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 210
+
+[[signal.colours]]
+name = "$2A"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 240
+
+[[signal.colours]]
+name = "$2B"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 270
+
+[[signal.colours]]
+name = "$2C"
+row = 2
+level_mv = 826
+swing_mv = 548
+angle = 300
+
+[[signal.colours]]
+name = "$2D"
+row = 2
+level_mv = 552
+
+[[signal.colours]]
+name = "$2E"
+row = 2
+level_mv = 312
+
+[[signal.colours]]
+name = "$2F"
+row = 2
+level_mv = 312
+
+[[signal.colours]]
+name = "$30"
+row = 3
+level_mv = 1100
+
+[[signal.colours]]
+name = "$31"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = -30
+
+[[signal.colours]]
+name = "$32"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 0
+
+[[signal.colours]]
+name = "$33"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 30
+
+[[signal.colours]]
+name = "$34"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 60
+
+[[signal.colours]]
+name = "$35"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 90
+
+[[signal.colours]]
+name = "$36"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 120
+
+[[signal.colours]]
+name = "$37"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 150
+
+[[signal.colours]]
+name = "$38"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 180
+
+[[signal.colours]]
+name = "$39"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 210
+
+[[signal.colours]]
+name = "$3A"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 240
+
+[[signal.colours]]
+name = "$3B"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 270
+
+[[signal.colours]]
+name = "$3C"
+row = 3
+level_mv = 990
+swing_mv = 220
+angle = 300
+
+[[signal.colours]]
+name = "$3D"
+row = 3
+level_mv = 880
+
+[[signal.colours]]
+name = "$3E"
+row = 3
+level_mv = 312
+
+[[signal.colours]]
+name = "$3F"
+row = 3
+level_mv = 312
+
+[[signal.revisions]]
+id = "2c02g_blank"
+name = "Ricoh 2C02G, black at the blank level (NTSC-J, no setup)"
+black_mv = 312
+white_mv = 1100
+phase_row_deg = -5
+
+[[signal.revisions]]
+id = "2c02g_setup"
+name = "Ricoh 2C02G, 7.5 IRE setup (NTSC-U)"
+black_mv = 365.6
+white_mv = 1100
+phase_row_deg = -5
+
+[[signal.revisions]]
+id = "2c02e_blank"
+name = "Ricoh 2C02E, black at the blank level (NTSC-J, no setup)"
+black_mv = 312
+white_mv = 1100
+phase_row_deg = -2.5
+
+[[signal.revisions]]
+id = "2c02e_setup"
+name = "Ricoh 2C02E, 7.5 IRE setup (NTSC-U)"
+black_mv = 365.6
+white_mv = 1100
+phase_row_deg = -2.5
+
+[provenance]
+colours = "S: nesdev, NTSC video (nesdev.org/wiki/NTSC_video), measurements by lidnariq, a terminated 75 ohm television, about 10 mV of noise and 4 mV of quantisation: the levels per luma row (low 228, 312, 552, 880 mV, high 616, 840, 1100, 1100 mV), hue 0 a constant high, hue 13 a constant low, hues 14 and 15 the level of $1D (312 mV); the phase of hue h is 30 x (h - 2) degrees on the U axis, derived from the page's decoder (hue 8 decodes to pure -U, the colour burst's phase); the hue and row of each entry follow the bits of the palette index"
+revisions = "S: nesdev, NTSC video: the differential phase distortion, -2.5 degrees (2C02E) or -5 degrees (2C02G) of extra rotation for each luma row (a forum measurement and a 2C02G hardware capture); E: the black level, the blank level (312 mV) for NTSC-J or 7.5 IRE above it (53.6 mV, 14 of 140 IRE per volt) for NTSC-U, and the white at the top level (1100 mV): the page's defaults and its alternatives, the television's own setting"
+chroma_factor = "D: the fundamental of a square wave of the swing, summed over the 12-sample window of the nesdev decoder (U and V of the window times 2): 0.6440; 2 / pi = 0.6366 in the continuous limit"
+reference = "E: the classification reference palette, not an output: the model at a chroma of 0.8 (saturation), black at 335 mV (between the blank level, 312 mV, of the Japanese palettes and the 7.5 IRE setup, 365.6 mV, of the American ones, which are darker), -5 degrees a row, white at 1100 mV, no gamma, chosen so that the Mesen2 default and the two pally 2C02G palettes are recognised (a search over the black level, the phase, the chroma and the contrast: 3 of the 192 colours of the three palettes are confused with a neighbour, dark greens and blues of row 0; the FCEUX default palette is the only popular one that no setting recognises)"
+threshold = "E: the largest distance between a pixel and a reference colour at which the pixel is taken for it, beyond the farthest of the recognised palettes (0.153 of the pally and Mesen2 palettes from their references; the tests print the distances)"
+black_index = "K: colour $0F (index 15) is black: the blank level and $1D"
+white_index = "K: colour $20 (index 32) is the white of the page's decoder, 1100 mV"

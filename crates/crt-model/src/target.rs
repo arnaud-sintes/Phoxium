@@ -250,28 +250,6 @@ impl Signal {
         self.references[i]
     }
 
-    /// The reference palette of a published model: the colour `i` of a signal of luma `luma_32[i]` over 32 and
-    /// chroma `angles[i]` degrees (none for a grey) at `amplitude`, with the contrast `gain` on luma and chroma, then
-    /// the decoder and the exponent `gamma` that a PC display applies.
-    pub fn reference_model(
-        luma_32: &[f64],
-        angles: &[Option<f64>],
-        amplitude: f64,
-        gain: f64,
-        gamma: f64,
-    ) -> [[f64; 3]; SIGNAL_MAX] {
-        let mut out = [[0.0; 3]; SIGNAL_MAX];
-        for (i, (l, a)) in luma_32.iter().zip(angles).enumerate().take(SIGNAL_MAX) {
-            let y = l / 32.0 * gain;
-            let (u, v) = a.map_or((0.0, 0.0), |a| {
-                let a = a.to_radians();
-                (amplitude * gain * a.cos(), amplitude * gain * a.sin())
-            });
-            out[i] = decode_yuv(y, u, v).map(|c| c.powf(gamma));
-        }
-        out
-    }
-
     /// The nearest hardware colour of the drive voltage `v` (the first of equals), `None` when none is within the
     /// threshold.
     pub fn classify(&self, v: [f64; 3]) -> Option<usize> {
