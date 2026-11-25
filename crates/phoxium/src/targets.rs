@@ -34,7 +34,7 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use crt_model::target::{Curve, Dac, Matrix, Palette, Transform, CURVE_LEN, DAC_LEN};
+use crt_model::target::{decode_yuv, Curve, Dac, Matrix, Palette, Signal, Transform, CURVE_LEN, DAC_LEN, SIGNAL_MAX};
 use serde::Deserialize;
 
 /// The schema version of the files.
@@ -64,6 +64,10 @@ const SHIPPED: &[(&str, &str)] = &[
     (
         "sega_mega_drive.toml",
         include_str!("../../../presets/targets/sega_mega_drive.toml"),
+    ),
+    (
+        "commodore_64.toml",
+        include_str!("../../../presets/targets/commodore_64.toml"),
     ),
 ];
 
@@ -122,6 +126,7 @@ struct File {
     curve: Option<CurveFile>,
     palette: Option<PaletteFile>,
     dac: Option<DacFile>,
+    signal: Option<SignalFile>,
     provenance: BTreeMap<String, String>,
 }
 
@@ -218,6 +223,138 @@ impl DacFile {
     }
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignalFile {
+    /// Chroma amplitude, in the units of the white-black span of the luma (the composite model's colour-difference scale).
+    amplitude: f64,
+    threshold: f64,
+    black_index: usize,
+    white_index: usize,
+    /// The model of the reference palette the classification compares with.
+    reference: SignalReference,
+    colours: Vec<SignalColour>,
+    revisions: Vec<SignalRevision>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignalReference {
+    /// The luma of each colour over 32.
+    luma_32: Vec<f64>,
+    amplitude: f64,
+    /// The contrast applied to luma and chroma.
+    gain: f64,
+    gamma: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignalColour {
+    name: String,
+    /// The chroma phase in degrees on the U axis (U = cos, V = sin); none for a grey.
+    angle: Option<f64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignalRevision {
+    id: String,
+    name: String,
+    /// The luma level of each colour, in the order of `colours`, in mV.
+    luma_mv: Vec<f64>,
+}
+
+impl SignalFile {
+    /// The revisions as variants: each colour's drive voltages from its luma, chroma angle and the amplitude.
+    fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
+        let n = self.colours.len();
+        if n == 0 || n > SIGNAL_MAX {
+            return Err(format!("{file}: signal.colours must hold 1 to {SIGNAL_MAX} colours"));
+        }
+        positive(file, "signal", "amplitude", self.amplitude)?;
+        positive(file, "signal.reference", "amplitude", self.reference.amplitude)?;
+        positive(file, "signal.reference", "gain", self.reference.gain)?;
+        positive(file, "signal.reference", "gamma", self.reference.gamma)?;
+        if self.reference.luma_32.len() != n || self.reference.luma_32.iter().any(|l| !l.is_finite() || *l < 0.0) {
+            return Err(format!(
+                "{file}: signal.reference.luma_32 must hold {n} levels, not negative"
+            ));
+        }
+        let angles: Vec<Option<f64>> = self.colours.iter().map(|c| c.angle).collect();
+        let references = Signal::reference_model(
+            &self.reference.luma_32,
+            &angles,
+            self.reference.amplitude,
+            self.reference.gain,
+            self.reference.gamma,
+        );
+        positive(file, "signal", "threshold", self.threshold)?;
+        if self.black_index >= n || self.white_index >= n || self.black_index == self.white_index {
+            return Err(format!(
+                "{file}: signal.black_index and signal.white_index must be two colours"
+            ));
+        }
+        if self.colours.iter().any(|c| c.name.trim().is_empty()) {
+            return Err(format!("{file}: signal.colours name must not be empty"));
+        }
+        if self.colours.iter().any(|c| c.angle.is_some_and(|a| !a.is_finite())) {
+            return Err(format!("{file}: signal.colours angle must be finite"));
+        }
+        if self.revisions.is_empty() || self.revisions.len() > MAX_PALETTES {
+            return Err(format!(
+                "{file}: signal.revisions must hold 1 to {MAX_PALETTES} revisions"
+            ));
+        }
+        let mut out: Vec<Variant> = Vec::new();
+        for r in &self.revisions {
+            if r.id.is_empty()
+                || !r
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(format!(
+                    "{file}: signal.revisions id \"{}\" must be lower case letters, digits and '_'",
+                    r.id
+                ));
+            }
+            if out.iter().any(|v| v.id == r.id) {
+                return Err(format!("{file}: signal.revisions id \"{}\" is used twice", r.id));
+            }
+            if r.luma_mv.len() != n || r.luma_mv.iter().any(|l| !l.is_finite() || *l <= 0.0) {
+                return Err(format!(
+                    "{file}: signal.revisions {} luma_mv must hold {n} positive levels",
+                    r.id
+                ));
+            }
+            let (black, white) = (r.luma_mv[self.black_index], r.luma_mv[self.white_index]);
+            if white <= black {
+                return Err(format!("{file}: signal.revisions {} white must be above black", r.id));
+            }
+            let mut colours = [[0.0; 3]; SIGNAL_MAX];
+            for (i, c) in self.colours.iter().enumerate() {
+                let y = (r.luma_mv[i] - black) / (white - black);
+                let (u, v) = c.angle.map_or((0.0, 0.0), |a| {
+                    let a = a.to_radians();
+                    (self.amplitude * a.cos(), self.amplitude * a.sin())
+                });
+                colours[i] = decode_yuv(y, u, v);
+            }
+            out.push(Variant {
+                id: r.id.clone(),
+                name: r.name.clone(),
+                transform: Transform::Signal(Signal {
+                    colours,
+                    count: n,
+                    references,
+                    threshold: self.threshold,
+                }),
+            });
+        }
+        Ok(out)
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaletteFile {
@@ -380,26 +517,41 @@ impl Target {
             ));
         }
         let mut variants = Vec::new();
-        let (transform, keys) = match (f.kind.as_str(), &f.matrix, &f.curve, &f.palette, &f.dac) {
-            ("matrix", Some(m), None, None, None) => (Transform::Matrix(m.matrix(file)?), m.keys()),
-            ("curve", None, Some(c), None, None) => (
+        let (transform, keys) = match (f.kind.as_str(), &f.matrix, &f.curve, &f.palette, &f.dac, &f.signal) {
+            ("matrix", Some(m), None, None, None, None) => (Transform::Matrix(m.matrix(file)?), m.keys()),
+            ("curve", None, Some(c), None, None, None) => (
                 Transform::Curve(c.curve(file)?),
                 vec!["table", "input_bits", "output_max"],
             ),
-            ("palette", None, None, Some(p), None) => {
+            ("palette", None, None, Some(p), None, None) => {
                 variants = p.variants(file)?;
                 (variants[0].transform, vec!["sets", "colour_bits"])
             }
-            ("dac", None, None, None, Some(d)) => {
+            ("dac", None, None, None, Some(d), None) => {
                 variants = d.variants(file)?;
                 (variants[0].transform, vec!["output", "output_max", "inputs"])
             }
-            ("matrix" | "curve" | "palette" | "dac", _, _, _, _) => {
+            ("signal", None, None, None, None, Some(s)) => {
+                variants = s.variants(file)?;
+                (
+                    variants[0].transform,
+                    vec![
+                        "colours",
+                        "revisions",
+                        "amplitude",
+                        "reference",
+                        "threshold",
+                        "black_index",
+                        "white_index",
+                    ],
+                )
+            }
+            ("matrix" | "curve" | "palette" | "dac" | "signal", _, _, _, _, _) => {
                 return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
             }
-            (other, _, _, _, _) => {
+            (other, _, _, _, _, _) => {
                 return Err(format!(
-                    "{file}: kind \"{other}\" is not \"matrix\", \"curve\", \"palette\" or \"dac\""
+                    "{file}: kind \"{other}\" is not \"matrix\", \"curve\", \"palette\", \"dac\" or \"signal\""
                 ))
             }
         };
@@ -439,6 +591,34 @@ pub fn shipped() -> &'static [Target] {
 /// The shipped target called `id` (the value name of `source_colour_target`), `None` for `none` and unknown names.
 pub fn by_id(id: &str) -> Option<&'static Target> {
     shipped().iter().find(|t| t.id == id)
+}
+
+/// The colours of the chosen signal target for the `target_table` of the frame uniform buffer
+/// (`gpu::FRAME_TABLE_VEC4` entries): the hardware colours (drive voltages) at entries 0 to count, the reference colours
+/// the classification compares with at entries 64 to 64 + count; `None` when the target is not a signal one.
+pub fn frame_table(p: &crate::params::Params) -> Option<Vec<[f32; 4]>> {
+    let t = for_value(p.source_colour_target)?;
+    match t.select(p.source_colour_variant) {
+        Transform::Signal(s) => {
+            let mut table = vec![[0.0f32; 4]; SIGNAL_MAX + s.count];
+            for i in 0..s.count {
+                table[i] = [
+                    s.colours[i][0] as f32,
+                    s.colours[i][1] as f32,
+                    s.colours[i][2] as f32,
+                    0.0,
+                ];
+                table[SIGNAL_MAX + i] = [
+                    s.references[i][0] as f32,
+                    s.references[i][1] as f32,
+                    s.references[i][2] as f32,
+                    0.0,
+                ];
+            }
+            Some(table)
+        }
+        _ => None,
+    }
 }
 
 /// The target of the value `value` of `source_colour_target` (`SOURCE_COLOUR_TARGET_*`), `None` for `none`.
@@ -664,5 +844,126 @@ mod tests {
             let err = Target::parse("t.toml", &text).expect_err(key);
             assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
         }
+    }
+
+    /// The published C64 palettes (plain lists of 16 colours: Pepto 2001 and the Colodore defaults, which Lospec lists the
+    /// same, and the more saturated Colodore file of VICE, compared only), each as bytes in the C64 colour order.
+    const PEPTO: [u32; 16] = [
+        0x000000, 0xFFFFFF, 0x68372B, 0x70A4B2, 0x6F3D86, 0x588D43, 0x352879, 0xB8C76F, 0x6F4F25, 0x433900, 0x9A6759,
+        0x444444, 0x6C6C6C, 0x9AD284, 0x6C5EB5, 0x959595,
+    ];
+    const COLODORE: [u32; 16] = [
+        0x000000, 0xFFFFFF, 0x813338, 0x75CEC8, 0x8E3C97, 0x56AC4D, 0x2E2C9B, 0xEDF171, 0x8E5029, 0x553800, 0xC46C71,
+        0x4A4A4A, 0x7B7B7B, 0xA9FF9F, 0x706DEB, 0xB2B2B2,
+    ];
+    const VICE_COLODORE: [u32; 16] = [
+        0x000000, 0xFFFFFF, 0x96282E, 0x5BD6CE, 0x9F2DAD, 0x41B936, 0x2724C4, 0xEFF347, 0x9F4815, 0x5E3500, 0xDA5F66,
+        0x474747, 0x787878, 0x91FF84, 0x6864FF, 0xAEAEAE,
+    ];
+
+    fn rgb(x: u32) -> [f64; 3] {
+        [(x >> 16) & 255, (x >> 8) & 255, x & 255].map(|c| f64::from(c) / 255.0)
+    }
+
+    /// The C64 file: four PAL revisions, 16 colours each, the first variant the 6569R3; the greys are grey, black and
+    /// white are the rails, luma follows the measured order; and the classification works on the published palettes:
+    /// every colour of Pepto's, Colodore's and VICE's Colodore palette is recognised as its own index on every
+    /// revision, and the two closest hardware colours are farther apart than the threshold.
+    #[test]
+    fn the_c64_file_and_the_published_palettes() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_COMMODORE_64).expect("c64");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["6569r3", "6569r4", "6569r5", "6569r1"]);
+        for v in &t.variants {
+            let Transform::Signal(s) = v.transform else {
+                panic!("signal")
+            };
+            assert_eq!(s.count, 16);
+            assert_eq!(s.colours[0], [0.0; 3], "{}: black", v.id);
+            assert_eq!(s.colours[1], [1.0; 3], "{}: white", v.id);
+            for i in [11, 12, 15] {
+                let c = s.colours[i];
+                assert!(
+                    (c[0] - c[1]).abs() < 1e-9 && (c[1] - c[2]).abs() < 1e-9,
+                    "{} grey {i}: {c:?}",
+                    v.id
+                );
+            }
+            // The greys rise: black, dark grey, medium grey, light grey, white (the measured luma order).
+            let luma = |i: usize| 0.299 * s.colours[i][0] + 0.587 * s.colours[i][1] + 0.114 * s.colours[i][2];
+            let order = [0, 11, 12, 15, 1];
+            assert!(
+                order.windows(2).all(|w| luma(w[0]) < luma(w[1])),
+                "{}: grey order",
+                v.id
+            );
+            // The two closest hardware colours, in the compared space, are farther apart than the threshold.
+            let mut closest = f64::MAX;
+            for i in 0..16 {
+                for j in i + 1..16 {
+                    let (a, b) = (s.reference(i), s.reference(j));
+                    closest =
+                        closest.min(((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt());
+                }
+            }
+            println!(
+                "{}: closest hardware colours {closest:.3}, threshold {}",
+                v.id, s.threshold
+            );
+            // The reference colours are not closer than 0.1 (so that the nearest one is a safe choice); the threshold lies
+            // beyond the farthest published palette (checked below), so it only leaves alone what is no palette colour.
+            assert!(closest > 0.1, "{}: {closest}", v.id);
+            for (name, pal) in [
+                ("Pepto", PEPTO),
+                ("Colodore", COLODORE),
+                ("VICE Colodore", VICE_COLODORE),
+            ] {
+                let mut worst = 0.0f64;
+                for (i, c) in pal.iter().enumerate() {
+                    let got = s.classify(rgb(*c));
+                    if got != Some(i) {
+                        println!("  MISS {} {name}: colour {i} {c:06X} is {got:?}", v.id);
+                    }
+                    let r = s.reference(i);
+                    let p = rgb(*c);
+                    worst = worst.max(((p[0] - r[0]).powi(2) + (p[1] - r[1]).powi(2) + (p[2] - r[2]).powi(2)).sqrt());
+                }
+                println!("{} {name}: worst distance to its own colour {worst:.3}", v.id);
+                assert!(worst <= s.threshold, "{} {name}: {worst}", v.id);
+            }
+        }
+    }
+
+    /// The R3 output colours are the decoder's drive voltages, hand derived for the red (colour 2): luma (1090 - 700) /
+    /// (1850 - 700) = 0.33913; U = 0.15625 cos 101.25 = -0.030657, V = 0.15625 sin 101.25 = 0.153213; R = Y + V / 0.877283
+    /// = 0.5138, B = Y + U / 0.492111 = 0.2768, G = (Y - 0.299 R - 0.114 B) / 0.587 = 0.2617.
+    #[test]
+    fn the_c64_output_is_the_decoders_drive_voltage() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_COMMODORE_64).expect("c64");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        let [r, g, b] = s.colours[2];
+        assert!(
+            (r - 0.5138).abs() < 1e-3 && (g - 0.2617).abs() < 1e-3 && (b - 0.2768).abs() < 1e-3,
+            "{r} {g} {b}"
+        );
+        // A different chip, a different luma: the R4 red is darker (black 500 mV, red 840, white 1875).
+        let Transform::Signal(r4) = t.transform_for(1) else {
+            panic!("signal")
+        };
+        assert!(r4.colours[2][0] < r - 0.03, "{} {r}", r4.colours[2][0]);
+        // The classification does not depend on the chip: the references are the same for every revision.
+        let Transform::Signal(r1) = t.transform_for(3) else {
+            panic!("signal")
+        };
+        assert_eq!(r4.references, s.references);
+        assert_eq!(r1.references, s.references);
+        // A recognised pixel is replaced by this chip's colour, an unknown pixel passes through.
+        let pepto_red = rgb(PEPTO[2]);
+        assert_eq!(s.apply(pepto_red), s.colours[2]);
+        assert_ne!(s.apply(pepto_red), r4.apply(pepto_red));
+        let odd = [0.2, 0.9, 0.95];
+        assert_eq!(s.apply(odd), odd);
     }
 }

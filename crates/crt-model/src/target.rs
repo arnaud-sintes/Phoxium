@@ -18,6 +18,8 @@
 //! - [`Dac`], a console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): a piecewise linear map
 //!   from the levels the emulator shows to the measured levels. It has no device code to recover: the levels are the
 //!   points of the map.
+//! - [`Signal`], a console whose colours are made of a composite signal (C64): the hardware colours as the drive voltages
+//!   a decoder gives ([`decode_yuv`]), and the recognition of each pixel as the nearest hardware colour.
 //! - [`Palette`], a monochrome source shown in four chosen colours (Super Game Boy): the luma of the source picks a
 //!   position between the colours. It has no device code to recover.
 //!
@@ -210,13 +212,96 @@ impl Dac {
     }
 }
 
-/// The transform of a target.
+/// Colours a [`Signal`] holds at most (the NES has 64).
+pub const SIGNAL_MAX: usize = 64;
+
+/// The drive voltages R'G'B' a television's decoder gives for a luma `y` (0 black, 1 white) and colour differences
+/// `u`, `v` on the scale of the composite model (`U = 0.492111 (B' - Y)`, `V = 0.877283 (R' - Y)`, BT.601 luma),
+/// clamped to the rails [0, 1]: the matrix of `crate::composite`, so a colour made here goes through the composite
+/// model and returns unchanged.
+pub fn decode_yuv(y: f64, u: f64, v: f64) -> [f64; 3] {
+    let r = y + v / 0.877_283;
+    let b = y + u / 0.492_111;
+    let g = (y - 0.299 * r - 0.114 * b) / 0.587;
+    [r, g, b].map(|c| c.clamp(0.0, 1.0))
+}
+
+/// A console whose colours are made of a composite signal (Commodore 64, later the NES), as the drive voltages a
+/// television's decoder would give for each hardware colour ([`decode_yuv`]), and the recognition of those colours in
+/// an emulator picture: each pixel is classified to the nearest hardware colour and replaced by it, a pixel with no
+/// close colour passes through. An emulator's palette is a PC colour, computed for a PC display and for a chip and a
+/// television setting of its own, so the pixel is compared with a **reference** palette (`references`), computed by a
+/// fixed model that stands between the published ones and does not depend on the chip revision chosen for the output;
+/// the reference is a classification aid, never applied to the output.
 #[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Signal {
+    /// The hardware colours as drive voltages, the first `count` used.
+    pub colours: [[f64; 3]; SIGNAL_MAX],
+    pub count: usize,
+    /// The colours an emulator shows for them, as the classification compares (the first `count` used).
+    pub references: [[f64; 3]; SIGNAL_MAX],
+    /// The largest distance (Euclidean, in the compared space) at which a pixel is taken for a hardware colour.
+    pub threshold: f64,
+}
+
+impl Signal {
+    /// The reference colour `i` (what an emulator shows for it), in the compared space.
+    pub fn reference(&self, i: usize) -> [f64; 3] {
+        self.references[i]
+    }
+
+    /// The reference palette of a published model: the colour `i` of a signal of luma `luma_32[i]` over 32 and
+    /// chroma `angles[i]` degrees (none for a grey) at `amplitude`, with the contrast `gain` on luma and chroma, then
+    /// the decoder and the exponent `gamma` that a PC display applies.
+    pub fn reference_model(
+        luma_32: &[f64],
+        angles: &[Option<f64>],
+        amplitude: f64,
+        gain: f64,
+        gamma: f64,
+    ) -> [[f64; 3]; SIGNAL_MAX] {
+        let mut out = [[0.0; 3]; SIGNAL_MAX];
+        for (i, (l, a)) in luma_32.iter().zip(angles).enumerate().take(SIGNAL_MAX) {
+            let y = l / 32.0 * gain;
+            let (u, v) = a.map_or((0.0, 0.0), |a| {
+                let a = a.to_radians();
+                (amplitude * gain * a.cos(), amplitude * gain * a.sin())
+            });
+            out[i] = decode_yuv(y, u, v).map(|c| c.powf(gamma));
+        }
+        out
+    }
+
+    /// The nearest hardware colour of the drive voltage `v` (the first of equals), `None` when none is within the
+    /// threshold.
+    pub fn classify(&self, v: [f64; 3]) -> Option<usize> {
+        let mut best: Option<(usize, f64)> = None;
+        for i in 0..self.count {
+            let r = self.reference(i);
+            let d = ((v[0] - r[0]).powi(2) + (v[1] - r[1]).powi(2) + (v[2] - r[2]).powi(2)).sqrt();
+            if best.is_none_or(|(_, b)| d < b) {
+                best = Some((i, d));
+            }
+        }
+        best.filter(|(_, d)| *d <= self.threshold).map(|(i, _)| i)
+    }
+
+    /// The target colour of the drive voltage `v`: the hardware colour it is taken for, else itself.
+    pub fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+        self.classify(v).map_or(v, |i| self.colours[i])
+    }
+}
+
+/// The transform of a target. A [`Signal`] is a few kilobytes of colours: the enum stays `Copy` for the cheap small kinds and
+/// is only built and read, never stored in bulk.
+#[derive(Clone, Copy, Debug, PartialEq)]
+#[allow(clippy::large_enum_variant)]
 pub enum Transform {
     Matrix(Matrix),
     Curve(Curve),
     Palette(Palette),
     Dac(Dac),
+    Signal(Signal),
 }
 
 impl Transform {
@@ -225,7 +310,7 @@ impl Transform {
         match self {
             Transform::Matrix(m) => m.input_bits,
             Transform::Curve(_) => 5,
-            Transform::Palette(_) | Transform::Dac(_) => 8,
+            Transform::Palette(_) | Transform::Dac(_) | Transform::Signal(_) => 8,
         }
     }
 
@@ -236,6 +321,7 @@ impl Transform {
             Transform::Curve(c) => c.apply(v),
             Transform::Palette(p) => p.apply(v),
             Transform::Dac(d) => d.apply(v),
+            Transform::Signal(s) => s.apply(v),
         }
     }
 }
@@ -506,5 +592,68 @@ mod tests {
         // The same picture value 102 is code 3 for one emulator and between codes for the other.
         assert!(close(md_gpgx().apply([102.0 / 255.0; 3])[0], 116.0 / 255.0, 1e-12));
         assert!(regen.apply([102.0 / 255.0; 3])[0] > 116.0 / 255.0);
+    }
+
+    /// A small signal with four colours: black, white, a red and a blue, from luma and colour differences.
+    fn tiny_signal() -> Signal {
+        let mut colours = [[0.0; 3]; SIGNAL_MAX];
+        colours[0] = decode_yuv(0.0, 0.0, 0.0);
+        colours[1] = decode_yuv(1.0, 0.0, 0.0);
+        colours[2] = decode_yuv(0.3, -0.05, 0.2);
+        colours[3] = decode_yuv(0.1, 0.3, 0.0);
+        let references = colours.map(|c| c.map(|v| v.powf(1.25)));
+        Signal {
+            colours,
+            count: 4,
+            references,
+            threshold: 0.1,
+        }
+    }
+
+    /// The decode matrix: a grey is grey, a colour difference of 0 gives the luma, the rails clamp. Hand derivation
+    /// for Y 0.3, U 0, V 0.1: R = 0.3 + 0.1 / 0.877283 = 0.41399, B = 0.3, G = (0.3 - 0.299 R - 0.114 B) / 0.587 = 0.2419.
+    #[test]
+    fn decode_yuv_matrix_and_rails() {
+        assert!(decode_yuv(0.5, 0.0, 0.0).iter().all(|c| close(*c, 0.5, 1e-12)));
+        let [r, g, b] = decode_yuv(0.3, 0.0, 0.1);
+        assert!(
+            close(r, 0.3 + 0.1 / 0.877_283, 1e-12) && close(b, 0.3, 1e-12),
+            "{r} {b}"
+        );
+        assert!(close(g, (0.3 - 0.299 * r - 0.114 * b) / 0.587, 1e-12));
+        assert!(close(g, 0.2419, 1e-3), "{g}");
+        // The luma of what comes out is the luma that went in (the BT.601 weights).
+        assert!(close(0.299 * r + 0.587 * g + 0.114 * b, 0.3, 1e-12));
+        // The rails: a colour difference too large for the gamut is clamped.
+        assert_eq!(decode_yuv(0.5, 0.0, 2.0)[0], 1.0);
+        assert_eq!(decode_yuv(0.0, 0.0, -2.0)[0], 0.0);
+    }
+
+    /// Every hardware colour is its own nearest in the compared space and is replaced by itself; the distance between
+    /// the two closest colours is larger than the threshold; a pixel far from all of them passes through.
+    #[test]
+    fn signal_classifies_to_the_nearest_hardware_colour() {
+        let s = tiny_signal();
+        for i in 0..s.count {
+            assert_eq!(s.classify(s.reference(i)), Some(i), "colour {i}");
+            assert_eq!(s.apply(s.reference(i)), s.colours[i]);
+        }
+        let mut closest = f64::MAX;
+        for i in 0..s.count {
+            for j in i + 1..s.count {
+                let (a, b) = (s.reference(i), s.reference(j));
+                closest = closest.min(((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt());
+            }
+        }
+        assert!(closest > s.threshold, "{closest}");
+        // A pixel a little off the red is still the red; a green is far from all four and passes through.
+        let r = s.reference(2).map(|c| c + 0.02);
+        assert_eq!(s.classify(r), Some(2));
+        let green = [0.1, 0.9, 0.1];
+        assert_eq!(s.classify(green), None);
+        assert_eq!(s.apply(green), green);
+        assert_eq!(Transform::Signal(s).input_bits(), 8);
+        // The first of two equal distances wins: a count of 0 classifies nothing.
+        assert_eq!(Signal { count: 0, ..s }.classify([0.0; 3]), None);
     }
 }

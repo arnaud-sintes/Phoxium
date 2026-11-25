@@ -32,10 +32,11 @@ const KIND_MATRIX: i32 = 0;
 const KIND_CURVE: i32 = 1;
 const KIND_PALETTE: i32 = 2;
 const KIND_DAC: i32 = 3;
+const KIND_SIGNAL: i32 = 4;
 
 /// The push constants of `target.comp` (std430, 100 bytes): the matrix row by row and its scalars, the curve (or the
 /// bytes of a palette) packed four entries to a word, the bits per channel of the device code (0 = no recovery) and the
-/// kind (0 matrix, 1 curve, 2 palette, 3 dac).
+/// kind (0 matrix, 1 curve, 2 palette, 3 dac, 4 signal).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -104,6 +105,19 @@ pub(super) fn plan(p: &Params) -> Push {
                 out_scale: (1.0 / c.output_max) as f32,
                 bits: recovery_bits(t.transform.input_bits()),
                 kind: KIND_CURVE,
+                ..identity
+            }
+        }
+        Transform::Signal(sig) => {
+            // The hardware and reference colours travel in the frame uniform buffer (`target_table`,
+            // `targets::frame_table`); here the distance threshold in `clamp_sum` and the count in word 0.
+            let mut table = [0u32; CURVE_LEN / 4];
+            table[0] = sig.count as u32;
+            Push {
+                clamp_sum: sig.threshold as f32,
+                table,
+                bits: 0,
+                kind: KIND_SIGNAL,
                 ..identity
             }
         }

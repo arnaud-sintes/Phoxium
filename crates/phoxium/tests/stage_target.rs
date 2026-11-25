@@ -11,8 +11,8 @@ mod common;
 use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    Params, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    Params, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
+    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
     SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
 };
 
@@ -82,8 +82,23 @@ fn transform(target: u32, variant: i32) -> Transform {
             3 => md_dac(32),
             _ => unreachable!(),
         },
+        // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
+        SOURCE_COLOUR_TARGET_COMMODORE_64 => phoxium::targets::for_value(target)
+            .expect("c64")
+            .transform_for(usize::try_from(variant - 1).unwrap()),
         _ => unreachable!(),
     }
+}
+
+/// Pepto's 16 colours (a published palette), as an emulator shows them.
+const PEPTO: [u32; 16] = [
+    0x000000, 0xFFFFFF, 0x68372B, 0x70A4B2, 0x6F3D86, 0x588D43, 0x352879, 0xB8C76F, 0x6F4F25, 0x433900, 0x9A6759,
+    0x444444, 0x6C6C6C, 0x9AD284, 0x6C5EB5, 0x959595,
+];
+
+fn pepto(i: usize) -> [f64; 3] {
+    let c = PEPTO[i % 16];
+    [(c >> 16) & 255, (c >> 8) & 255, c & 255].map(|v| f64::from(v) / 255.0)
 }
 /// A native raster of `w` x `h` pixels: the 5-bit expanded codes of every channel in turn (grey ramp, red, green and
 /// blue ramps), then a pseudo-random fill of any 8-bit drive voltage (a frame that was not 5-bit quantised), with
@@ -102,6 +117,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 (1, _) => [expand(c), 0.0, 0.0],
                 (2, _) => [0.0, expand(c), 0.0],
                 (3, _) => [0.0, 0.0, expand(c)],
+                // The C64 palette of Pepto, then the same a little off (a pixel the classification still takes).
+                (5, _) => pepto(x),
+                (6, _) => pepto(x).map(|v| (v + 0.012).min(1.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -168,6 +186,9 @@ fn target_slot_matches_the_oracle() {
         ("md gpgx", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1),
         ("md kega", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 2),
         ("md regen", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 3),
+        ("c64 6569R3", SOURCE_COLOUR_TARGET_COMMODORE_64, 1),
+        ("c64 6569R4", SOURCE_COLOUR_TARGET_COMMODORE_64, 2),
+        ("c64 6569R1", SOURCE_COLOUR_TARGET_COMMODORE_64, 4),
     ] {
         let p = Params {
             source_colour_target: target,

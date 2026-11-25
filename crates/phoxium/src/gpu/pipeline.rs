@@ -211,6 +211,13 @@ impl Settings {
     }
 }
 
+/// The entries of the target table that follows the [`FrameConstants`] in the frame uniform buffer (`target_table` of
+/// `common.glsl`): one `vec4` per hardware colour of a signal colour target, at most [`FRAME_TABLE_VEC4`].
+pub const FRAME_TABLE_VEC4: usize = 128;
+
+/// Bytes of the frame uniform buffer: the constants, then the target table.
+const FRAME_BLOCK_BYTES: usize = size_of::<FrameConstants>() + 16 * FRAME_TABLE_VEC4;
+
 /// Per-frame constants, std140, laid out as the `FrameConstants` block of `shaders/include/common.glsl`
 /// (96 bytes, 4-byte fields only, two explicit padding fields; a test checks the offsets against the GLSL).
 #[repr(C)]
@@ -813,8 +820,7 @@ impl Pipeline {
                     &vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED),
                     None,
                 )?;
-                s.frame_ubo =
-                    HostBuffer::create(ctx, size_of::<FrameConstants>(), vk::BufferUsageFlags::UNIFORM_BUFFER)?;
+                s.frame_ubo = HostBuffer::create(ctx, FRAME_BLOCK_BYTES, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
                 s.params_ubo = HostBuffer::create(ctx, PARAMS_STD140_SIZE, vk::BufferUsageFlags::UNIFORM_BUFFER)?;
                 s.clip_buf = HostBuffer::create(ctx, encode::CLIP_BYTES, vk::BufferUsageFlags::TRANSFER_DST)?;
                 // R-50: read before the slot's first frame finished (`clip_counts`): zero, not whatever the
@@ -857,7 +863,7 @@ impl Pipeline {
                 .range(PARAMS_STD140_SIZE as u64)];
             let frame = [vk::DescriptorBufferInfo::default()
                 .buffer(s.frame_ubo.buffer)
-                .range(size_of::<FrameConstants>() as u64)];
+                .range(FRAME_BLOCK_BYTES as u64)];
             let mut all = vec![s.decode_set, s.encode_set];
             for ls in &s.links {
                 all.extend(
@@ -1789,6 +1795,14 @@ impl Pipeline {
             s.frame_ubo.mapped,
             size_of::<FrameConstants>(),
         );
+        // The hardware colours of a signal colour target, after the constants (the shader reads `target_table`).
+        if let Some(table) = crate::targets::frame_table(params) {
+            std::ptr::copy_nonoverlapping(
+                table.as_ptr().cast::<u8>(),
+                s.frame_ubo.mapped.add(size_of::<FrameConstants>()),
+                table.len() * 16,
+            );
+        }
         std::ptr::copy_nonoverlapping(params.to_std140().as_ptr(), s.params_ubo.mapped, PARAMS_STD140_SIZE);
 
         let d = &ctx.device;
@@ -2303,6 +2317,9 @@ mod tests {
             (std::mem::offset_of!(FrameConstants, mask_box_px), "mask_box_px"),
         ];
         let rust: Vec<(usize, String)> = rust.iter().map(|&(o, n)| (o, n.to_string())).collect();
+        // The target table follows the constants (its offset is the struct size, a multiple of 16).
+        let mut rust = rust;
+        rust.push((size_of::<FrameConstants>(), format!("target_table[{FRAME_TABLE_VEC4}]")));
         assert_eq!(members, rust);
         assert_eq!(size_of::<FrameConstants>(), 96);
         assert!(glsl.contains("std140, 96 bytes"));

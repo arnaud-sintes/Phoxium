@@ -1,0 +1,113 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets" and "Design
+# note: signal-driven colour targets"). Format: crates/phoxium/src/targets.rs. Every key of [signal] has a [provenance]
+# entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "commodore_64"
+name = "Commodore 64 (VIC-II, PAL, computed from the signal)"
+label = "the C64's colours as a PAL television decodes the VIC-II's signal (Colour variant: the chip revision)"
+kind = "signal"
+notes = """
+The Commodore 64's video chip does not make RGB colours: it makes a composite signal, a luma level and a chroma wave of one amplitude at one of eight phases, and the colour on the screen is what the television made of it. Emulators show a PC palette (Pepto's, Colodore's) that someone computed from that signal for a PC display. This target goes back to the signal: it recognises each pixel as the nearest of the 16 hardware colours and shows the colour a decoder drives the tube with, so the tube's own gamma, primaries and white take over (no conversion for a PC display).
+The luma is measured: Marko Makela's 1996 oscilloscope table of the luma pin of six VIC-II revisions (all units mV, one computer, a 40 MHz analog scope, no load), here the four PAL ones (the NTSC 6567 chips need NTSC phases that are not sourced here). Each colour's level is normalised between that chip's black (colour 0) and white (colour 1). The chroma angles are Colodore's (2017, the author of the Pepto palette, 'remeasured with better tools', sectors of 22.5 degrees offset by 11.25: purple 56.25, red 101.25, orange 123.75, brown 146.25, yellow 168.75, green 236.25, cyan 281.25, blue 348.75 degrees on the U axis); Pepto's own 2001 angles (vectorscope and a test program) were multiples of 22.5 degrees (blue 0, purple 45, red 112.5 ...), and the forum disputes both. The chroma amplitude is one value for every colour (Colodore's default saturation, 40 of the 256 of the luma scale, a derived number, not measured); the colour differences are in the scale of the composite model, so the colours go through it and return unchanged. The PAL delay line averages the two lines of the Hanover bars; Pepto's and Colodore's palettes are that average, and the composite model's PAL decoder does it itself when the option is on.
+Recognition compares each pixel with a reference palette that does not depend on the chip: the colours of the model that stands between the two published ones (Pepto 2001: contrast 1, amplitude 0.1334, gamma 2.5 / 2.2; Colodore: contrast 1.2, amplitude 0.15625, gamma 2.8 / 2.2), the quantised late luma levels in 32nds, the Colodore angles and amplitude, a contrast of 1.1 and a gamma of 1.136; with it every colour of Pepto's palette, of the Colodore defaults and of the more saturated Colodore file of VICE is recognised as its own index (the tests list the distances). This aid is never applied to the output. A pixel with no reference colour within the threshold (a scaled or filtered picture, an edited palette) passes through unchanged.
+Not modelled: the chroma amplitude per colour and per chip (the 8565 is not measured), the television's contrast and brightness (Colodore's default contrast of 1.2 makes its mid colours brighter than the nominal ones here), the 1084 monitor's own decoder, the NTSC chips.
+"""
+
+[signal]
+amplitude = 0.15625
+threshold = 0.25
+black_index = 0
+white_index = 1
+
+[signal.reference]
+luma_32 = [0, 32, 10, 20, 12, 16, 8, 24, 12, 8, 16, 10, 15, 24, 15, 20]
+amplitude = 0.15625
+gain = 1.1
+gamma = 1.136
+[[signal.colours]]
+name = "black"
+
+[[signal.colours]]
+name = "white"
+
+[[signal.colours]]
+name = "red"
+angle = 101.25
+
+[[signal.colours]]
+name = "cyan"
+angle = 281.25
+
+[[signal.colours]]
+name = "purple"
+angle = 56.25
+
+[[signal.colours]]
+name = "green"
+angle = 236.25
+
+[[signal.colours]]
+name = "blue"
+angle = 348.75
+
+[[signal.colours]]
+name = "yellow"
+angle = 168.75
+
+[[signal.colours]]
+name = "orange"
+angle = 123.75
+
+[[signal.colours]]
+name = "brown"
+angle = 146.25
+
+[[signal.colours]]
+name = "light red"
+angle = 101.25
+
+[[signal.colours]]
+name = "dark grey"
+
+[[signal.colours]]
+name = "medium grey"
+
+[[signal.colours]]
+name = "light green"
+angle = 236.25
+
+[[signal.colours]]
+name = "light blue"
+angle = 348.75
+
+[[signal.colours]]
+name = "light grey"
+
+[[signal.revisions]]
+id = "6569r3"
+name = "MOS 6569R3 (PAL, the common late chip)"
+luma_mv = [700, 1850, 1090, 1480, 1180, 1340, 1020, 1620, 1180, 1020, 1340, 1090, 1300, 1620, 1300, 1480]
+
+[[signal.revisions]]
+id = "6569r4"
+name = "MOS 6569R4 (PAL)"
+luma_mv = [500, 1875, 840, 1300, 920, 1100, 760, 1500, 920, 760, 1100, 840, 1050, 1500, 1050, 1300]
+
+[[signal.revisions]]
+id = "6569r5"
+name = "MOS 6569R5 (PAL)"
+luma_mv = [540, 1850, 900, 1340, 980, 1150, 810, 1520, 980, 810, 1150, 900, 1110, 1520, 1110, 1340]
+
+[[signal.revisions]]
+id = "6569r1"
+name = "MOS 6569R1 (PAL, the first revision, four luma levels)"
+luma_mv = [630, 1850, 900, 1560, 1260, 1260, 900, 1560, 1260, 900, 1260, 900, 1260, 1560, 1260, 1560]
+
+[provenance]
+colours = "K: the standard C64 colour order 0 black, 1 white, 2 red, 3 cyan, 4 purple, 5 green, 6 blue, 7 yellow, 8 orange, 9 brown, 10 light red, 11 dark grey, 12 medium grey, 13 light green, 14 light blue, 15 light grey; E: the angles are Colodore's (colodore.com, 2017: 11.25 + k x 22.5 degrees, k = 2 purple, 4 red and light red, 5 orange, 6 brown, 7 yellow, 10 green and light green, 12 cyan, 15 blue and light blue), the result of Pepto (the author of the colorvic pages) from oscilloscope readings by Makela, his own vectorscope and frame grabbers, which the Lemon64 forum disputes (unverified); greys have no chroma"
+revisions = "S: Marko Makela, Commodore 6567/6569 video chip luminance levels (zimmers.net/anonftp/pub/cbm/documents/chipdata/656x-luminances.txt), 19 December 1996, one 2nd-revision board, a 40 MHz analog scope at 2 us/div, the luma pin without load, mV: 6569R3 MOS 6569R3 3483, 6569R4 MOS 6569R4 0786, 6569R5 MOS 6569R5 0989 15, 6569R1 MOS 6569R1 0783; the black level was measured on an all-black screen and the level 'changes when the colour changes'; the 6569R1 table has four levels above black"
+amplitude = "E: Colodore's default saturation 50 scaled by 1 - 1/5 = 40 of the 256 of the luma scale, 0.15625 of the white-black span; Pepto 2001 used 34.008 of 255 (0.1334), found by brute force so that brown's blue just reaches 0; neither is measured"
+reference = "E: the classification reference palette, not an output: the late luma levels over 32 (Pepto 2001 and Colodore 2017 both quantise Makela's table to 0, 8, 10, 12, 15, 16, 20, 24, 32), the Colodore angles and amplitude, a contrast of 1.1 (Pepto 1.0, Colodore 1.2) and a gamma of 1.136 (Pepto 2.5 / 2.2; Colodore 2.8 / 2.2 = 1.273), chosen so that the published palettes are all recognised (an exhaustive search over the published values, QUESTIONS.md)"
+threshold = "E: the largest distance between a pixel and a reference colour at which the pixel is taken for it; VICE's Colodore file is the farthest published palette, 0.23 from its references; the closest two reference colours are 0.12 apart, so the threshold is a limit on what is left alone, not on which colour is chosen"
+black_index = "K: colour 0 is the black level of the screen (Makela: the level was measured on an all-black screen)"
+white_index = "K: colour 1 is white"

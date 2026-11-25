@@ -20,6 +20,10 @@
 //   3 dac:    V' = out_scale x piecewise linear map through the points (in[i], out[i]) (the 8-bit levels the emulator
 //             shows, the measured output codes; bytes 0 to 7 and 8 to 15 of `table`), V x 255 held to the first and
 //             last input level. No device code is recovered (bits = 0).
+//   4 signal: the nearest of `table[0]` reference colours (`frame.target_table[64 + i].rgb`, what an emulator shows)
+//             classifies the pixel; it is replaced by that hardware colour (`frame.target_table[i].rgb`, the drive
+//             voltages) when the distance is at most `clamp_sum` (the threshold); the first of equal distances wins; a
+//             pixel with no close colour passes through. No device code is recovered (bits = 0).
 // Alpha is copied.
 
 #include "params.glsl"
@@ -49,7 +53,7 @@ layout(push_constant) uniform Push {
     float out_scale;
     uint table[8];        // the curve, entry i in byte i % 4 of word i / 4
     int bits;             // bits per channel of the device code, 4 to 7; 0 = no recovery
-    int kind;             // 0 matrix, 1 curve, 2 palette, 3 dac
+    int kind;             // 0 matrix, 1 curve, 2 palette, 3 dac, 4 signal
 } pc;
 
 // Tolerance of the recovery in 8-bit code units (`crt_model::target::RECOVERY_TOLERANCE`).
@@ -112,6 +116,21 @@ float dac(float x) {
     return mix(table_byte(8 + i), table_byte(9 + i), (p - x0) / (x1 - x0));
 }
 
+// The nearest hardware colour of a signal target, or the pixel itself (see the header).
+vec3 signal_colour(vec3 v) {
+    int count = int(pc.table[0]);
+    float best = 1e30;
+    int index = -1;
+    for (int i = 0; i < count; i++) {
+        float d = distance(v, frame.target_table[64 + i].rgb);
+        if (d < best) {
+            best = d;
+            index = i;
+        }
+    }
+    return (index >= 0 && best <= pc.clamp_sum) ? frame.target_table[index].rgb : v;
+}
+
 float curve(float x) {
     float pos = clamp(x, 0.0, 1.0) * float(CURVE_LAST);
     int i = min(int(floor(pos)), CURVE_LAST - 1);
@@ -139,8 +158,10 @@ void main() {
         c = pc.out_scale * vec3(curve(x.r), curve(x.g), curve(x.b));
     } else if (pc.kind == 2) {
         c = pc.out_scale * palette(x);
-    } else {
+    } else if (pc.kind == 3) {
         c = pc.out_scale * vec3(dac(x.r), dac(x.g), dac(x.b));
+    } else {
+        c = signal_colour(x);
     }
     imageStore(drive_out, p, round_f16(vec4(c, src.a)));
 }
