@@ -15,6 +15,9 @@
 //!   8-bit output rounds.
 //! - [`Curve`], a console whose output is a per-channel table (SNES): `V'_c = table[code_c] / output_max`, the
 //!   entries between two codes interpolated linearly for a colour that is not on the 32 levels.
+//! - [`Dac`], a console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): a piecewise linear map
+//!   from the levels the emulator shows to the measured levels. It has no device code to recover: the levels are the
+//!   points of the map.
 //! - [`Palette`], a monochrome source shown in four chosen colours (Super Game Boy): the luma of the source picks a
 //!   position between the colours. It has no device code to recover.
 //!
@@ -174,12 +177,46 @@ impl Palette {
     }
 }
 
+/// Codes of a [`Dac`]: 3 bits per channel.
+pub const DAC_LEN: usize = 8;
+
+/// A console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): what the emulator shows for the
+/// code `i` is the 8-bit level `input[i]` (an emulator choice: a linear step of 34, 33 or 32 for the three that are
+/// documented), what the console outputs is `output[i] / output_max`. A level between two input levels (a scaled
+/// picture, the Mega Drive's shadow and highlight half steps) is mapped on the straight line between the two points, a
+/// level below the first or above the last input level takes the nearest output.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Dac {
+    /// The 8-bit level the emulator shows for each code, strictly increasing.
+    pub input: [u8; DAC_LEN],
+    /// The output code of each code, as the source gives them, not decreasing.
+    pub output: [u8; DAC_LEN],
+    /// Largest output code (255).
+    pub output_max: f64,
+}
+
+impl Dac {
+    /// The target colour of the drive voltage `v`.
+    pub fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+        v.map(|x| {
+            let p = (x * 255.0).clamp(f64::from(self.input[0]), f64::from(self.input[DAC_LEN - 1]));
+            let i = (0..DAC_LEN - 1)
+                .find(|&i| p <= f64::from(self.input[i + 1]))
+                .unwrap_or(DAC_LEN - 2);
+            let (x0, x1) = (f64::from(self.input[i]), f64::from(self.input[i + 1]));
+            let t = (p - x0) / (x1 - x0);
+            (f64::from(self.output[i]) * (1.0 - t) + f64::from(self.output[i + 1]) * t) / self.output_max
+        })
+    }
+}
+
 /// The transform of a target.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transform {
     Matrix(Matrix),
     Curve(Curve),
     Palette(Palette),
+    Dac(Dac),
 }
 
 impl Transform {
@@ -188,7 +225,7 @@ impl Transform {
         match self {
             Transform::Matrix(m) => m.input_bits,
             Transform::Curve(_) => 5,
-            Transform::Palette(_) => 8,
+            Transform::Palette(_) | Transform::Dac(_) => 8,
         }
     }
 
@@ -198,6 +235,7 @@ impl Transform {
             Transform::Matrix(m) => m.apply(v),
             Transform::Curve(c) => c.apply(v),
             Transform::Palette(p) => p.apply(v),
+            Transform::Dac(d) => d.apply(v),
         }
     }
 }
@@ -415,5 +453,58 @@ mod tests {
         let want = f64::from(p.colours[i][0]) * (1.0 - f) + f64::from(p.colours[i + 1][0]) * f;
         assert!(close(green[0], want / 31.0, 1e-12), "{green:?}");
         assert_eq!(Transform::Palette(p).input_bits(), 8);
+    }
+
+    /// The Mega Drive DAC of TmEE''s scope readings (normal mode) behind a Genesis Plus GX picture (step 34).
+    fn md_gpgx() -> Dac {
+        Dac {
+            input: [0, 34, 68, 102, 136, 170, 204, 238],
+            output: [0, 52, 87, 116, 144, 172, 206, 255],
+            output_max: 255.0,
+        }
+    }
+
+    /// Hand derivation: the code 3 of a Genesis Plus GX picture is 102 of 255 and goes to 116 of 255 (the third measured
+    /// level); the ends are 0 and 238 (the top code of that emulator, 6.4 percent below full white) to 255.
+    #[test]
+    fn dac_levels_map_to_the_measured_levels() {
+        let d = md_gpgx();
+        for (i, (&inp, &out)) in d.input.iter().zip(d.output.iter()).enumerate() {
+            let got = d.apply([f64::from(inp) / 255.0; 3]);
+            assert!(
+                got.iter().all(|c| close(*c, f64::from(out) / 255.0, 1e-12)),
+                "code {i}: {got:?}"
+            );
+        }
+        assert_eq!(d.apply([0.0; 3]), [0.0; 3]);
+        assert_eq!(d.apply([1.0; 3]), [1.0; 3], "above the last level: the last output");
+    }
+
+    /// A level between two codes is on the straight line between the points: 85 is half way between 68 and 102, so
+    /// half way between 87 and 116, 101.5; the Mega Drive''s shadow half step, 17 of a Genesis Plus GX picture, is half
+    /// way between 0 and 52, 26 (the measured shadow level is 29).
+    #[test]
+    fn dac_blends_between_levels() {
+        let d = md_gpgx();
+        assert!(close(d.apply([85.0 / 255.0; 3])[0], 101.5 / 255.0, 1e-12));
+        assert!(close(d.apply([17.0 / 255.0; 3])[0], 26.0 / 255.0, 1e-12));
+        // The channels are mapped on their own.
+        let [r, g, b] = d.apply([34.0 / 255.0, 0.0, 238.0 / 255.0]);
+        assert!(close(r, 52.0 / 255.0, 1e-12) && g == 0.0 && b == 1.0);
+        assert_eq!(Transform::Dac(d).input_bits(), 8);
+    }
+
+    /// Another emulator, another step: with a step of 32 (Regen) the code 7 is 224, still the last output.
+    #[test]
+    fn dac_input_levels_are_the_emulators() {
+        let regen = Dac {
+            input: [0, 32, 64, 96, 128, 160, 192, 224],
+            ..md_gpgx()
+        };
+        assert!(close(regen.apply([224.0 / 255.0; 3])[0], 1.0, 1e-12));
+        assert!(close(regen.apply([96.0 / 255.0; 3])[0], 116.0 / 255.0, 1e-12));
+        // The same picture value 102 is code 3 for one emulator and between codes for the other.
+        assert!(close(md_gpgx().apply([102.0 / 255.0; 3])[0], 116.0 / 255.0, 1e-12));
+        assert!(regen.apply([102.0 / 255.0; 3])[0] > 116.0 / 255.0);
     }
 }

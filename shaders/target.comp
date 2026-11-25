@@ -17,6 +17,9 @@
 //   2 palette: the luma of V (BT.601) picks a position between four colours (lightest first, three bytes each in the
 //             first three words of `table`): V' = out_scale x lerp(colour[i], colour[i + 1], f), (i, f) the whole and
 //             fractional part of (1 - luma) x 3. No device code is recovered (bits = 0).
+//   3 dac:    V' = out_scale x piecewise linear map through the points (in[i], out[i]) (the 8-bit levels the emulator
+//             shows, the measured output codes; bytes 0 to 7 and 8 to 15 of `table`), V x 255 held to the first and
+//             last input level. No device code is recovered (bits = 0).
 // Alpha is copied.
 
 #include "params.glsl"
@@ -46,7 +49,7 @@ layout(push_constant) uniform Push {
     float out_scale;
     uint table[8];        // the curve, entry i in byte i % 4 of word i / 4
     int bits;             // bits per channel of the device code, 4 to 7; 0 = no recovery
-    int kind;             // 0 matrix, 1 curve, 2 palette
+    int kind;             // 0 matrix, 1 curve, 2 palette, 3 dac
 } pc;
 
 // Tolerance of the recovery in 8-bit code units (`crt_model::target::RECOVERY_TOLERANCE`).
@@ -91,6 +94,24 @@ vec3 palette(vec3 v) {
     return mix(palette_colour(i), palette_colour(i + 1), pos - float(i));
 }
 
+// Byte `i` of `table` (the dac's eight input levels, then its eight output codes).
+float table_byte(int i) {
+    return float((pc.table[i >> 2] >> uint((i & 3) * 8)) & 255u);
+}
+
+float dac(float x) {
+    float p = clamp(x * 255.0, table_byte(0), table_byte(7));
+    int i = 0;
+    for (int k = 0; k < 6; k++) {
+        if (p > table_byte(k + 1)) {
+            i = k + 1;
+        }
+    }
+    float x0 = table_byte(i);
+    float x1 = table_byte(i + 1);
+    return mix(table_byte(8 + i), table_byte(9 + i), (p - x0) / (x1 - x0));
+}
+
 float curve(float x) {
     float pos = clamp(x, 0.0, 1.0) * float(CURVE_LAST);
     int i = min(int(floor(pos)), CURVE_LAST - 1);
@@ -116,8 +137,10 @@ void main() {
         c = pc.out_scale * (pc.inv_out_gamma != 1.0 ? pow(y, vec3(pc.inv_out_gamma)) : y);
     } else if (pc.kind == 1) {
         c = pc.out_scale * vec3(curve(x.r), curve(x.g), curve(x.b));
-    } else {
+    } else if (pc.kind == 2) {
         c = pc.out_scale * palette(x);
+    } else {
+        c = pc.out_scale * vec3(dac(x.r), dac(x.g), dac(x.b));
     }
     imageStore(drive_out, p, round_f16(vec4(c, src.a)));
 }

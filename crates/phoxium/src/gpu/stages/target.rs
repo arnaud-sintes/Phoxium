@@ -31,10 +31,11 @@ fn new() -> Box<dyn Stage> {
 const KIND_MATRIX: i32 = 0;
 const KIND_CURVE: i32 = 1;
 const KIND_PALETTE: i32 = 2;
+const KIND_DAC: i32 = 3;
 
 /// The push constants of `target.comp` (std430, 100 bytes): the matrix row by row and its scalars, the curve (or the
 /// bytes of a palette) packed four entries to a word, the bits per channel of the device code (0 = no recovery) and the
-/// kind (0 matrix, 1 curve, 2 palette).
+/// kind (0 matrix, 1 curve, 2 palette, 3 dac).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -80,9 +81,11 @@ pub(super) fn plan(p: &Params) -> Push {
     let Some(t) = crate::targets::for_value(p.source_colour_target) else {
         return identity;
     };
-    // `source_colour_palette` is 1 based; a number past the last palette gives the first.
-    let variant = usize::try_from(p.source_colour_palette.max(1) - 1).unwrap_or(0);
-    match t.transform_for(variant) {
+    // The palette number (1 based) or the emulator (`source_colour_input`) picks the variant of a target that has some.
+    let input = crate::params::meta("source_colour_input")
+        .and_then(|m| m.values.get(p.source_colour_input as usize).copied())
+        .unwrap_or("default");
+    match t.select(p.source_colour_palette, input) {
         Transform::Matrix(m) => Push {
             k: m.rows.map(|row| row.map(|w| w as f32)),
             input_range: m.input_range as f32,
@@ -104,6 +107,20 @@ pub(super) fn plan(p: &Params) -> Push {
                 out_scale: (1.0 / c.output_max) as f32,
                 bits: recovery_bits(t.transform.input_bits()),
                 kind: KIND_CURVE,
+                ..identity
+            }
+        }
+        Transform::Dac(d) => {
+            // Eight input levels, then eight output codes, one byte each, four to a word.
+            let mut table = [0u32; CURVE_LEN / 4];
+            for (i, v) in d.input.iter().chain(d.output.iter()).enumerate() {
+                table[i / 4] |= u32::from(*v) << (8 * (i % 4));
+            }
+            Push {
+                table,
+                out_scale: (1.0 / d.output_max) as f32,
+                bits: 0,
+                kind: KIND_DAC,
                 ..identity
             }
         }
@@ -168,7 +185,8 @@ mod tests {
     use super::*;
     use crate::params::{
         SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-        SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+        SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+        SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
     };
 
     /// The push block is 100 bytes in the shader's order.
@@ -274,5 +292,35 @@ mod tests {
         );
         assert_eq!(plan(&with_palette(0)).table, a.table, "below 1: the first");
         assert_ne!(plan(&with_palette(2)).table, a.table);
+    }
+
+    /// The Mega Drive: eight input levels, then eight output codes, one byte each. The default emulator is Genesis
+    /// Plus GX (steps of 34), `source_colour_input` picks Kega Fusion (33) or Regen (32), and the palette number is ignored.
+    #[test]
+    fn the_dac_is_packed_as_input_levels_then_output_codes() {
+        let md = |input: u32| Params {
+            source_colour_input: input,
+            ..with(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE)
+        };
+        let names = crate::params::meta("source_colour_input").unwrap().values;
+        let gpgx = plan(&md(0));
+        assert_eq!((gpgx.kind, gpgx.bits), (3, 0));
+        // Inputs 0, 34, 68, 102 then 136, 170, 204, 238; outputs 0, 52, 87, 116 then 144, 172, 206, 255.
+        assert_eq!(gpgx.table[..4], [0x6644_2200, 0xEECC_AA88, 0x7457_3400, 0xFFCE_AC90]);
+        assert_eq!(gpgx.table[4..], [0; 4]);
+        assert!((f64::from(gpgx.out_scale) - 1.0 / 255.0).abs() < 1e-9);
+        let pos = |n: &str| names.iter().position(|v| *v == n).unwrap() as u32;
+        let kega = plan(&md(pos("kega_fusion")));
+        assert_eq!(kega.table[0], 0x6342_2100, "0, 33, 66, 99");
+        assert_eq!(kega.table[2..], gpgx.table[2..], "the same measured outputs");
+        let regen = plan(&md(pos("regen")));
+        assert_eq!(regen.table[0], 0x6040_2000, "0, 32, 64, 96");
+        assert_eq!(plan(&md(pos("genesis_plus_gx"))).table, gpgx.table);
+        // The palette number does nothing here.
+        let other = Params {
+            source_colour_palette: 20,
+            ..md(0)
+        };
+        assert_eq!(plan(&other).table, gpgx.table);
     }
 }
