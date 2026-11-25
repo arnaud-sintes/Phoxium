@@ -1,0 +1,179 @@
+# Source colour target, data only (TODO, "A GBC target"; QUESTIONS.md, "Audit of the colour targets"). Format:
+# crates/phoxium/src/targets.rs. Every key of [palette] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "super_game_boy"
+name = "Super Game Boy (the 32 built-in palettes)"
+label = "a Game Boy picture in one of the Super Game Boy's 32 built-in palettes (Palette number), from a grey source"
+kind = "palette"
+notes = """
+The Super Game Boy, the SNES cartridge that plays Game Boy games on a television, shows the four shades of the Game Boy in four colours chosen from 32 palettes built into its firmware (menu 1-A to 4-H; 1-A is the power-on palette). This target turns a Game Boy picture into those colours: the luma of the source picks a position between the palette's four colours, lightest first, so a grey emulator picture (white, light grey, dark grey, black: the emulator's 'grayscale' palette) lands on the four colours exactly and anything between blends. Choose the palette with Palette number (1 = 1-A ... 8 = 1-H, 9 = 2-A ... 32 = 4-H); the colour source must be grey, because a green emulator palette would not span the luma range.
+The table is hardware data: 32 palettes of four RGB555 words, lifted from the Super Game Boy firmware ROM according to the rustyboi emulator (MIT; its claim, at file offset 0x10000 of the SGB1 program ROM, could not be checked against a ROM dump). An independent audit (QUESTIONS.md, Audit of the colour targets) compared all 32 palettes and all 128 colours with two other sources, Bulbapedia (CC BY-NC-SA) and the Gambatte emulator (GPL, compared only), and found no disagreement; the three may share an upstream, so their independence is moderate. Not every palette is monotonic in lightness (1-G, 2-G and 3-F are not): colour 0 is the colour of the lightest Game Boy shade, not always the lightest colour.
+The SNES shows each 5-bit channel code through a DAC that is close to linear (an oscilloscope measurement of one console, nesdev forum), so a colour is drawn as its 5-bit code over 31, with no black boost; the SNES output chain's own effect on these colours is otherwise not modelled, and the real picture also depends on the television. The Game Boy's own screen is not modelled: this is the Super Game Boy's colour, not a handheld's.
+"""
+
+[palette]
+colour_bits = 5
+[[palette.sets]]
+id = "1_a"
+name = "1-A"
+words = [0x67BF, 0x265B, 0x10B5, 0x2866]
+
+[[palette.sets]]
+id = "1_b"
+name = "1-B"
+words = [0x637B, 0x3AD9, 0x0956, 0x0000]
+
+[[palette.sets]]
+id = "1_c"
+name = "1-C"
+words = [0x7F1F, 0x2A7D, 0x30F3, 0x4CE7]
+
+[[palette.sets]]
+id = "1_d"
+name = "1-D"
+words = [0x57FF, 0x2618, 0x001F, 0x006A]
+
+[[palette.sets]]
+id = "1_e"
+name = "1-E"
+words = [0x5B7F, 0x3F0F, 0x222D, 0x10EB]
+
+[[palette.sets]]
+id = "1_f"
+name = "1-F"
+words = [0x7FBB, 0x2A3C, 0x0015, 0x0900]
+
+[[palette.sets]]
+id = "1_g"
+name = "1-G"
+words = [0x2800, 0x7680, 0x01EF, 0x2FFF]
+
+[[palette.sets]]
+id = "1_h"
+name = "1-H"
+words = [0x73BF, 0x46FF, 0x0110, 0x0066]
+
+[[palette.sets]]
+id = "2_a"
+name = "2-A"
+words = [0x533E, 0x2638, 0x01E5, 0x0000]
+
+[[palette.sets]]
+id = "2_b"
+name = "2-B"
+words = [0x7FFF, 0x2BBF, 0x00DF, 0x2C0A]
+
+[[palette.sets]]
+id = "2_c"
+name = "2-C"
+words = [0x7F1F, 0x463D, 0x74CF, 0x4CA5]
+
+[[palette.sets]]
+id = "2_d"
+name = "2-D"
+words = [0x53FF, 0x03E0, 0x00DF, 0x2800]
+
+[[palette.sets]]
+id = "2_e"
+name = "2-E"
+words = [0x433F, 0x72D2, 0x3045, 0x0822]
+
+[[palette.sets]]
+id = "2_f"
+name = "2-F"
+words = [0x7FFA, 0x2A5F, 0x0014, 0x0003]
+
+[[palette.sets]]
+id = "2_g"
+name = "2-G"
+words = [0x1EED, 0x215C, 0x42FC, 0x0060]
+
+[[palette.sets]]
+id = "2_h"
+name = "2-H"
+words = [0x7FFF, 0x5EF7, 0x39CE, 0x0000]
+
+[[palette.sets]]
+id = "3_a"
+name = "3-A"
+words = [0x4F5F, 0x630E, 0x159F, 0x3126]
+
+[[palette.sets]]
+id = "3_b"
+name = "3-B"
+words = [0x637B, 0x121C, 0x0140, 0x0840]
+
+[[palette.sets]]
+id = "3_c"
+name = "3-C"
+words = [0x66BC, 0x3FFF, 0x7EE0, 0x2C84]
+
+[[palette.sets]]
+id = "3_d"
+name = "3-D"
+words = [0x5FFE, 0x3EBC, 0x0321, 0x0000]
+
+[[palette.sets]]
+id = "3_e"
+name = "3-E"
+words = [0x63FF, 0x36DC, 0x11F6, 0x392A]
+
+[[palette.sets]]
+id = "3_f"
+name = "3-F"
+words = [0x65EF, 0x7DBF, 0x035F, 0x2108]
+
+[[palette.sets]]
+id = "3_g"
+name = "3-G"
+words = [0x2B6C, 0x7FFF, 0x1CD9, 0x0007]
+
+[[palette.sets]]
+id = "3_h"
+name = "3-H"
+words = [0x53FC, 0x1F2F, 0x0E29, 0x0061]
+
+[[palette.sets]]
+id = "4_a"
+name = "4-A"
+words = [0x36BE, 0x7EAF, 0x681A, 0x3C00]
+
+[[palette.sets]]
+id = "4_b"
+name = "4-B"
+words = [0x7BBE, 0x329D, 0x1DE8, 0x0423]
+
+[[palette.sets]]
+id = "4_c"
+name = "4-C"
+words = [0x739F, 0x6A9B, 0x7293, 0x0001]
+
+[[palette.sets]]
+id = "4_d"
+name = "4-D"
+words = [0x5FFF, 0x6732, 0x3DA9, 0x2481]
+
+[[palette.sets]]
+id = "4_e"
+name = "4-E"
+words = [0x577F, 0x3EBC, 0x456F, 0x1880]
+
+[[palette.sets]]
+id = "4_f"
+name = "4-F"
+words = [0x6B57, 0x6E1B, 0x5010, 0x0007]
+
+[[palette.sets]]
+id = "4_g"
+name = "4-G"
+words = [0x0F96, 0x2C97, 0x0045, 0x3200]
+
+[[palette.sets]]
+id = "4_h"
+name = "4-H"
+words = [0x67FF, 0x2F17, 0x2230, 0x1548]
+
+[provenance]
+sets = "S: rustyboi, rustyboi-core/src/sgb_system_palette.rs (MIT): 32 palettes of four RGB555 words, row-major 1-A to 4-H, claimed lifted from the SGB1 program ROM at 0x10000 (not verified); all 128 colours agree with Bulbapedia, Color palette (Generations I-II), Super Game Boy predefined color palettes (CC BY-NC-SA) and with Gambatte gbcpalettes.h (GPL, compared only), whose origin is not traced"
+colour_bits = "S: the SNES stores RGB555, 5 bits per channel, red in bits 0 to 4, green 5 to 9, blue 10 to 14"

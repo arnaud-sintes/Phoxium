@@ -30,9 +30,11 @@ fn new() -> Box<dyn Stage> {
 
 const KIND_MATRIX: i32 = 0;
 const KIND_CURVE: i32 = 1;
+const KIND_PALETTE: i32 = 2;
 
-/// The push constants of `target.comp` (std430, 100 bytes): the matrix row by row and its scalars, the curve packed four
-/// entries to a word, the bits per channel of the device code (0 = no recovery) and the kind.
+/// The push constants of `target.comp` (std430, 100 bytes): the matrix row by row and its scalars, the curve (or the
+/// bytes of a palette) packed four entries to a word, the bits per channel of the device code (0 = no recovery) and the
+/// kind (0 matrix, 1 curve, 2 palette).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -78,7 +80,9 @@ pub(super) fn plan(p: &Params) -> Push {
     let Some(t) = crate::targets::for_value(p.source_colour_target) else {
         return identity;
     };
-    match t.transform {
+    // `source_colour_palette` is 1 based; a number past the last palette gives the first.
+    let variant = usize::try_from(p.source_colour_palette.max(1) - 1).unwrap_or(0);
+    match t.transform_for(variant) {
         Transform::Matrix(m) => Push {
             k: m.rows.map(|row| row.map(|w| w as f32)),
             input_range: m.input_range as f32,
@@ -100,6 +104,20 @@ pub(super) fn plan(p: &Params) -> Push {
                 out_scale: (1.0 / c.output_max) as f32,
                 bits: recovery_bits(t.transform.input_bits()),
                 kind: KIND_CURVE,
+                ..identity
+            }
+        }
+        Transform::Palette(pal) => {
+            // Twelve bytes, colour by colour, lightest first, channel by channel, four to a word.
+            let mut table = [0u32; CURVE_LEN / 4];
+            for (i, v) in pal.colours.iter().flatten().enumerate() {
+                table[i / 4] |= u32::from(*v) << (8 * (i % 4));
+            }
+            Push {
+                table,
+                out_scale: (1.0 / pal.output_max) as f32,
+                bits: 0,
+                kind: KIND_PALETTE,
                 ..identity
             }
         }
@@ -150,7 +168,7 @@ mod tests {
     use super::*;
     use crate::params::{
         SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-        SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+        SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
     };
 
     /// The push block is 100 bytes in the shader's order.
@@ -230,5 +248,31 @@ mod tests {
         assert_eq!(snes.table[0], 0x0603_0100);
         assert_eq!(snes.table[7], 0xfff8_f0e8);
         assert!((f64::from(snes.out_scale) - 1.0 / 255.0).abs() < 1e-9);
+    }
+
+    /// A palette is packed as its twelve bytes, colour by colour, channel by channel, four to a word; the number
+    /// picks the palette (1 = 1-A, 9 = 2-A) and a number past the last one gives the first. Hand derivation of 2-A:
+    /// 0x533E is red 30, green 25, blue 20 and 0x2638 has red 24, so the first word is 30, 25, 20, 24 from the low byte.
+    #[test]
+    fn a_palette_is_packed_as_twelve_bytes_and_the_number_picks_it() {
+        let with_palette = |n: i32| Params {
+            source_colour_palette: n,
+            ..with(SOURCE_COLOUR_TARGET_SUPER_GAME_BOY)
+        };
+        let a = plan(&with_palette(1));
+        assert_eq!((a.kind, a.bits), (2, 0));
+        // 1-A: colours (31, 29, 25), (27, 18, 9), (21, 5, 4), (6, 3, 10).
+        assert_eq!(a.table[0], 31 | 29 << 8 | 25 << 16 | 27 << 24);
+        assert_eq!(a.table[2], 4 | 6 << 8 | 3 << 16 | 10 << 24);
+        assert_eq!(a.table[3..], [0; 5]);
+        assert!((f64::from(a.out_scale) - 1.0 / 31.0).abs() < 1e-9);
+        assert_eq!(plan(&with_palette(9)).table[0], 30 | 25 << 8 | 20 << 16 | 24 << 24);
+        assert_eq!(
+            plan(&with_palette(99)).table,
+            a.table,
+            "past the last palette: the first"
+        );
+        assert_eq!(plan(&with_palette(0)).table, a.table, "below 1: the first");
+        assert_ne!(plan(&with_palette(2)).table, a.table);
     }
 }

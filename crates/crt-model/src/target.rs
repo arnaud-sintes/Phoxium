@@ -15,6 +15,8 @@
 //!   8-bit output rounds.
 //! - [`Curve`], a console whose output is a per-channel table (SNES): `V'_c = table[code_c] / output_max`, the
 //!   entries between two codes interpolated linearly for a colour that is not on the 32 levels.
+//! - [`Palette`], a monochrome source shown in four chosen colours (Super Game Boy): the luma of the source picks a
+//!   position between the colours. It has no device code to recover.
 //!
 //! **The device code.** The source is the drive voltage `V = code / 255` (the default `drive_voltage` source
 //! meaning). An emulator shows the device code `c` expanded to 8 bits by repeating its bits
@@ -141,11 +143,43 @@ impl Curve {
     }
 }
 
+/// A palette of four colours for a monochrome source (the Super Game Boy, later the original Game Boy): the luma of
+/// the source picks a position between the four colours. `colours[0]` is the lightest, `colours[3]` the darkest; the
+/// source's own shades are taken as evenly spaced in luma (a grey emulator palette: white, light grey, dark grey,
+/// black), and a luma between two shades blends the two colours linearly. Not a 5-bit recovery: the luma of any
+/// colour works.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Palette {
+    /// The four colours, lightest first, as integer codes of `output_max`.
+    pub colours: [[u8; 3]; 4],
+    /// Largest code of a colour channel (31 for RGB555 words, 255 for hex colours).
+    pub output_max: f64,
+}
+
+impl Palette {
+    /// BT.601 luma of the drive voltage (the weights `decode` uses for a monochrome phosphor).
+    pub fn luma(v: [f64; 3]) -> f64 {
+        0.299 * v[0] + 0.587 * v[1] + 0.114 * v[2]
+    }
+
+    /// The target colour of the drive voltage `v`.
+    pub fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+        let pos = (1.0 - Self::luma(v).clamp(0.0, 1.0)) * 3.0;
+        let i = (pos.floor() as usize).min(2);
+        let f = pos - i as f64;
+        let channel = |c: usize| {
+            (f64::from(self.colours[i][c]) * (1.0 - f) + f64::from(self.colours[i + 1][c]) * f) / self.output_max
+        };
+        [channel(0), channel(1), channel(2)]
+    }
+}
+
 /// The transform of a target.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Transform {
     Matrix(Matrix),
     Curve(Curve),
+    Palette(Palette),
 }
 
 impl Transform {
@@ -154,6 +188,7 @@ impl Transform {
         match self {
             Transform::Matrix(m) => m.input_bits,
             Transform::Curve(_) => 5,
+            Transform::Palette(_) => 8,
         }
     }
 
@@ -162,6 +197,7 @@ impl Transform {
         match self {
             Transform::Matrix(m) => m.apply(v),
             Transform::Curve(c) => c.apply(v),
+            Transform::Palette(p) => p.apply(v),
         }
     }
 }
@@ -334,5 +370,50 @@ mod tests {
         assert!(close(r, 128.0 / 255.0, 1e-12), "{r}");
         // The upper half is nearly left alone, the lower half darkened: code 8 shows 0x24 = 36, not 66.
         assert!(close(t.apply([v(8); 3])[0], 36.0 / 255.0, 1e-12));
+    }
+
+    /// The Super Game Boy palette 1-A as RGB555 words 0x67BF, 0x265B, 0x10B5, 0x2866 (lightest first): red = bits 0 to 4,
+    /// green = bits 5 to 9, blue = bits 10 to 14.
+    fn sgb_1a() -> Palette {
+        let word = |w: u32| [(w & 31) as u8, ((w >> 5) & 31) as u8, ((w >> 10) & 31) as u8];
+        Palette {
+            colours: [word(0x67BF), word(0x265B), word(0x10B5), word(0x2866)],
+            output_max: 31.0,
+        }
+    }
+
+    /// Hand derivation: 0x67BF = 0b0_11001_11101_11111: red 31, green 29, blue 25, so white is (31, 29, 25) / 31 and the
+    /// darkest 0x2866 = 0b0_01010_00011_00110 is (6, 3, 10) / 31; mid positions blend linearly: luma 2/3 is the second
+    /// colour 0x265B = (27, 18, 9), and 0x10B5 = (21, 5, 4).
+    #[test]
+    fn palette_ends_and_shades() {
+        let p = sgb_1a();
+        assert_eq!(p.colours, [[31, 29, 25], [27, 18, 9], [21, 5, 4], [6, 3, 10]]);
+        let [r, g, b] = p.apply([1.0; 3]);
+        assert!(close(r, 1.0, 1e-12) && close(g, 29.0 / 31.0, 1e-12) && close(b, 25.0 / 31.0, 1e-12));
+        let [r, g, b] = p.apply([0.0; 3]);
+        assert!(close(r, 6.0 / 31.0, 1e-12) && close(g, 3.0 / 31.0, 1e-12) && close(b, 10.0 / 31.0, 1e-12));
+        // The four grey levels of a grey emulator palette land on the four colours exactly.
+        for (i, g) in [1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0].into_iter().enumerate() {
+            let out = p.apply([g; 3]);
+            for (c, (o, code)) in out.iter().zip(p.colours[i]).enumerate() {
+                assert!(close(*o, f64::from(code) / 31.0, 1e-12), "shade {i} channel {c}");
+            }
+        }
+    }
+
+    /// Between two shades the colours blend linearly in luma: halfway between the lightest and the second colour is
+    /// their mean; a coloured source goes by its luma only (a pure green of luma 0.587 sits between shades 1 and 2).
+    #[test]
+    fn palette_blends_by_luma() {
+        let p = sgb_1a();
+        let mid = p.apply([5.0 / 6.0; 3]);
+        assert!(close(mid[0], (31.0 + 27.0) / 2.0 / 31.0, 1e-12) && close(mid[1], (29.0 + 18.0) / 2.0 / 31.0, 1e-12));
+        let green = p.apply([0.0, 1.0, 0.0]);
+        let pos: f64 = (1.0 - 0.587) * 3.0;
+        let (i, f) = (pos.floor() as usize, pos.fract());
+        let want = f64::from(p.colours[i][0]) * (1.0 - f) + f64::from(p.colours[i + 1][0]) * f;
+        assert!(close(green[0], want / 31.0, 1e-12), "{green:?}");
+        assert_eq!(Transform::Palette(p).input_bits(), 8);
     }
 }

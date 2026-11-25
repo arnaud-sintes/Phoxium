@@ -2,7 +2,7 @@
 //!
 //! A target is a TOML file of `presets/targets/`, embedded in the binary with `include_str!`; the parameter
 //! `source_colour_target` (`params/source.toml`) names it by the id, which is also its value name. Two kinds exist
-//! (the formulas are in `crt_model::target`):
+//! (the formulas are in `crt_model::target`; a third kind, `palette`, below):
 //!
 //! ```toml
 //! schema = 1
@@ -34,11 +34,14 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use crt_model::target::{Curve, Matrix, Transform, CURVE_LEN};
+use crt_model::target::{Curve, Matrix, Palette, Transform, CURVE_LEN};
 use serde::Deserialize;
 
 /// The schema version of the files.
 pub const SCHEMA_VERSION: u32 = 1;
+
+/// Palettes a target may hold: the range of `source_colour_palette` (`params/source.toml`).
+pub const MAX_PALETTES: usize = 32;
 
 /// The shipped files, in the order of the enum values after `none` (a test checks the ids).
 const SHIPPED: &[(&str, &str)] = &[
@@ -54,6 +57,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "super_nintendo_black_boost.toml",
         include_str!("../../../presets/targets/super_nintendo_black_boost.toml"),
     ),
+    (
+        "super_game_boy.toml",
+        include_str!("../../../presets/targets/super_game_boy.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -65,10 +72,30 @@ pub struct Target {
     /// One line for the menu.
     pub label: String,
     pub notes: String,
-    /// The transform of the device.
+    /// The transform of the device (for a palette target: the first palette).
     pub transform: Transform,
+    /// The palettes of a `palette` target, in the order of `source_colour_palette` (empty for the other kinds).
+    pub variants: Vec<Variant>,
     /// The provenance entry of every key of the kind's table.
     pub provenance: BTreeMap<String, String>,
+}
+
+/// One palette of a `palette` target.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Variant {
+    /// Lower case id (`1_a`).
+    pub id: String,
+    /// The name the device shows (`1-A`).
+    pub name: String,
+    pub transform: Transform,
+}
+
+impl Target {
+    /// The transform for the palette number `variant` (0 based, `source_colour_palette` minus one); targets without
+    /// palettes, and a number past the last palette, give the target's own (first) transform.
+    pub fn transform_for(&self, variant: usize) -> Transform {
+        self.variants.get(variant).map_or(self.transform, |v| v.transform)
+    }
 }
 
 #[derive(Deserialize)]
@@ -82,6 +109,7 @@ struct File {
     notes: String,
     matrix: Option<MatrixFile>,
     curve: Option<CurveFile>,
+    palette: Option<PaletteFile>,
     provenance: BTreeMap<String, String>,
 }
 
@@ -104,6 +132,65 @@ struct CurveFile {
     table: Vec<u32>,
     input_bits: u32,
     output_max: f64,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaletteFile {
+    /// Bits per colour channel of the words (5: RGB555, red in bits 0 to 4, green 5 to 9, blue 10 to 14).
+    colour_bits: u32,
+    sets: Vec<PaletteSet>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PaletteSet {
+    id: String,
+    name: String,
+    /// Four colour words, lightest first.
+    words: [u32; 4],
+}
+
+impl PaletteFile {
+    /// The palettes as variants, each with its four colours decoded from the words.
+    fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
+        if self.colour_bits != 5 {
+            return Err(format!("{file}: palette.colour_bits must be 5 (RGB555 words)"));
+        }
+        if self.sets.is_empty() || self.sets.len() > MAX_PALETTES {
+            return Err(format!("{file}: palette.sets must hold 1 to {MAX_PALETTES} palettes"));
+        }
+        let mut out: Vec<Variant> = Vec::new();
+        for s in &self.sets {
+            if s.id.is_empty()
+                || !s
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(format!(
+                    "{file}: palette.sets id \"{}\" must be lower case letters, digits and '_'",
+                    s.id
+                ));
+            }
+            if out.iter().any(|v| v.id == s.id) {
+                return Err(format!("{file}: palette.sets id \"{}\" is used twice", s.id));
+            }
+            if s.words.iter().any(|w| *w > 0x7FFF) {
+                return Err(format!("{file}: palette {} has a word above 0x7FFF (15 bits)", s.id));
+            }
+            let colour = |w: u32| [(w & 31) as u8, ((w >> 5) & 31) as u8, ((w >> 10) & 31) as u8];
+            out.push(Variant {
+                id: s.id.clone(),
+                name: s.name.clone(),
+                transform: Transform::Palette(Palette {
+                    colours: s.words.map(colour),
+                    output_max: 31.0,
+                }),
+            });
+        }
+        Ok(out)
+    }
 }
 
 fn positive(file: &str, table: &str, key: &str, v: f64) -> Result<(), String> {
@@ -208,16 +295,25 @@ impl Target {
                 f.id
             ));
         }
-        let (transform, keys) = match (f.kind.as_str(), &f.matrix, &f.curve) {
-            ("matrix", Some(m), None) => (Transform::Matrix(m.matrix(file)?), m.keys()),
-            ("curve", None, Some(c)) => (
+        let mut variants = Vec::new();
+        let (transform, keys) = match (f.kind.as_str(), &f.matrix, &f.curve, &f.palette) {
+            ("matrix", Some(m), None, None) => (Transform::Matrix(m.matrix(file)?), m.keys()),
+            ("curve", None, Some(c), None) => (
                 Transform::Curve(c.curve(file)?),
                 vec!["table", "input_bits", "output_max"],
             ),
-            ("matrix" | "curve", _, _) => {
+            ("palette", None, None, Some(p)) => {
+                variants = p.variants(file)?;
+                (variants[0].transform, vec!["sets", "colour_bits"])
+            }
+            ("matrix" | "curve" | "palette", _, _, _) => {
                 return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
             }
-            (other, _, _) => return Err(format!("{file}: kind \"{other}\" is not \"matrix\" or \"curve\"")),
+            (other, _, _, _) => {
+                return Err(format!(
+                    "{file}: kind \"{other}\" is not \"matrix\", \"curve\" or \"palette\""
+                ))
+            }
         };
         for key in keys {
             let ok = f.provenance.get(key).is_some_and(|p| {
@@ -235,6 +331,7 @@ impl Target {
             label: f.label,
             notes: f.notes,
             transform,
+            variants,
             provenance: f.provenance,
         })
     }
@@ -267,7 +364,8 @@ mod tests {
     use super::*;
     use crate::params::{
         meta, Params, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-        SOURCE_COLOUR_TARGET_NONE, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+        SOURCE_COLOUR_TARGET_NONE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+        SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
     };
 
     /// Every enum value after `none` has a file of that id, in order, and `none` has none: no value without data, no
@@ -366,6 +464,55 @@ mod tests {
             (snes.replace("input_bits = 5", "input_bits = 4"), "input_bits"),
             (snes.replace("0x00", "0xzz"), "t.toml"),
             (snes.replace("output_max = 255", "output_max = 300"), "output_max"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The Super Game Boy file: 32 palettes in the menu order 1-A to 4-H, the first decoded by hand (0x67BF is
+    /// 0b0_11001_11101_11111: red 31, green 29, blue 25), the last one 4-H, and the first palette is the target's own.
+    #[test]
+    fn the_sgb_file_holds_32_palettes_in_menu_order() {
+        let t = for_value(SOURCE_COLOUR_TARGET_SUPER_GAME_BOY).expect("sgb");
+        assert_eq!(t.variants.len(), MAX_PALETTES);
+        for (i, v) in t.variants.iter().enumerate() {
+            let name = format!("{}-{}", i / 8 + 1, char::from(b'A' + (i % 8) as u8));
+            assert_eq!(v.name, name);
+            assert_eq!(v.id, name.to_lowercase().replace('-', "_"));
+        }
+        let Transform::Palette(first) = t.transform_for(0) else {
+            panic!("palette")
+        };
+        assert_eq!(first.colours, [[31, 29, 25], [27, 18, 9], [21, 5, 4], [6, 3, 10]]);
+        assert_eq!(first.output_max, 31.0);
+        assert_eq!(t.transform_for(0), t.transform);
+        // 4-H: 0x67FF = red 31, green 31, blue 25.
+        let Transform::Palette(last) = t.transform_for(31) else {
+            panic!("palette")
+        };
+        assert_eq!(last.colours[0], [31, 31, 25]);
+        assert_ne!(t.transform_for(8), t.transform_for(0));
+        // A number past the last palette gives the first one.
+        assert_eq!(t.transform_for(99), t.transform);
+        // The other kinds have no palettes and ignore the number.
+        let gbc = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_COLOR).unwrap();
+        assert!(gbc.variants.is_empty());
+        assert_eq!(gbc.transform_for(5), gbc.transform);
+    }
+
+    /// The palette validation: a word of more than 15 bits, a repeated id, other than 5 bits per channel.
+    #[test]
+    fn a_bad_palette_file_is_refused() {
+        let ok = SHIPPED[3].1.to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replace("0x67BF", "0x87BF"), "0x7FFF"),
+            (ok.replace("id = \"1_b\"", "id = \"1_a\""), "twice"),
+            (ok.replace("colour_bits = 5", "colour_bits = 4"), "colour_bits"),
+            (ok.replace("kind = \"palette\"", "kind = \"curve\""), "kind"),
+            (ok.replace("sets = \"S:", "sets = \"X:"), "provenance.sets"),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);

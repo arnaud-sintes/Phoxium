@@ -212,8 +212,22 @@ stage = "source"
 type = "enum"
 unit = "1"
 default = "none"
-values = ["none", "game_boy_color", "game_boy_advance", "super_nintendo_black_boost"]
+values = ["none", "game_boy_color", "game_boy_advance", "super_nintendo_black_boost", "super_game_boy"]
 tag = "E"
 source = "TODO, A GBC target, and QUESTIONS.md, Study: source colour targets. Each target is a data file of presets/targets/ with the source of every value (src/targets.rs); the Game Boy Color matrix is a formula of unknown origin quoted by near.sh (colour emulation), so the whole target is an estimate"
-description = "The device the source came from: the colours of the picture are transformed into what that device's screen would have shown, before the CRT chain. none leaves the source colours alone (bit for bit). game_boy_color: Game Boy Color (the LCD mixed the three channels and clipped white at 240 of 255). game_boy_advance: Game Boy Advance (steep LCD response, channels mixed). super_nintendo_black_boost: the bsnes 'deep black boost' table (an emulator look, not the console output, never stack it on a gun law) that darkens the shadows for a CRT. It works on the drive voltage, so keep Source meaning on drive_voltage, and it acts on the colours as they come, whether the source was 5-bit quantised or not. For a monochrome phosphor type it acts on the grey the phosphor shows."
+description = "The device the source came from: the colours of the picture are transformed into what that device's screen would have shown, before the CRT chain. none leaves the source colours alone (bit for bit). game_boy_color: Game Boy Color (the LCD mixed the three channels and clipped white at 240 of 255). game_boy_advance: Game Boy Advance (steep LCD response, channels mixed). super_game_boy: the Game Boy picture in the colours of one of the Super Game Boy's 32 built-in palettes (choose it with Palette number; it needs a grey source picture). super_nintendo_black_boost: the bsnes 'deep black boost' table (an emulator look, not the console output, never stack it on a gun law) that darkens the shadows for a CRT. It works on the drive voltage, so keep Source meaning on drive_voltage, and it acts on the colours as they come, whether the source was 5-bit quantised or not. For a monochrome phosphor type it acts on the grey the phosphor shows."
+group = "Source"
+
+[[param]]
+id = "source_colour_palette"
+stage = "source"
+type = "i32"
+unit = "1"
+default = 1
+min = 1
+max = 32
+hard_why = "the palette number of the target, 1 to 32 (the Super Game Boy has 32 palettes); a number past the last palette of the chosen target uses its first"
+tag = "E"
+source = "TODO, A GBC target, and QUESTIONS.md, Audit of the colour targets: a target of the palette kind holds several palettes (data file presets/targets/, src/targets.rs); the Super Game Boy has 32 built-in palettes, numbered 1-A to 4-H"
+description = "Which palette of the colour target to show, for a target that has several: the Super Game Boy's 32 built-in palettes in the order of its palette screen (1 = 1-A, the power-on palette, 2 = 1-B ... 8 = 1-H, 9 = 2-A ... 32 = 4-H). The source should be a grey picture (the emulator's grayscale palette): its four shades become the four colours. Targets without palettes ignore it."
 group = "Source"

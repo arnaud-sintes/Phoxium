@@ -8,18 +8,28 @@
 
 mod common;
 
-use crt_model::target::{Curve, Matrix, Transform};
+use crt_model::target::{Curve, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
     Params, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
 };
 
 const MAX_ERR: f64 = 1e-3;
 const MEAN_ERR: f64 = 2e-4;
 
 /// The transforms of the targets, written here independently of the data files (the numbers of the near.sh article).
-fn transform(target: u32) -> Transform {
+/// A Super Game Boy palette from its four RGB555 words (red in bits 0 to 4, green 5 to 9, blue 10 to 14), lightest first,
+/// written here independently of the data file.
+fn sgb_palette(words: [u32; 4]) -> Transform {
+    let colour = |w: u32| [(w & 31) as u8, ((w >> 5) & 31) as u8, ((w >> 10) & 31) as u8];
+    Transform::Palette(Palette {
+        colours: words.map(colour),
+        output_max: 31.0,
+    })
+}
+
+fn transform(target: u32, palette: i32) -> Transform {
     match target {
         SOURCE_COLOUR_TARGET_GAME_BOY_COLOR => Transform::Matrix(Matrix {
             rows: [[26.0, 4.0, 2.0], [0.0, 24.0, 8.0], [6.0, 4.0, 22.0]],
@@ -48,6 +58,13 @@ fn transform(target: u32) -> Transform {
             ],
             output_max: 255.0,
         }),
+        // Palette 1 is 1-A (the power-on palette), palette 9 is 2-A, palette 32 is 4-H.
+        SOURCE_COLOUR_TARGET_SUPER_GAME_BOY => match palette {
+            1 => sgb_palette([0x67BF, 0x265B, 0x10B5, 0x2866]),
+            9 => sgb_palette([0x533E, 0x2638, 0x01E5, 0x0000]),
+            32 => sgb_palette([0x67FF, 0x2F17, 0x2230, 0x1548]),
+            _ => unreachable!(),
+        },
         _ => unreachable!(),
     }
 }
@@ -124,19 +141,23 @@ fn target_slot_matches_the_oracle() {
         "none: the slot is skipped"
     );
 
-    for (name, target) in [
-        ("gbc", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR),
-        ("gba", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE),
-        ("snes", SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST),
+    for (name, target, palette) in [
+        ("gbc", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, 1),
+        ("gba", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, 1),
+        ("snes", SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, 1),
+        ("sgb 1-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 1),
+        ("sgb 2-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9),
+        ("sgb 4-H", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 32),
     ] {
         let p = Params {
             source_colour_target: target,
+            source_colour_palette: palette,
             ..Params::default()
         };
         let out = run(&mut gpu, &img, &p);
         assert!(!gpu.last_skipped_slots().contains(&"target"), "{name}: the slot runs");
         assert_eq!((out.width, out.height), (img.width, img.height));
-        let t = transform(target);
+        let t = transform(target, palette);
         let (mut max, mut sum, mut n, mut worst) = (0.0_f64, 0.0, 0, (0, 0));
         for y in 0..img.height {
             for x in 0..img.width {
@@ -159,7 +180,15 @@ fn target_slot_matches_the_oracle() {
         println!("{name}: max {max:.2e} at {worst:?}, mean {mean:.2e}");
         assert!(max <= MAX_ERR, "{name}: max error {max} at {worst:?}");
         assert!(mean <= MEAN_ERR, "{name}: mean error {mean}");
-        assert_eq!(out.pixel(0, 0)[..3], [0.0, 0.0, 0.0], "{name}: black stays black");
+        // Black: itself for the colour correction (a matrix or a curve keeps black black), the darkest colour for a palette.
+        let black = out.pixel(0, 0);
+        let want_black = t.apply([0.0; 3]);
+        for c in 0..3 {
+            assert!(
+                (f64::from(black[c]) - want_black[c]).abs() <= MAX_ERR,
+                "{name}: black {black:?}"
+            );
+        }
         // White: the GBC clips at 240 of 255, the GBA is tinted (0.988, 0.935, 0.950), the SNES table ends at 255.
         let white = out.pixel(1, 0);
         let want_white = t.apply([1.0; 3]);

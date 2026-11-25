@@ -74,6 +74,7 @@ pub fn summary(p: &SourceProfile) -> String {
         p.flip.is_some(),
         p.prefilter.is_some(),
         p.colour_target.is_some(),
+        p.colour_palette.is_some(),
         p.pixel_size.is_some(),
     ]
     .iter()

@@ -14,6 +14,9 @@
 //   0 matrix: l = input_range x x^input_gamma, s = clamp(K l, 0, clamp), V' = out_scale (s / divisor)^inv_out_gamma;
 //   1 curve:  V' = out_scale x table[x x 31], linearly interpolated between two entries (32 entries of 8 bits, four to
 //             a word).
+//   2 palette: the luma of V (BT.601) picks a position between four colours (lightest first, three bytes each in the
+//             first three words of `table`): V' = out_scale x lerp(colour[i], colour[i + 1], f), (i, f) the whole and
+//             fractional part of (1 - luma) x 3. No device code is recovered (bits = 0).
 // Alpha is copied.
 
 #include "params.glsl"
@@ -43,7 +46,7 @@ layout(push_constant) uniform Push {
     float out_scale;
     uint table[8];        // the curve, entry i in byte i % 4 of word i / 4
     int bits;             // bits per channel of the device code, 4 to 7; 0 = no recovery
-    int kind;             // 0 matrix, 1 curve
+    int kind;             // 0 matrix, 1 curve, 2 palette
 } pc;
 
 // Tolerance of the recovery in 8-bit code units (`crt_model::target::RECOVERY_TOLERANCE`).
@@ -74,6 +77,20 @@ float curve_entry(int i) {
     return float((pc.table[i >> 2] >> uint((i & 3) * 8)) & 255u);
 }
 
+// Colour `j` (0 lightest) of the palette: three bytes, channel c of colour j at byte 3 j + c of `table`.
+vec3 palette_colour(int j) {
+    int b = 3 * j;
+    return vec3(float((pc.table[(b + 0) >> 2] >> uint(((b + 0) & 3) * 8)) & 255u),
+                float((pc.table[(b + 1) >> 2] >> uint(((b + 1) & 3) * 8)) & 255u),
+                float((pc.table[(b + 2) >> 2] >> uint(((b + 2) & 3) * 8)) & 255u));
+}
+
+vec3 palette(vec3 v) {
+    float pos = (1.0 - clamp(dot(v, vec3(0.299, 0.587, 0.114)), 0.0, 1.0)) * 3.0;
+    int i = min(int(floor(pos)), 2);
+    return mix(palette_colour(i), palette_colour(i + 1), pos - float(i));
+}
+
 float curve(float x) {
     float pos = clamp(x, 0.0, 1.0) * float(CURVE_LAST);
     int i = min(int(floor(pos)), CURVE_LAST - 1);
@@ -97,8 +114,10 @@ void main() {
             vec3(0.0), vec3(pc.clamp_sum));
         vec3 y = s / pc.divisor;
         c = pc.out_scale * (pc.inv_out_gamma != 1.0 ? pow(y, vec3(pc.inv_out_gamma)) : y);
-    } else {
+    } else if (pc.kind == 1) {
         c = pc.out_scale * vec3(curve(x.r), curve(x.g), curve(x.b));
+    } else {
+        c = pc.out_scale * palette(x);
     }
     imageStore(drive_out, p, round_f16(vec4(c, src.a)));
 }
