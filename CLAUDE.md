@@ -62,6 +62,7 @@ Every document except this file is in `docs/`.
 - `docs/ARCHITECTURE.md`: architecture and architectural decisions (languages, API, modules, data flow, target pipeline).
 - `docs/DESIGN.md`: coding rules, design patterns, good practices, known deviations.
 - `docs/ENV.md`: how to set up, build, test, package, deploy and publish.
+- `docs/MSI-tests.md`: the step-by-step test session for the owner's second PC (the MSI laptop): commands, what to write down, the files to send back.
 - `docs/CHANGELOG.md`: changes per version (Keep a Changelog, Semantic Versioning, one workspace version).
 
 ## Conventions
