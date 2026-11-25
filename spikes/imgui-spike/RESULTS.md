@@ -1,6 +1,6 @@
 # T-08 (TEC-5) ImGui binding spike: results of the build part
 
-Date 2026-11-19, dev machine (Windows 11 build 26300, NVIDIA RTX A2000 8GB Laptop GPU, Rust 1.98.1, MSVC).
+Date 2026-11-19, reference PC (Windows 11 build 26300, NVIDIA RTX A2000 8GB Laptop GPU, Rust 1.98.1, MSVC).
 Branch `spike/T-08`, throw-away code, never merged. This file and `QUESTIONS.md` TEC-5 carry the facts to T-13.
 
 Scope of this run: everything that needs no window. No window was opened, no hotkey registered, no input
@@ -34,7 +34,7 @@ C/C++ carries its own notices: Dear ImGui `LICENSE.txt` (MIT, Omar Cornut), cimg
 Dilly), and `THIRD_PARTY_NOTICES.md` (MIT, stack-layout shim, compiled only with the `stack-layout` feature,
 which we do not use). `scripts/package.ps1` must add these notices to the release zip (T-52a or T-62).
 
-## 2. Build cost (set A, dev machine)
+## 2. Build cost (set A, reference PC)
 
 | Measure | Value |
 |---|---|
@@ -136,7 +136,7 @@ Open questions only the live run answers:
 - Whether plain `SetForegroundWindow` from the `WM_HOTKEY` handler is allowed (the hotkey should count as the
   last input event), or one of the workarounds is needed; run once with `-FgMethod plain` to know.
 - Whether `RegisterHotKey(VK_F12)` succeeds: Microsoft's RegisterHotKey documentation reserves F12 for the
-  debugger (not checked on this machine). If it fails, T-54 needs another default key or a modifier.
+  debugger (not checked on the reference PC). If it fails, T-54 needs another default key or a modifier.
 - Whether the synthetic Alt tap has side effects in the game (menu bar activation in Win32 apps).
 - Whether toggling `WS_EX_NOACTIVATE` at run time is enough without `SWP_FRAMECHANGED`.
 - Real typing, dragging and clicking by a person (the self-test types with SendInput only), the behaviour with a
@@ -155,15 +155,15 @@ over `dear-imgui-sys`, then set B.
 ## 8. Risks
 
 - Single-maintainer binding with fast API churn (three minor releases in three weeks, breaking renderer API).
-- Build needs the MSVC C++ toolchain (already needed by `cc`-based crates on this machine; to document in ENV).
+- Build needs the MSVC C++ toolchain (already needed by `cc`-based crates on the reference PC; to document in ENV).
 - Missing LICENSE files in the crate packages: the release zip must carry the upstream notices.
 - The renderer submits its own upload work on our queue; with a future second queue or thread this must stay
   on the render queue.
-- F12 can be held by another program (error 1409 on the dev machine): the menu key must be configurable and registration failure handled (section 9.2). Focus hand-off verified with plain `SetForegroundWindow` (section 9.3).
+- F12 can be held by another program (error 1409 on the reference PC): the menu key must be configurable and registration failure handled (section 9.2). Focus hand-off verified with plain `SetForegroundWindow` (section 9.3).
 
 ## 9. Live run 2026-11-19
 
-Branch `task/T-08live`, dev machine (Windows 11 build 26300, RTX A2000 Laptop, Dell P2418D 2560x1440), unattended run,
+Branch `task/T-08live`, reference PC (Windows 11 build 26300, RTX A2000 Laptop), unattended run,
 hands-off desktop (idle log below). Source window: `pixel-demo` 256x240 at 3x. Every run: 2 F11 toggles with the
 source focused, then N cycles of menu key (open), `t08` typed with SendInput, menu key (close). Validation layer
 and synchronization validation on in every run: 0 messages. No pixel-demo/live/poll process left after any run.

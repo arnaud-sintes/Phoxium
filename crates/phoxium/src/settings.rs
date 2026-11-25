@@ -30,7 +30,7 @@ pub const SETTINGS_FILE: &str = "settings.toml";
 pub const BACKUP_FILE: &str = "settings.toml.bak";
 
 /// Hotkey action ids with their default chords (T-54; parsed and validated by `hotkeys::Bindings::from_settings`).
-/// The menu key is F10 (PLAN D-17: F12 is owned by another program on the dev machine). No default uses Ctrl+Alt
+/// The menu key is F10 (PLAN D-17: F12 is owned by another program on the reference PC). No default uses Ctrl+Alt
 /// with a character key: those fire on AltGr on European keyboard layouts (review D-01).
 pub const DEFAULT_HOTKEYS: &[(&str, &str)] = &[
     ("quit", "Ctrl+Alt+End"),

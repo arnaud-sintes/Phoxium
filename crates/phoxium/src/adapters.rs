@@ -1122,7 +1122,7 @@ mod tests {
         }
     }
 
-    // The dev machine topology (QUESTIONS HW-3 result): RTX drives a 1920x1080 monitor at (0, 0), Intel a
+    // The reference PC topology (QUESTIONS HW-3 result): RTX drives a 1920x1080 monitor at (0, 0), Intel a
     // 1920x1200 monitor at (1920, -116), the software adapter none. Vulkan enumerates the RTX first.
     const RTX: Luid = Luid { high: 0, low: 0x17801 };
     const INTEL: Luid = Luid { high: 0, low: 0x17426 };

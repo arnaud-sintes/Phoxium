@@ -16,9 +16,9 @@
 //! (the picture is centred in the visible area, T-30).
 //!
 //! Tolerance. Chain images are FP16 (11 significant bits, one step = 2^-10 of the value at most). How a
-//! float is rounded when a stage stores it was left to the device (the dev machine truncated); since
+//! float is rounded when a stage stores it was left to the device (the reference PC truncated); since
 //! T-fp16 every stage stores `round_f16(value)`, to nearest on any device, and [`Stored::detect`] asserts
-//! it: stored / computed - 1 lies in [-2^-11, 2^-11] (it was [-2^-10, 0] on the dev machine). On top of that the shader's own f32 arithmetic gets a budget
+//! it: stored / computed - 1 lies in [-2^-11, 2^-11] (it was [-2^-10, 0] on the reference PC). On top of that the shader's own f32 arithmetic gets a budget
 //! ([`f32_budget`]): the ends of a pixel inside its triad are known to about 2e-7 triad (a few f32 ulp of
 //! 1), which moves an area mean by at most that over (pixel width x fill), 4e-7 x px per triad / fill; a
 //! damper wire is placed with the rounding of its row coordinate, 2^-22 of the visible height in px,

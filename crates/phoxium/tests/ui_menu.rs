@@ -1118,7 +1118,7 @@ fn user_preset_save_and_load_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A made-up adapter list like the dev machine's: the RTX (Vulkan 0) and the Intel UHD driving the monitors.
+/// A made-up adapter list like the reference PC's: the RTX (Vulkan 0) and the Intel UHD driving the monitors.
 fn fake_gpu() -> phoxium::adapters::Current {
     use phoxium::adapters::{AdapterEntry, AdapterId, Current, GpuSelection, Luid, Owner, Reason, VulkanDevice};
     let id = |name: &str, vendor: u32, device: u32, luid: Luid| AdapterId {

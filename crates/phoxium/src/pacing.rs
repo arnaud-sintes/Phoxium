@@ -1,6 +1,6 @@
 //! Frame pacing of the live loop (OUT-6): each frame starts after the next desktop composition.
 //!
-//! The FIFO swapchain alone is not a steady clock on the development laptop: once the GPU lowers its clocks (a light
+//! The FIFO swapchain alone is not a steady clock on the reference PC: once the GPU lowers its clocks (a light
 //! chain at 60 fps, after about 5 s), the presentation engine releases the swapchain images in pairs about every
 //! 33 ms, the loop waits for them in `wait_slot`, and frames start in pairs about 2 ms apart then 30 ms apart; with a
 //! captured source only one frame of each pair has a new capture, so motion steps like 30 fps (`QUESTIONS.md` OUT-6,

@@ -12,13 +12,13 @@ It captures the content of any window (typically 1:1 pixel-art game output), run
 - Captures the content of a chosen window (generally 1:1 pixel-art content).
 - Single-window product with no command line needed (owner requirement 2026-11-20): the output window is the only window of the app; the window to capture is chosen inside it (a mandatory, manual "Choose a window to capture" picker at start, reachable again from the menu and when the source is lost for longer than the wait), then the automatic handling takes over (resolution, integer upscale, crop, scale modes, centring, surround) with manual overrides in the menu. The command line stays a developer and diagnostic convenience only.
 - Transforms it on the GPU and presents the result in a second window, which can be put fullscreen.
-- Presenting or interacting with the output window must not steal focus from the captured application. One deliberate exception: the ImGui settings menu (F10 by default, reassignable, inside the output window; F12 was already registered by another program on the development PC) takes the focus while it is open (accepted by the owner) and returns it to the source on close. F11 (a default binding, reassignable) toggles fullscreen and a resizable windowed output. The quit chord is fixed.
+- Presenting or interacting with the output window must not steal focus from the captured application. One deliberate exception: the ImGui settings menu (F10 by default, reassignable, inside the output window; F12 was already registered by another program on the reference PC) takes the focus while it is open (accepted by the owner) and returns it to the source on close. F11 (a default binding, reassignable) toggles fullscreen and a resizable windowed output. The quit chord is fixed.
 - Capture uses a simple CPU copy, the most universal path (decided 2026-11-19). A zero-copy path (shared handle) is a later optional performance setting.
 - Which GPU runs the whole chain is a setting (`[global.gpu] adapter`), default `auto` = the adapter of the monitor the output covers.
 - Must work with a single screen: the fullscreen output covers the captured window on the same monitor, at least when the captured game is not in exclusive fullscreen (conditional GO, 2026-11-19; to be debugged on a real game if it fails).
 - Input resolution and colour count are arbitrary (the model works on the captured RGB frame).
 - Output is SDR only. HDR output and HDR colour are out of scope for now.
-- Target hardware: NVIDIA GPU (development hardware: hybrid laptop with Intel UHD plus RTX A2000 Laptop GPU, two 2560×1440 SDR monitors), Windows 11.
+- Target hardware: NVIDIA GPU, SDR monitors, Windows 11. Measurements and live checks come from one reference PC (RTX A2000 Laptop GPU plus an Intel UHD 770 iGPU).
 - Mask type is a 3-way choice (aperture grille, slot mask, delta dot). All other look parameters are independent, in physical units. Well-known CRT models (up to 10, typical monitor parameters) ship as starting-point presets, data files only, which the user loads and then edits freely.
 - Personal project. No GPL shader code is reused (inspiration only).
 
@@ -61,9 +61,7 @@ Every document except this file is in `docs/`.
 - `docs/PLAN.md`: the execution plan of the AI-assisted build, kept as provenance of the decisions.
 - `docs/ARCHITECTURE.md`: architecture and architectural decisions (languages, API, modules, data flow, target pipeline).
 - `docs/DESIGN.md`: coding rules, design patterns, good practices, known deviations.
-- `docs/ENV.md`: how to set up, build, test, package, deploy and publish.
-- `docs/MSI-tests.md`: the step-by-step test session for the owner's second PC (the MSI laptop): commands, what to write down, the files to send back.
-- `docs/CHANGELOG.md`: changes per version (Keep a Changelog, Semantic Versioning, one workspace version).
+- `docs/ENV.md`: how to set up, build, test, package, deploy and publish.- `docs/CHANGELOG.md`: changes per version (Keep a Changelog, Semantic Versioning, one workspace version).
 
 ## Conventions
 

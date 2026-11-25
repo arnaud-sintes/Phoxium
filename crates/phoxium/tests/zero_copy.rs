@@ -7,7 +7,7 @@
 //! pixels, bit for bit.
 //!
 //! When the machine cannot share Direct3D 11 textures with Vulkan (no device, no extension, no import), the tests
-//! print why and pass, unless `PHOXIUM_REQUIRE_GPU` is set: then they fail (the development machine supports it).
+//! print why and pass, unless `PHOXIUM_REQUIRE_GPU` is set: then they fail (the reference PC supports it).
 
 // Only ssert_no_validation_messages is used here.
 #[allow(dead_code)]

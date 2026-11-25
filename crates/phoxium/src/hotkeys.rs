@@ -5,7 +5,7 @@
 //! `RegisterHotKey` only (no low-level hook): a registered chord is swallowed system-wide, so the captured game
 //! loses it while phoxium runs (documented in the README), but the foreground window never changes.
 //! Defaults: Quit `Ctrl+Alt+End`, fullscreen `F11`, settings menu `F10` (F12 is registered by another program on
-//! the dev machine, error 1409), overlay `Ctrl+Alt+F9`, A/B bypass `Ctrl+Alt+F7`, next and previous preset
+//! the reference PC, error 1409), overlay `Ctrl+Alt+F9`, A/B bypass `Ctrl+Alt+F7`, next and previous preset
 //! `Ctrl+Alt+PageDown` and `Ctrl+Alt+PageUp`, click-through `Ctrl+Alt+F6`. Every action, Quit included, can be rebound; Quit is never left
 //! unbound by a rebind or a reset (the old chord is kept when the new one cannot be registered).
 //!
@@ -1429,7 +1429,7 @@ mod tests {
 
     #[test]
     fn f12_taken_while_f10_is_wanted_changes_nothing() {
-        // The dev machine case: F12 is owned by another program (error 1409), the default menu key is F10.
+        // The reference PC case: F12 is owned by another program (error 1409), the default menu key is F10.
         let mut fake = Fake::taking(&["F12"]);
         let reg = register_all(&mut fake, &plan_registration(&Bindings::default()));
         assert!(!reg.has_problems());
@@ -1684,7 +1684,7 @@ mod tests {
     fn the_safety_chord_skips_fallbacks_owned_by_other_programs() {
         let mut fake = Fake::taking(&["F10"]);
         let reg = started(&mut fake);
-        // The dev machine case with F10 taken: the menu is on Ctrl+Alt+F10, the safety on Ctrl+Alt+F12.
+        // The reference PC case with F10 taken: the menu is on Ctrl+Alt+F10, the safety on Ctrl+Alt+F12.
         assert_eq!(reg.bound(Action::ToggleMenu), Some(chord("Ctrl+Alt+F10")));
         assert_eq!(reg.menu_fallback, Some(chord("Ctrl+Alt+F12")));
     }

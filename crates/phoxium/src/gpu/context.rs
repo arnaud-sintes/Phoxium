@@ -975,7 +975,7 @@ mod tests {
         }
     }
 
-    /// R-29: the device check names what is missing; the dev machine's GPUs and the usual desktop values pass,
+    /// R-29: the device check names what is missing; the reference PC's GPUs and the usual desktop values pass,
     /// the Vulkan minimum-spec values do not.
     #[test]
     fn device_check_names_the_missing_limit_or_feature() {

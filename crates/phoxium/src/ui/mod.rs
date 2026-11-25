@@ -60,7 +60,7 @@ use menu::{CloseReason, HotkeyRow, Menu, MenuModel, MenuRects, PresetForm, Syste
 use profiles_panel::ProfilesModel;
 use system_panels::{ExtrasModel, ResetKind};
 
-/// Default menu key (D-17: F10, since F12 is registered system-wide by another program on the dev machine).
+/// Default menu key (D-17: F10, since F12 is registered system-wide by another program on the reference PC).
 pub const DEFAULT_MENU_KEY: &str = "F10";
 
 /// Longest frame time handed to ImGui (after the UI was hidden for a while).
