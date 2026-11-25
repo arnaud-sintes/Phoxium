@@ -191,11 +191,6 @@ pub fn run() -> Res<()> {
     } else {
         crate::instance::acquire_app()?
     };
-    // REN-1: a live session first copies the settings folder of the earlier versions, once (before
-    // anything reads the settings). Never fatal; the offline commands above leave the folders alone.
-    if let Ok(Some(line)) = std::panic::catch_unwind(crate::migrate::migrate_default_dir) {
-        eprintln!("{line}");
-    }
     // A RefCell: "Open image" in the picker or the menu replaces a capture by a still image while the loop runs.
     let kind = std::cell::RefCell::new(source::Source::choose(
         args.pattern.as_deref(),

@@ -7,6 +7,20 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.9.4] - 2026-11-25
+
+### Removed
+
+- The one-time copy of the settings folder of the versions up to 0.3.0 (`%APPDATA%\ultimateCRT`, module `migrate`) at the start of a live session: a settings folder of that age is no longer carried over. The README, the reference and the architecture no longer mention it.
+
+### Added
+
+- `scripts/collect-hardware-info.ps1`: a read-only inventory of a PC for the hardware test sessions (model, CPU, memory, storage, graphics adapters and drivers, every display with the refresh rates it offers, cameras, `nvidia-smi`, the Vulkan limits, and the `--list-gpus` and `--list-adapters` report of a given `phoxium.exe`); no serial number, no computer or user name.
+
+### Changed
+
+- Documentation only: the test procedure for a second PC (`docs/ENV.md` section 9), the TODO split by what each item needs with a section of tests for the owner's MSI laptop and a section of gaps against ShaderGlass, and the comparison with ShaderGlass (`docs/QUESTIONS.md`).
+
 ## [0.9.3] - 2026-11-25
 
 ### Fixed
@@ -355,7 +369,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.3...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.4...HEAD
+[0.9.4]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.3...v0.9.4
 [0.9.3]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.0...v0.9.1

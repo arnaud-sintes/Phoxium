@@ -64,7 +64,7 @@ A window, a whole monitor ("Whole screen N"), a still image (a PNG file: **Open 
 
 ## Settings and privacy
 
-Everything Phoxium keeps is in `%APPDATA%\Phoxium\` (settings, your presets, game profiles, burn-in state). Delete that folder to go back to the defaults. On its first start Phoxium copies the folder of the old name, `%APPDATA%\ultimateCRT\`, if there is one; the old folder is left untouched.
+Everything Phoxium keeps is in `%APPDATA%\Phoxium\` (settings, your presets, game profiles, burn-in state). Delete that folder to go back to the defaults.
 
 The program has no network code and sends nothing anywhere. It opens a video device (a capture card, the PC's camera) only when you choose one in the list, and only to show its picture in the output window. The settings file keeps the title of the last captured window (to find it again after a restart); look at the file before you attach it to a bug report.
 
