@@ -1,0 +1,93 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets"). Format:
+# crates/phoxium/src/targets.rs. Every key of [remap] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "ibm_cga_rgbi"
+name = "IBM CGA, RGBI colours on an IBM 5153 monitor"
+label = "the 16 CGA colours as the IBM 5153 monitor drove its tube (measured), in place of the canonical palette"
+kind = "remap"
+notes = """
+The CGA card makes 16 digital colours (red, green, blue and an intensity bit), and an emulator shows them as the canonical palette: each channel 0, 0x55, 0xAA or 0xFF, with the brown fixed by halving the green (AA5500). The monitor did not draw them so. Dr. Hugo Holden measured the voltages that an IBM 5153 gives to its three gun amplifiers (Fitting an EGA Card to an IBM 5155, 2016, as tabulated by VileR on int10h.org): with the contrast control at its maximum, a colour of the normal half is 1.00 V above black on each channel that is on, the intensity bit lifts the off channels to 0.40 V and the on channels to 1.12, 1.24 or 1.30 V according to how many channels are on (so the intensified colours are not a uniform step), and the brown circuit (transistor Q206) lowers the green of colour 6 to 0.64 V, 36 percent and not 50 percent, so the brown is C47E00 and not AA5500. This target shows those levels: each colour is its voltage over 1.30 V, the drive voltage of the tube, with no gamma (the page normalises the 0 to 1.30 V range linearly to 0 to 255 and says the question of the monitor's gamma, which IBM never published, is open: the nominal value is between 2.25 and 2.5).
+Each pixel is recognised as the nearest of the canonical colours (the colours of Wikipedia, MAME, PCem, 86Box, DOSBox Staging and the MartyPC book), plus the dark yellow AAAA00 that PCem shows as colour 6 when it has no brown circuit; a pixel with no canonical colour close by (a scaled or smoothed picture) passes through unchanged. Use the integer upscale and the nearest-pixel prefilter, and a picture in the 16 colours (the 640 x 200 composite mode and the 4-colour palettes of the card use the same 16 colours but are not recognised when an emulator draws artifact colours).
+Not modelled: the contrast control (it dims the colours of the normal half only, in proportion across the channels, and shifts the brown a little toward green: 'from here you can only go down'), the brightness control (a fixed offset), the 5154 and EGA monitors (the canonical colours, the brown through the 5154's own circuit), the PCjr 4863, the 5515 (dark yellow for colour 6), Tandy monitors, the composite colours. The DOSBox Staging 'ibm5153' preset shows the intensified colours of this table to within one level and much darker normal colours (0xA6 where this page and these voltages say 0xC4); the cause is not known, so do not use both.
+"""
+
+[remap]
+threshold = 0.1
+[[remap.references]]
+rgb = 0x000000
+colour = 0
+
+[[remap.references]]
+rgb = 0x0000AA
+colour = 1
+
+[[remap.references]]
+rgb = 0x00AA00
+colour = 2
+
+[[remap.references]]
+rgb = 0x00AAAA
+colour = 3
+
+[[remap.references]]
+rgb = 0xAA0000
+colour = 4
+
+[[remap.references]]
+rgb = 0xAA00AA
+colour = 5
+
+[[remap.references]]
+rgb = 0xAA5500
+colour = 6
+
+[[remap.references]]
+rgb = 0xAAAAAA
+colour = 7
+
+[[remap.references]]
+rgb = 0x555555
+colour = 8
+
+[[remap.references]]
+rgb = 0x5555FF
+colour = 9
+
+[[remap.references]]
+rgb = 0x55FF55
+colour = 10
+
+[[remap.references]]
+rgb = 0x55FFFF
+colour = 11
+
+[[remap.references]]
+rgb = 0xFF5555
+colour = 12
+
+[[remap.references]]
+rgb = 0xFF55FF
+colour = 13
+
+[[remap.references]]
+rgb = 0xFFFF55
+colour = 14
+
+[[remap.references]]
+rgb = 0xFFFFFF
+colour = 15
+
+[[remap.references]]
+rgb = 0xAAAA00
+colour = 6
+
+[[remap.variants]]
+id = "ibm_5153_max_contrast"
+name = "IBM 5153, contrast at the maximum (Holden's measurement)"
+output = [0x000000, 0x0000C4, 0x00C400, 0x00C4C4, 0xC40000, 0xC400C4, 0xC47E00, 0xC4C4C4, 0x4E4E4E, 0x4E4EDC, 0x4EDC4E, 0x4EF3F3, 0xDC4E4E, 0xF34EF3, 0xF3F34E, 0xFFFFFF]
+
+[provenance]
+references = "K: the canonical CGA RGBI palette, each channel 0, 0x55, 0xAA or 0xFF, colour 6 as AA5500 (Wikipedia, Color Graphics Adapter; MAME cgapal.cpp; PCem; 86Box; DOSBox Staging; MartyPC book), and the AAAA00 of a monitor without the brown circuit (PCem, 'RGB (no brown)')"
+variants = "S: Dr. Hugo Holden, Fitting an EGA Card to an IBM 5155 (2016), pages 21 to 24, as tabulated by VileR, The IBM 5153's True CGA Palette and Color Output (int10h.org, 11 June 2022): volts above black at the gun amplifiers with the contrast control at the maximum, 0 to 1.30 V, normalised linearly to 0 to 255 (1.00 V = 0xC4, 0.40 V = 0x4E, 1.12 V = 0xDC, 1.24 V = 0xF3, 1.30 V = 0xFF, the brown's green 0.64 V = 0x7E); the instrument is not named on the page and Holden's PDF could not be read; the page states no licence (so the voltages are cited, not the text)"
+threshold = "E: the largest distance (Euclidean in drive voltage) at which a pixel is taken for a canonical colour; the canonical colours are 0.33 apart (a third of the range), so the threshold only decides what is left alone"

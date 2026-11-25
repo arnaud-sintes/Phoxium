@@ -1,0 +1,56 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets"). Format:
+# crates/phoxium/src/targets.rs. Every key of [matrix] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "game_boy_advance_sp_ags_101"
+name = "Nintendo Game Boy Advance SP (AGS-101, backlit), measured"
+label = "the backlit AGS-101 screen from colorimeter and spectrophotometer readings of one unit; Colour variant: the session and the white"
+kind = "matrix"
+notes = """
+The Game Boy Advance SP AGS-101 has a backlit screen. Pokefan531 measured one unit twice, through a screen protector (not removed): on 2023-07-24 with an X-Rite ColorMunki Photo spectrophotometer and HCFR, and on 2026-05-02 with a ColorMunki Display colorimeter (not calibrated); the readings (XYZ of the white, the black, the three primaries and the secondaries, and 32 grey steps) are in Brankale's Handheld-Color-Space-Project. This target is built from them by the standard colorimetric chain, written here from the numbers and not taken from that project's shader or its fitted polynomials: the 5-bit code over 31 is raised to an exponent, the three primaries (their XYZ chromaticities) and the white give the matrix to XYZ, and the standard matrix gives linear sRGB, which is raised to 1 / 2.2 as the drive voltage of the tube.
+The exponent is a single number, the least-squares fit, in logarithms, of the black-subtracted grey ramp over the steps 4 to 28 (2.30 for the 2023 readings, 2.40 for the 2026 ones; the local exponent runs from 2.1 to 2.8 along the ramp and falls to 1.6 near white, which is partly a black-handling effect: a single power is a simplification). The primaries are close to sRGB's (red 0.615, 0.346, green 0.331, 0.606, blue 0.144, 0.085 in xy, 2023), green warmer and blue between sRGB's and the older Game Boy Advance's, as Pokefan531 describes; the white is x 0.306, y 0.310 (about 6800 K), pinker than D65.
+The variants are the two sessions, each with the white as measured (the tinted white of the screen, scaled so that its brightest channel reaches full drive: the matrix is not normalised to a neutral white) and adapted to D65 by a Bradford transform (a neutral white). The black level is not modelled (0.3 percent of the white). The instruments differ (the Display reads darker blacks, the Photo the white temperature more accurately), the sessions differ by about 5 percent in the blue and the white, there is no brightness, warm-up or ambient light in the report, and the Brankale repository states no licence (its README credits Pokefan531 for the measurements and welcomes corrections): the readings are quoted with attribution as numbers, and permission has not been asked. This is one unit, one backlight state, one viewing angle, with a protector on. It is not the frontlit AGS-001 or the Game Boy Advance of the other target.
+"""
+
+[matrix]
+rows = [[0.994790087, 0.115694092, -0.070311613], [0.036984183, 0.858438113, 0.076774123], [0.003571811, -0.040092086, 1.193645495]]
+input_bits = 5
+input_range = 1
+input_gamma = 2.30
+divisor = 1
+output_gamma = 2.2
+output_scale = 0.935817
+
+[[matrix.variants]]
+id = "session_2023_measured_white"
+name = "2023 session (ColorMunki Photo), the screen's own white"
+
+[[matrix.variants]]
+id = "session_2023_d65_white"
+name = "2023 session (ColorMunki Photo), white adapted to D65"
+rows = [[0.983578468, 0.084308768, -0.067899696], [0.039654084, 0.878088583, 0.082279371], [0.000069916, -0.045976839, 1.045725448]]
+output_scale = 1.0
+
+[[matrix.variants]]
+id = "session_2026_measured_white"
+name = "2026 session (ColorMunki Display), the screen's own white"
+rows = [[1.016511727, 0.110640845, -0.068343387], [0.038799969, 0.857925319, 0.072758782], [-0.001207254, -0.039013808, 1.169336952]]
+input_gamma = 2.40
+output_scale = 0.946298
+
+[[matrix.variants]]
+id = "session_2026_d65_white"
+name = "2026 session (ColorMunki Display), white adapted to D65"
+rows = [[0.997877814, 0.069786216, -0.067676490], [0.042150760, 0.880015132, 0.077856145], [-0.003618200, -0.044233836, 1.047670560]]
+input_gamma = 2.40
+output_scale = 1.0
+
+[provenance]
+rows = "D: computed from the XYZ readings of the 2023 session (Brankale, Handheld-Color-Space-Project, handhelds/Nintendo GBA SP AGS-101, [2023-07-24][Pokefan531], hcfr_report.xls, units not stated): white 121.178963, 122.963692, 151.95961; red 53.035133, 29.786356, 3.376642; green 43.2085, 79.048882, 8.263728; blue 25.650356, 15.12584, 136.981308; the matrix from the normalised primaries (the primaries' chromaticities scaled to sum to the white) times the XYZ to linear sRGB matrix (3.2406255, -1.5372080, -0.4986286 / -0.9689307, 1.8757561, 0.0415175 / 0.0557101, -0.2040211, 1.0569959); the 2026 session ([2026-05-02][Pokefan531], colors.csv): white 121.795317, 123.381279, 149.195392; red 55.509378, 31.260651, 2.961776; green 43.927962, 80.674025, 8.561921; blue 26.129149, 15.251464, 139.940875; the D65 variants add a Bradford chromatic adaptation from the measured white to D65 (0.95047, 1, 1.08883)"
+input_bits = "S: the console stores 5 bits per channel, codes 0 to 31"
+input_range = "K: the exponent works on the normalised value (code / 31)"
+input_gamma = "D: least-squares power fit, in logarithms, of the black-subtracted grey ramp (32 steps, (Y - black) / (white - black), x = step / 31) over the steps 4 to 28: 2.30 (2023, ColorMunki Photo) and 2.40 (2026, ColorMunki Display); a fit on the linear values gives 2.45 and 2.58 and a fit over all the steps 2.2 and 2.3: a single power for a ramp whose local exponent runs from 2.1 to 2.8"
+divisor = "K: no scaling of the linear sum"
+output_gamma = "E: linear sRGB raised to 1 / 2.2 as the drive voltage of the tube, the convention of the other targets"
+output_scale = "D: 1 / (largest row sum of the matrix) ^ (1 / 2.2) for the white as measured (1.1571 for 2023, 1.1291 for 2026: the blue of the white), so that the brightest channel of the white reaches full drive (a saturated blue can still pass it a little and is clipped at the output); 1 for the D65 variants, whose white is neutral"
+variants = "D: the sessions of 2023 and 2026 and the white as measured or adapted to D65 (Bradford), see rows; the instruments are an X-Rite ColorMunki Photo with HCFR (2023) and a ColorMunki Display, not calibrated (2026), both through a screen protector"

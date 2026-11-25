@@ -1,0 +1,49 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets"). Format:
+# crates/phoxium/src/targets.rs. Every key of [matrix] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "game_boy_color_colorimetric"
+name = "Nintendo Game Boy Color, colorimetric (Pokefan531's colour space)"
+label = "the Game Boy Color's LCD primaries by Pokefan531 (libretro, Gambatte and mGBA), with a gamma step; Colour variant: the light on the screen"
+kind = "matrix"
+notes = """
+This is the second Game Boy Color target, the one the audit proposed (QUESTIONS.md, Audit of the colour targets): not the integer formula of Gambatte's 'fast' mode but the colour space that Pokefan531 matched by eye to photographs of a real console (a camera and a flashlight, hand-matched on a calibrated monitor; he later wrote that the colour space is 'pretty much eyeballed'). It is the matrix of the libretro gbc-color shader (public domain per its header, 'Shader Modified: Pokefan531, Color Mangler, author hunterk'), of Gambatte's 'accurate' mode (GPL, numbers only) and of mGBA's gbc-color shader (MPL-2.0, numbers only): R = 0.82 r + 0.24 g - 0.06 b, G = 0.125 r + 0.665 g + 0.21 b, B = 0.195 r + 0.075 g + 0.73 b on the linearised 5-bit codes, each row summing to 1, scaled by 0.94, then raised to 1 / 2.2. Pokefan531 says the gamma has to be lowered first, then the primaries changed, then the gamma restored: the input is raised to 2.2 minus a 'lighten' value, so the screen is lighter when the light comes from above it (exponent 1.2), at the middle (1.7, Gambatte's default) or from below (2.2). The matrix has a negative weight (the blue primary of the real screen is outside sRGB): a negative result is clamped to 0, as Gambatte does.
+The variants are the three exponents (libretro's default is 1.2, Gambatte's 1.7) and mGBA's sRGB profile (a different matrix of the same lineage, scaled by 0.91, exponent 1.2). All are eye-matched, from one lineage, not independent: the instrument readings of the same author (the Handheld-Color-Space-Project, a spectrophotometer, no licence, partly marked invalid by him) are not used. White is 0.94 of full (0.973 after the output exponent) in the libretro and Gambatte matrix; the integer formula of the other Game Boy Color target puts it at 240 of 255.
+"""
+
+[matrix]
+rows = [[0.82, 0.24, -0.06], [0.125, 0.665, 0.21], [0.195, 0.075, 0.73]]
+input_bits = 5
+input_range = 1
+input_gamma = 1.2
+divisor = 1.0638297872340425
+output_gamma = 2.2
+
+[[matrix.variants]]
+id = "libretro_light_above"
+name = "libretro gbc-color, light above the screen (exponent 1.2)"
+
+[[matrix.variants]]
+id = "gambatte_light_central"
+name = "Gambatte accurate, light at the middle (exponent 1.7)"
+input_gamma = 1.7
+
+[[matrix.variants]]
+id = "light_below"
+name = "light below the screen (exponent 2.2)"
+input_gamma = 2.2
+
+[[matrix.variants]]
+id = "mgba_srgb"
+name = "mGBA gbc-color, sRGB profile (exponent 1.2)"
+rows = [[0.905, 0.195, -0.10], [0.10, 0.65, 0.25], [0.1575, 0.1425, 0.70]]
+divisor = 1.0989010989010988
+
+[provenance]
+rows = "E: libretro glsl-shaders, handheld/shaders/color/gbc-color.glsl (header: Shader Modified Pokefan531, Color Mangler, author hunterk, License: Public domain), identical to Gambatte accurate mode (GPL-2.0, numbers only): r 0.82, g 0.665, b 0.73, rg 0.125, rb 0.195, gr 0.24, gb 0.075, br -0.06, bg 0.21 (the shader builds the matrix column by column; here written by output channel); matched by eye to photographs"
+input_bits = "S: the console stores 5 bits per channel, codes 0 to 31"
+input_range = "E: the shader works on the normalised value (code / 31)"
+input_gamma = "E: the shader raises the input to 2.2 minus the 'lighten screen' value (default 1.0, so 1.2); Gambatte's frontlight position central is 1.7, below the screen 2.2; Pokefan531's Tumblr: the gamma is lowered first, then the primaries, then the gamma restored"
+divisor = "E: the shader's lum 0.94 applied to the linear value before the matrix (a divisor of 1 / 0.94); mGBA's sRGB profile uses lum 0.91"
+output_gamma = "E: the shader raises the result to 1 / 2.2"
+variants = "E: the three exponents of the libretro shader and Gambatte; mGBA res/shaders/gbc-color.shader (MPL-2.0, credit Pokefan531 and hunterk) sRGB profile: R = 0.905 r + 0.195 g - 0.10 b, G = 0.10 r + 0.65 g + 0.25 b, B = 0.1575 r + 0.1425 g + 0.70 b, lum 0.91"

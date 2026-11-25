@@ -12,9 +12,10 @@ use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
     Params, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
-    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
+    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI,
+    SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE,
+    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -84,11 +85,13 @@ fn transform(target: u32, variant: i32) -> Transform {
             _ => unreachable!(),
         },
         // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
-        SOURCE_COLOUR_TARGET_COMMODORE_64 | SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM => {
-            phoxium::targets::for_value(target)
-                .expect("signal target")
-                .transform_for(usize::try_from(variant - 1).unwrap())
-        }
+        SOURCE_COLOUR_TARGET_COMMODORE_64
+        | SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM
+        | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
+        | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
+        | SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101 => phoxium::targets::for_value(target)
+            .expect("signal target")
+            .transform_for(usize::try_from(variant - 1).unwrap()),
         _ => unreachable!(),
     }
 }
@@ -112,6 +115,18 @@ const PALLY_J: [&str; 64] = [
 fn nes(i: usize) -> [f64; 3] {
     let v = u32::from_str_radix(PALLY_J[i % 64], 16).unwrap();
     [(v >> 16) & 255, (v >> 8) & 255, v & 255].map(|c| f64::from(c) / 255.0)
+}
+
+/// The canonical CGA RGBI colours: each channel 0, 0x55, 0xAA or 0xFF, the brown with half the green.
+fn cga(i: usize) -> [f64; 3] {
+    let i = i % 16;
+    let (on, bright) = (|b: usize| i & b != 0, i & 8 != 0);
+    let level = |set: bool| f64::from(u8::from(set) * 0xAA + u8::from(bright) * 0x55) / 255.0;
+    let mut c = [level(on(4)), level(on(2)), level(on(1))];
+    if i == 6 {
+        c[1] = f64::from(0x55u8) / 255.0;
+    }
+    c
 }
 
 fn pepto(i: usize) -> [f64; 3] {
@@ -141,6 +156,8 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The NES palette of pally, then the same a little off.
                 (7, _) => nes(x),
                 (8, _) => nes(x).map(|v| (v + 0.012).min(1.0)),
+                // The canonical CGA palette (each channel 0, 1/3, 2/3 or 1, the brown AA5500), then the dark yellow.
+                (9, _) => cga(x),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -213,6 +230,20 @@ fn target_slot_matches_the_oracle() {
         ("nes 2C02G blank", SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, 1),
         ("nes 2C02G setup", SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, 2),
         ("nes 2C02E blank", SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, 3),
+        ("cga 5153", SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, 1),
+        (
+            "gbc colorimetric above",
+            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
+            1,
+        ),
+        (
+            "gbc colorimetric central",
+            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
+            2,
+        ),
+        ("gbc mGBA sRGB", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, 4),
+        ("ags 2023 measured", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, 1),
+        ("ags 2026 D65", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, 4),
     ] {
         let p = Params {
             source_colour_target: target,

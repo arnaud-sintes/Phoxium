@@ -73,6 +73,18 @@ const SHIPPED: &[(&str, &str)] = &[
         "nintendo_entertainment_system.toml",
         include_str!("../../../presets/targets/nintendo_entertainment_system.toml"),
     ),
+    (
+        "ibm_cga_rgbi.toml",
+        include_str!("../../../presets/targets/ibm_cga_rgbi.toml"),
+    ),
+    (
+        "game_boy_color_colorimetric.toml",
+        include_str!("../../../presets/targets/game_boy_color_colorimetric.toml"),
+    ),
+    (
+        "game_boy_advance_sp_ags_101.toml",
+        include_str!("../../../presets/targets/game_boy_advance_sp_ags_101.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -131,6 +143,7 @@ struct File {
     palette: Option<PaletteFile>,
     dac: Option<DacFile>,
     signal: Option<SignalFile>,
+    remap: Option<RemapFile>,
     provenance: BTreeMap<String, String>,
 }
 
@@ -144,6 +157,19 @@ struct MatrixFile {
     clamp: Option<f64>,
     divisor: f64,
     output_gamma: Option<f64>,
+    output_scale: Option<f64>,
+    /// Variants of the matrix: each may replace the weights, the input gamma, the divisor and the output scale.
+    variants: Option<Vec<MatrixVariant>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct MatrixVariant {
+    id: String,
+    name: String,
+    rows: Option<[[f64; 3]; 3]>,
+    input_gamma: Option<f64>,
+    divisor: Option<f64>,
     output_scale: Option<f64>,
 }
 
@@ -227,6 +253,94 @@ impl DacFile {
     }
 }
 
+/// A palette remap: the colours of a fixed palette (the reference, as an emulator shows them) replaced by the colours of a
+/// monitor (the output); built on the `signal` transform, whose recognition takes the nearest reference colour.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemapFile {
+    /// The largest distance (Euclidean in drive voltage) at which a pixel is taken for a reference colour.
+    threshold: f64,
+    /// The colours emulators show: an RGB value (0xRRGGBB) and the index of the colour it stands for (several references
+    /// may stand for one colour: two emulators' browns).
+    references: Vec<RemapReference>,
+    variants: Vec<RemapVariant>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemapReference {
+    rgb: u32,
+    colour: usize,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemapVariant {
+    id: String,
+    name: String,
+    /// The colour each index shows on this monitor, 0xRRGGBB, as the drive voltage over 255 (no gamma).
+    output: Vec<u32>,
+}
+
+impl RemapFile {
+    fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
+        positive(file, "remap", "threshold", self.threshold)?;
+        let n = self.references.len();
+        if n == 0 || n > SIGNAL_MAX {
+            return Err(format!("{file}: remap.references must hold 1 to {SIGNAL_MAX} colours"));
+        }
+        let colours = self.references.iter().map(|r| r.colour).max().unwrap_or(0) + 1;
+        if self.references.iter().any(|r| r.rgb > 0xFF_FFFF) {
+            return Err(format!("{file}: remap.references rgb must be at most 0xFFFFFF"));
+        }
+        if self.variants.is_empty() || self.variants.len() > MAX_PALETTES {
+            return Err(format!("{file}: remap.variants must hold 1 to {MAX_PALETTES} monitors"));
+        }
+        let rgb = |c: u32| [(c >> 16) & 255, (c >> 8) & 255, c & 255].map(|v| f64::from(v) / 255.0);
+        let mut references = [[0.0; 3]; SIGNAL_MAX];
+        for (i, r) in self.references.iter().enumerate() {
+            references[i] = rgb(r.rgb);
+        }
+        let mut out: Vec<Variant> = Vec::new();
+        for v in &self.variants {
+            if v.id.is_empty()
+                || !v
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(format!(
+                    "{file}: remap.variants id \"{}\" must be lower case letters, digits and '_'",
+                    v.id
+                ));
+            }
+            if out.iter().any(|x| x.id == v.id) {
+                return Err(format!("{file}: remap.variants id \"{}\" is used twice", v.id));
+            }
+            if v.output.len() != colours || v.output.iter().any(|c| *c > 0xFF_FFFF) {
+                return Err(format!(
+                    "{file}: remap.variants {} output must hold {colours} colours of at most 0xFFFFFF",
+                    v.id
+                ));
+            }
+            let mut table = [[0.0; 3]; SIGNAL_MAX];
+            for (i, r) in self.references.iter().enumerate() {
+                table[i] = rgb(v.output[r.colour]);
+            }
+            out.push(Variant {
+                id: v.id.clone(),
+                name: v.name.clone(),
+                transform: Transform::Signal(Signal {
+                    colours: table,
+                    count: n,
+                    references,
+                    threshold: self.threshold,
+                }),
+            });
+        }
+        Ok(out)
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct SignalFile {
@@ -561,6 +675,7 @@ impl MatrixFile {
             ("clamp", self.clamp.is_some()),
             ("output_gamma", self.output_gamma.is_some()),
             ("output_scale", self.output_scale.is_some()),
+            ("variants", self.variants.is_some()),
         ] {
             if present {
                 k.push(name);
@@ -569,9 +684,61 @@ impl MatrixFile {
         k
     }
 
+    /// The variants of the matrix: the base matrix with each variant's replacements, the first one the target's own.
+    fn matrix_variants(&self, file: &str, base: &Matrix) -> Result<Vec<Variant>, String> {
+        let Some(list) = &self.variants else {
+            return Ok(Vec::new());
+        };
+        if list.is_empty() || list.len() > MAX_PALETTES {
+            return Err(format!(
+                "{file}: matrix.variants must hold 1 to {MAX_PALETTES} variants"
+            ));
+        }
+        let mut out: Vec<Variant> = Vec::new();
+        for v in list {
+            if v.id.is_empty()
+                || !v
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(format!(
+                    "{file}: matrix.variants id \"{}\" must be lower case letters, digits and '_'",
+                    v.id
+                ));
+            }
+            if out.iter().any(|x| x.id == v.id) {
+                return Err(format!("{file}: matrix.variants id \"{}\" is used twice", v.id));
+            }
+            let mut m = *base;
+            if let Some(rows) = v.rows {
+                if !rows.iter().flatten().all(|w| w.is_finite()) {
+                    return Err(format!("{file}: matrix.variants {} rows must be finite", v.id));
+                }
+                m.rows = rows;
+            }
+            for (key, value, slot) in [
+                ("input_gamma", v.input_gamma, &mut m.input_gamma),
+                ("divisor", v.divisor, &mut m.divisor),
+                ("output_scale", v.output_scale, &mut m.output_scale),
+            ] {
+                if let Some(x) = value {
+                    positive(file, "matrix.variants", key, x)?;
+                    *slot = x;
+                }
+            }
+            out.push(Variant {
+                id: v.id.clone(),
+                name: v.name.clone(),
+                transform: Transform::Matrix(m),
+            });
+        }
+        Ok(out)
+    }
+
     fn matrix(&self, file: &str) -> Result<Matrix, String> {
-        if !self.rows.iter().flatten().all(|w| w.is_finite() && *w >= 0.0) {
-            return Err(format!("{file}: matrix.rows must be finite and not negative"));
+        if !self.rows.iter().flatten().all(|w| w.is_finite()) {
+            return Err(format!("{file}: matrix.rows must be finite"));
         }
         if !(4..=8).contains(&self.input_bits) {
             return Err(format!("{file}: matrix.input_bits must be 4 to 8"));
@@ -647,32 +814,59 @@ impl Target {
             ));
         }
         let mut variants = Vec::new();
-        let (transform, keys) = match (f.kind.as_str(), &f.matrix, &f.curve, &f.palette, &f.dac, &f.signal) {
-            ("matrix", Some(m), None, None, None, None) => (Transform::Matrix(m.matrix(file)?), m.keys()),
-            ("curve", None, Some(c), None, None, None) => (
+        // Which table the kind names, and that it is the only one the file has.
+        let which = match f.kind.as_str() {
+            "matrix" => 0,
+            "curve" => 1,
+            "palette" => 2,
+            "dac" => 3,
+            "signal" => 4,
+            "remap" => 5,
+            other => {
+                return Err(format!(
+                "{file}: kind \"{other}\" is not \"matrix\", \"curve\", \"palette\", \"dac\", \"signal\" or \"remap\""
+            ))
+            }
+        };
+        let tables = [
+            f.matrix.is_some(),
+            f.curve.is_some(),
+            f.palette.is_some(),
+            f.dac.is_some(),
+            f.signal.is_some(),
+            f.remap.is_some(),
+        ];
+        if tables.iter().enumerate().any(|(i, has)| *has != (i == which)) {
+            return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
+        }
+        let (transform, keys) = match (&f.matrix, &f.curve, &f.palette, &f.dac, &f.signal, &f.remap) {
+            (Some(m), ..) => {
+                let base = m.matrix(file)?;
+                variants = m.matrix_variants(file, &base)?;
+                let first = variants.first().map_or(Transform::Matrix(base), |v| v.transform);
+                (first, m.keys())
+            }
+            (_, Some(c), ..) => (
                 Transform::Curve(c.curve(file)?),
                 vec!["table", "input_bits", "output_max"],
             ),
-            ("palette", None, None, Some(p), None, None) => {
+            (_, _, Some(p), ..) => {
                 variants = p.variants(file)?;
                 (variants[0].transform, vec!["sets", "colour_bits"])
             }
-            ("dac", None, None, None, Some(d), None) => {
+            (_, _, _, Some(d), ..) => {
                 variants = d.variants(file)?;
                 (variants[0].transform, vec!["output", "output_max", "inputs"])
             }
-            ("signal", None, None, None, None, Some(s)) => {
+            (_, _, _, _, Some(s), _) => {
                 variants = s.variants(file)?;
                 (variants[0].transform, s.keys())
             }
-            ("matrix" | "curve" | "palette" | "dac" | "signal", _, _, _, _, _) => {
-                return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
+            (_, _, _, _, _, Some(r)) => {
+                variants = r.variants(file)?;
+                (variants[0].transform, vec!["references", "variants", "threshold"])
             }
-            (other, _, _, _, _, _) => {
-                return Err(format!(
-                    "{file}: kind \"{other}\" is not \"matrix\", \"curve\", \"palette\", \"dac\" or \"signal\""
-                ))
-            }
+            _ => unreachable!("the kind has its table"),
         };
         for key in keys {
             let ok = f.provenance.get(key).is_some_and(|p| {
@@ -841,7 +1035,7 @@ mod tests {
             (ok.replace("kind = \"matrix\"", "kind = \"curve\""), "kind"),
             (ok.replace("clamp = 960", "clamp = 960\nextra = 1"), "extra"),
             (ok.replace("divisor = 1020", "divisor = 0"), "divisor"),
-            (ok.replace("[[26, 4, 2],", "[[-26, 4, 2],"), "rows"),
+            (ok.replace("[[26, 4, 2],", "[[inf, 4, 2],"), "rows"),
             (ok.replace("clamp = \"E:", "clamp = \"X:"), "provenance.clamp"),
             (
                 ok.replace("input_bits = \"S: the", "input_bits_ = \"S: the"),
@@ -1213,6 +1407,274 @@ mod tests {
             // A few dark greens and blues of row 0 sit between two references: at most 3 of the 64 are confused.
             assert!(wrong.len() <= 3, "{name}: {wrong:?}");
             assert!(worst <= s.threshold, "{name}: {worst}");
+        }
+    }
+
+    /// The CGA remap: the canonical colours (and the dark yellow of a monitor without the brown circuit) are replaced by
+    /// the colours Holden measured on the IBM 5153. Hand derivation: the brown of the canonical palette, AA5500, is the
+    /// index 6, whose gun voltages are 1.00, 0.64 and 0 V over 1.30 V: (196, 126, 0) of 255; the intensified white is
+    /// 1.30 V, 255; the dark grey of intensity 0.40 V is 78 of 255.
+    #[test]
+    fn the_cga_file_replaces_the_canonical_colours_by_the_measured_ones() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_IBM_CGA_RGBI).expect("cga");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["ibm_5153_max_contrast"]);
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        assert_eq!(s.count, 17, "16 canonical colours and the dark yellow");
+        let b = |v: f64| (v * 255.0).round() as u32;
+        let hexes = |c: [f64; 3]| (b(c[0]), b(c[1]), b(c[2]));
+        // The canonical brown AA5500 shows C47E00; so does the dark yellow AAAA00 (colour 6 again).
+        let brown = hex_rgb(0xAA5500);
+        assert_eq!(hexes(s.apply(brown)), (0xC4, 0x7E, 0x00));
+        assert_eq!(hexes(s.apply(hex_rgb(0xAAAA00))), (0xC4, 0x7E, 0x00));
+        assert_eq!(hexes(s.apply(hex_rgb(0xFFFFFF))), (0xFF, 0xFF, 0xFF));
+        assert_eq!(hexes(s.apply(hex_rgb(0x555555))), (0x4E, 0x4E, 0x4E));
+        assert_eq!(
+            hexes(s.apply(hex_rgb(0x0000AA))),
+            (0x00, 0x00, 0xC4),
+            "the blue of the normal half is 1.00 V"
+        );
+        assert_eq!(
+            hexes(s.apply(hex_rgb(0x55FFFF))),
+            (0x4E, 0xF3, 0xF3),
+            "the light cyan: 0.40, 1.24, 1.24 V"
+        );
+        // Every canonical colour is recognised as its own index, and the 5153's colours are those of the voltage table
+        // over 1.30 V (the volts of Holden's table, as the file derives them).
+        let volts: [[f64; 3]; 16] = [
+            [0.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [0.0, 1.0, 0.0],
+            [0.0, 1.0, 1.0],
+            [1.0, 0.0, 0.0],
+            [1.0, 0.0, 1.0],
+            [1.0, 0.64, 0.0],
+            [1.0, 1.0, 1.0],
+            [0.4, 0.4, 0.4],
+            [0.4, 0.4, 1.12],
+            [0.4, 1.12, 0.4],
+            [0.4, 1.24, 1.24],
+            [1.12, 0.4, 0.4],
+            [1.24, 0.4, 1.24],
+            [1.24, 1.24, 0.4],
+            [1.3, 1.3, 1.3],
+        ];
+        for (i, v) in volts.iter().enumerate() {
+            assert_eq!(s.classify(s.reference(i)), Some(i));
+            let out = s.colours[i];
+            for c in 0..3 {
+                assert!(
+                    (out[c] - v[c] / 1.3).abs() < 0.003,
+                    "colour {i} channel {c}: {} vs {}",
+                    out[c],
+                    v[c] / 1.3
+                );
+            }
+        }
+        // A pixel far from every canonical colour passes through.
+        let odd = [0.2, 0.45, 0.15];
+        assert_eq!(s.apply(odd), odd);
+    }
+
+    fn hex_rgb(c: u32) -> [f64; 3] {
+        [(c >> 16) & 255, (c >> 8) & 255, c & 255].map(|v| f64::from(v) / 255.0)
+    }
+
+    /// The remap validation: an output of the wrong length, a reference past 0xFFFFFF, a repeated id, a missing provenance.
+    #[test]
+    fn a_bad_remap_file_is_refused() {
+        let ok = include_str!("../../../presets/targets/ibm_cga_rgbi.toml").to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replace("rgb = 0xFFFFFF", "rgb = 0x1FFFFFF"), "0xFFFFFF"),
+            (
+                ok.replace("output = [0x000000,", "output = [0x000001, 0x000000,"),
+                "output",
+            ),
+            (ok.replace("threshold = 0.1", "threshold = 0"), "threshold"),
+            (ok.replace("variants = \"S:", "variants = \"X:"), "provenance.variants"),
+            (ok.replace("kind = \"remap\"", "kind = \"signal\""), "kind"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The Pokefan531 Game Boy Color: the libretro matrix (rows summing to 1, lum 0.94) and the gamma step. Hand
+    /// derivation: a pure red (code 31) with the exponent 1.2 gives linear (1, 0, 0), R = 0.82 x 0.94 = 0.7708, G = 0.125 x
+    /// 0.94 = 0.1175, B = 0.195 x 0.94 = 0.1833, each raised to 1 / 2.2: 0.88838, 0.37777, 0.46255; a pure blue has a
+    /// negative red weight (-0.06), which clamps to 0; white (1, 1, 1) is 0.94 on every row, 0.94 ^ (1 / 2.2) = 0.97226; a grey
+    /// code 16 with the central exponent 1.7: (16 / 31) ^ 1.7 = 0.32492, x 0.94 = 0.30543, ^ (1 / 2.2) = 0.58310.
+    #[test]
+    fn the_pokefan531_gbc_file_follows_the_libretro_shader() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC).expect("gbc colorimetric");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "libretro_light_above",
+                "gambatte_light_central",
+                "light_below",
+                "mgba_srgb"
+            ]
+        );
+        let code = |c: u32| f64::from((c << 3) | (c >> 2)) / 255.0;
+        let near = |a: f64, b: f64| (a - b).abs() < 1e-3;
+        let [r, g, b] = t.transform_for(0).apply([1.0, 0.0, 0.0]);
+        assert!(near(r, 0.88838) && near(g, 0.37777) && near(b, 0.46255), "{r} {g} {b}");
+        let [r, _, b] = t.transform_for(0).apply([0.0, 0.0, 1.0]);
+        assert!(
+            r == 0.0 && near(b, (0.73f64 * 0.94).powf(1.0 / 2.2)),
+            "negative weight clamped: {r} {b}"
+        );
+        for c in t.transform_for(0).apply([1.0; 3]) {
+            assert!(near(c, 0.97226), "{c}");
+        }
+        let grey = t.transform_for(1).apply([code(16); 3]);
+        assert!(grey.iter().all(|c| near(*c, 0.58310)), "{grey:?}");
+        // The exponents: 1.2, 1.7, 2.2 darken the mid grey more and more.
+        let mids: Vec<f64> = (0..3).map(|i| t.transform_for(i).apply([code(16); 3])[0]).collect();
+        assert!(mids[0] > mids[1] && mids[1] > mids[2], "{mids:?}");
+        // mGBA's sRGB profile: white is lum 0.91, 0.91 ^ (1 / 2.2) = 0.95810.
+        for c in t.transform_for(3).apply([1.0; 3]) {
+            assert!(near(c, 0.95810), "{c}");
+        }
+    }
+
+    /// The AGS-101 target against an independent computation: the matrices of the variants are recomputed here from the XYZ
+    /// readings (the normalised primary matrix times the XYZ to linear sRGB matrix, and the Bradford adaptation to D65), the
+    /// exponents from the 32-step grey ramps (a logarithmic least-squares fit of the black-subtracted ramp over the steps 4
+    /// to 28), and the white of the D65 variants is neutral, the white as measured is full drive on its brightest channel.
+    #[test]
+    #[allow(clippy::needless_range_loop)]
+    fn the_ags_101_file_is_recomputed_from_the_readings() {
+        type M = [[f64; 3]; 3];
+        let mul = |a: &M, b: &M| {
+            let mut r = [[0.0; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    for k in 0..3 {
+                        r[i][j] += a[i][k] * b[k][j];
+                    }
+                }
+            }
+            r
+        };
+        let mulv = |a: &M, v: [f64; 3]| [0, 1, 2].map(|i| a[i][0] * v[0] + a[i][1] * v[1] + a[i][2] * v[2]);
+        let inv = |m: &M| {
+            let [[a, b, c], [d, e, f], [g, h, i]] = *m;
+            let det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g);
+            [
+                [(e * i - f * h) / det, (c * h - b * i) / det, (b * f - c * e) / det],
+                [(f * g - d * i) / det, (a * i - c * g) / det, (c * d - a * f) / det],
+                [(d * h - e * g) / det, (b * g - a * h) / det, (a * e - b * d) / det],
+            ]
+        };
+        let diag = |v: [f64; 3]| [[v[0], 0.0, 0.0], [0.0, v[1], 0.0], [0.0, 0.0, v[2]]];
+        let to_srgb: M = [
+            [3.2406255, -1.5372080, -0.4986286],
+            [-0.9689307, 1.8757561, 0.0415175],
+            [0.0557101, -0.2040211, 1.0569959],
+        ];
+        let bradford: M = [
+            [0.8951, 0.2664, -0.1614],
+            [-0.7502, 1.7135, 0.0367],
+            [0.0389, -0.0685, 1.0296],
+        ];
+        let d65 = [0.95047, 1.0, 1.08883];
+        // (red, green, blue, white) XYZ of the two sessions, and the 32 grey steps (Y) of each.
+        let sessions: [([[f64; 3]; 4], [f64; 32]); 2] = [
+            (
+                [
+                    [53.035133, 29.786356, 3.376642],
+                    [43.2085, 79.048882, 8.263728],
+                    [25.650356, 15.12584, 136.981308],
+                    [121.178963, 122.963692, 151.95961],
+                ],
+                [
+                    0.476724, 0.57227, 0.730655, 0.928297, 1.300691, 1.972238, 3.104219, 4.684548, 6.752009, 8.528899,
+                    10.644724, 13.507071, 16.091734, 18.133703, 20.990744, 23.672119, 26.548615, 30.127653, 33.071106,
+                    36.36824, 40.365112, 45.727238, 50.626457, 57.723812, 63.798332, 71.693527, 77.374222, 85.518791,
+                    95.451256, 106.659615, 116.605713, 122.963692,
+                ],
+            ),
+            (
+                [
+                    [55.509378, 31.260651, 2.961776],
+                    [43.927962, 80.674025, 8.561921],
+                    [26.129149, 15.251464, 139.940875],
+                    [121.795317, 123.381279, 149.195392],
+                ],
+                [
+                    0.391119, 0.474823, 0.594589, 0.763017, 1.069079, 1.636336, 2.566728, 4.062557, 5.803986, 7.413745,
+                    9.4599, 12.004312, 14.511519, 16.591394, 18.977837, 21.629573, 24.58209, 27.647328, 30.921221,
+                    34.6192, 38.844053, 43.804122, 49.010497, 54.66813, 61.273021, 69.030122, 76.815933, 84.59095,
+                    95.189857, 107.539479, 116.89763, 123.381279,
+                ],
+            ),
+        ];
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101).expect("ags");
+        for (s, (xyz, ramp)) in sessions.iter().enumerate() {
+            let chroma = |p: [f64; 3]| [p[0] / p[1], 1.0, p[2] / p[1]];
+            let (cr, cg, cb, w) = (chroma(xyz[0]), chroma(xyz[1]), chroma(xyz[2]), chroma(xyz[3]));
+            let p: M = [[cr[0], cg[0], cb[0]], [1.0, 1.0, 1.0], [cr[2], cg[2], cb[2]]];
+            let m = mul(&p, &diag(mulv(&inv(&p), w)));
+            let measured = mul(&to_srgb, &m);
+            let (rs, rd) = (mulv(&bradford, w), mulv(&bradford, d65));
+            let cat = mul(
+                &inv(&bradford),
+                &mul(&diag([rd[0] / rs[0], rd[1] / rs[1], rd[2] / rs[2]]), &bradford),
+            );
+            let adapted = mul(&to_srgb, &mul(&cat, &m));
+            // The exponent: log-log least squares of the black-subtracted ramp over the steps 4 to 28.
+            let (black, white) = (ramp[0], ramp[31] - ramp[0]);
+            let pts: Vec<(f64, f64)> = (4..=28)
+                .map(|i| ((i as f64 / 31.0).ln(), ((ramp[i] - black) / white).ln()))
+                .collect();
+            let n = pts.len() as f64;
+            let (sx, sy) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
+            let (sxx, sxy) = pts.iter().fold((0.0, 0.0), |a, p| (a.0 + p.0 * p.0, a.1 + p.0 * p.1));
+            let gamma = (n * sxy - sx * sy) / (n * sxx - sx * sx);
+            for (k, (rows, label)) in [(measured, "measured white"), (adapted, "D65 white")]
+                .into_iter()
+                .enumerate()
+            {
+                let Transform::Matrix(f) = t.transform_for(s * 2 + k) else {
+                    panic!("matrix")
+                };
+                for r in 0..3 {
+                    for c in 0..3 {
+                        assert!(
+                            (f.rows[r][c] - rows[r][c]).abs() < 2e-9,
+                            "session {s} {label} row {r} col {c}: {} vs {}",
+                            f.rows[r][c],
+                            rows[r][c]
+                        );
+                    }
+                }
+                assert!(
+                    (f.input_gamma - gamma).abs() < 0.01,
+                    "session {s}: exponent {} vs fitted {gamma}",
+                    f.input_gamma
+                );
+                // The white: neutral for the D65 variants, the brightest channel at full drive for the measured one.
+                let out = Transform::Matrix(f).apply([1.0; 3]);
+                let top = out.iter().cloned().fold(0.0, f64::max);
+                if k == 0 {
+                    assert!(
+                        (top - 1.0).abs() < 2e-3,
+                        "session {s}: the brightest channel of the white {top}"
+                    );
+                } else {
+                    assert!(
+                        out.iter().all(|c| (c - out[0]).abs() < 0.01),
+                        "session {s}: white {out:?}"
+                    );
+                }
+            }
         }
     }
 }
