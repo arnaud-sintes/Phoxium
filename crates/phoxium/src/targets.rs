@@ -40,7 +40,7 @@ use serde::Deserialize;
 /// The schema version of the files.
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Palettes a target may hold: the range of `source_colour_palette` (`params/source.toml`).
+/// Palettes a target may hold: the range of `source_colour_variant` (`params/source.toml`).
 pub const MAX_PALETTES: usize = 32;
 
 /// The shipped files, in the order of the enum values after `none` (a test checks the ids).
@@ -78,29 +78,14 @@ pub struct Target {
     pub notes: String,
     /// The transform of the device (for a palette target: the first palette).
     pub transform: Transform,
-    /// The palettes of a `palette` target, in the order of `source_colour_palette`, or the emulators of a `dac` target
-    /// (empty for the other kinds).
+    /// The palettes of a `palette` target or the emulators of a `dac` target, in the order of `source_colour_variant`
+    /// (1 is the first; empty for the other kinds).
     pub variants: Vec<Variant>,
-    /// What picks the variant: the palette number, or the emulator (`source_colour_input`).
-    pub selector: Selector,
-    /// The variant used when the input is `default` or unknown (0 except for a `dac` file that names one).
-    pub default_variant: usize,
     /// The provenance entry of every key of the kind's table.
     pub provenance: BTreeMap<String, String>,
 }
 
-/// What chooses between the variants of a target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Selector {
-    /// One transform.
-    None,
-    /// The palette number, `source_colour_palette`.
-    Palette,
-    /// The emulator the picture comes from, `source_colour_input`.
-    Input,
-}
-
-/// One palette of a `palette` target, or one emulator input of a `dac` target.
+/// One variant of a target: a palette of a `palette` target, an emulator input of a `dac` target.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Variant {
     /// Lower case id (`1_a`).
@@ -111,25 +96,14 @@ pub struct Variant {
 }
 
 impl Target {
-    /// The transform for a palette number (1 based, `source_colour_palette`) and an emulator (a value name of
-    /// `source_colour_input`, `default` for the target's own choice): what [`Selector`] says picks the variant.
-    pub fn select(&self, palette: i32, input: &str) -> Transform {
-        match self.selector {
-            Selector::None => self.transform,
-            Selector::Palette => self.transform_for(usize::try_from(palette.max(1) - 1).unwrap_or(0)),
-            Selector::Input => {
-                let i = self
-                    .variants
-                    .iter()
-                    .position(|v| v.id == input)
-                    .unwrap_or(self.default_variant);
-                self.transform_for(i)
-            }
-        }
+    /// The transform for the variant number `variant` (1 based, `source_colour_variant`); a target without variants,
+    /// and a number below 1 or past the last variant, give the target's own (first) transform.
+    pub fn select(&self, variant: i32) -> Transform {
+        self.transform_for(usize::try_from(variant.max(1) - 1).unwrap_or(0))
     }
 
-    /// The transform for the palette number `variant` (0 based, `source_colour_palette` minus one); targets without
-    /// palettes, and a number past the last palette, give the target's own (first) transform.
+    /// The transform for the variant `variant` (0 based); targets without variants, and an index past the last
+    /// variant, give the target's own (first) transform.
     pub fn transform_for(&self, variant: usize) -> Transform {
         self.variants.get(variant).map_or(self.transform, |v| v.transform)
     }
@@ -178,8 +152,6 @@ struct DacFile {
     /// The output code of each of the 8 codes.
     output: [u32; DAC_LEN],
     output_max: f64,
-    /// The id of the input used when `source_colour_input` is `default`.
-    default_input: String,
     inputs: Vec<DacInput>,
 }
 
@@ -193,8 +165,8 @@ struct DacInput {
 }
 
 impl DacFile {
-    /// The emulator inputs as variants and the index of the default one.
-    fn variants(&self, file: &str) -> Result<(Vec<Variant>, usize), String> {
+    /// The emulator inputs as variants, the first one the default.
+    fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
         positive(file, "dac", "output_max", self.output_max)?;
         if self.output_max > 255.0 {
             return Err(format!("{file}: dac.output_max must be at most 255"));
@@ -212,14 +184,13 @@ impl DacFile {
         let mut out: Vec<Variant> = Vec::new();
         for s in &self.inputs {
             if s.id.is_empty()
-                || s.id == "default"
                 || !s
                     .id
                     .chars()
                     .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
             {
                 return Err(format!(
-                    "{file}: dac.inputs id \"{}\" must be lower case letters, digits and '_' and not \"default\"",
+                    "{file}: dac.inputs id \"{}\"  must be lower case letters, digits and '_'",
                     s.id
                 ));
             }
@@ -243,13 +214,7 @@ impl DacFile {
                 }),
             });
         }
-        let default = out.iter().position(|v| v.id == self.default_input).ok_or_else(|| {
-            format!(
-                "{file}: dac.default_input \"{}\" is not one of the inputs",
-                self.default_input
-            )
-        })?;
-        Ok((out, default))
+        Ok(out)
     }
 }
 
@@ -415,8 +380,6 @@ impl Target {
             ));
         }
         let mut variants = Vec::new();
-        let mut selector = Selector::None;
-        let mut default_variant = 0;
         let (transform, keys) = match (f.kind.as_str(), &f.matrix, &f.curve, &f.palette, &f.dac) {
             ("matrix", Some(m), None, None, None) => (Transform::Matrix(m.matrix(file)?), m.keys()),
             ("curve", None, Some(c), None, None) => (
@@ -425,16 +388,11 @@ impl Target {
             ),
             ("palette", None, None, Some(p), None) => {
                 variants = p.variants(file)?;
-                selector = Selector::Palette;
                 (variants[0].transform, vec!["sets", "colour_bits"])
             }
             ("dac", None, None, None, Some(d)) => {
-                (variants, default_variant) = d.variants(file)?;
-                selector = Selector::Input;
-                (
-                    variants[default_variant].transform,
-                    vec!["output", "output_max", "inputs", "default_input"],
-                )
+                variants = d.variants(file)?;
+                (variants[0].transform, vec!["output", "output_max", "inputs"])
             }
             ("matrix" | "curve" | "palette" | "dac", _, _, _, _) => {
                 return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
@@ -462,8 +420,6 @@ impl Target {
             notes: f.notes,
             transform,
             variants,
-            selector,
-            default_variant,
             provenance: f.provenance,
         })
     }
@@ -652,51 +608,41 @@ mod tests {
         }
     }
 
-    /// The Mega Drive file: the measured levels, three emulator inputs of known steps, the default one named, and every
-    /// input id is a value of `source_colour_input` (no input that nothing can select).
+    /// The Mega Drive file: the measured levels and three emulator variants of known steps, the first one (variant 1,
+    /// the default) Genesis Plus GX; the palette-style number picks one.
     #[test]
-    fn the_mega_drive_file_holds_the_measured_levels_and_the_emulator_inputs() {
+    fn the_mega_drive_file_holds_the_measured_levels_and_the_emulator_variants() {
         let t = for_value(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE).expect("md");
-        assert_eq!(t.selector, Selector::Input);
         let Transform::Dac(d) = t.transform else { panic!("dac") };
         assert_eq!(d.output, [0, 52, 87, 116, 144, 172, 206, 255]);
         assert_eq!(
             d.input,
             [0, 34, 68, 102, 136, 170, 204, 238],
-            "the default is Genesis Plus GX"
+            "the first variant is Genesis Plus GX"
         );
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, ["genesis_plus_gx", "kega_fusion", "regen"]);
-        let values = meta("source_colour_input").unwrap().values;
-        assert_eq!(values[0], "default");
-        for id in &ids {
-            assert!(values.contains(id), "{id} is not a value of source_colour_input");
-        }
+        let names: Vec<&str> = t.variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, ["Genesis Plus GX", "Kega Fusion", "Regen"]);
         // The steps of the three emulators: 34, 33 and 32 per code.
         for (v, step) in t.variants.iter().zip([34u8, 33, 32]) {
             let Transform::Dac(d) = v.transform else { panic!("dac") };
             assert_eq!(d.input, std::array::from_fn(|i| step * i as u8), "{}", v.id);
         }
-        // The measured levels come from TmEE''s 15 mV levels, every second one, scaled so that 951 mV is 255.
+        // The measured levels come from TmEE's 15 mV levels, every second one, scaled so that 951 mV is 255.
         let mv: [f64; 8] = [0.0, 192.0, 324.0, 432.0, 537.0, 642.0, 768.0, 951.0];
         for (m, out) in mv.iter().zip(d.output) {
             assert!((m / 951.0 * 255.0 - f64::from(out)).abs() <= 0.6, "{m} mV is {out}");
         }
-        // `select` follows the emulator; default and an unknown name give the file''s default; the palette number is ignored.
-        assert_eq!(t.select(5, "default"), t.variants[0].transform);
-        assert_eq!(t.select(1, "regen"), t.variants[2].transform);
-        assert_eq!(t.select(1, "mesen"), t.variants[0].transform);
-        assert_ne!(t.select(1, "kega_fusion"), t.select(1, "regen"));
-        // Every enum value of the input after `default` is used by some target (none unused).
-        for v in &values[1..] {
-            assert!(
-                shipped().iter().any(|t| t.variants.iter().any(|x| x.id == *v)),
-                "{v} unused"
-            );
-        }
+        // `select` takes the 1-based variant; 0, a negative number and a number past the last give the first.
+        assert_eq!(t.select(1), t.variants[0].transform);
+        assert_eq!(t.select(3), t.variants[2].transform);
+        assert_eq!(t.select(0), t.variants[0].transform);
+        assert_eq!(t.select(-4), t.variants[0].transform);
+        assert_eq!(t.select(32), t.variants[0].transform);
+        assert_ne!(t.select(2), t.select(3));
     }
-
-    /// The dac validation: levels that do not increase, an output that decreases, a default that is not an input.
+    /// The dac validation: levels that do not increase, an output that decreases, a repeated id, no inputs.
     #[test]
     fn a_bad_dac_file_is_refused() {
         let ok = SHIPPED[4].1.to_string();
@@ -710,11 +656,6 @@ mod tests {
                 ok.replace("output = [0, 52, 87,", "output = [0, 87, 52,"),
                 "not decrease",
             ),
-            (
-                ok.replace("default_input = \"genesis_plus_gx\"", "default_input = \"mesen\""),
-                "default_input",
-            ),
-            (ok.replace("id = \"regen\"", "id = \"default\""), "default"),
             (ok.replace("id = \"regen\"", "id = \"kega_fusion\""), "twice"),
             (ok.replace("output_max = 255", "output_max = 300"), "output_max"),
             (ok.replace("inputs = \"E:", "inputs = \"X:"), "provenance.inputs"),

@@ -39,7 +39,7 @@ fn md_dac(step: u8) -> Transform {
     })
 }
 
-fn transform(target: u32, palette: i32, input: &str) -> Transform {
+fn transform(target: u32, variant: i32) -> Transform {
     match target {
         SOURCE_COLOUR_TARGET_GAME_BOY_COLOR => Transform::Matrix(Matrix {
             rows: [[26.0, 4.0, 2.0], [0.0, 24.0, 8.0], [6.0, 4.0, 22.0]],
@@ -68,17 +68,18 @@ fn transform(target: u32, palette: i32, input: &str) -> Transform {
             ],
             output_max: 255.0,
         }),
-        // Palette 1 is 1-A (the power-on palette), palette 9 is 2-A, palette 32 is 4-H.
-        SOURCE_COLOUR_TARGET_SUPER_GAME_BOY => match palette {
+        // Variant 1 is 1-A (the power-on palette), variant 9 is 2-A, variant 32 is 4-H.
+        SOURCE_COLOUR_TARGET_SUPER_GAME_BOY => match variant {
             1 => sgb_palette([0x67BF, 0x265B, 0x10B5, 0x2866]),
             9 => sgb_palette([0x533E, 0x2638, 0x01E5, 0x0000]),
             32 => sgb_palette([0x67FF, 0x2F17, 0x2230, 0x1548]),
             _ => unreachable!(),
         },
-        SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE => match input {
-            "genesis_plus_gx" | "default" => md_dac(34),
-            "kega_fusion" => md_dac(33),
-            "regen" => md_dac(32),
+        // Variant 1 is Genesis Plus GX (steps of 34, the default), 2 Kega Fusion (33), 3 Regen (32).
+        SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE => match variant {
+            1 => md_dac(34),
+            2 => md_dac(33),
+            3 => md_dac(32),
             _ => unreachable!(),
         },
         _ => unreachable!(),
@@ -157,33 +158,26 @@ fn target_slot_matches_the_oracle() {
         "none: the slot is skipped"
     );
 
-    for (name, target, palette, input) in [
-        ("gbc", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, 1, "default"),
-        ("gba", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, 1, "default"),
-        ("snes", SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, 1, "default"),
-        ("sgb 1-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 1, "default"),
-        ("sgb 2-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9, "default"),
-        ("sgb 4-H", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 32, "default"),
-        ("md gpgx", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1, "genesis_plus_gx"),
-        ("md kega", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1, "kega_fusion"),
-        ("md regen", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1, "regen"),
-        ("md default", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1, "default"),
+    for (name, target, variant) in [
+        ("gbc", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, 1),
+        ("gba", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, 1),
+        ("snes", SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, 1),
+        ("sgb 1-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 1),
+        ("sgb 2-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9),
+        ("sgb 4-H", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 32),
+        ("md gpgx", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1),
+        ("md kega", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 2),
+        ("md regen", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 3),
     ] {
         let p = Params {
             source_colour_target: target,
-            source_colour_palette: palette,
-            source_colour_input: phoxium::params::meta("source_colour_input")
-                .unwrap()
-                .values
-                .iter()
-                .position(|v| *v == input)
-                .unwrap() as u32,
+            source_colour_variant: variant,
             ..Params::default()
         };
         let out = run(&mut gpu, &img, &p);
         assert!(!gpu.last_skipped_slots().contains(&"target"), "{name}: the slot runs");
         assert_eq!((out.width, out.height), (img.width, img.height));
-        let t = transform(target, palette, input);
+        let t = transform(target, variant);
         let (mut max, mut sum, mut n, mut worst) = (0.0_f64, 0.0, 0, (0, 0));
         for y in 0..img.height {
             for x in 0..img.width {

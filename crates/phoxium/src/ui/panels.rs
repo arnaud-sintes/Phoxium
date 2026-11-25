@@ -652,6 +652,33 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
             ctx.items.push((format!("widget:{}", m.id), rect));
             widget_hovered = hovered;
         }
+        // The variant of the colour target: a combo of the names its data file gives (a Super Game Boy palette, the
+        // emulator of a Mega Drive picture), disabled while the target has no variants.
+        ParamValue::I32(v) if m.id == "source_colour_variant" => {
+            let names: Vec<&str> = crate::targets::for_value(ctx.params.source_colour_target)
+                .map(|t| t.variants.iter().map(|x| x.name.as_str()).collect())
+                .unwrap_or_default();
+            let index = usize::try_from(v.max(1) - 1)
+                .unwrap_or(0)
+                .min(names.len().saturating_sub(1));
+            let current = names.get(index).copied().unwrap_or("none for this target").to_string();
+            let disabled = ui.begin_disabled_with_cond(names.is_empty());
+            ui.set_next_item_width(width);
+            if let Some(_combo) = ui.begin_combo(&wid, &current) {
+                for (i, name) in names.iter().enumerate() {
+                    let selected = i == index;
+                    if ui.selectable_config(name).selected(selected).build() && !selected {
+                        new = Some(ParamValue::I32(i as i32 + 1));
+                    }
+                    if selected {
+                        ui.set_item_default_focus();
+                    }
+                }
+            }
+            drop(disabled);
+            ctx.record(ui, format!("widget:{}", m.id));
+            widget_hovered = ui.is_item_hovered();
+        }
         ParamValue::I32(mut v) => {
             let (lo, hi) = m.soft_range.unwrap_or((0.0, 10.0));
             let track = width - value_width(ui) - ui.clone_style().item_spacing()[0];

@@ -485,8 +485,9 @@ pub struct SourceProfile {
     pub prefilter: Option<String>,
     /// `source_colour_target` value name: `none` or a target of `presets/targets/` (`game_boy_color`).
     pub colour_target: Option<String>,
-    /// `source_colour_palette`: the palette number (1 to 32) of a colour target that has several (the Super Game Boy).
-    pub colour_palette: Option<u32>,
+    /// `source_colour_variant`: the variant number (1 to 32) of a colour target that has several (a Super Game Boy
+    /// palette, the emulator of a Mega Drive picture).
+    pub colour_variant: Option<u32>,
     /// `source_pixel_size`: host px per source row in the manual scale mode.
     pub pixel_size: Option<f32>,
 }
@@ -496,7 +497,7 @@ pub const PROFILE_PARAM_IDS: &[&str] = &[
     "source_flip",
     "source_prefilter",
     "source_colour_target",
-    "source_colour_palette",
+    "source_colour_variant",
     "source_pixel_size",
     "source_eotf",
     "source_crop_mode",
@@ -557,11 +558,11 @@ impl SourceProfile {
         if let Some(v) = self.par {
             warn(v > 0.0 && params.set("source_par", ParamValue::F32(v)), "par");
         }
-        if let Some(v) = self.colour_palette {
+        if let Some(v) = self.colour_variant {
             warn(
                 i32::try_from(v)
-                    .is_ok_and(|v| (1..=32).contains(&v) && params.set("source_colour_palette", ParamValue::I32(v))),
-                "colour_palette",
+                    .is_ok_and(|v| (1..=32).contains(&v) && params.set("source_colour_variant", ParamValue::I32(v))),
+                "colour_variant",
             );
         }
         if let Some(v) = self.line_multiplier {
@@ -1277,7 +1278,7 @@ mod tests {
             flip: Some("horizontal".into()),
             prefilter: Some("lanczos2".into()),
             colour_target: Some("game_boy_color".into()),
-            colour_palette: Some(9),
+            colour_variant: Some(9),
             pixel_size: Some(2.5),
             picture_area: Some("manual".into()),
             crop_client: Some([640, 480]),
@@ -2056,7 +2057,7 @@ mod tests {
             flip: Some("horizontal".into()),
             prefilter: Some("lanczos3".into()),
             colour_target: Some("game_boy_color".into()),
-            colour_palette: Some(9),
+            colour_variant: Some(9),
             ..SourceProfile::default()
         });
         let got = s.effective_source("a.exe", "A").unwrap();
@@ -2077,13 +2078,13 @@ mod tests {
         assert_eq!(p.source_flip, SOURCE_FLIP_HORIZONTAL);
         assert_eq!(p.source_prefilter, SOURCE_PREFILTER_LANCZOS3);
         assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR);
-        assert_eq!(p.source_colour_palette, 9);
+        assert_eq!(p.source_colour_variant, 9);
         // A bad value is skipped with a warning.
         let bad = SourceProfile {
             flip: Some("sideways".into()),
             pixel_size: Some(-1.0),
             colour_target: Some("snes2".into()),
-            colour_palette: Some(33),
+            colour_variant: Some(33),
             ..SourceProfile::default()
         };
         assert_eq!(bad.apply_to(&mut Params::default()).len(), 4);

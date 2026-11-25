@@ -215,31 +215,19 @@ default = "none"
 values = ["none", "game_boy_color", "game_boy_advance", "super_nintendo_black_boost", "super_game_boy", "sega_mega_drive"]
 tag = "E"
 source = "TODO, A GBC target, and QUESTIONS.md, Study: source colour targets. Each target is a data file of presets/targets/ with the source of every value (src/targets.rs); the Game Boy Color matrix is a formula of unknown origin quoted by near.sh (colour emulation), so the whole target is an estimate"
-description = "The device the source came from: the colours of the picture are transformed into what that device's screen would have shown, before the CRT chain. none leaves the source colours alone (bit for bit). game_boy_color: Game Boy Color (the LCD mixed the three channels and clipped white at 240 of 255). game_boy_advance: Game Boy Advance (steep LCD response, channels mixed). sega_mega_drive: the 3-bit colour codes of a Mega Drive / Genesis emulator at the levels the console's DAC measured (choose the emulator with Colour input). super_game_boy: the Game Boy picture in the colours of one of the Super Game Boy's 32 built-in palettes (choose it with Colour palette; it needs a grey source picture). super_nintendo_black_boost: the bsnes 'deep black boost' table (an emulator look, not the console output, never stack it on a gun law) that darkens the shadows for a CRT. It works on the drive voltage, so keep Source meaning on drive_voltage, and it acts on the colours as they come, whether the source was 5-bit quantised or not. For a monochrome phosphor type it acts on the grey the phosphor shows."
+description = "The device the source came from: the colours of the picture are transformed into what that device's screen would have shown, before the CRT chain. none leaves the source colours alone (bit for bit). game_boy_color: Game Boy Color (the LCD mixed the three channels and clipped white at 240 of 255). game_boy_advance: Game Boy Advance (steep LCD response, channels mixed). sega_mega_drive: the 3-bit colour codes of a Mega Drive / Genesis emulator at the levels the console's DAC measured (choose the emulator with Colour variant). super_game_boy: the Game Boy picture in the colours of one of the Super Game Boy's 32 built-in palettes (choose its palette with Colour variant; it needs a grey source picture). super_nintendo_black_boost: the bsnes 'deep black boost' table (an emulator look, not the console output, never stack it on a gun law) that darkens the shadows for a CRT. It works on the drive voltage, so keep Source meaning on drive_voltage, and it acts on the colours as they come, whether the source was 5-bit quantised or not. For a monochrome phosphor type it acts on the grey the phosphor shows."
 group = "Source"
 
 [[param]]
-id = "source_colour_palette"
+id = "source_colour_variant"
 stage = "source"
 type = "i32"
 unit = "1"
 default = 1
 min = 1
 max = 32
-hard_why = "the palette number of the target, 1 to 32 (the Super Game Boy has 32 palettes); a number past the last palette of the chosen target uses its first"
+hard_why = "the variant number of the colour target, 1 to 32 (the Super Game Boy has 32 palettes); a number past the last variant of the chosen target uses its first"
 tag = "E"
-source = "TODO, A GBC target, and QUESTIONS.md, Audit of the colour targets: a target of the palette kind holds several palettes (data file presets/targets/, src/targets.rs); the Super Game Boy has 32 built-in palettes, numbered 1-A to 4-H"
-description = "Which palette of the colour target to show, for a target that has several: the Super Game Boy's 32 built-in palettes in the order of its palette screen (1 = 1-A, the power-on palette, 2 = 1-B ... 8 = 1-H, 9 = 2-A ... 32 = 4-H). The source should be a grey picture (the emulator's grayscale palette): its four shades become the four colours. Targets without palettes ignore it."
-group = "Source"
-
-[[param]]
-id = "source_colour_input"
-stage = "source"
-type = "enum"
-unit = "1"
-default = "default"
-values = ["default", "genesis_plus_gx", "kega_fusion", "regen"]
-tag = "E"
-source = "TODO, A GBC target, and QUESTIONS.md, Audit of the colour targets: the emulator whose picture is captured, for a colour target whose input levels depend on it (the Mega Drive: Genesis Plus GX shows a linear step of 34 per 3-bit code, Kega Fusion 33, Regen 32; Eke on GPGX issue 345 and SpritesMind forum posts, estimates)"
-description = "Which emulator the captured picture comes from, for a colour target that depends on it. sega_mega_drive: the 3-bit colour codes are shown at different 8-bit levels by different emulators (Genesis Plus GX steps of 34, Kega Fusion 33, Regen 32); BlastEm already shows the measured levels, so leave the target off for it. default: the target's own choice (Genesis Plus GX). Targets that do not depend on the emulator ignore it."
+source = "TODO, source colour targets, and QUESTIONS.md, Design note: signal-driven colour targets: a target of the palette or dac kind holds named variants in its data file (src/targets.rs): the Super Game Boy's 32 built-in palettes, the emulator whose picture a Mega Drive target reads; later the chip revision of the C64 and the NES"
+description = "Which variant of the colour target to use, for a target that has several; the menu shows their names. Super Game Boy: one of its 32 built-in palettes in the order of its palette screen (1 = 1-A, the power-on palette, 2 = 1-B ... 8 = 1-H, 9 = 2-A ... 32 = 4-H); the source should be a grey picture (the emulator's grayscale palette). Sega Mega Drive: the emulator whose picture is captured (Genesis Plus GX, Kega Fusion, Regen; BlastEm already shows the measured levels, leave the target off for it). Targets without variants ignore it."
 group = "Source"

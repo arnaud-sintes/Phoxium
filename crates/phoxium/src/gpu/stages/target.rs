@@ -81,11 +81,8 @@ pub(super) fn plan(p: &Params) -> Push {
     let Some(t) = crate::targets::for_value(p.source_colour_target) else {
         return identity;
     };
-    // The palette number (1 based) or the emulator (`source_colour_input`) picks the variant of a target that has some.
-    let input = crate::params::meta("source_colour_input")
-        .and_then(|m| m.values.get(p.source_colour_input as usize).copied())
-        .unwrap_or("default");
-    match t.select(p.source_colour_palette, input) {
+    // The variant (1 based) of a target that has some: its palette, or the emulator whose picture is captured.
+    match t.select(p.source_colour_variant) {
         Transform::Matrix(m) => Push {
             k: m.rows.map(|row| row.map(|w| w as f32)),
             input_range: m.input_range as f32,
@@ -268,59 +265,51 @@ mod tests {
         assert!((f64::from(snes.out_scale) - 1.0 / 255.0).abs() < 1e-9);
     }
 
-    /// A palette is packed as its twelve bytes, colour by colour, channel by channel, four to a word; the number
+    /// A palette is packed as its twelve bytes, colour by colour, channel by channel, four to a word; the variant number
     /// picks the palette (1 = 1-A, 9 = 2-A) and a number past the last one gives the first. Hand derivation of 2-A:
     /// 0x533E is red 30, green 25, blue 20 and 0x2638 has red 24, so the first word is 30, 25, 20, 24 from the low byte.
     #[test]
     fn a_palette_is_packed_as_twelve_bytes_and_the_number_picks_it() {
-        let with_palette = |n: i32| Params {
-            source_colour_palette: n,
+        let with_variant = |n: i32| Params {
+            source_colour_variant: n,
             ..with(SOURCE_COLOUR_TARGET_SUPER_GAME_BOY)
         };
-        let a = plan(&with_palette(1));
+        let a = plan(&with_variant(1));
         assert_eq!((a.kind, a.bits), (2, 0));
         // 1-A: colours (31, 29, 25), (27, 18, 9), (21, 5, 4), (6, 3, 10).
         assert_eq!(a.table[0], 31 | 29 << 8 | 25 << 16 | 27 << 24);
         assert_eq!(a.table[2], 4 | 6 << 8 | 3 << 16 | 10 << 24);
         assert_eq!(a.table[3..], [0; 5]);
         assert!((f64::from(a.out_scale) - 1.0 / 31.0).abs() < 1e-9);
-        assert_eq!(plan(&with_palette(9)).table[0], 30 | 25 << 8 | 20 << 16 | 24 << 24);
+        assert_eq!(plan(&with_variant(9)).table[0], 30 | 25 << 8 | 20 << 16 | 24 << 24);
         assert_eq!(
-            plan(&with_palette(99)).table,
+            plan(&with_variant(99)).table,
             a.table,
             "past the last palette: the first"
         );
-        assert_eq!(plan(&with_palette(0)).table, a.table, "below 1: the first");
-        assert_ne!(plan(&with_palette(2)).table, a.table);
+        assert_eq!(plan(&with_variant(0)).table, a.table, "below 1: the first");
+        assert_ne!(plan(&with_variant(2)).table, a.table);
     }
 
-    /// The Mega Drive: eight input levels, then eight output codes, one byte each. The default emulator is Genesis
-    /// Plus GX (steps of 34), `source_colour_input` picks Kega Fusion (33) or Regen (32), and the palette number is ignored.
+    /// The Mega Drive: eight input levels, then eight output codes, one byte each. Variant 1 is Genesis Plus GX (steps of
+    /// 34, the default), 2 Kega Fusion (33), 3 Regen (32); a number past the last gives the first.
     #[test]
     fn the_dac_is_packed_as_input_levels_then_output_codes() {
-        let md = |input: u32| Params {
-            source_colour_input: input,
+        let md = |variant: i32| Params {
+            source_colour_variant: variant,
             ..with(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE)
         };
-        let names = crate::params::meta("source_colour_input").unwrap().values;
-        let gpgx = plan(&md(0));
+        let gpgx = plan(&md(1));
         assert_eq!((gpgx.kind, gpgx.bits), (3, 0));
         // Inputs 0, 34, 68, 102 then 136, 170, 204, 238; outputs 0, 52, 87, 116 then 144, 172, 206, 255.
         assert_eq!(gpgx.table[..4], [0x6644_2200, 0xEECC_AA88, 0x7457_3400, 0xFFCE_AC90]);
         assert_eq!(gpgx.table[4..], [0; 4]);
         assert!((f64::from(gpgx.out_scale) - 1.0 / 255.0).abs() < 1e-9);
-        let pos = |n: &str| names.iter().position(|v| *v == n).unwrap() as u32;
-        let kega = plan(&md(pos("kega_fusion")));
+        let kega = plan(&md(2));
         assert_eq!(kega.table[0], 0x6342_2100, "0, 33, 66, 99");
         assert_eq!(kega.table[2..], gpgx.table[2..], "the same measured outputs");
-        let regen = plan(&md(pos("regen")));
+        let regen = plan(&md(3));
         assert_eq!(regen.table[0], 0x6040_2000, "0, 32, 64, 96");
-        assert_eq!(plan(&md(pos("genesis_plus_gx"))).table, gpgx.table);
-        // The palette number does nothing here.
-        let other = Params {
-            source_colour_palette: 20,
-            ..md(0)
-        };
-        assert_eq!(plan(&other).table, gpgx.table);
+        assert_eq!(plan(&md(20)).table, gpgx.table, "past the last emulator: the first");
     }
 }
