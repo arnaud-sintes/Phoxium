@@ -75,7 +75,7 @@ Across the targets:
 - [x] **One variant parameter and a named combo** (the design note's first step, built 2026-11-25): `source_colour_variant` and a menu combo that shows the names from the data file replaced `source_colour_palette` and `source_colour_input`; the profile field is `colour_variant`.
 - [ ] **Menu and command line**: the menu shows the three target settings as plain choices; show the data file's label, notes and the provenance (the tag of every value) next to the choice, a named combo for the palette and the emulator, and a `--source-colour` flag (only `--set source_colour_target=...` exists).
 - [ ] **A live look on a real emulator window for every shipped target**, with the target on and off (nothing but the headless renders and the GPU tests has run).
-- [ ] **A palette-remap kind** (a named source palette, the emulator's, matched pixel by pixel) for the CGA, CPC, Spectrum and the fixed-palette consoles; **a composite-driven kind** for the C64, NES, Atari and Apple II. Both need a design note before code.
+- [ ] **A palette-remap kind** (a named source palette, the emulator's, matched pixel by pixel) for the CGA, CPC, Spectrum and the fixed-palette consoles; **a composite-driven kind** for the C64, NES, Atari and Apple II (built for the C64 and the NES as the `signal` kind, with the nearest-colour recognition and the composite artefacts checked; the Atari and the Apple II need more data). The palette-remap kind needs a design note before code.
 - [ ] **One white-scale policy** for the targets (the Game Boy Color keeps 240 of 255, the Game Boy Advance a tinted white, the Mega Drive full white at 255 against an open 238): decide, then say it in each file.
 
 ## Very low
