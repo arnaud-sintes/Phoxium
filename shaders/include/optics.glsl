@@ -3,7 +3,9 @@
 // crates/crt-model/src/optics.rs. All passes use the standard set 0 (Params, FrameConstants, the chain input
 // at binding 2, the chain output at binding 3) and the stage's set 1 below, with one push-constant block.
 //
-// Set 1 (each pass has its own descriptor set; every binding is written, unused ones with a 1 x 1 image):
+// Set 1 (each pass has its own descriptor set; every binding is written, unused ones with a 1 x 1 image). The passes
+// that write images have a set layout with the storage images 0 to 4 and the buffer 18; the composite has its own
+// layout with the images it reads (2, 4 to 17, 19 to 21) as sampled images and the buffer 18:
 //   0 OPT_SRC   pass input (down: level k - 1; kernel: level l; gauss_v: per-Gaussian red sums)
 //   1 OPT_DST   pass output (down: level k; kernel: the halo at level l; gauss_h: red sums)
 //   2, 3        gauss_h outputs / gauss_v inputs (green, blue sums)
@@ -66,6 +68,26 @@ layout(std430, set = 1, binding = 18) readonly buffer OpticsWeights {
         vec3 v10 = imageLoad(IM, ivec2(b.x, a.y)).rgb;                                                         \
         vec3 v01 = imageLoad(IM, ivec2(a.x, b.y)).rgb;                                                         \
         vec3 v11 = imageLoad(IM, b).rgb;                                                                       \
+        return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);                                              \
+    }
+
+// The same read of a sampled image (texture2D, `texelFetch`: the exact texel, no filtering). The composite pass reads
+// its images this way: the images of the pass are 22 and a storage image binding counts per shader stage against
+// maxPerStageDescriptorStorageImages (16 on an Intel UHD 770), a sampled image against a limit of 200.
+#define OPT_BILINEAR_TEX(NAME, TX)                                                                             \
+    vec3 NAME(ivec2 p, int lvl) {                                                                              \
+        float s = float(1 << lvl);                                                                             \
+        vec2 u = (vec2(p) - 0.5 * (s - 1.0)) / s;                                                              \
+        ivec2 sz = textureSize(TX, 0);                                                                         \
+        vec2 fl = floor(u);                                                                                    \
+        vec2 f = u - fl;                                                                                       \
+        ivec2 i0 = ivec2(fl);                                                                                  \
+        ivec2 a = clamp(i0, ivec2(0), sz - 1);                                                                 \
+        ivec2 b = clamp(i0 + 1, ivec2(0), sz - 1);                                                             \
+        vec3 v00 = texelFetch(TX, a, 0).rgb;                                                                   \
+        vec3 v10 = texelFetch(TX, ivec2(b.x, a.y), 0).rgb;                                                     \
+        vec3 v01 = texelFetch(TX, ivec2(a.x, b.y), 0).rgb;                                                     \
+        vec3 v11 = texelFetch(TX, b, 0).rgb;                                                                   \
         return mix(mix(v00, v10, f.x), mix(v01, v11, f.x), f.y);                                              \
     }
 

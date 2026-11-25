@@ -1,5 +1,6 @@
 #version 450
 #extension GL_GOOGLE_include_directive : require
+#extension GL_EXT_samplerless_texture_functions : require
 
 // Slot `optics` (ARCHITECTURE 3.7, image contract; T-45, CRT.md rule 7, QUESTIONS PHY-10): tube domain -> tube
 // domain, linear light. The composite pass, after the pyramid, halo and horizontal diffusion passes (src/gpu/stages/optics.rs).
@@ -44,41 +45,41 @@ layout(local_size_x = TILE, local_size_y = TILE) in;
 
 layout(set = 0, binding = 2) uniform sampler2D light_in;
 layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
-layout(set = 1, binding = 2, rgba16f) uniform readonly image2D diff_img;
-layout(set = 1, binding = 4, rgba16f) uniform readonly image2D halo_img;
-layout(set = 1, binding = 5, rgba16f) uniform readonly image2D top;
-layout(set = 1, binding = 6, rgba16f) uniform readonly image2D level1;
-layout(set = 1, binding = 7, rgba16f) uniform readonly image2D level2;
-layout(set = 1, binding = 8, rgba16f) uniform readonly image2D level3;
-layout(set = 1, binding = 9, rgba16f) uniform readonly image2D level4;
-layout(set = 1, binding = 10, rgba16f) uniform readonly image2D level5;
-layout(set = 1, binding = 11, rgba16f) uniform readonly image2D level6;
-layout(set = 1, binding = 12, rgba16f) uniform readonly image2D level7;
-layout(set = 1, binding = 13, rgba16f) uniform readonly image2D level8;
-layout(set = 1, binding = 14, rgba16f) uniform readonly image2D level9;
-layout(set = 1, binding = 15, rgba16f) uniform readonly image2D level10;
-layout(set = 1, binding = 16, rgba16f) uniform readonly image2D level11;
-layout(set = 1, binding = 17, rgba16f) uniform readonly image2D level12;
-layout(set = 1, binding = 19, rgba16f) uniform readonly image2D bloom0;
-layout(set = 1, binding = 20, rgba16f) uniform readonly image2D bloom1;
-layout(set = 1, binding = 21, rgba16f) uniform readonly image2D bloom2;
+layout(set = 1, binding = 2) uniform texture2D diff_img;
+layout(set = 1, binding = 4) uniform texture2D halo_img;
+layout(set = 1, binding = 5) uniform texture2D top;
+layout(set = 1, binding = 6) uniform texture2D level1;
+layout(set = 1, binding = 7) uniform texture2D level2;
+layout(set = 1, binding = 8) uniform texture2D level3;
+layout(set = 1, binding = 9) uniform texture2D level4;
+layout(set = 1, binding = 10) uniform texture2D level5;
+layout(set = 1, binding = 11) uniform texture2D level6;
+layout(set = 1, binding = 12) uniform texture2D level7;
+layout(set = 1, binding = 13) uniform texture2D level8;
+layout(set = 1, binding = 14) uniform texture2D level9;
+layout(set = 1, binding = 15) uniform texture2D level10;
+layout(set = 1, binding = 16) uniform texture2D level11;
+layout(set = 1, binding = 17) uniform texture2D level12;
+layout(set = 1, binding = 19) uniform texture2D bloom0;
+layout(set = 1, binding = 20) uniform texture2D bloom1;
+layout(set = 1, binding = 21) uniform texture2D bloom2;
 
-OPT_BILINEAR(bilin_halo, halo_img)
-OPT_BILINEAR(bilin1, level1)
-OPT_BILINEAR(bilin2, level2)
-OPT_BILINEAR(bilin3, level3)
-OPT_BILINEAR(bilin4, level4)
-OPT_BILINEAR(bilin5, level5)
-OPT_BILINEAR(bilin6, level6)
-OPT_BILINEAR(bilin7, level7)
-OPT_BILINEAR(bilin8, level8)
-OPT_BILINEAR(bilin9, level9)
-OPT_BILINEAR(bilin10, level10)
-OPT_BILINEAR(bilin11, level11)
-OPT_BILINEAR(bilin12, level12)
-OPT_BILINEAR(bilin_b0, bloom0)
-OPT_BILINEAR(bilin_b1, bloom1)
-OPT_BILINEAR(bilin_b2, bloom2)
+OPT_BILINEAR_TEX(bilin_halo, halo_img)
+OPT_BILINEAR_TEX(bilin1, level1)
+OPT_BILINEAR_TEX(bilin2, level2)
+OPT_BILINEAR_TEX(bilin3, level3)
+OPT_BILINEAR_TEX(bilin4, level4)
+OPT_BILINEAR_TEX(bilin5, level5)
+OPT_BILINEAR_TEX(bilin6, level6)
+OPT_BILINEAR_TEX(bilin7, level7)
+OPT_BILINEAR_TEX(bilin8, level8)
+OPT_BILINEAR_TEX(bilin9, level9)
+OPT_BILINEAR_TEX(bilin10, level10)
+OPT_BILINEAR_TEX(bilin11, level11)
+OPT_BILINEAR_TEX(bilin12, level12)
+OPT_BILINEAR_TEX(bilin_b0, bloom0)
+OPT_BILINEAR_TEX(bilin_b1, bloom1)
+OPT_BILINEAR_TEX(bilin_b2, bloom2)
 
 // Pyramid level k (1 to 12) read bilinearly at the host pixel p.
 vec3 level_bilin(ivec2 p, int k) {
@@ -138,7 +139,7 @@ void main() {
         for (int d = -rd; d <= rd; ++d) {
             int y = p.y + d;
             if (y >= 0 && y < sz.y) {
-                blur += opt_buf.weight[abs(d)] * imageLoad(diff_img, ivec2(p.x, y)).rgb;
+                blur += opt_buf.weight[abs(d)] * texelFetch(diff_img, ivec2(p.x, y), 0).rgb;
             }
         }
     }
@@ -162,10 +163,10 @@ void main() {
     } else if (mode == 2) {
         h = pyramid_halo(p);
     } else if (mode == 3) {
-        h = imageLoad(halo_img, p).rgb;
+        h = texelFetch(halo_img, p, 0).rgb;
     }
 
-    vec3 mean = wg > 0.0 ? imageLoad(top, ivec2(0)).rgb * pc.scal.x : vec3(0.0);
+    vec3 mean = wg > 0.0 ? texelFetch(top, ivec2(0), 0).rgb * pc.scal.x : vec3(0.0);
     vec3 g = (1.0 - wh - wg) * d + wh * h + wg * mean;
     if (wb > 0.0) {
         // Bloom: the fed light q L leaves the direct image, the blurred feed comes back.

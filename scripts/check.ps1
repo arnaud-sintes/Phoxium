@@ -20,8 +20,8 @@
     on stderr.
 .PARAMETER SmokeGpu
     Vulkan device index (`phoxium --list-gpus`) the smoke run uses (`--gpu`). Default: the automatic choice, the adapter of
-    the monitor the output covers, which depends on the monitor layout (an Intel UHD 770 reports a lower
-    `maxPerStageDescriptorStorageImages`, 16, than the optics layout declares, 22: one known validation line, QUESTIONS REV-2 notes).
+    the monitor the output covers, which depends on the monitor layout (pin it to run the smoke on a given GPU,
+    for instance the Intel one, whose limits are the lowest of the development PC).
 .PARAMETER SkipTests
     Skip `cargo test` (fmt, clippy and licences still run). Full gate only.
 .PARAMETER Full

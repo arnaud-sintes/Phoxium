@@ -7,6 +7,16 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.9.3] - 2026-11-25
+
+### Fixed
+
+- The optics stage no longer declares more storage images per shader stage than a low-limit GPU allows: the composite pass reads its 18 images as sampled images (`texelFetch`, the same values) in a layout of its own and the other passes use a trimmed layout, so a pipeline layout has at most 6 storage images instead of 22 (an Intel UHD 770 allows 16 and the validation layer printed an error at startup). The pictures are unchanged: 28 offline renders of every optics configuration and the ten presets are byte-identical to 0.9.2.
+
+### Changed
+
+- Documentation only: the TODO is split by what each item needs (this PC alone, the owner at the keyboard, other hardware); the FP16 phosphor history and the prefix reuse were tried or studied and dropped, with their measurements in `docs/QUESTIONS.md`; the README no longer lists the Intel validation message as a known limit.
+
 ## [0.9.2] - 2026-11-24
 
 ### Fixed
@@ -345,7 +355,8 @@ The entries below are the detail, grouped by Added, Changed, Fixed and Security.
   - D-04 (WP6a): the release executables embedded the user profile path (the cargo registry paths of dependency panic locations, and the Dear ImGui assertion paths). `package.ps1` builds with `--remap-path-prefix` for the profile, the repository, `CARGO_HOME` and the target folder, trims the C++ paths with MSVC `/d1trimfile:`, and fails when a staged executable contains the profile or repository path, the target folder, the user name or the machine name (ASCII or UTF-16).
   - R-03 (release step, not a code change): the author e-mail address is removed from every commit by a one-time history rewrite before v0.2.0 is published, the one exception to the "no force pushes to `main`" rule (DESIGN 11, ENV 7). Commit hashes quoted in older entries of this file, `QUESTIONS.md` and `PLAN.md` are stale afterwards.
 
-[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.2...HEAD
+[Unreleased]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.3...HEAD
+[0.9.3]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.2...v0.9.3
 [0.9.2]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/arnaud-sintes/Phoxium/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/arnaud-sintes/Phoxium/compare/v0.8.0...v0.9.0

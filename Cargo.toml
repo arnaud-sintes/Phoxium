@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/appres", "crates/crt-model","crates/paramgen", "crates/pixel-demo", "crates/phoxium"]
 
 [workspace.package]
-version = "0.9.2"
+version = "0.9.3"
 edition = "2021"
 publish = false
 license = "MIT"

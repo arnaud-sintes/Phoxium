@@ -78,9 +78,21 @@ const BLOOM_BLUR_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/optics_b
 const MAX_LEVELS: usize = 14;
 /// Pyramid levels the composite can read (`level1` to `level12` of `optics.comp`).
 const PYRAMID_BINDINGS: usize = 12;
-/// Bindings of set 1: storage images 0 to 17 and 19 to 21 (the bloom lobes), the storage buffer at 18.
+/// Bindings of set 1 (the passes that write images use storage images 0 to 4 and the buffer at 18; the composite
+/// reads sampled images 2, 4 to 17 and 19 to 21 (the bloom lobes) and the buffer at 18).
 const BINDINGS: u32 = 22;
 const BUFFER_BINDING: u32 = 18;
+/// Storage images of the set 1 of the passes that write images (bindings 0 to 4).
+const STORAGE_BINDINGS: u32 = 5;
+/// The images the composite reads as sampled images (the composite's set 1 layout; `optics.comp`): the diffusion
+/// and halo images, the top, the pyramid levels 1 to 12 and the three bloom lobes.
+fn composite_bindings() -> Vec<u32> {
+    [2, 4]
+        .into_iter()
+        .chain(5..=17)
+        .chain(BLOOM_BINDING as u32..BLOOM_BINDING as u32 + 3)
+        .collect()
+}
 /// First binding of the three bloom lobes read by the composite.
 const BLOOM_BINDING: usize = 19;
 /// Largest diffusion radius in px (`OPT_DIFF_MAX`) and the start of the kernel quadrant (`OPT_KERNEL_OFFSET`).
@@ -540,7 +552,10 @@ struct Optics {
     /// The composite pass's standard set layout (the pipelines use [`Optics::layout`]).
     pass: ComputePass,
     set1_layout: vk::DescriptorSetLayout,
+    /// The composite's own set 1 layout and pipeline layout (sampled images, `composite_bindings`).
+    set1c_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
+    layout_composite: vk::PipelineLayout,
     composite: vk::Pipeline,
     down_input: vk::Pipeline,
     down: vk::Pipeline,
@@ -641,7 +656,7 @@ impl Optics {
                     height: size.1,
                 },
                 FORMAT,
-                vk::ImageUsageFlags::STORAGE,
+                vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
             )
         };
         let sizes = level_sizes(plan.size, plan.levels);
@@ -765,18 +780,22 @@ impl Optics {
         let buf = [vk::DescriptorBufferInfo::default()
             .buffer(self.buffer.buffer)
             .range(vk::WHOLE_SIZE)];
+        let composite = composite_bindings();
         let mut writes = Vec::new();
         for (s, set_infos) in infos.iter().enumerate() {
-            for (b, info) in set_infos.iter().enumerate() {
-                if b as u32 == BUFFER_BINDING {
-                    continue;
-                }
+            // The composite reads its images as sampled images; the other passes have storage images 0 to 4.
+            let (bindings, ty): (Vec<u32>, vk::DescriptorType) = if s == SET_COMPOSITE {
+                (composite.clone(), vk::DescriptorType::SAMPLED_IMAGE)
+            } else {
+                ((0..STORAGE_BINDINGS).collect(), vk::DescriptorType::STORAGE_IMAGE)
+            };
+            for b in bindings {
                 writes.push(
                     vk::WriteDescriptorSet::default()
                         .dst_set(self.sets[s])
-                        .dst_binding(b as u32)
-                        .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
-                        .image_info(info),
+                        .dst_binding(b)
+                        .descriptor_type(ty)
+                        .image_info(&set_infos[b as usize]),
                 );
             }
             writes.push(
@@ -896,8 +915,13 @@ impl Optics {
     ) {
         let bind = vk::PipelineBindPoint::COMPUTE;
         d.cmd_bind_pipeline(cb, bind, pipeline);
-        d.cmd_bind_descriptor_sets(cb, bind, self.layout, 0, &[set0, self.sets[set1]], &[]);
-        super::push(d, cb, self.layout, vk::ShaderStageFlags::COMPUTE, push);
+        let layout = if set1 == SET_COMPOSITE {
+            self.layout_composite
+        } else {
+            self.layout
+        };
+        d.cmd_bind_descriptor_sets(cb, bind, layout, 0, &[set0, self.sets[set1]], &[]);
+        super::push(d, cb, layout, vk::ShaderStageFlags::COMPUTE, push);
         d.cmd_dispatch(cb, size.0.div_ceil(group.0), size.1.div_ceil(group.1), 1);
     }
 }
@@ -909,7 +933,11 @@ unsafe fn pass_barrier(d: &ash::Device, cb: vk::CommandBuffer) {
         .src_stage_mask(compute)
         .src_access_mask(vk::AccessFlags2::SHADER_STORAGE_WRITE)
         .dst_stage_mask(compute)
-        .dst_access_mask(vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE)];
+        .dst_access_mask(
+            vk::AccessFlags2::SHADER_STORAGE_READ
+                | vk::AccessFlags2::SHADER_STORAGE_WRITE
+                | vk::AccessFlags2::SHADER_SAMPLED_READ,
+        )];
     d.cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().memory_barriers(&m));
 }
 
@@ -921,30 +949,41 @@ impl Stage for Optics {
     unsafe fn create(&mut self, d: &ash::Device) -> Res<()> {
         let s = vk::ShaderStageFlags::COMPUTE;
         self.pass.set_layout = standard_set_layout(d)?;
-        let b: Vec<_> = (0..BINDINGS)
-            .map(|i| {
-                let ty = if i == BUFFER_BINDING {
-                    vk::DescriptorType::STORAGE_BUFFER
-                } else {
-                    vk::DescriptorType::STORAGE_IMAGE
-                };
-                binding(i, ty, s)
-            })
+        // Set 1 of the passes that write images: the storage images 0 to 4 and the weights buffer.
+        let b: Vec<_> = (0..STORAGE_BINDINGS)
+            .map(|i| binding(i, vk::DescriptorType::STORAGE_IMAGE, s))
+            .chain([binding(BUFFER_BINDING, vk::DescriptorType::STORAGE_BUFFER, s)])
             .collect();
         self.set1_layout =
             d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&b), None)?;
-        let set_layouts = [self.pass.set_layout, self.set1_layout];
+        // Set 1 of the composite: its images as sampled images and the weights buffer (22 storage images in one
+        // layout exceed the 16 per stage of an Intel UHD 770; sampled images are limited to 200 there).
+        let bc: Vec<_> = composite_bindings()
+            .into_iter()
+            .map(|i| binding(i, vk::DescriptorType::SAMPLED_IMAGE, s))
+            .chain([binding(BUFFER_BINDING, vk::DescriptorType::STORAGE_BUFFER, s)])
+            .collect();
+        self.set1c_layout =
+            d.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bc), None)?;
         let ranges = [vk::PushConstantRange::default()
             .stage_flags(s)
             .offset(0)
             .size(size_of::<Push>() as u32)];
+        let set_layouts = [self.pass.set_layout, self.set1_layout];
         self.layout = d.create_pipeline_layout(
             &vk::PipelineLayoutCreateInfo::default()
                 .set_layouts(&set_layouts)
                 .push_constant_ranges(&ranges),
             None,
         )?;
-        self.composite = compute_pipeline(d, self.layout, COMPOSITE_SPV)?;
+        let set_layouts_c = [self.pass.set_layout, self.set1c_layout];
+        self.layout_composite = d.create_pipeline_layout(
+            &vk::PipelineLayoutCreateInfo::default()
+                .set_layouts(&set_layouts_c)
+                .push_constant_ranges(&ranges),
+            None,
+        )?;
+        self.composite = compute_pipeline(d, self.layout_composite, COMPOSITE_SPV)?;
         self.down_input = compute_pipeline(d, self.layout, DOWN_INPUT_SPV)?;
         self.down = compute_pipeline(d, self.layout, DOWN_SPV)?;
         self.kernel = compute_pipeline(d, self.layout, KERNEL_SPV)?;
@@ -956,7 +995,10 @@ impl Stage for Optics {
         let sizes = [
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_IMAGE)
-                .descriptor_count((BINDINGS - 1) * SETS as u32),
+                .descriptor_count(STORAGE_BINDINGS * (SETS as u32 - 1)),
+            vk::DescriptorPoolSize::default()
+                .ty(vk::DescriptorType::SAMPLED_IMAGE)
+                .descriptor_count(composite_bindings().len() as u32),
             vk::DescriptorPoolSize::default()
                 .ty(vk::DescriptorType::STORAGE_BUFFER)
                 .descriptor_count(SETS as u32),
@@ -967,7 +1009,8 @@ impl Stage for Optics {
                 .pool_sizes(&sizes),
             None,
         )?;
-        let layouts = [self.set1_layout; SETS];
+        let mut layouts = vec![self.set1_layout; SETS];
+        layouts[SET_COMPOSITE] = self.set1c_layout;
         self.sets = d.allocate_descriptor_sets(
             &vk::DescriptorSetAllocateInfo::default()
                 .descriptor_pool(self.pool)
@@ -1029,7 +1072,7 @@ impl Stage for Optics {
                     ctx,
                     vk::Extent2D { width: 1, height: 1 },
                     FORMAT,
-                    vk::ImageUsageFlags::STORAGE,
+                    vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::SAMPLED,
                 )?;
             }
             if self.buffer.mapped.is_null() {
@@ -1060,7 +1103,9 @@ impl Stage for Optics {
             return;
         };
         let compute = vk::PipelineStageFlags2::COMPUTE_SHADER;
-        let rw = vk::AccessFlags2::SHADER_STORAGE_READ | vk::AccessFlags2::SHADER_STORAGE_WRITE;
+        let rw = vk::AccessFlags2::SHADER_STORAGE_READ
+            | vk::AccessFlags2::SHADER_STORAGE_WRITE
+            | vk::AccessFlags2::SHADER_SAMPLED_READ;
         if self.transition {
             let all = self
                 .levels
@@ -1218,7 +1263,9 @@ impl Stage for Optics {
             d.destroy_pipeline(p, None);
         }
         d.destroy_pipeline_layout(self.layout, None);
+        d.destroy_pipeline_layout(self.layout_composite, None);
         d.destroy_descriptor_set_layout(self.set1_layout, None);
+        d.destroy_descriptor_set_layout(self.set1c_layout, None);
         self.pass.destroy(d);
         *self = Self::default();
     }
@@ -1243,9 +1290,7 @@ mod tests {
         let kernel = include_str!("../../../../../shaders/optics_kernel.comp");
         assert!(kernel.contains(&format!("#define OPT_TAPS_MAX {TAPS_MAX}")));
         let composite = include_str!("../../../../../shaders/optics.comp");
-        assert!(composite.contains(&format!(
-            "binding = {BLOOM_BINDING}, rgba16f) uniform readonly image2D bloom0"
-        )));
+        assert!(composite.contains(&format!("binding = {BLOOM_BINDING}) uniform texture2D bloom0")));
     }
 
     /// A bloom lobe runs on the finest level whose remaining blur fits the radius budget: level 1 read
