@@ -38,7 +38,7 @@ To read in a browser or measure (the research agents were blocked, or the docume
 
 Across the targets:
 
-- [ ] **Menu and command line**: the menu shows the three target settings as plain choices; show the data file's label, notes and the provenance (the tag of every value) next to the choice, a named combo for the palette and the emulator, and a `--source-colour` flag (only `--set source_colour_target=...` exists).
+- [ ] **A live look at the target details in the menu** (built 2026-11-26, checked only in headless previews `target/ui-preview/menu-colour-target*.png` and a headless click test): choose a target in the Source and placement panel and look at the label and variant line, the collapsed Notes and Provenance headers, the legend, the wrapping of the long notes at the menu width and at a large UI scale, and `phoxium --source-colour super_game_boy:2-a` (and a mistyped target and variant: the error lists what is accepted).
 - [ ] **A live look on a real emulator window for every shipped target**, with the target on and off (nothing but the headless renders and the GPU tests has run).
 - [ ] **One white-scale policy** for the targets (the Game Boy Color keeps 240 of 255, the Game Boy Advance a tinted white, the Mega Drive full white at 255 against an open 238): decide, then say it in each file.
 

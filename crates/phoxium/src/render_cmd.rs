@@ -26,11 +26,13 @@ use crate::{
 };
 
 pub const USAGE: &str = "Usage: phoxium render (--pattern <name[:args]> [--pattern-size <WxH>] | --image <file.png>)
-                         [--preset <id|file.toml>] [--set <id=value>]... [--size <WxH>] --out <file.png|file.pfm>
-                         [--validation]
+                         [--preset <id|file.toml>] [--source-colour <target[:variant]>] [--set <id=value>]...
+                         [--size <WxH>] --out <file.png|file.pfm> [--validation]
   Renders one frame offline through the GPU pipeline (no window) and writes an 8-bit PNG, or a float
   PFM when the file name ends in .pfm. --size is the output size (default: the source size).
-  --preset applies a tube preset (shipped or user id, or a preset file) before --set.
+  --preset applies a tube preset (shipped or user id, or a preset file) before --source-colour and --set.
+  --source-colour sets the colour target and its variant (number, id or name; the first without one), as
+  `phoxium --help` describes; --set comes after it and wins.
   --set overrides a parameter by id; vectors are comma separated, booleans are true/false, enums
   take the value name.";
 
@@ -42,6 +44,8 @@ pub struct RenderArgs {
     pub image: Option<String>,
     /// Tube preset id or file, applied before `--set`.
     pub preset: Option<String>,
+    /// `--source-colour <target[:variant]>` (checked at parse), applied after the preset and before `--set`.
+    pub colour: Option<crate::cli::ColourChoice>,
     pub sets: Vec<(String, String)>,
     pub size: Option<(u32, u32)>,
     pub out: Option<String>,
@@ -62,6 +66,9 @@ pub fn parse(args: &[String]) -> Res<RenderArgs> {
             "--out" => a.out = Some(value("--out")?),
             "--preset" => a.preset = Some(value("--preset")?),
             "--validation" => a.validation = true,
+            "--source-colour" => {
+                a.colour = Some(crate::cli::parse_colour("--source-colour", &value("--source-colour")?)?);
+            }
             "--set" => {
                 let v = value("--set")?;
                 let (id, val) = v.split_once('=').ok_or("--set expects id=value")?;
@@ -246,6 +253,9 @@ pub fn run(args: &[String]) -> Res<()> {
     if let Some(preset) = &a.preset {
         p = resolve_preset(preset)?.params();
     }
+    if let Some(c) = a.colour {
+        c.apply(&mut p, "--source-colour")?;
+    }
     for (id, v) in &a.sets {
         if let Some(w) = set_param(&mut p, id, v)? {
             eprintln!("warning: {w}");
@@ -375,6 +385,19 @@ mod tests {
         assert_eq!(a.sets, [("exposure".to_string(), "0.5".to_string())]);
         assert!(parse(&s(&["--bogus"])).is_err());
         assert!(parse(&s(&["--set", "novalue"])).is_err());
+        // `--source-colour` is read and checked as on the live command line.
+        assert_eq!(parse(&s(&["--out", "a.png"])).unwrap().colour, None);
+        let c = parse(&s(&["--source-colour", "super_game_boy:2-a"]))
+            .unwrap()
+            .colour
+            .unwrap();
+        assert_eq!(
+            (c.target, c.variant),
+            (crate::params::SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9)
+        );
+        assert!(parse(&s(&["--source-colour", "nope"])).is_err());
+        assert!(parse(&s(&["--source-colour"])).is_err());
+        assert!(USAGE.contains("--source-colour <target[:variant]>"));
     }
 
     fn temp(name: &str) -> std::path::PathBuf {

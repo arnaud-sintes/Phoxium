@@ -38,6 +38,7 @@ pub mod panels;
 pub mod picker;
 pub mod profiles_panel;
 pub mod system_panels;
+pub mod target_info;
 pub mod theme;
 
 use std::path::PathBuf;

@@ -200,6 +200,17 @@ impl Target {
         self.transform_for(usize::try_from(variant.max(1) - 1).unwrap_or(0))
     }
 
+    /// The 0-based index of the variant in force for `source_colour_variant` = `variant`: the variant itself, or 0
+    /// (the first, which [`Target::select`] uses) for a number below 1, past the last variant, or a target with none.
+    pub fn variant_index(&self, variant: i32) -> usize {
+        let i = usize::try_from(variant.max(1) - 1).unwrap_or(0);
+        if i < self.variants.len() {
+            i
+        } else {
+            0
+        }
+    }
+
     /// The transform for the variant `variant` (0 based); targets without variants, and an index past the last
     /// variant, give the target's own (first) transform.
     pub fn transform_for(&self, variant: usize) -> Transform {

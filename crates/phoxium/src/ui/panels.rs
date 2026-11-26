@@ -655,12 +655,12 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
         // The variant of the colour target: a combo of the names its data file gives (a Super Game Boy palette, the
         // emulator of a Mega Drive picture), disabled while the target has no variants.
         ParamValue::I32(v) if m.id == "source_colour_variant" => {
-            let names: Vec<&str> = crate::targets::for_value(ctx.params.source_colour_target)
+            let target = crate::targets::for_value(ctx.params.source_colour_target);
+            let names: Vec<&str> = target
                 .map(|t| t.variants.iter().map(|x| x.name.as_str()).collect())
                 .unwrap_or_default();
-            let index = usize::try_from(v.max(1) - 1)
-                .unwrap_or(0)
-                .min(names.len().saturating_sub(1));
+            // The variant in force: a number past the last variant uses the first, as the GPU stage does.
+            let index = target.map_or(0, |t| t.variant_index(v));
             let current = names.get(index).copied().unwrap_or("none for this target").to_string();
             let disabled = ui.begin_disabled_with_cond(names.is_empty());
             ui.set_next_item_width(width);
@@ -803,6 +803,17 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
     }
 }
 
+/// What follows the row of `m`: under the colour target's variant row, the details of the chosen target (its label,
+/// notes and provenance, [`super::target_info`]), whose two collapsible headers are recorded as
+/// `colour_target:notes` and `colour_target:provenance`. Nothing for any other parameter.
+pub fn after_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &ParamMeta) {
+    if m.id == "source_colour_variant" {
+        for (key, rect) in super::target_info::draw(ui, ctx.params) {
+            ctx.items.push((key.to_string(), rect));
+        }
+    }
+}
+
 /// The rows of the panel `name` (with a search: only the matching ones), with subheadings where the panel
 /// holds several groups, the count of hidden advanced parameters and a reset button when something differs
 /// from the reference. True when a value changed.
@@ -860,6 +871,7 @@ pub fn panel_body(
         }
         let _id = ui.push_id(m.id);
         changed |= param_row(ui, ctx, m);
+        after_row(ui, ctx, m);
     }
     if searching {
         return changed;

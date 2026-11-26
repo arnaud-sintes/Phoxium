@@ -55,6 +55,11 @@ Usage: phoxium [options]
   --par <W:H|number>   pixel aspect ratio of a source pixel (1:1 default, 8:7 NES/SNES, 32:35 Genesis H40)
   --aspect <par|fill|W:H|number>  picture shape: from the PAR (default), the whole tube (fill), or a forced
                        display aspect such as 4:3
+  --source-colour <target[:variant]>  colour target: the colours of the source as the device it came from would
+                       have shown them (`source_colour_target`), none or a target of the Source section (game_boy_color,
+                       super_game_boy, sega_mega_drive...); after a colon its variant (`source_colour_variant`): a
+                       number from 1, or the variant's id or name as the menu shows it (super_game_boy:2-a,
+                       sega_mega_drive:regen). Without a variant, the first. Wins over the settings and the profile
   --pattern <name[:args]>  generated test pattern instead of a capture (no window needed): flat[:level],
                        ramp, vline[:N], hline[:N], grating[:N], checker[:N], crosshatch[:N], point,
                        window[:APL%], bar[:width[:px-per-frame]], pluge, moire[:N]
@@ -152,6 +157,94 @@ pub struct Args {
     pub surround: Option<[f32; 3]>,
     pub par: Option<f32>,
     pub aspect: Option<Aspect>,
+    /// `--source-colour <target[:variant]>`: the colour target and variant, checked against the data files at parse.
+    pub colour: Option<ColourChoice>,
+}
+
+/// The `--source-colour` choice: a value of `source_colour_target` and the number of `source_colour_variant`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ColourChoice {
+    /// The value of `source_colour_target` (0 = none, then the data files in the order of `params/source.toml`).
+    pub target: u32,
+    /// The variant number, from 1 (1 when the text names no variant).
+    pub variant: i32,
+}
+
+impl ColourChoice {
+    /// Sets `source_colour_target` and `source_colour_variant` through the checked setter, as every other option does;
+    /// `flag` names the option in the messages.
+    pub fn apply(self, params: &mut Params, flag: &str) -> Res<()> {
+        set_flag(params, flag, "source_colour_target", ParamValue::Enum(self.target))?;
+        set_flag(params, flag, "source_colour_variant", ParamValue::I32(self.variant))
+    }
+}
+
+/// How a name is compared: lower case, with the spaces and dashes read as `_` (`Genesis Plus GX`, `2-A`).
+fn name_key(text: &str) -> String {
+    text.trim().to_lowercase().replace([' ', '-'], "_")
+}
+
+/// The 0-based index of the variant of `target` that `text` names: a position from 1 when the text is digits only and
+/// within the variants, else an id or a name ([`name_key`] on both sides), which is how a variant whose id is a
+/// number too large to be a position (`800` the Atari 800, `24` degrees) is reached. `None` when nothing matches.
+pub fn variant_by_text(target: &crate::targets::Target, text: &str) -> Option<usize> {
+    let text = text.trim();
+    if !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit()) {
+        if let Some(n) = text
+            .parse::<usize>()
+            .ok()
+            .filter(|n| (1..=target.variants.len()).contains(n))
+        {
+            return Some(n - 1);
+        }
+    }
+    let key = name_key(text);
+    target
+        .variants
+        .iter()
+        .position(|v| name_key(&v.id) == key || name_key(&v.name) == key)
+}
+
+/// Reads `<target>[:<variant>]`: the target is a value name of `source_colour_target` (case and `-` or `_` free),
+/// the variant a number from 1 or an id or name of the target's data file ([`variant_by_text`]). No variant means
+/// the first. A target with no variants takes none; an unknown target or variant is an error listing what is accepted.
+pub fn parse_colour(flag: &str, text: &str) -> Res<ColourChoice> {
+    let values = crate::params::meta("source_colour_target").map_or(&[][..], |m| m.values);
+    let (name, variant) = match text.split_once(':') {
+        Some((n, v)) => (n, Some(v)),
+        None => (text, None),
+    };
+    let wanted = name_key(name);
+    let Some(target) = values.iter().position(|v| *v == wanted) else {
+        return Err(format!(
+            "{flag} expects <target>[:<variant>] with a target of {}, got \"{text}\"",
+            values.join(", ")
+        )
+        .into());
+    };
+    let choice = |variant| ColourChoice {
+        target: target as u32,
+        variant,
+    };
+    let Some(variant) = variant else {
+        return Ok(choice(1));
+    };
+    let Some(t) = crate::targets::for_value(target as u32).filter(|t| !t.variants.is_empty()) else {
+        return Err(format!("{flag}: \"{}\" has no variants, got \"{variant}\"", values[target]).into());
+    };
+    match variant_by_text(t, variant) {
+        Some(i) => Ok(choice(i as i32 + 1)),
+        None => {
+            let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+            Err(format!(
+                "{flag}: \"{}\" has no variant \"{variant}\" (a number from 1 to {}, or {})",
+                t.id,
+                ids.len(),
+                ids.join(", ")
+            )
+            .into())
+        }
+    }
 }
 
 /// The `--aspect` choice (T-96).
@@ -239,6 +332,9 @@ impl Args {
         }
         if let Some(p) = self.par {
             set_flag(params, "--par", "source_par", ParamValue::F32(p))?;
+        }
+        if let Some(c) = self.colour {
+            c.apply(params, "--source-colour")?;
         }
         let par = ParamValue::Enum(crate::params::RASTER_ASPECT_PAR);
         match self.aspect {
@@ -367,6 +463,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                     _ => return Err("--surround expects r,g,b with values from 0 to 1".into()),
                 }
             }
+            "--source-colour" => a.colour = Some(parse_colour("--source-colour", &value("--source-colour")?)?),
             "--par" => a.par = Some(parse_ratio("--par", &value("--par")?)?),
             "--aspect" => {
                 a.aspect = Some(match value("--aspect")?.as_str() {
@@ -518,6 +615,139 @@ mod tests {
         assert!(parse("--surround 1,2").is_err());
         assert!(parse("--par 0:1").is_err());
         assert!(parse("--scale-mode huge").unwrap().apply_source(&mut p).is_err());
+    }
+
+    fn colour(text: &str) -> Res<ColourChoice> {
+        // One argument, so that a variant name with spaces ("Kega Fusion") stays whole, as a quoted shell word does.
+        Ok(parse_from(["--source-colour".to_string(), text.to_string()])?
+            .colour
+            .unwrap())
+    }
+
+    /// `--source-colour <target[:variant]>`: the target by its value name, the variant by number, id or name, the
+    /// first variant when none is given; it sets the two parameters as `--set` would and wins over the profile.
+    #[test]
+    fn source_colour_flag() {
+        use crate::params::{
+            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_NONE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+        };
+        assert_eq!(parse("").unwrap().colour, None);
+        let gbc = ColourChoice {
+            target: SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
+            variant: 1,
+        };
+        assert_eq!(colour("game_boy_color").unwrap(), gbc);
+        // Case, dashes and underscores do not matter, as for the other value names.
+        assert_eq!(colour("Game-Boy-Color").unwrap(), gbc);
+        assert_eq!(colour("none").unwrap().target, SOURCE_COLOUR_TARGET_NONE);
+        // Variants of the Super Game Boy: a number, an id, a name, any case, dash or underscore.
+        let sgb = |variant| ColourChoice {
+            target: SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+            variant,
+        };
+        assert_eq!(colour("super_game_boy").unwrap(), sgb(1));
+        assert_eq!(colour("super_game_boy:1").unwrap(), sgb(1));
+        assert_eq!(colour("super_game_boy:9").unwrap(), sgb(9));
+        assert_eq!(colour("super_game_boy:32").unwrap(), sgb(32));
+        assert_eq!(colour("super_game_boy:2-a").unwrap(), sgb(9));
+        assert_eq!(colour("super_game_boy:2_A").unwrap(), sgb(9));
+        assert_eq!(colour("super-game-boy:4-h").unwrap(), sgb(32));
+        // A variant by the name the menu shows (spaces read as `_`).
+        let md = colour("sega_mega_drive:Kega Fusion").unwrap();
+        assert_eq!(md.variant, 2);
+        assert_eq!(colour("sega_mega_drive:kega_fusion").unwrap(), md);
+        assert_eq!(colour("sega_mega_drive:regen").unwrap().variant, 3);
+        // An id made of digits is reached when it is not a position: the Atari 800 (3rd) and 400 (4th) by their ids,
+        // the 3rd by its position too.
+        assert_eq!(colour("atari_8bit_gtia:800").unwrap().variant, 3);
+        assert_eq!(colour("atari_8bit_gtia:400").unwrap().variant, 4);
+        assert_eq!(colour("atari_8bit_gtia:3").unwrap().variant, 3);
+        assert_eq!(colour("atari_2600_tia:24").unwrap().variant, 2);
+        // Errors name the option and what is accepted.
+        let e = colour("gameboy").unwrap_err().to_string();
+        assert!(
+            e.starts_with("--source-colour expects <target>[:<variant>]")
+                && e.contains("game_boy_color, game_boy_advance"),
+            "{e}"
+        );
+        assert!(e.ends_with("got \"gameboy\""), "{e}");
+        for (text, wanted) in [
+            ("super_game_boy:0", "a number from 1 to 32"),
+            ("super_game_boy:33", "1_a, 1_b"),
+            ("super_game_boy:9-z", "has no variant \"9-z\""),
+            ("super_game_boy:", "has no variant \"\""),
+            ("sega_mega_drive:snes", "genesis_plus_gx, kega_fusion, regen"),
+            ("none:1", "\"none\" has no variants"),
+            ("game_boy_color:1", "has no variants"),
+        ] {
+            let e = colour(text).unwrap_err().to_string();
+            assert!(e.starts_with("--source-colour: ") && e.contains(wanted), "{text}: {e}");
+        }
+        assert!(parse("--source-colour").is_err());
+        assert!(USAGE.contains("--source-colour <target[:variant]>"));
+        // It sets both parameters as `--set` would, over what a profile put there.
+        let mut p = Params::default();
+        p.set("source_colour_variant", ParamValue::I32(17));
+        parse("--source-colour super_game_boy:2-a")
+            .unwrap()
+            .apply_source(&mut p)
+            .unwrap();
+        assert_eq!(
+            (p.source_colour_target, p.source_colour_variant),
+            (SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9)
+        );
+        // Without a variant the first is selected, whatever the variant was.
+        parse("--source-colour game_boy_color")
+            .unwrap()
+            .apply_source(&mut p)
+            .unwrap();
+        assert_eq!(
+            (p.source_colour_target, p.source_colour_variant),
+            (SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, 1)
+        );
+        parse("--source-colour none").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_NONE);
+        // The same result as the generic path (`render --set`) with the same values.
+        let mut q = Params::default();
+        crate::render_cmd::set_param(&mut q, "source_colour_target", "super_game_boy").unwrap();
+        crate::render_cmd::set_param(&mut q, "source_colour_variant", "9").unwrap();
+        let mut p = Params::default();
+        parse("--source-colour super_game_boy:9")
+            .unwrap()
+            .apply_source(&mut p)
+            .unwrap();
+        assert_eq!(p, q);
+    }
+
+    /// The variant text of every shipped target is unambiguous: every variant is found by its number, its id and its
+    /// name; no id is made of digits only (that is a number); no two variants share an id or a name.
+    #[test]
+    fn every_shipped_variant_is_reachable_by_number_id_and_name() {
+        for t in crate::targets::shipped() {
+            for (i, v) in t.variants.iter().enumerate() {
+                // An id made of digits must not be a position (it would be shadowed by the number).
+                if v.id.bytes().all(|b| b.is_ascii_digit()) {
+                    let n: usize = v.id.parse().unwrap();
+                    assert!(
+                        !(1..=t.variants.len()).contains(&n),
+                        "{}: id {} is a position",
+                        t.id,
+                        v.id
+                    );
+                }
+                for text in [(i + 1).to_string(), v.id.clone(), v.name.clone()] {
+                    assert_eq!(variant_by_text(t, &text), Some(i), "{}: \"{text}\"", t.id);
+                    let c = parse_colour("--source-colour", &format!("{}:{text}", t.id)).unwrap();
+                    assert_eq!(c.variant, i as i32 + 1, "{}: \"{text}\"", t.id);
+                }
+            }
+            assert_eq!(
+                variant_by_text(t, &(t.variants.len() + 1).to_string()),
+                None,
+                "{}",
+                t.id
+            );
+        }
     }
 
     /// Review D-07: --par, --aspect and --surround go through the checked setter. Values outside the hard

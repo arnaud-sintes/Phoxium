@@ -682,6 +682,7 @@ fn search_results(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
         for p in rows {
             let _id = ui.push_id(p.id);
             r.params_changed |= panels::param_row(ui, &mut ctx, p);
+            panels::after_row(ui, &mut ctx, p);
             found += 1;
         }
     }
