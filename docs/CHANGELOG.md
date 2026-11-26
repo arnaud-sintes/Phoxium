@@ -33,6 +33,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ### Fixed
 
+- **A colour target did nothing useful on a monochrome phosphor type.** `decode` took the BT.601 luma of the picture for any `phosphor_type` other than P22 before the `target` slot, so every colour-dependent target (the Amstrad CPC green monitor's 9 : 3 : 1 mix, the recognising C64, NES and Atari targets, the Game Boy palettes, the Virtual Boy) saw three equal channels: with P31 the CPC green screen was bit-identical to target off, and the C64 mapped red, blue, orange, brown and dark grey to one grey. `decode` now keeps the colour while `source_colour_target` is not `none`, and the `target` slot takes the BT.601 luma of its own output on a monochrome phosphor, so the target acts on the colour and the later stages still get three equal channels. With no target the picture is bit for bit what it was; the SNES black boost and Neo Geo curves now act on the colour and then the luma instead of on the grey (a few codes on a monochrome phosphor). The notes of the CPC green screen, the description of `source_colour_target` and the reference say so.
 - The **Colour variant** combo showed the last variant when `source_colour_variant` was past the last variant of the chosen target (a saved number 9 after switching to a target with four), while the GPU stage uses the first. It now shows the first (`Target::variant_index`).
 
 ## [0.10.0] - 2026-11-25

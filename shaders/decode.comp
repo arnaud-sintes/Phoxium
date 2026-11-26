@@ -23,7 +23,10 @@
 // Monochrome phosphor type (params.phosphor_type other than p22, QUESTIONS PHY-19; src/phosphor_type.rs): one gun, so the
 // three channels carry the BT.601 luma Y' = 0.299 R' + 0.587 G' + 0.114 B' of the gamma-encoded code values (the weights of
 // crt_model::composite::LUMA, oracle crt_model::phosphor_types::mono_drive), taken before the drive voltage and the gun
-// law. P22 does not take the branch (bit for bit unchanged).
+// law. P22 does not take the branch (bit for bit unchanged). The branch is also skipped while a source colour target is on
+// (`params.source_colour_target` is not `none`; every value after `none` has a data file, so the slot `target` runs): the target
+// then acts on the colour picture and takes this same luma of ITS OUTPUT (shaders/target.comp), so the stages after it still
+// receive three equal channels. With no target the stage is unchanged bit for bit.
 // Flip (`source_flip`, applied to the upright picture after the quarter turn) mirrors the block index.
 // Pre-filter (`source_prefilter`, oracle crt_model::prefilter): with a divisor above 1 a native pixel can be read as
 // a kernel-weighted sum of the captured texels around its block's centre (box, triangle, Lanczos 2 and 3, sinc)
@@ -167,7 +170,9 @@ void main() {
         }
     }
     vec3 code = captured_code(b);
-    if (params.phosphor_type != PHOSPHOR_TYPE_P22) {
+    // One gun: the luma, unless a source colour target is on (then the slot `target` takes the luma of its own output, see
+    // shaders/target.comp, so that the target acts on the colour the device shows).
+    if (params.phosphor_type != PHOSPHOR_TYPE_P22 && params.source_colour_target == SOURCE_COLOUR_TARGET_NONE) {
         code = vec3(dot(code, vec3(0.299, 0.587, 0.114)));
     }
     vec3 v = drive_voltage(code);

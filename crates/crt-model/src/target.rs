@@ -189,7 +189,7 @@ pub struct Palette {
 }
 
 impl Palette {
-    /// BT.601 luma of the drive voltage (the weights `decode` uses for a monochrome phosphor).
+    /// BT.601 luma of the drive voltage (the weights `decode` uses for a monochrome phosphor when no target is on).
     pub fn luma(v: [f64; 3]) -> f64 {
         0.299 * v[0] + 0.587 * v[1] + 0.114 * v[2]
     }
@@ -455,6 +455,14 @@ impl Transform {
             Transform::Signal(s) => s.apply(v),
             Transform::Lut(l) => l.apply(v),
         }
+    }
+
+    /// The target colour of `v` shown by a monochrome (one-gun) phosphor type: the BT.601 luma of [`Transform::apply`] on
+    /// the colour `v`, in all three channels ([`crate::phosphor_types::mono_drive`]). The chain does the target first
+    /// (`decode` keeps the colour while a target is on) and the luma of its output second (`shaders/target.comp`), so the
+    /// target never sees a grey picture on a monochrome tube.
+    pub fn apply_mono(&self, v: [f64; 3]) -> [f64; 3] {
+        [crate::phosphor_types::mono_drive(self.apply(v)); 3]
     }
 }
 
@@ -1296,6 +1304,43 @@ mod tests {
             );
             assert_eq!(c.map(|c| (c * 255.0).round() as u8), bytes, "{u} {v} {y}");
         }
+    }
+
+    /// On a monochrome tube the target acts on the colour and the luma of its output is shown: the CPC green monitor's 9 : 3 : 1
+    /// grey keeps its order (red three times green), where the luma first (BT.601) would make green the heavier; the three
+    /// channels are equal, and a grey picture comes out as the target's grey.
+    #[test]
+    fn apply_mono_takes_the_luma_of_the_targets_output() {
+        let cpc = Transform::Matrix(Matrix {
+            rows: [[9.0, 3.0, 1.0]; 3],
+            input_bits: 8,
+            input_range: 1.0,
+            input_gamma: 1.0,
+            clamp: f64::INFINITY,
+            divisor: 13.0,
+            output_gamma: 1.0,
+            output_scale: 1.0,
+        });
+        let red = cpc.apply_mono([1.0, 0.0, 0.0]);
+        let green = cpc.apply_mono([0.0, 1.0, 0.0]);
+        assert_eq!(red[0], red[1]);
+        assert_eq!(red[1], red[2]);
+        assert!(close(red[0], 9.0 / 13.0, 1e-12) && close(green[0], 3.0 / 13.0, 1e-12));
+        // The luma first would give red 0.299 < green 0.587.
+        assert!(
+            crate::phosphor_types::mono_drive([1.0, 0.0, 0.0]) < crate::phosphor_types::mono_drive([0.0, 1.0, 0.0])
+        );
+        // The luma of an equal-channel output is that grey (the weights add to 1).
+        let grey = cpc.apply_mono([0.4, 0.4, 0.4]);
+        assert!(close(grey[0], 0.4, 1e-12));
+        // A target with a colour output (the Game Boy Color matrix) gives the luma of that colour.
+        let gbc = gbc();
+        let v = [0.9, 0.2, 0.5];
+        let c = gbc.apply(v);
+        let m = Transform::Matrix(gbc).apply_mono(v);
+        assert!(close(m[0], 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2], 1e-12));
+        assert_eq!(m[0], m[1]);
+        assert_eq!(m[1], m[2]);
     }
 
     /// A lookup replaces a pixel that is a code by that code's colour, whichever expansion the emulator uses, and lets any other

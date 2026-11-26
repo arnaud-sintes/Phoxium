@@ -36,6 +36,11 @@
 //             through. The table shares the frame block with the signal kind (one target at a time). No device code is
 //             recovered (bits = 0).
 // Alpha is copied.
+//
+// Monochrome phosphor (`params.phosphor_type` other than p22): `decode` does not take the luma while a target is on, so the
+// target above acts on the colour picture; this slot then writes the BT.601 luma of its output to the three channels (the
+// one-gun tube shows the device's colour as grey), and the stages after it receive three equal channels as for a target-less
+// monochrome tube.
 
 #include "params.glsl"
 #include "common.glsl"
@@ -217,6 +222,12 @@ void main() {
         c = index >= 0 ? frame.target_table[index].rgb : x;
     } else {
         c = signal_colour(x);
+    }
+    // A monochrome phosphor type (one gun): `decode` left the colour alone because this target is on, so the device's colour
+    // is shown as the BT.601 luma of what the device outputs, in all three channels (`crt_model::target::Transform::apply_mono`).
+    // P22 does not take the branch (bit for bit unchanged).
+    if (params.phosphor_type != PHOSPHOR_TYPE_P22) {
+        c = vec3(dot(c, vec3(0.299, 0.587, 0.114)));
     }
     imageStore(drive_out, p, round_f16(vec4(c, src.a)));
 }
