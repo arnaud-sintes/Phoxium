@@ -101,6 +101,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "texas_instruments_tms9928.toml",
         include_str!("../../../presets/targets/texas_instruments_tms9928.toml"),
     ),
+    (
+        "snk_neo_geo.toml",
+        include_str!("../../../presets/targets/snk_neo_geo.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -195,6 +199,18 @@ struct CurveFile {
     table: Vec<u32>,
     input_bits: u32,
     output_max: f64,
+    /// Variants of the curve, each a factor on the whole output (the Neo Geo's dark bit and shadow); the first one is the
+    /// target's own.
+    variants: Option<Vec<CurveVariant>>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CurveVariant {
+    id: String,
+    name: String,
+    /// The factor on every output level, above 0 and at most 1.
+    scale: f64,
 }
 
 #[derive(Deserialize)]
@@ -977,7 +993,57 @@ impl CurveFile {
         Ok(Curve {
             table,
             output_max: self.output_max,
+            scale: 1.0,
         })
+    }
+
+    /// The keys that are present, for the provenance check.
+    fn keys(&self) -> Vec<&'static str> {
+        let mut k = vec!["table", "input_bits", "output_max"];
+        if self.variants.is_some() {
+            k.push("variants");
+        }
+        k
+    }
+
+    /// The variants of the curve: the base curve with each variant's scale, the first one the target's own.
+    fn curve_variants(&self, file: &str, base: &Curve) -> Result<Vec<Variant>, String> {
+        let Some(list) = &self.variants else {
+            return Ok(Vec::new());
+        };
+        if list.is_empty() || list.len() > MAX_PALETTES {
+            return Err(format!("{file}: curve.variants must hold 1 to {MAX_PALETTES} variants"));
+        }
+        let mut out: Vec<Variant> = Vec::new();
+        for v in list {
+            if v.id.is_empty()
+                || !v
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(format!(
+                    "{file}: curve.variants id \"{}\" must be lower case letters, digits and '_'",
+                    v.id
+                ));
+            }
+            if out.iter().any(|x| x.id == v.id) {
+                return Err(format!("{file}: curve.variants id \"{}\" is used twice", v.id));
+            }
+            positive(file, "curve.variants", "scale", v.scale)?;
+            if v.scale > 1.0 {
+                return Err(format!("{file}: curve.variants {} scale must be at most 1", v.id));
+            }
+            out.push(Variant {
+                id: v.id.clone(),
+                name: v.name.clone(),
+                transform: Transform::Curve(Curve {
+                    scale: v.scale,
+                    ..*base
+                }),
+            });
+        }
+        Ok(out)
     }
 }
 
@@ -999,7 +1065,7 @@ impl Target {
                 f.id
             ));
         }
-        let mut variants = Vec::new();
+        let variants: Vec<Variant>;
         // Which table the kind names, and that it is the only one the file has.
         let which = match f.kind.as_str() {
             "matrix" => 0,
@@ -1032,10 +1098,12 @@ impl Target {
                 let first = variants.first().map_or(Transform::Matrix(base), |v| v.transform);
                 (first, m.keys())
             }
-            (_, Some(c), ..) => (
-                Transform::Curve(c.curve(file)?),
-                vec!["table", "input_bits", "output_max"],
-            ),
+            (_, Some(c), ..) => {
+                let base = c.curve(file)?;
+                variants = c.curve_variants(file, &base)?;
+                let first = variants.first().map_or(Transform::Curve(base), |v| v.transform);
+                (first, c.keys())
+            }
             (_, _, Some(p), ..) => {
                 variants = p.variants(file)?;
                 (variants[0].transform, vec!["sets", "colour_bits"])
@@ -2278,5 +2346,94 @@ mod tests {
             let err = Target::parse("t.toml", &text).expect_err(key);
             assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
         }
+    }
+
+    /// The Neo Geo file: the 32 levels are the resistor ladder of 3900, 2200, 1000, 470 and 220 ohm rounded to whole 8-bit
+    /// codes (recomputed here from the resistors), they rise strictly from 0 to the reference white 255, and the four
+    /// variants carry the factors of the dark bit (8200 ohm), the shadow (150 ohm) and both, recomputed from the
+    /// resistors; the first variant is the target's own and has no factor.
+    #[test]
+    fn the_neo_geo_file_holds_the_ladder_levels_and_the_pulldown_factors() {
+        use crt_model::target::ladder_output;
+        const R: [f64; 5] = [3900.0, 2200.0, 1000.0, 470.0, 220.0];
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_SNK_NEO_GEO).expect("neo geo");
+        let Transform::Curve(c) = t.transform else {
+            panic!("curve")
+        };
+        assert_eq!((c.table[0], c.table[31], c.output_max, c.scale), (0, 255, 255.0, 1.0));
+        assert!(c.table.windows(2).all(|w| w[0] < w[1]), "the table rises strictly");
+        for (code, entry) in c.table.iter().enumerate() {
+            let exact = 255.0 * ladder_output(&R, code as u32, None);
+            assert!(
+                (exact - f64::from(*entry)).abs() <= 0.5,
+                "code {code}: ladder {exact}, table {entry}"
+            );
+        }
+        // The levels a plain 5-bit picture shows, 8 x 8 + 2 = 66 for code 8, 132 for code 16: 65 and 138.
+        assert_eq!((c.table[4], c.table[8], c.table[16]), (30, 65, 138));
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["normal", "dark", "shadow", "shadow_dark"]);
+        let pulls = [
+            None,
+            Some(8200.0),
+            Some(150.0),
+            Some(1.0 / (1.0 / 8200.0 + 1.0 / 150.0)),
+        ];
+        for (v, pull) in t.variants.iter().zip(pulls) {
+            let Transform::Curve(vc) = v.transform else {
+                panic!("curve")
+            };
+            assert_eq!(vc.table, c.table, "{}: the same levels", v.id);
+            // The factor is the same for every code: the ratio with and without the pulldown.
+            for code in 1..32 {
+                let want = ladder_output(&R, code, pull) / ladder_output(&R, code, None);
+                assert!(
+                    (vc.scale - want).abs() < 2e-6,
+                    "{} code {code}: scale {} want {want}",
+                    v.id,
+                    vc.scale
+                );
+            }
+        }
+        assert_eq!(t.select(1), t.transform);
+        assert_eq!(t.select(0), t.transform, "below 1: the first");
+        assert_eq!(t.select(9), t.transform, "past the last: the first");
+        assert_ne!(t.select(2), t.select(3));
+        // Through the oracle: grey 16 of a plain picture (132 of 255) is 138 of 255; the shadow lowers white to 0.557054.
+        let grey = f64::from(crt_model::target::expand(16, 5)) / 255.0;
+        assert!((t.select(1).apply([grey; 3])[0] - 138.0 / 255.0).abs() < 1e-12);
+        assert!((t.select(3).apply([1.0; 3])[0] - 0.557_054).abs() < 1e-9);
+        assert!((t.select(2).apply([1.0; 3])[1] - 0.985_663).abs() < 1e-9);
+        assert_eq!(t.select(3).apply([0.0; 3]), [0.0; 3]);
+        assert_eq!(t.provenance["variants"].chars().next(), Some('D'));
+    }
+
+    /// The curve variant validation: a scale of 0 or above 1, a repeated or empty id, an empty list, an unknown key, a
+    /// missing provenance entry for the variants; a curve without variants still parses (the SNES file) and has none.
+    #[test]
+    fn a_bad_curve_variant_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "snk_neo_geo.toml")
+            .expect("the neo geo file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replacen("scale = 1.0", "scale = 0.0", 1), "scale"),
+            (ok.replacen("scale = 1.0", "scale = 1.5", 1), "at most 1"),
+            (ok.replace("id = \"dark\"", "id = \"normal\""), "twice"),
+            (ok.replacen("id = \"dark\"", "id = \"Dark\"", 1), "lower case"),
+            (ok.replacen("scale = 1.0", "scale = 1.0\nextra = 1", 1), "extra"),
+            (ok.replace("variants = \"D:", "variants = \"X:"), "provenance.variants"),
+            (ok.replace("input_bits = 5", "input_bits = 4"), "input_bits"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+        let snes = for_value(crate::params::SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST).expect("snes");
+        assert!(snes.variants.is_empty());
+        assert_eq!(snes.select(3), snes.transform, "no variants: the target's own");
     }
 }

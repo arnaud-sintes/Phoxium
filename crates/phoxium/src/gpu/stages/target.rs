@@ -102,7 +102,7 @@ pub(super) fn plan(p: &Params) -> Push {
             }
             Push {
                 table,
-                out_scale: (1.0 / c.output_max) as f32,
+                out_scale: (c.scale / c.output_max) as f32,
                 bits: recovery_bits(t.transform.input_bits()),
                 kind: KIND_CURVE,
                 ..identity
@@ -308,6 +308,26 @@ mod tests {
         assert_eq!(snes.table[0], 0x0603_0100);
         assert_eq!(snes.table[7], 0xfff8_f0e8);
         assert!((f64::from(snes.out_scale) - 1.0 / 255.0).abs() < 1e-9);
+    }
+
+    /// The Neo Geo curve: its ladder levels packed four to a word, the variant's scale in `out_scale` over `output_max`
+    /// (1 / 255 for the normal variant, 0.557054 / 255 for the shadow), five-bit recovery.
+    #[test]
+    fn the_neo_geo_variant_scales_the_curve_output() {
+        let neo = |variant: i32| Params {
+            source_colour_variant: variant,
+            ..with(crate::params::SOURCE_COLOUR_TARGET_SNK_NEO_GEO)
+        };
+        let normal = plan(&neo(1));
+        assert_eq!((normal.kind, normal.bits), (1, 5));
+        // Entries 0 to 3 are 0, 8, 14, 22; the last word holds 233, 241, 247, 255.
+        assert_eq!(normal.table[0], 22 << 24 | 14 << 16 | 8 << 8);
+        assert_eq!(normal.table[7], 255 << 24 | 247 << 16 | 241 << 8 | 233);
+        assert!((f64::from(normal.out_scale) - 1.0 / 255.0).abs() < 1e-9);
+        let shadow = plan(&neo(3));
+        assert_eq!(shadow.table, normal.table, "the scale is not baked into the table");
+        assert!((f64::from(shadow.out_scale) - 0.557_054 / 255.0).abs() < 1e-8);
+        assert_eq!(plan(&neo(99)), normal, "past the last variant: the first");
     }
 
     /// A palette is packed as its twelve bytes, colour by colour, channel by channel, four to a word; the variant number

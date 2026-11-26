@@ -14,7 +14,8 @@
 //!   out (`input_range` 1, divisor 255, scale `255 / 280`). The integer floor of a shift is not done: the chain's own
 //!   8-bit output rounds.
 //! - [`Curve`], a console whose output is a per-channel table (SNES): `V'_c = table[code_c] / output_max`, the
-//!   entries between two codes interpolated linearly for a colour that is not on the 32 levels.
+//!   entries between two codes interpolated linearly for a colour that is not on the 32 levels. A `scale` lowers the whole
+//!   output (the Neo Geo's ladder levels, [`ladder_output`], and its dark bit and shadow).
 //! - [`Dac`], a console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): a piecewise linear map
 //!   from the levels the emulator shows to the measured levels. It has no device code to recover: the levels are the
 //!   points of the map.
@@ -133,6 +134,9 @@ pub struct Curve {
     pub table: [u8; CURVE_LEN],
     /// Largest output code (255).
     pub output_max: f64,
+    /// A factor on the whole output (1 for none): the Neo Geo's dark bit and shadow lower every level by a constant
+    /// fraction ([`ladder_output`]), which a variant of the target states as a scale on the table.
+    pub scale: f64,
 }
 
 impl Curve {
@@ -143,9 +147,27 @@ impl Curve {
             let pos = x.clamp(0.0, 1.0) * (CURVE_LEN - 1) as f64;
             let i = (pos.floor() as usize).min(CURVE_LEN - 2);
             let f = pos - i as f64;
-            (f64::from(self.table[i]) * (1.0 - f) + f64::from(self.table[i + 1]) * f) / self.output_max
+            self.scale * (f64::from(self.table[i]) * (1.0 - f) + f64::from(self.table[i + 1]) * f) / self.output_max
         })
     }
+}
+
+/// The output of a resistor-ladder DAC as a fraction of the supply (the Neo Geo's palette DAC, 74HC-type outputs driving
+/// one resistor per bit): each bit of `code` (bit `b` through `resistances[b]`) is driven to the supply when set and to
+/// ground when clear, so the node is the divider `V = G_on / (G_all + G_pull)`, with `G` the conductances (1 / R) of the
+/// set resistors (`G_on`), of all the resistors (`G_all`), and of `pulldown_ohms`, an extra resistor to ground (the Neo
+/// Geo's dark bit and shadow; `None` for none). Nothing loads the node (the video amplifier's input is taken as
+/// infinite). The code with every bit set and no pulldown gives 1, so the levels are relative to that white.
+pub fn ladder_output(resistances: &[f64], code: u32, pulldown_ohms: Option<f64>) -> f64 {
+    let g = |r: &f64| 1.0 / r;
+    let on: f64 = resistances
+        .iter()
+        .enumerate()
+        .filter(|(b, _)| code >> b & 1 == 1)
+        .map(|(_, r)| g(r))
+        .sum();
+    let all: f64 = resistances.iter().map(g).sum();
+    on / (all + pulldown_ohms.map_or(0.0, |r| 1.0 / r))
 }
 
 /// A palette of four colours for a monochrome source (the Super Game Boy, later the original Game Boy): the luma of
@@ -351,6 +373,7 @@ mod tests {
                 0x90, 0x98, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0xf0, 0xf8, 0xff,
             ],
             output_max: 255.0,
+            scale: 1.0,
         }
     }
 
@@ -478,6 +501,59 @@ mod tests {
         assert!(close(r, 128.0 / 255.0, 1e-12), "{r}");
         // The upper half is nearly left alone, the lower half darkened: code 8 shows 0x24 = 36, not 66.
         assert!(close(t.apply([v(8); 3])[0], 36.0 / 255.0, 1e-12));
+    }
+
+    /// The Neo Geo ladder, 3900, 2200, 1000, 470 and 220 ohm on bits 0 to 4. Hand derivation in millisiemens: 1 / 3.9 =
+    /// 0.256410, 1 / 2.2 = 0.454545, 1, 1 / 0.47 = 2.127660, 1 / 0.22 = 4.545455, total 8.384070. Code 1 is
+    /// 0.256410 / 8.384070 = 0.030583 (7.80 of 255), code 2 is 0.454545 / 8.384070 = 0.054215 (13.82), code 3 their sum
+    /// 0.084798 (21.62), the top code 1 (white); the weights are not binary and still rise strictly with the code.
+    #[test]
+    fn ladder_levels_of_the_neo_geo() {
+        const R: [f64; 5] = [3900.0, 2200.0, 1000.0, 470.0, 220.0];
+        let level = |c: u32| ladder_output(&R, c, None);
+        assert_eq!(level(0), 0.0);
+        assert!(close(level(31), 1.0, 1e-12));
+        assert!(close(level(1), 0.256_410 / 8.384_070, 1e-6) && close(level(1) * 255.0, 7.80, 5e-3));
+        assert!(close(level(2), 0.454_545 / 8.384_070, 1e-6) && close(level(2) * 255.0, 13.82, 5e-3));
+        assert!(close(level(3), 0.084_798, 1e-6));
+        assert!(close(level(16) * 255.0, 138.25, 5e-3), "{}", level(16) * 255.0);
+        assert!((1..32).all(|c| level(c) > level(c - 1)), "the levels rise strictly");
+    }
+
+    /// The dark bit (8200 ohm to ground) and the shadow (150 ohm) lower every level by the same factor, whatever the code:
+    /// the pulldown adds to the conductance of the divider's denominator only. Hand derivation: 8.384070 / (8.384070 +
+    /// 1 / 8.2) = 8.384070 / 8.506022 = 0.985662, with the shadow 8.384070 / (8.384070 + 6.666667) = 0.557054, with both
+    /// 8.384070 / 15.172689 = 0.552576.
+    #[test]
+    fn ladder_pulldowns_scale_every_level() {
+        const R: [f64; 5] = [3900.0, 2200.0, 1000.0, 470.0, 220.0];
+        for (pull, factor) in [
+            (8200.0, 0.985_663),
+            (150.0, 0.557_054),
+            (1.0 / (1.0 / 8200.0 + 1.0 / 150.0), 0.552_576),
+        ] {
+            for c in 1..32 {
+                let got = ladder_output(&R, c, Some(pull)) / ladder_output(&R, c, None);
+                assert!(close(got, factor, 2e-6), "pulldown {pull}, code {c}: {got}");
+            }
+            assert_eq!(ladder_output(&R, 0, Some(pull)), 0.0, "black stays black");
+        }
+        // The whole of white lowered by the shadow is 0.557 of the reference white.
+        assert!(close(ladder_output(&R, 31, Some(150.0)), 0.557_054, 2e-6));
+    }
+
+    /// A scale on the curve lowers every output by that factor and leaves black alone: with a scale of 0.5 the table's
+    /// code 31 (248) gives 248 / 510 and the code 16 (138) gives 138 / 510.
+    #[test]
+    fn curve_scale_multiplies_the_output() {
+        let c = Curve {
+            table: std::array::from_fn(|i| if i == 16 { 138 } else { (i * 8) as u8 }),
+            output_max: 255.0,
+            scale: 0.5,
+        };
+        assert_eq!(c.apply([0.0; 3]), [0.0; 3]);
+        assert!(close(c.apply([1.0; 3])[0], 248.0 / 510.0, 1e-12));
+        assert!(close(c.apply([v(16); 3])[1], 138.0 / 510.0, 1e-12));
     }
 
     /// The Super Game Boy palette 1-A as RGB555 words 0x67BF, 0x265B, 0x10B5, 0x2866 (lightest first): red = bits 0 to 4,

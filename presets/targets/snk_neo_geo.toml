@@ -1,0 +1,51 @@
+# Source colour target, data only (TODO, "Source colour targets"; QUESTIONS.md, "Audit of the colour targets" and "Second research
+# pass"). Format: crates/phoxium/src/targets.rs. Every key of [curve] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "snk_neo_geo"
+name = "SNK Neo Geo (MVS, AES, CD): palette DAC, dark bit and shadow"
+label = "the Neo Geo's resistor-ladder palette DAC computed from the schematic values, behind a plain 5-bit emulator picture (Colour variant: normal, dark bit, shadow, both)"
+kind = "curve"
+notes = """
+The Neo Geo's palette word holds three 5-bit colour channels and one shared 'dark' bit. Each channel leaves the video chip as five logic outputs, each through its own resistor to a common node: 3900, 2200, 1000, 470 and 220 ohm for bits 0 to 4. A set bit drives its resistor to the supply and a clear bit to ground, so the node is a divider and the level of code c is the conductance of the set resistors over the total conductance, which is not binary: the weights of the five bits are 3.06, 5.42, 11.93, 25.38 and 54.22 percent, and the 32 levels run 0, 7.8, 13.8, 21.6, 30.4 ... 247.2, 255 of 255 (the table, rounded to whole 8-bit codes; the largest rounding is 0.5 of 255, 2.5 percent of the first level). The levels rise strictly and the top level is the reference white. This target replaces the plain levels of a 5-bit picture (code c shown as c x 8 + c / 4, 0 to 255 evenly) by those: code 8 shown as 66 becomes 65, code 16 shown as 132 becomes 138, code 4 shown as 33 becomes 30.
+The dark bit adds an 8200 ohm resistor to ground on each channel, the shadow (the REG_SHADOW switch of the whole video output) a 150 ohm one; both lower every level by the same fraction, since the pulldown only adds to the divider's total conductance: 0.985663 for the dark bit, 0.557054 for the shadow, 0.552576 for both (variants 2 to 4; variant 1, the default, has neither). Black stays black.
+What an RGB pixel cannot tell: an emulator shows the palette word's 5-bit channels, so the pixel carries neither the dark bit (a 1.4 percent effect on the palette entries that have it) nor the state of the shadow switch. The variants are therefore states of the whole picture that the user chooses, not something recovered from the pixel; the shadow and dark variants are a model of the hardware, useful for a game known to be running shadowed. MAME (BSD-3) and Geolith (BSD-3) render the shadow and the dark bit themselves, in their own palettes, so with them variants 3 and 4 would darken twice.
+The input is read as the plain 5-bit expansion of the code (c << 3 | c >> 2, the usual 'pal5bit'), recovered exactly; any other colour is interpolated between the two nearest codes. This is not verified for any named emulator, and two that were read do not use it: MAME computes the ladder itself from the same resistors, and Geolith's 'resnet' palette does too, after smoothing each level with its two neighbours (a weighted average, which flattens the real steps), so for those leave the target off. Geolith's 'Raw' palette is 6 bits (the colour with the dark bit as the lowest bit, 255 / 63 per step, the dark bit inverted), whose levels (2 c + 1) x 255 / 63 (black is 4 of 255) are not 5-bit expansions: it is read directly and lands up to half a code high in the darkest colours; recovering its dark bit from the odd and even levels is possible and is not done. The Neo Geo CD is the same video hardware as the MVS and AES.
+Open: the values are the schematic's, no voltage was measured per code (the ladder's node is taken as unloaded: a load on the video amplifier's input would shrink all levels together and, with the real driver output impedances, change the weights slightly); the weight of the dark bit is disputed (one forum claim of a 95 percent factor and its shadow levels disagree with the divider and are not supported; FBNeo adds the dark bit as a ladder input of the opposite sign and about the same 1.4 percent); the white scale, the amplifier and the monitor are not modelled and no gamma is applied.
+"""
+
+[curve]
+table = [
+  0, 8, 14, 22, 30, 38, 44, 52,
+  65, 73, 79, 86, 95, 103, 109, 117,
+  138, 146, 152, 160, 169, 176, 182, 190,
+  203, 211, 217, 225, 233, 241, 247, 255,
+]
+input_bits = 5
+output_max = 255
+
+[[curve.variants]]
+id = "normal"
+name = "Normal (dark bit clear, shadow off)"
+scale = 1.0
+
+[[curve.variants]]
+id = "dark"
+name = "Dark bit set on every colour (8.2 kohm)"
+scale = 0.985663
+
+[[curve.variants]]
+id = "shadow"
+name = "Shadow on (150 ohm, the whole picture)"
+scale = 0.557054
+
+[[curve.variants]]
+id = "shadow_dark"
+name = "Shadow on and dark bit set"
+scale = 0.552576
+
+[provenance]
+table = "D: the divider of the five bit resistors 3900, 2200, 1000, 470 and 220 ohm on bits 0 to 4, level(c) = 255 x (sum of 1 / R over the set bits) / (sum of 1 / R over all five), computed by the unit tests from the resistor values (crt_model::target::ladder_output) and rounded to whole codes; the resistors are MAME's (src/mame/snk/neogeo_v.cpp, BSD-3-Clause, resistances 3900, 2200, 1000, 470, 220, read 2026-11-26) and Geolith's (src/geo_lspc.c, BSD-3-Clause, Rupert Carmichael, the same values, no table copied); the QUESTIONS.md second research pass (neogeo-diag-bios documents and the neogeodev wiki, not re-read) gives the same ladder and the weights 3.1, 5.4, 11.9, 25.4 and 54.2 percent; Geolith's comment lists the resistors in the opposite bit order but its code and these weights put 3900 ohm on bit 0"
+input_bits = "S: the Neo Geo palette word has 5 bits per colour channel plus one shared dark bit (neogeodev wiki and MAME's palette write: r = bit 14 | (data >> 7) & 0x1e, the dark bit the top bit); the 5-bit expansion c << 3 | c >> 2 as the emulator's picture is E (no emulator verified)"
+output_max = "K: 8-bit output code, the top level 255 is the reference white"
+variants = "D: the dark bit adds 8200 ohm to ground (MAME: weights_dark with 8200; Geolith pd_dark 8200) and the shadow 150 ohm (MAME: weights_shadow with 150; Geolith pd_shadow 150, REG_SHADOW); each lowers every level by G_all / (G_all + G_pulldown) with G_all = 8.384070 mS: 0.985663 (8200), 0.557054 (150) and 0.552576 (8200 and 150 in parallel, 1 / (1 / 8200 + 1 / 150)), checked by the unit tests; the dark bit and shadow are a state of the whole picture chosen by the user (the pixel does not carry them)"

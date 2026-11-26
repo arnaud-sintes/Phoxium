@@ -15,7 +15,7 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
     SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
     SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
@@ -70,7 +70,24 @@ fn transform(target: u32, variant: i32) -> Transform {
                 0x90, 0x98, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0xf0, 0xf8, 0xff,
             ],
             output_max: 255.0,
+            scale: 1.0,
         }),
+        // The Neo Geo ladder written here from the resistors (not read from the data file): the levels are the divider of
+        // the set bits rounded to whole codes, the variant scales the dark bit (8200 ohm), the shadow (150 ohm) and both.
+        SOURCE_COLOUR_TARGET_SNK_NEO_GEO => {
+            let r = [3900.0f64, 2200.0, 1000.0, 470.0, 220.0];
+            let ladder = |code: u32, pull: f64| {
+                let on: f64 = (0..5).filter(|b| code >> b & 1 == 1).map(|b| 1.0 / r[b]).sum();
+                on / (r.iter().map(|x| 1.0 / x).sum::<f64>() + pull)
+            };
+            let pull =
+                [0.0, 1.0 / 8200.0, 1.0 / 150.0, 1.0 / 8200.0 + 1.0 / 150.0][usize::try_from(variant - 1).unwrap()];
+            Transform::Curve(Curve {
+                table: std::array::from_fn(|c| (255.0 * ladder(c as u32, 0.0)).round() as u8),
+                output_max: 255.0,
+                scale: ladder(31, pull),
+            })
+        }
         // Variant 1 is 1-A (the power-on palette), variant 9 is 2-A, variant 32 is 4-H.
         SOURCE_COLOUR_TARGET_SUPER_GAME_BOY => match variant {
             1 => sgb_palette([0x67BF, 0x265B, 0x10B5, 0x2866]),
@@ -286,6 +303,10 @@ fn target_slot_matches_the_oracle() {
         ("atari 800XL delay 27.5", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 6),
         ("tms9928 datasheet", SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928, 1),
         ("tms9929 scope", SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928, 2),
+        ("neo geo normal", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 1),
+        ("neo geo dark", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 2),
+        ("neo geo shadow", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 3),
+        ("neo geo shadow dark", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 4),
     ] {
         let p = Params {
             source_colour_target: target,
