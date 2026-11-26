@@ -1,0 +1,45 @@
+# Source colour target, data only (TODO, "Source colour targets"; QUESTIONS.md, "Third research pass"). Format:
+# crates/phoxium/src/targets.rs. Every key of [matrix] has a [provenance] entry "<tag>: <source>" with the CRT.md confidence tag
+# (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "amstrad_cpc_green_screen"
+name = "Amstrad CPC green monitor (GT64, GT65): 27 grey steps"
+label = "the CPC's green-screen monitor, which sums the three colour outputs 9 : 3 : 1 into one grey (use a green phosphor type); Colour variant: linear steps or the 0.40 half level, behind an emulator whose half level is 128 or MAME's 96"
+kind = "matrix"
+notes = """
+The green monitors of the CPC (GT64, GT65) take the same three colour outputs as a colour monitor and mix them with a resistor network, weights 9 : 3 : 1 (10k, 3.3k and 1k for red, green and blue, as relayed from a forum snippet), into the one signal of a green tube: 27 greys, one for each of the 27 colours. This target does that mix on the picture: all three output channels become the grey (9 R + 3 G + B) / 13, so a pixel's grey is one of 27 values and every grey of the source is left where it is. It is not an identity: a colour is reduced to this grey (red weighs 0.692, green 0.231, blue 0.077), where the chain's own monochrome tube would use the BT.601 luma (0.299, 0.587, 0.114). Choose a monochrome phosphor type (P31 or P1, green) in the Phosphor section: the target makes the grey, the phosphor type makes the tube green. The chain's decode stage takes the BT.601 luma of the grey, which is the grey itself (the three weights add to 1), so nothing else changes the value.
+**What is well founded and what is not.** The weights 9 : 3 : 1 and the 27 steps are the research notes' reading of the CPCWiki pages ('well founded'); the pages were not readable here (HTTP 403), so this is second-hand. With three levels per channel at 0, half and full, a sum of 9, 3 and 1 times a level index of 0, 1 or 2 gives 27 evenly spaced steps from 0 to 26: that is variant 1 (the picture's half level 127 or 128 is taken as the half, 0.5 of full scale, off by 0.4 percent of full scale at most; a ramp of the steps is exactly linear). **The conflict:** the resistors sum the voltages the Gate Array makes, and its half level is 0.40 of full scale, not 0.5 (the target amstrad_cpc). With 0.40 the steps are not evenly spaced and not in the order of the index (red at half, 9 x 0.4 = 3.6, is below green and blue at full, 3 + 1 = 4) and one pair of colours falls on the same grey (red and blue at half, 3.6 + 0.4, equal green and blue at full, 4: 26 different greys, not 27); variants 2 and 4 are that sum. The monitor's own amplifier and gamma are not known and are not modelled, and neither is the absolute brightness against a colour monitor or what phosphor the tube has (green, not identified): the chain's gun law and phosphor type decide those.
+**How the variants are built (estimate).** The matrix kind works on the picture's value x with an exponent in front of the weights. To make the picture's half level land on 0.40 the exponent is chosen so that half ^ exponent = 0.40: ln 0.40 / ln (128 / 255) = 1.3294 for an emulator that shows 128, ln 0.40 / ln (96 / 255) = 0.9379 for MAME's 96. This maps the three levels exactly and everything between them on a power law, which is a device of this model: a CPC picture only has the three levels, but a scaled picture has blends, and their shape between the levels is not measured. For MAME's 96 with the literal 0.5 (variant 3) the exponent is ln 0.5 / ln (96 / 255) = 0.7095. The 127 of other emulators is within a code of 128 and is not a variant. MAME's 96 is the relayed, unchecked figure of the target amstrad_cpc.
+"""
+
+[matrix]
+rows = [[9.0, 3.0, 1.0], [9.0, 3.0, 1.0], [9.0, 3.0, 1.0]]
+input_bits = 8
+input_range = 1.0
+divisor = 13.0
+
+[[matrix.variants]]
+id = "linear_128"
+name = "27 linear steps (half level 0.5); emulator half level 127 or 128"
+
+[[matrix.variants]]
+id = "half_040_128"
+name = "Sum of the Gate Array voltages (half level 0.40); emulator half level 128"
+input_gamma = 1.3294348326
+
+[[matrix.variants]]
+id = "linear_mame_96"
+name = "27 linear steps (half level 0.5); MAME half level 96"
+input_gamma = 0.7095263453
+
+[[matrix.variants]]
+id = "half_040_mame_96"
+name = "Sum of the Gate Array voltages (half level 0.40); MAME half level 96"
+input_gamma = 0.9379428099
+
+[provenance]
+rows = "S: the weights 9 : 3 : 1 (10k, 3.3k and 1k resistors) of the GT64 and GT65 green monitors, as relayed by the third research pass of QUESTIONS.md from the CPCWiki pages (HTTP 403 here, so second-hand) and a forum snippet; the same three rows give the one grey on all output channels (D, the tube is monochrome, and the chain's decode takes the BT.601 luma of a grey, which is the grey)"
+input_bits = "K: no device code to recover: the picture is the three levels an emulator shows, 8 bits a channel, and the matrix reads the value directly"
+input_range = "K: the linearised input reaches 1 at full scale; the sum works on values 0 to 1"
+divisor = "D: 9 + 3 + 1 = 13, so that all three channels at full give 1 and the grey of any grey picture is unchanged"
+variants = "E: variant 1 reads the picture's half level (127 or 128) as the half, 0.5 of full scale, which makes the sum 27 evenly spaced steps (D: 9 a + 3 b + c for level indexes 0 to 2 are the 27 integers 0 to 26 over 26); variants 2 to 4 set an exponent so that the half level lands on 0.40 (S relayed, see the target amstrad_cpc) or, for MAME's 96, on 0.5: ln 0.40 / ln (128 / 255) = 1.3294, ln 0.40 / ln (96 / 255) = 0.9379, ln 0.5 / ln (96 / 255) = 0.7095 (D); that the half level is the same on the three channels, that the monitor sums voltages and that the shape between the levels is a power law are estimates (E); MAME's 96 is unchecked (E)"

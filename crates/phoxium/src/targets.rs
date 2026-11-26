@@ -134,6 +134,14 @@ const SHIPPED: &[(&str, &str)] = &[
         "atari_2600_tia.toml",
         include_str!("../../../presets/targets/atari_2600_tia.toml"),
     ),
+    (
+        "amstrad_cpc.toml",
+        include_str!("../../../presets/targets/amstrad_cpc.toml"),
+    ),
+    (
+        "amstrad_cpc_green_screen.toml",
+        include_str!("../../../presets/targets/amstrad_cpc_green_screen.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -3932,6 +3940,232 @@ mod tests {
             (ok.replacen("id = \"kitrinx\"", "id = \"Kitrinx\"", 1), "lower case"),
             (ok.replacen("kind = \"lut\"", "kind = \"signal\"", 1), "own table"),
             (ok.replacen("codes = \"S:", "codes = \"X:", 1), "provenance.codes"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The CPC colour target: three codes a channel (padded with the last point), black and full kept, the middle level on
+    /// 0.40 (102 of 255, D from 0.40 x 255 and from the Plus ASIC's 6 / 15), the same on the three channels, one variant per
+    /// half level an emulator shows (128, 127, MAME's 96). The literal 0.5 is not a variant: none of them leaves its own
+    /// half level where it is (that would be an identity).
+    #[test]
+    fn the_amstrad_cpc_file_moves_the_half_level_to_forty_percent() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_AMSTRAD_CPC).expect("cpc");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["emulator_128", "emulator_127", "mame_96"]);
+        assert_eq!(t.transform, t.variants[0].transform);
+        for (v, half) in t.variants.iter().zip([128u8, 127, 96]) {
+            let Transform::Dac(d) = v.transform else { panic!("dac") };
+            assert_eq!(d.len(), 3);
+            assert_eq!(d.input[..3], [0, half, 255]);
+            assert!(d.input[3..].iter().all(|&i| i == 255) && d.output[3..].iter().all(|&o| o == 255));
+            assert_eq!(d.output[..3], [0, 102, 255]);
+            assert_eq!(
+                (d.output_green, d.output_blue),
+                (None, None),
+                "one level for the three channels"
+            );
+            assert_eq!(d.output_max, 255.0);
+            // 0.40 of 255 is 102 and 6 / 15 of the Plus ASIC's 4 bits is the same ratio.
+            assert_eq!(102.0, (0.40f64 * 255.0).round());
+            assert!((6.0f64 / 15.0 - 0.40).abs() < 1e-12);
+            // The half level lands on 102 on every channel, black and full stay; it is not an identity.
+            let got = v.transform.apply([f64::from(half) / 255.0; 3]);
+            assert!(got.iter().all(|c| (c - 102.0 / 255.0).abs() < 1e-12), "{got:?}");
+            assert_ne!(102, half, "the variant {} would be an identity", v.id);
+            assert_eq!(v.transform.apply([0.0; 3]), [0.0; 3]);
+            assert_eq!(v.transform.apply([1.0; 3]), [1.0; 3]);
+        }
+        // The 27 colours: every level of every channel goes to its own level, whatever the others are.
+        let levels = [0.0, 128.0 / 255.0, 1.0];
+        let want = [0.0, 102.0 / 255.0, 1.0];
+        for r in 0..3 {
+            for g in 0..3 {
+                for b in 0..3 {
+                    let got = t.select(1).apply([levels[r], levels[g], levels[b]]);
+                    for (c, (o, w)) in got.iter().zip([want[r], want[g], want[b]]).enumerate() {
+                        assert!((o - w).abs() < 1e-12, "{r}{g}{b} channel {c}");
+                    }
+                }
+            }
+        }
+        // Between the levels the map is the straight line: 127 on the 128 variant is 127 / 128 of 102 (101.2), 64 half way.
+        assert!((t.select(1).apply([127.0 / 255.0; 3])[0] * 255.0 - 127.0 * 102.0 / 128.0).abs() < 1e-9);
+        assert!((t.select(1).apply([64.0 / 255.0; 3])[1] * 255.0 - 51.0).abs() < 1e-9);
+        assert_eq!(t.select(9), t.transform, "past the last: the first");
+        assert_eq!(t.provenance["output"].chars().next(), Some('S'));
+        assert_eq!(t.provenance["inputs"].chars().next(), Some('E'));
+        assert!(
+            !t.provenance.contains_key("variant_outputs"),
+            "no variant has its own output"
+        );
+    }
+
+    /// The validation of the CPC colour file: a level list of the wrong length or not increasing, an output that decreases or
+    /// is out of range, a repeated id, a missing provenance entry.
+    #[test]
+    fn a_bad_amstrad_cpc_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "amstrad_cpc.toml")
+            .expect("the cpc file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen("levels = [0, 128, 255]", "levels = [0, 128]", 1),
+                "must hold 3",
+            ),
+            (
+                ok.replacen("levels = [0, 128, 255]", "levels = [0, 255, 255]", 1),
+                "strictly increase",
+            ),
+            (
+                ok.replacen("output = [0, 102, 255]", "output = [0, 255, 102]", 1),
+                "must not decrease",
+            ),
+            (
+                ok.replacen("output = [0, 102, 255]", "output = [0, 102, 256]", 1),
+                "0 to 255",
+            ),
+            (
+                ok.replacen("id = \"mame_96\"", "id = \"emulator_127\"", 1),
+                "used twice",
+            ),
+            (ok.replacen("id = \"mame_96\"", "id = \"Mame\"", 1), "lower case"),
+            (
+                ok.replacen("output_max = \"K:", "output_max = \"X:", 1),
+                "provenance.output_max",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The CPC green monitor: the 9 : 3 : 1 sum over 13 on the three output channels (a grey), the 27 colours of a half level
+    /// of 0.5 are the 27 steps i / 26 exactly (hand derivation: 9 a + 3 b + c for level indexes 0 to 2 are the integers 0 to
+    /// 26); with the half level at 0.40 the same sum is not evenly spaced and not in the order of the index (red at half,
+    /// 9 x 0.4 = 3.6, is below green and blue at full, 3 + 1 = 4, over 13); the exponents put the half level of each
+    /// emulator on 0.5 or 0.40.
+    #[test]
+    fn the_amstrad_cpc_green_screen_is_the_nine_three_one_sum() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN).expect("green screen");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["linear_128", "half_040_128", "linear_mame_96", "half_040_mame_96"]
+        );
+        assert_eq!(t.transform, t.variants[0].transform);
+        let Transform::Matrix(m) = t.transform else {
+            panic!("matrix")
+        };
+        assert_eq!(m.rows, [[9.0, 3.0, 1.0]; 3]);
+        assert_eq!(
+            (m.input_bits, m.input_range, m.divisor, m.input_gamma),
+            (8, 1.0, 13.0, 1.0)
+        );
+        // The weights: pure red 9 / 13, green 3 / 13, blue 1 / 13, on all three output channels; greys are unchanged.
+        for (px, want) in [
+            ([1.0, 0.0, 0.0], 9.0 / 13.0),
+            ([0.0, 1.0, 0.0], 3.0 / 13.0),
+            ([0.0, 0.0, 1.0], 1.0 / 13.0),
+        ] {
+            let got = t.select(1).apply(px);
+            assert!(got.iter().all(|c| (c - want).abs() < 1e-12), "{px:?}: {got:?}");
+        }
+        for x in [0.0, 0.2, 0.5, 0.77, 1.0] {
+            assert!(
+                t.select(1).apply([x; 3]).iter().all(|c| (c - x).abs() < 1e-12),
+                "grey {x}"
+            );
+        }
+        // Variant 1 on the exact half level: the 27 colours give i / 26.
+        let mut steps = Vec::new();
+        for a in 0..3 {
+            for b in 0..3 {
+                for c in 0..3 {
+                    let px = [f64::from(a) / 2.0, f64::from(b) / 2.0, f64::from(c) / 2.0];
+                    let got = t.select(1).apply(px);
+                    let i = 9 * a + 3 * b + c;
+                    assert!(
+                        got.iter().all(|g| (g - f64::from(i) / 26.0).abs() < 1e-12),
+                        "{a}{b}{c}: {got:?}"
+                    );
+                    steps.push(got[0]);
+                }
+            }
+        }
+        assert!(steps.windows(2).all(|w| w[1] > w[0]), "27 rising steps");
+        // The exponents: the half level of each emulator (128 or 96 of 255) lands on 0.40 or 0.5 exactly, black and full stay.
+        for (v, half, target) in [(2, 128.0, 0.40), (3, 96.0, 0.5), (4, 96.0, 0.40)] {
+            let Transform::Matrix(mv) = t.select(v) else {
+                panic!("matrix")
+            };
+            assert!(
+                ((half / 255.0f64).powf(mv.input_gamma) - target).abs() < 1e-9,
+                "variant {v}"
+            );
+            assert_eq!(t.select(v).apply([0.0; 3]), [0.0; 3]);
+            assert!(t.select(v).apply([1.0; 3]).iter().all(|c| (c - 1.0).abs() < 1e-12));
+            // The picture's half level in one channel only: the weight of that channel times the target level.
+            let got = t.select(v).apply([half / 255.0, 0.0, 0.0])[0];
+            assert!((got - target * 9.0 / 13.0).abs() < 1e-9, "variant {v}: {got}");
+        }
+        // With 0.40 the sum is out of the index order: red at half (3.6 / 13) is below green and blue at full (4 / 13),
+        // where the index has 9 above 8; and one pair of colours falls together.
+        let lo = t.select(2).apply([128.0 / 255.0, 0.0, 0.0])[0];
+        let hi = t.select(2).apply([0.0, 1.0, 1.0])[0];
+        assert!((lo - 3.6 / 13.0).abs() < 1e-9 && (hi - 4.0 / 13.0).abs() < 1e-9 && lo < hi);
+        let mut all = Vec::new();
+        for a in [0.0, 128.0 / 255.0, 1.0] {
+            for b in [0.0, 128.0 / 255.0, 1.0] {
+                for c in [0.0, 128.0 / 255.0, 1.0] {
+                    all.push(t.select(2).apply([a, b, c])[0]);
+                }
+            }
+        }
+        all.sort_by(f64::total_cmp);
+        // One pair is equal: red and blue at half (3.6 + 0.4) and green and blue at full (3 + 1) both make 4 / 13, so 26
+        // different greys, not 27.
+        let equal = all.windows(2).filter(|w| w[1] - w[0] < 1e-9).count();
+        assert_eq!((all.len(), equal), (27, 1), "26 different values");
+        let rb = t.select(2).apply([128.0 / 255.0, 0.0, 128.0 / 255.0])[0];
+        assert!((rb - hi).abs() < 1e-9 && (rb - 4.0 / 13.0).abs() < 1e-9);
+        assert_eq!(t.provenance["rows"].chars().next(), Some('S'));
+        assert_eq!(t.provenance["variants"].chars().next(), Some('E'));
+    }
+
+    /// The validation of the CPC green-screen file: an exponent that is not positive, a repeated id, a missing provenance.
+    #[test]
+    fn a_bad_amstrad_cpc_green_screen_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "amstrad_cpc_green_screen.toml")
+            .expect("the green screen file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen("input_gamma = 1.3294348326", "input_gamma = 0", 1),
+                "input_gamma",
+            ),
+            (
+                ok.replacen("id = \"half_040_128\"", "id = \"linear_128\"", 1),
+                "used twice",
+            ),
+            (ok.replacen("divisor = 13.0", "divisor = 0.0", 1), "divisor"),
+            (ok.replacen("input_bits = 8", "input_bits = 3", 1), "input_bits"),
+            (
+                ok.replacen("variants = \"E:", "variants = \"X:", 1),
+                "provenance.variants",
+            ),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);

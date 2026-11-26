@@ -11,8 +11,9 @@ mod common;
 use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    Params, SOURCE_COLOUR_TARGET_ATARI_2600_TIA, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA,
-    SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
+    Params, SOURCE_COLOUR_TARGET_AMSTRAD_CPC, SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
+    SOURCE_COLOUR_TARGET_ATARI_2600_TIA, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA,
+    SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
     SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
@@ -147,6 +148,39 @@ fn transform(target: u32, variant: i32) -> Transform {
                 output_green: None,
                 output_blue: blue.map(pad),
                 output_max: 255.0,
+            })
+        }
+        // The CPC, written here independently of the data file: three codes padded with the last point, the half level an
+        // emulator shows (128, 127, MAME's 96) going to 0.40 of 255 = 102, black and full kept.
+        SOURCE_COLOUR_TARGET_AMSTRAD_CPC => {
+            let half = [128u8, 127, 96][usize::try_from(variant - 1).unwrap()];
+            let pad = |a: [u8; 3]| std::array::from_fn(|i| a[i.min(2)]);
+            Transform::Dac(Dac {
+                input: pad([0, half, 255]),
+                output: pad([0, (0.40f64 * 255.0).round() as u8, 255]),
+                output_green: None,
+                output_blue: None,
+                output_max: 255.0,
+            })
+        }
+        // The CPC green monitor: the 9 : 3 : 1 sum over 13 on all three channels, with an exponent that puts the emulator's
+        // half level (128, or MAME's 96) on 0.5 (linear steps) or on 0.40 (the Gate Array's measured half level).
+        SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN => {
+            let (half, level) =
+                [(128.0f64, 0.5f64), (128.0, 0.40), (96.0, 0.5), (96.0, 0.40)][usize::try_from(variant - 1).unwrap()];
+            Transform::Matrix(Matrix {
+                rows: [[9.0, 3.0, 1.0]; 3],
+                input_bits: 8,
+                input_range: 1.0,
+                input_gamma: if variant == 1 {
+                    1.0
+                } else {
+                    level.ln() / (half / 255.0).ln()
+                },
+                clamp: f64::INFINITY,
+                divisor: 13.0,
+                output_gamma: 1.0,
+                output_scale: 1.0,
             })
         }
         // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
@@ -438,6 +472,21 @@ fn target_slot_matches_the_oracle() {
         ("atari 2600 chroma 0.23", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 5),
         ("pc engine kitrinx", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 1),
         ("pc engine v 14/15", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 2),
+        ("cpc half 128", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 1),
+        ("cpc half 127", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 2),
+        ("cpc mame 96", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 3),
+        ("cpc green linear", SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN, 1),
+        ("cpc green half 0.40", SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN, 2),
+        (
+            "cpc green mame linear",
+            SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
+            3,
+        ),
+        (
+            "cpc green mame half 0.40",
+            SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
+            4,
+        ),
     ] {
         let p = Params {
             source_colour_target: target,
@@ -575,6 +624,77 @@ fn mega_drive_shadow_and_highlight_levels_come_out_at_the_measured_levels() {
     let out = run(&mut gpu, &half, &kega);
     assert!((f64::from(out.pixel(0, 0)[1]) * 255.0 - 26.0).abs() < 0.3);
     assert!((f64::from(out.pixel(1, 0)[1]) * 255.0 - 52.0).abs() < 0.3);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The CPC's 27 colours (every channel 0, 128 or 255) through the shader: the colour target puts the half level on 102 of
+/// 255 on every channel and keeps black and full; the green monitor, on the variant with the half level at 0.40, makes the
+/// 9 : 3 : 1 sum of the three levels (0, 0.40, 1) over 13 on all three channels (variant 1 gives i / 26 for the exact
+/// levels 0, 0.5, 1, checked on the oracle's hand derivation in `targets.rs`).
+#[test]
+fn cpc_colours_come_out_at_the_half_level_of_the_gate_array() {
+    let Some(mut gpu) = common::gpu_or_skip("cpc_colours_come_out_at_the_half_level") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&["target"]).unwrap();
+    let level = [0.0f64, 128.0 / 255.0, 1.0];
+    let mut rgba = Vec::new();
+    for r in 0..3 {
+        for g in 0..3 {
+            for b in 0..3 {
+                rgba.extend_from_slice(&[level[r] as f32, level[g] as f32, level[b] as f32, 1.0]);
+            }
+        }
+    }
+    let img = ImageF32 {
+        width: 27,
+        height: 1,
+        rgba,
+    };
+    let want = [0.0f64, 102.0 / 255.0, 1.0];
+    let p = Params {
+        source_colour_target: SOURCE_COLOUR_TARGET_AMSTRAD_CPC,
+        source_colour_variant: 1,
+        ..Params::default()
+    };
+    let out = run(&mut gpu, &img, &p);
+    for r in 0..3usize {
+        for g in 0..3usize {
+            for b in 0..3usize {
+                let px = out.pixel((9 * r + 3 * g + b) as u32, 0);
+                for (c, w) in [want[r], want[g], want[b]].into_iter().enumerate() {
+                    assert!(
+                        (f64::from(px[c]) - w).abs() <= MAX_ERR,
+                        "cpc {r}{g}{b} channel {c}: {} want {w}",
+                        px[c]
+                    );
+                }
+            }
+        }
+    }
+    // The green monitor with the half level at 0.40: grey = (9 R + 3 G + B) / 13 of the levels 0, 0.40, 1, on all channels.
+    let green = Params {
+        source_colour_target: SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
+        source_colour_variant: 2,
+        ..Params::default()
+    };
+    let out = run(&mut gpu, &img, &green);
+    let mut worst = 0.0f64;
+    for r in 0..3usize {
+        for g in 0..3usize {
+            for b in 0..3usize {
+                let want = (9.0 * [0.0, 0.4, 1.0][r] + 3.0 * [0.0, 0.4, 1.0][g] + [0.0, 0.4, 1.0][b]) / 13.0;
+                let px = out.pixel((9 * r + 3 * g + b) as u32, 0);
+                for (c, v) in px.iter().take(3).enumerate() {
+                    let e = (f64::from(*v) - want).abs();
+                    worst = worst.max(e);
+                    assert!(e <= MAX_ERR, "green {r}{g}{b} channel {c}: {v} want {want}");
+                }
+            }
+        }
+    }
+    println!("cpc colours: green max {worst:.2e}");
     common::assert_no_validation_messages(&counter);
 }
 

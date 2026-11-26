@@ -1,0 +1,39 @@
+# Source colour target, data only (TODO, "Source colour targets"; QUESTIONS.md, "Audit of the colour targets" and "Third research
+# pass"). Format: crates/phoxium/src/targets.rs. Every key of [dac] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "amstrad_cpc"
+name = "Amstrad CPC 464 / 6128 (Gate Array, 27 colours)"
+label = "the CPC Gate Array's three levels per channel with the middle level at 0.40 of full scale (not 0.5), behind an emulator picture whose middle level is 128, 127 or MAME's 96 (Emulator variant)"
+kind = "dac"
+notes = """
+The CPC's Gate Array makes each of the three colour channels from one of three levels, off, half and full: 27 colours. An emulator shows the three levels as 0, a middle value and 255; this target moves the middle level to where the hardware puts it, 0.40 of full scale (102 of 255), and leaves black and full alone. The map is a dac of three points per channel with the straight line between them (a scaled picture): the same on red, green and blue.
+**Where 0.40 comes from.** The CPCWiki Gate Array page says the half level was measured closer to 40 percent than to 50, credits the measurement to Grim (the Grimware oscilloscope pages, whose domain is gone), and says nocash confirmed it; the CPC Plus ASIC, which has 4 bits a channel, maps its levels to 0, 6 and 15, and 6 / 15 is exactly 0.40, 'to better match the real CPC palette'. None of this was read at its source here: the CPCWiki main site refuses automated reads (HTTP 403, tried again for this target) and the Grimware pages are gone, so the figure is second-hand (the third research pass of QUESTIONS.md, which read it through a search tool and a forum). It is an instrument claim with no voltage on it. 0.40 of 255 is 102.
+**What conflicts.** The wiki's own palette table lists the half level as the literal half, 0.5, which is what an emulator shows and what an unloaded Gate Array would give if its three levels were equally spaced. nocash's scope readings on a CPC6128 (100 mV a division, loaded by a Philips television, not an Amstrad monitor) are about 4.0 V for both full and half with nothing connected, about 1.0 V and 0.5 V loaded: a ratio of 0.5 loaded, so one reading supports the literal half. The loaded level depends on the resistor network in the monitor and its cable (the research notes quote 1k, 3.3k and 10k for the luminance mix of the green monitor, and 220 or 270 ohm at the output, from a forum snippet that could not be re-read), and the television is the load that matters, as with the Master System. The target ships the measured 0.40, as the TODO and the Plus ASIC do, and does not claim to know the level a given monitor shows.
+**The emulator's input level (the variants).** The CPCWiki palette page (as a search snippet) gives the half level of a modern display as 127 or 128; MAME's palette uses 0x60 (96, 0.376), a figure that came with the notes of the third research pass (MAME's licence is mixed BSD-3 and GPL: the number only, no code or table was copied, and no MAME source was read here, so the figure is not checked and the version that uses it is not known: MAME's CTM644 colours were corrected after a bug report, number 8506, fixed in 0.252, from photographs and no stated numbers). Variant 1 is an emulator that shows 128 (the middle level 128 goes to 102), variant 2 one that shows 127, variant 3 MAME's 96. An emulator whose half level is something else is between the points of the nearest variant and lands on the straight line: 127 on variant 1 comes out at 101.2, one code off 102. The literal 0.5 is not a variant: an emulator already shows it (127 or 128), so mapping it to itself would be an identity.
+**Not built, and why.** A per-channel half level: the sources say green's half is significantly higher than red's and blue's on a real CPC and that Amstrad monitors respond weakly in red, and none gives a number (Grim's per-channel readings are on the pages that could not be read), so no per-channel variant exists and none was invented: the three channels share the one level. The monitor's own transfer curve and gamma (CTM644 on the CPC 464 and 6128, CM14 on the Plus: 100 ohm gun load, 0 to 10 mA a gun, linear, per the notes) are not modelled either; the gun law, white point and primaries of the chain's tube take over. The composite and RF output through the modulator is not modelled. The green screen (GT64, GT65) is the separate target amstrad_cpc_green_screen. Analog RGB, so the composite module is not involved.
+"""
+
+[dac]
+output = [0, 102, 255]
+output_max = 255.0
+
+[[dac.inputs]]
+id = "emulator_128"
+name = "Emulator that shows the half level as 128 (CPCWiki: 127 or 128)"
+levels = [0, 128, 255]
+
+[[dac.inputs]]
+id = "emulator_127"
+name = "Emulator that shows the half level as 127"
+levels = [0, 127, 255]
+
+[[dac.inputs]]
+id = "mame_96"
+name = "MAME: half level 0x60 (96), as relayed, unchecked"
+levels = [0, 96, 255]
+
+[provenance]
+output = "S: the half level is 0.40 of full scale, the CPCWiki Gate Array page (credited to Grim, confirmed by nocash) and the CPC Plus ASIC's 4-bit mapping 0, 6, 15 (6 / 15 = 0.40), as relayed by the third research pass of QUESTIONS.md; the CPCWiki site returned HTTP 403 again for this target and the Grimware scope pages are gone, so the figure is second-hand and carries no voltage (S, relayed); 102 = 0.40 x 255 (D); off 0 and full 255 are the two ends of the three-level channel (K); the literal 0.5 of the wiki's table and nocash's loaded 1.0 V against 0.5 V are the conflict, stated in the notes; no per-channel half level was found, the three channels share this one"
+output_max = "K: 8-bit output code; full 255 is the Gate Array's top level, the reference of the measured 0.40"
+inputs = "E: the half level an emulator shows, 128 (variant 1) or 127 (variant 2), the CPCWiki palette page's 'about 127 or 128' as a search snippet of the third research pass (the page was not readable); 96 = 0x60 for MAME (variant 3) is the number noted in the third research pass as a GPL cross-check, not read in MAME's source here and with no version named; black 0 and full 255 are K; none of the emulators' code was read"
