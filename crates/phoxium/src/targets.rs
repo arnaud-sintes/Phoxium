@@ -32,7 +32,9 @@
 //! one by one (`[[signal.colours]]`) or, for a palette that is a grid of hues and luma levels (the Atari's 256), as
 //! `[signal.grid]` (`hues`, `lumas`, the phase `angle` of hue 1): the colour of hue `h` and luma `l` has the index
 //! `h x lumas + l`, hue 0 has no chroma, the phase of hue `h` is `angle + phase_row_deg x (h - 1)` and the `luma_mv` of
-//! a revision or of the reference holds one level per luma. A revision may give its own chroma `amplitude`.
+//! a revision or of the reference holds one level per luma. A revision may give its own chroma `amplitude`. The reference
+//! the classification compares with is computed from the colours (`[signal.reference]`), or, with `rgb_references`, a
+//! list of the RGB colours an emulator shows (the CGA's canonical RGBI palette).
 //!
 //! [`Target::parse`] rejects an unknown key, a schema other than 1, an unknown kind, a table of the other kind, a value
 //! that is not finite or not in range, and a key with no provenance entry of the form `<tag>: <text>`. A target ships
@@ -108,6 +110,10 @@ const SHIPPED: &[(&str, &str)] = &[
     (
         "sega_master_system.toml",
         include_str!("../../../presets/targets/sega_master_system.toml"),
+    ),
+    (
+        "ibm_cga_composite.toml",
+        include_str!("../../../presets/targets/ibm_cga_composite.toml"),
     ),
 ];
 
@@ -494,6 +500,12 @@ struct SignalReference {
     /// show the same chip with different display gammas (the TMS9928A palettes go from 1.0 to 1.6), and one exponent
     /// cannot sit near them all.
     extra_gammas: Option<Vec<f64>>,
+    /// The reference as a list of colours an emulator shows (0xRRGGBB) with the index of the colour each stands for
+    /// (several may stand for one colour), in place of a computed palette: for a device whose emulators show a fixed RGB
+    /// palette that is not the signal's decode (the IBM CGA's canonical RGBI colours). It excludes every key that
+    /// computes the reference (`luma_mv`, `black_mv`, `white_mv`, `phase_row_deg`, `amplitude`, `saturation`,
+    /// `extra_gammas`) and needs a `gain` and a `gamma` of 1.
+    rgb_references: Option<Vec<RemapReference>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -697,7 +709,35 @@ impl SignalFile {
         for g in &extra_gammas {
             positive(file, "signal.reference", "extra_gammas", *g)?;
         }
-        let sets = 1 + extra_gammas.len();
+        let rgb_refs = r.rgb_references.as_deref();
+        if let Some(refs) = rgb_refs {
+            if refs.is_empty() || refs.len() > SIGNAL_MAX {
+                return Err(format!(
+                    "{file}: signal.reference.rgb_references must hold 1 to {SIGNAL_MAX} colours"
+                ));
+            }
+            if refs.iter().any(|x| x.rgb > 0xFF_FFFF || x.colour >= n) {
+                return Err(format!(
+                    "{file}: signal.reference.rgb_references rgb must be at most 0xFFFFFF and colour one of the {n} colours"
+                ));
+            }
+            if r.luma_mv.is_some()
+                || r.black_mv.is_some()
+                || r.white_mv.is_some()
+                || r.phase_row_deg.is_some()
+                || r.amplitude.is_some()
+                || r.saturation.is_some()
+                || !extra_gammas.is_empty()
+                || r.gain != 1.0
+                || r.gamma != 1.0
+            {
+                return Err(format!(
+                    "{file}: signal.reference.rgb_references replaces the computed reference: no luma_mv, black_mv, white_mv, \
+                     phase_row_deg, amplitude, saturation or extra_gammas, and a gain and a gamma of 1"
+                ));
+            }
+        }
+        let sets = if rgb_refs.is_some() { 1 } else { 1 + extra_gammas.len() };
         if n.saturating_mul(sets) > SIGNAL_MAX {
             return Err(format!(
                 "{file}: {n} colours in {sets} reference sets are more than the {SIGNAL_MAX} the table holds"
@@ -750,7 +790,17 @@ impl SignalFile {
         }
         // The reference palette, once per exponent: the set `k` fills the entries `k x n` to `k x n + n - 1`.
         let mut references = [[0.0; 3]; SIGNAL_MAX];
-        for (k, gamma) in std::iter::once(r.gamma).chain(extra_gammas.iter().copied()).enumerate() {
+        if let Some(refs) = rgb_refs {
+            for (i, x) in refs.iter().enumerate() {
+                references[i] = [(x.rgb >> 16) & 255, (x.rgb >> 8) & 255, x.rgb & 255].map(|v| f64::from(v) / 255.0);
+            }
+        }
+        let computed_sets = if rgb_refs.is_some() { 0 } else { sets };
+        for (k, gamma) in std::iter::once(r.gamma)
+            .chain(extra_gammas.iter().copied())
+            .take(computed_sets)
+            .enumerate()
+        {
             let set = self.colours_for(
                 file,
                 "signal.reference",
@@ -842,15 +892,27 @@ impl SignalFile {
             )?;
             // One copy of the colours per reference set: the entry `k x n + i` of a later set gives the colour `i`.
             let mut table = [[0.0; 3]; SIGNAL_MAX];
-            for k in 0..sets {
-                table[k * n..(k + 1) * n].copy_from_slice(&colours[..n]);
-            }
+            let count = match rgb_refs {
+                // One entry per reference colour, the colour that reference stands for.
+                Some(refs) => {
+                    for (i, x) in refs.iter().enumerate() {
+                        table[i] = colours[x.colour];
+                    }
+                    refs.len()
+                }
+                None => {
+                    for k in 0..sets {
+                        table[k * n..(k + 1) * n].copy_from_slice(&colours[..n]);
+                    }
+                    n * sets
+                }
+            };
             out.push(Variant {
                 id: rev.id.clone(),
                 name: rev.name.clone(),
                 transform: Transform::Signal(Signal {
                     colours: table,
-                    count: n * sets,
+                    count,
                     references,
                     threshold: self.threshold,
                 }),
@@ -2637,5 +2699,295 @@ mod tests {
         // The Mega Drive file has no variant outputs of its own and no such provenance entry.
         let md = for_value(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE).expect("md");
         assert!(!md.provenance.contains_key("variant_outputs"));
+    }
+
+    /// The chroma waves of the CGA over one colour cycle of eight steps, by colour index 0 to 7 (B is bit 0, G bit 1, R
+    /// bit 2): reenigne, 'CRTC emulation for MESS' (2006), typed here independently of the data file.
+    const CGA_WAVES: [u8; 8] = [
+        0b0000_0000, // black
+        0b0000_1111, // blue
+        0b0111_1000, // green
+        0b0011_1100, // cyan
+        0b1100_0011, // red
+        0b1000_0111, // magenta
+        0b1111_0000, // yellow, also the burst
+        0b1111_1111, // white
+    ];
+
+    /// The fundamental of a wave of eight steps: the sum of its bits times e^(-j 2 pi k / 8), as (re, im).
+    fn cga_fundamental(wave: u8) -> (f64, f64) {
+        (0..8)
+            .filter(|k| wave >> (7 - k) & 1 == 1)
+            .fold((0.0, 0.0), |(re, im), k| {
+                let a = std::f64::consts::TAU * f64::from(k) / 8.0;
+                (re + a.cos(), im - a.sin())
+            })
+    }
+
+    /// The four levels of reenigne's circuit simulation of the old card, in mV: Y (intensity) 0 or 1, C (chroma) 0 or 1.
+    const CGA_OLD_MV: [[f64; 2]; 2] = [[416.0, 1160.0], [709.0, 1460.0]];
+
+    /// The file's 16 colours, one per index, from the card's logic written out here: the wave of the colour bits gives the
+    /// mean chroma (the share of its bits set) and, from its fundamental against the yellow wave's, the phase (the burst's
+    /// 180 degrees minus the turn); the old card's level is the mean of its two intensity levels weighted by that share,
+    /// the new card's the weighted sum of the chroma, R, G, B and I bits; the decode is [`decode_yuv`]. `amplitude` is the
+    /// chroma vector as a share of the span.
+    fn cga_composite(new_card: bool, amplitude: f64) -> [[f64; 3]; 16] {
+        let level = |i: usize| -> f64 {
+            let wave = CGA_WAVES[i & 7];
+            let c = f64::from(wave.count_ones()) / 8.0;
+            let (intensity, r, g, b) = (
+                f64::from(u8::from(i & 8 != 0)),
+                f64::from(u8::from(i & 4 != 0)),
+                f64::from(u8::from(i & 2 != 0)),
+                f64::from(u8::from(i & 1 != 0)),
+            );
+            if new_card {
+                0.29 * c + 0.10 * r + 0.22 * g + 0.07 * b + 0.32 * intensity
+            } else {
+                let y = &CGA_OLD_MV[usize::from(i & 8 != 0)];
+                y[0] + c * (y[1] - y[0])
+            }
+        };
+        let (black, white) = (level(0), level(15));
+        let burst = cga_fundamental(CGA_WAVES[6]);
+        let burst_phase = burst.1.atan2(burst.0);
+        let mut out = [[0.0; 3]; 16];
+        for (i, o) in out.iter_mut().enumerate() {
+            let y = (level(i) - black) / (white - black);
+            let wave = CGA_WAVES[i & 7];
+            let (u, v) = if matches!(i & 7, 0 | 7) {
+                (0.0, 0.0)
+            } else {
+                let f = cga_fundamental(wave);
+                // The wave leads the burst by this much; the hue on the U axis is the burst's 180 degrees minus it.
+                let lead = (f.1.atan2(f.0) - burst_phase).to_degrees();
+                let a = (180.0 - lead).to_radians();
+                (amplitude * a.cos(), amplitude * a.sin())
+            };
+            *o = decode_yuv(y, u, v);
+        }
+        out
+    }
+
+    /// The IBM CGA composite file: four variants over 17 reference entries (the 16 canonical colours and PCem's dark
+    /// yellow); each variant's 16 colours are the card's logic written out in [`cga_composite`] (the waves' phases from
+    /// their fundamentals, the luma from the simulated levels or the weights, the amplitude from a square wave's
+    /// fundamental), the rounded amplitudes of the file within 1e-4; the six chromatic hues stay within 20 degrees of the
+    /// NTSC hues of the pure colours; the greys have no chroma; hand-derived entries.
+    /// Hand derivation, new card, red (colour 4): level 0.29 x 0.5 + 0.10 = 0.245, hue 90 degrees, amplitude
+    /// 2 / pi x 0.29 = 0.1846: U = 0, V = 0.1846, R = 0.245 + 0.1846 / 0.877283 = 0.4554, B = 0.245,
+    /// G = (0.245 - 0.299 x 0.4554 - 0.114 x 0.245) / 0.587 = 0.1378 (decoded from the unclamped red and blue).
+    #[test]
+    fn the_cga_composite_file_is_the_cards_logic() {
+        use std::f64::consts::PI;
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE).expect("cga composite");
+        assert_eq!(t.variants.len(), 4);
+        assert_eq!(
+            t.variants.iter().map(|v| v.id.as_str()).collect::<Vec<_>>(),
+            ["old_card", "new_card", "old_card_burst_gain", "new_card_burst_gain"]
+        );
+        // The amplitudes: a square wave of swing p has the fundamental 2 p / pi; the old card's swing is the mean of the
+        // two chroma steps of the four levels over the span, the new card's is 0.29; the burst-gain variants 20 / 100.
+        let old_span = CGA_OLD_MV[1][1] - CGA_OLD_MV[0][0];
+        let old_swing =
+            ((CGA_OLD_MV[0][1] - CGA_OLD_MV[0][0]) + (CGA_OLD_MV[1][1] - CGA_OLD_MV[1][0])) / 2.0 / old_span;
+        let amplitudes = [2.0 / PI * old_swing, 2.0 / PI * 0.29, 0.2, 0.2];
+        assert!((amplitudes[0] - 0.4558).abs() < 1e-4 && (amplitudes[1] - 0.1846).abs() < 1e-4);
+        for (k, v) in t.variants.iter().enumerate() {
+            let Transform::Signal(s) = v.transform else {
+                panic!("signal")
+            };
+            assert_eq!(s.count, 17, "{}", v.id);
+            let want = cga_composite(k % 2 == 1, amplitudes[k]);
+            for i in 0..17 {
+                let colour = if i == 16 { 6 } else { i };
+                assert!(
+                    dist(s.colours[i], want[colour]) < 1e-3,
+                    "{} entry {i}: {:?} against {:?}",
+                    v.id,
+                    s.colours[i],
+                    want[colour]
+                );
+            }
+            // The two variants of a card with the same luma share it: the greys are the same.
+            for g in [0, 7, 8, 15] {
+                assert!(close_channels(s.colours[g]), "{} grey {g}: {:?}", v.id, s.colours[g]);
+            }
+        }
+        // Hue: decode U and V back from the colours of the unclamped variants (the new card and the burst-gain ones) and
+        // compare with the file's angles and with the NTSC hue of the pure colour (within 20 degrees).
+        let ntsc_hue = |rgb: [f64; 3]| {
+            let y = 0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2];
+            (0.877_283 * (rgb[0] - y))
+                .atan2(0.492_111 * (rgb[2] - y))
+                .to_degrees()
+                .rem_euclid(360.0)
+        };
+        let mut checked = 0;
+        for k in [1, 2, 3] {
+            let Transform::Signal(s) = t.variants[k].transform else {
+                panic!("signal")
+            };
+            let pures = [
+                (1, [0.0, 0.0, 1.0]),
+                (2, [0.0, 1.0, 0.0]),
+                (3, [0.0, 1.0, 1.0]),
+                (4, [1.0, 0.0, 0.0]),
+                (5, [1.0, 0.0, 1.0]),
+                (6, [1.0, 1.0, 0.0]),
+            ];
+            for (i, pure) in pures {
+                for c in [i, i + 8] {
+                    // A colour that clips a channel has lost its hue to the rails.
+                    if s.colours[c].iter().any(|v| *v <= 0.0 || *v >= 1.0) {
+                        continue;
+                    }
+                    checked += 1;
+                    let got = ntsc_hue(s.colours[c]);
+                    let want = [0.0, 0.0, 225.0, 270.0, 90.0, 45.0, 180.0][i];
+                    let off = (got - want + 540.0).rem_euclid(360.0) - 180.0;
+                    assert!(off.abs() < 0.5, "variant {k} colour {c}: hue {got} against {want}");
+                    let natural = (got - ntsc_hue(pure) + 540.0).rem_euclid(360.0) - 180.0;
+                    assert!(
+                        natural.abs() < 20.0,
+                        "variant {k} colour {c}: {natural} degrees from the pure hue"
+                    );
+                }
+            }
+        }
+        assert!(checked >= 28, "{checked} colours checked for hue");
+        // Hand-derived: the new card's red.
+        let Transform::Signal(s) = t.variants[1].transform else {
+            panic!("signal")
+        };
+        let (r, b) = (0.245 + 0.1846 / 0.877_283, 0.245);
+        let g = (0.245 - 0.299 * r - 0.114 * b) / 0.587;
+        assert!(dist(s.colours[4], [r, g, b]) < 1e-3, "{:?}", s.colours[4]);
+        assert!((g - 0.1378).abs() < 1e-3, "{g}");
+        // The old card is far more saturated than the new one: its chromatic colours clip a channel at the rails.
+        let Transform::Signal(old) = t.variants[0].transform else {
+            panic!("signal")
+        };
+        let clipped = (1..7)
+            .filter(|&i| old.colours[i].iter().any(|c| *c == 0.0 || *c == 1.0))
+            .count();
+        assert!(clipped >= 4, "{clipped}");
+        // The first variant is the target's own.
+        assert_eq!(t.transform, t.variants[0].transform);
+    }
+
+    /// True when the three channels are equal (a grey): a colour with no chroma decodes to R = G = B.
+    fn close_channels(c: [f64; 3]) -> bool {
+        (c[0] - c[1]).abs() < 1e-9 && (c[1] - c[2]).abs() < 1e-9
+    }
+
+    /// The wave of each colour is the yellow wave turned by whole steps (the file's phases follow from the turn), written
+    /// as rotations of the string and checked against the fundamental's phase: blue 4 steps from yellow, red 2, magenta 3,
+    /// cyan 6, green 7, and the means 0, 0.5 and 1 of the duty.
+    #[test]
+    fn the_cga_waves_are_the_yellow_wave_turned_by_whole_steps() {
+        let yellow = CGA_WAVES[6];
+        let want = [(1, 4), (2, 7), (3, 6), (4, 2), (5, 3), (6, 0)];
+        for (i, turn) in want {
+            assert_eq!(yellow.rotate_left(turn), CGA_WAVES[i], "colour {i}");
+            let (y, w) = (cga_fundamental(yellow), cga_fundamental(CGA_WAVES[i]));
+            let amp = |f: (f64, f64)| (f.0 * f.0 + f.1 * f.1).sqrt();
+            assert!((amp(y) - amp(w)).abs() < 1e-9, "colour {i}: equal fundamentals");
+            // The wave that leads by `turn` steps has the phase of the yellow wave plus turn x 45 degrees.
+            let lead = (w.1.atan2(w.0) - y.1.atan2(y.0)).to_degrees().rem_euclid(360.0);
+            assert!((lead - f64::from(turn) * 45.0).abs() < 1e-9, "colour {i}: {lead}");
+        }
+        assert_eq!(
+            CGA_WAVES.map(|w| w.count_ones()),
+            [0, 4, 4, 4, 4, 4, 4, 8],
+            "the mean chroma is 0, 0.5 or 1"
+        );
+    }
+
+    /// The recognition of the CGA composite target is that of the RGBI target: every canonical colour (and the dark
+    /// yellow, which stands for colour 6) is recognised as its own, a pixel off by a little still is, the closest two
+    /// references of different colours are farther apart than the threshold, a pixel with no canonical colour near passes
+    /// through, and the four variants share the references.
+    #[test]
+    fn the_cga_composite_reference_is_the_canonical_palette() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE).expect("cga composite");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        let canonical = [
+            0x000000, 0x0000AA, 0x00AA00, 0x00AAAA, 0xAA0000, 0xAA00AA, 0xAA5500, 0xAAAAAA, 0x555555, 0x5555FF,
+            0x55FF55, 0x55FFFF, 0xFF5555, 0xFF55FF, 0xFFFF55, 0xFFFFFF,
+        ];
+        for (i, c) in canonical.iter().enumerate() {
+            let rgb = hex_rgb(*c);
+            assert_eq!(s.classify(rgb), Some(i), "colour {i}");
+            assert_eq!(s.apply(rgb), s.colours[i]);
+            assert_eq!(s.classify(rgb.map(|v| (v + 0.02).min(1.0))), Some(i), "colour {i} off");
+        }
+        // PCem's dark yellow stands for colour 6: the entry 16 gives the colour 6's output.
+        assert_eq!(s.classify(hex_rgb(0xAAAA00)), Some(16));
+        assert_eq!(s.apply(hex_rgb(0xAAAA00)), s.colours[6]);
+        assert_eq!(s.colours[16], s.colours[6]);
+        let mut closest = f64::MAX;
+        for i in 0..17 {
+            for j in 0..17 {
+                if i % 16 != j % 16 && !(i == 16 && j == 6 || i == 6 && j == 16) {
+                    closest = closest.min(dist(s.reference(i), s.reference(j)));
+                }
+            }
+        }
+        assert!(closest > s.threshold, "{closest}");
+        let odd = [0.0, 1.0, 0.0];
+        assert_eq!(s.classify(odd), None);
+        assert_eq!(s.apply(odd), odd);
+        for v in &t.variants {
+            let Transform::Signal(o) = v.transform else {
+                panic!("signal")
+            };
+            assert_eq!(o.references, s.references, "{}", v.id);
+        }
+    }
+
+    /// The validation of `rgb_references`: an empty list, a colour past the last, an rgb past 0xFFFFFF, a computed-reference
+    /// key beside the list, a gain that is not 1.
+    #[test]
+    fn a_bad_cga_composite_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "ibm_cga_composite.toml")
+            .expect("the cga composite file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen("rgb = 0xFFFFFF\ncolour = 15", "rgb = 0x1FFFFFF\ncolour = 15", 1),
+                "0xFFFFFF",
+            ),
+            (
+                ok.replacen("rgb = 0xFFFFFF\ncolour = 15", "rgb = 0xFFFFFF\ncolour = 16", 1),
+                "16 colours",
+            ),
+            (ok.replacen("gain = 1.0", "gain = 1.1", 1), "gain and a gamma of 1"),
+            (ok.replacen("gamma = 1.0", "gamma = 2.2", 1), "gain and a gamma of 1"),
+            (
+                ok.replacen("gain = 1.0", "gain = 1.0\namplitude = 0.3", 1),
+                "replaces the computed reference",
+            ),
+            (
+                ok.replacen("gain = 1.0", "gain = 1.0\nextra_gammas = [1.5]", 1),
+                "replaces the computed reference",
+            ),
+            (
+                ok.replace("black_index = \"K:", "black_index = \"X:"),
+                "provenance.black_index",
+            ),
+            (ok.replacen("luma_mv = [0, 215,", "luma_mv = [215,", 1), "luma_mv"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
     }
 }
