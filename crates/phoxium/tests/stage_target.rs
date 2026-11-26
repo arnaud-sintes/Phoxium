@@ -584,6 +584,7 @@ fn target_slot_matches_the_oracle() {
         ("atari 2600 25.7", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 1),
         ("atari 2600 24", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 2),
         ("atari 2600 chroma 0.23", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 5),
+        ("atari 2600 2600a ladder", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 6),
         ("pc engine kitrinx", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 1),
         ("pc engine v 14/15", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 2),
         ("cpc half 128", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 1),

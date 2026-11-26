@@ -2829,7 +2829,7 @@ mod tests {
     fn the_atari_2600_file_and_its_hand_derived_colours() {
         let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_2600_TIA).expect("atari 2600");
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
-        assert_eq!(ids, ["25_7", "24", "26_7", "sat_0_30", "sat_0_23"]);
+        assert_eq!(ids, ["25_7", "24", "26_7", "sat_0_30", "sat_0_23", "ladder_2600a_14"]);
         for key in [
             "grid",
             "revisions",
@@ -2860,7 +2860,7 @@ mod tests {
             (r - 0.81006).abs() < 1e-3 && (g - 0.20424).abs() < 1e-3 && (b - 0.58308).abs() < 1e-3,
             "{r} {g} {b}"
         );
-        // The 8 greys of hue 0 are the linear luma n / 7 (Ball's 0.09 a step) on every variant.
+        // The 8 greys of hue 0 are the linear luma n / 7 (Ball's 0.09 a step) on every variant but the ladder.
         for v in 0..5 {
             let o = signal(v);
             for l in 0..8 {
@@ -2877,10 +2877,68 @@ mod tests {
         let amplitude = |o: &Signal| (1.0 - o.colours[15][2]) * 0.492111;
         let want = (20.0 / 92.5) / 0.63;
         println!("Ball's amplitude {want:.4}");
-        for (v, a) in [(0, want), (1, want), (2, want), (3, 0.30), (4, 0.2303)] {
+        for (v, a) in [(0, want), (1, want), (2, want), (3, 0.30), (4, 0.2303), (5, want)] {
             let got = amplitude(&signal(v));
             assert!((got - a).abs() < 2e-4, "variant {v}: {got} against {a}");
         }
+        // The ladder variant (2600A from revision 14, Field Service Manual schematics): the node of the four resistors
+        // recomputed here from 27k, 47k, 110k (LM2, LM1, LM0) and 24k (SYN, high in the picture), each high pin 5 V through
+        // its resistor and its pull-up (3.3k, 4.7k, 3.3k, 4.7k), each low pin 0 V through its resistor, loaded by 15k.
+        let r = [27e3, 47e3, 110e3];
+        let pull = [3.3e3, 4.7e3, 3.3e3];
+        let node = |n: usize| {
+            let (mut g, mut i) = (1.0 / 15e3, 0.0);
+            for b in 0..3 {
+                if n & (4 >> b) != 0 {
+                    g += 1.0 / (r[b] + pull[b]);
+                    i += 5.0 / (r[b] + pull[b]);
+                } else {
+                    g += 1.0 / r[b];
+                }
+            }
+            g += 1.0 / (24e3 + 4.7e3);
+            i += 5.0 / (24e3 + 4.7e3);
+            i / g
+        };
+        let ladder = signal(5);
+        let mut worst = 0.0f64;
+        let mut off = 0.0f64;
+        for l in 0..8 {
+            let want = (node(l) - node(0)) / (node(7) - node(0));
+            worst = worst.max((ladder.colours[l][0] - want).abs());
+            off = off.max((want - l as f64 / 7.0).abs());
+            assert!((ladder.colours[l][0] - want).abs() < 2e-6, "ladder {l}");
+        }
+        // It departs from the linear luma by up to 0.038 of the span (step 5), more than the 0.02 that makes a variant.
+        println!("2600A ladder against linear: at most {off:.4}; against its own recomputation {worst:.2e}");
+        assert!(off > 0.037 && off < 0.039, "{off}");
+        // The CX2600 (12k, 24k, 47k, 10k, rail to rail buffers, 18k) and the early 2600A (27k, 56k, 110k, 27k, 3.3k pull-ups,
+        // 15k) ladders are within 0.02 of linear, which is why they have no variant of their own.
+        let dev = |r: [f64; 3], rs: f64, pull: [f64; 4], gl: f64| {
+            let lvl = |n: usize| {
+                let (mut g, mut i) = (gl, 0.0);
+                for b in 0..3 {
+                    let rr = r[b] + if n & (4 >> b) != 0 { pull[b] } else { 0.0 };
+                    g += 1.0 / rr;
+                    if n & (4 >> b) != 0 {
+                        i += 5.0 / rr;
+                    }
+                }
+                g += 1.0 / (rs + pull[3]);
+                i += 5.0 / (rs + pull[3]);
+                i / g
+            };
+            (0..8)
+                .map(|l| ((lvl(l) - lvl(0)) / (lvl(7) - lvl(0)) - l as f64 / 7.0).abs())
+                .fold(0.0, f64::max)
+        };
+        let cx2600 = dev([12e3, 24e3, 47e3], 10e3, [0.0; 4], 1.0 / 18e3);
+        let early_a = dev([27e3, 56e3, 110e3], 27e3, [3.3e3; 4], 1.0 / 15e3);
+        println!("CX2600 ladder against linear: at most {cx2600:.4}; early 2600A {early_a:.4}");
+        assert!(
+            cx2600 < 0.003 && early_a < 0.0105 && early_a > 0.0095,
+            "{cx2600} {early_a}"
+        );
         // MAME's hue 1 chroma magnitude is the value of the last variant.
         assert!(((0.192f64.powi(2) + 0.127f64.powi(2)).sqrt() - 0.2303).abs() < 1e-3);
         // Hue 1 is the burst phase on every step (the same colour on all variants of the same chroma).
@@ -2898,7 +2956,7 @@ mod tests {
         assert!(far24 > 0.04, "{far24}");
         assert!(far26 > 0.04, "{far26}");
         // The classification does not depend on the variant: the references are the same.
-        for v in 1..5 {
+        for v in 1..6 {
             assert_eq!(signal(v).references, s.references, "variant {v}");
         }
     }
