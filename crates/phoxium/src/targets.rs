@@ -151,6 +151,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "game_boy_lcd.toml",
         include_str!("../../../presets/targets/game_boy_lcd.toml"),
     ),
+    (
+        "nintendo_virtual_boy.toml",
+        include_str!("../../../presets/targets/nintendo_virtual_boy.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -4449,6 +4453,138 @@ mod tests {
             (ok.replacen("sets = \"S:", "sets = \"X:", 1), "provenance.sets"),
             // Read as RGB555, an 8-bit word is above 15 bits.
             (ok.replacen("colour_bits = 8", "colour_bits = 5", 1), "0x7FFF"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The Virtual Boy: the console's four levels are the on-times 0, A, 2A, 3A (BRTC = 0, BRTB = 2 A), so the light is
+    /// 0, 1/3, 2/3, 1 of the brightest; an emulator (Mednafen) encodes that on-time with a power of 1 / 2.2 and tints it
+    /// (0xF0F0F0), so the grey it shows for level k is p_k = (k / 3)^(1 / 2.2) x 240 / 255 (hand derivation). The target
+    /// undoes the 2.2, keeps red only, and encodes again: the red comes out as p_k, its linear light (the 2.2 power) is in the
+    /// ratio 0 : 1 : 2 : 3, and green and blue are 0 whatever the input.
+    #[test]
+    fn the_virtual_boy_makes_red_light_proportional_to_the_on_time() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY).expect("virtual boy");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["grey", "red_ramp"]);
+        assert_eq!(t.transform, t.variants[0].transform);
+        let Transform::Matrix(m) = t.transform else {
+            panic!("matrix")
+        };
+        assert_eq!(m.rows, [[0.299, 0.587, 0.114], [0.0; 3], [0.0; 3]]);
+        assert_eq!(
+            (
+                m.input_bits,
+                m.input_range,
+                m.divisor,
+                m.input_gamma,
+                m.output_gamma,
+                m.output_scale
+            ),
+            (8, 1.0, 1.0, 2.2, 2.2, 1.0)
+        );
+        assert!(m.clamp.is_infinite());
+        let close = |a: f64, b: f64| (a - b).abs() < 1e-9;
+        assert!(close(m.rows[0].iter().sum::<f64>(), 1.0));
+        let tint = 240.0 / 255.0;
+        let mut light = Vec::new();
+        for k in 0..4 {
+            let p = (f64::from(k) / 3.0).powf(1.0 / 2.2) * tint;
+            let out = t.select(1).apply([p; 3]);
+            // Red is the pixel itself (the two exponents cancel), green and blue are dark.
+            assert!(close(out[0], p) && out[1] == 0.0 && out[2] == 0.0, "level {k}: {out:?}");
+            light.push(out[0].powf(2.2));
+        }
+        assert_eq!(light[0], 0.0);
+        for k in 1..4 {
+            assert!(
+                close(light[k] / light[1], k as f64),
+                "level {k}: {}",
+                light[k] / light[1]
+            );
+        }
+        // The brightest level is the whole range when the tint is full white: full light, a pure red.
+        let white = t.select(1).apply([1.0; 3]);
+        assert!(close(white[0], 1.0) && white[1] == 0.0 && white[2] == 0.0, "{white:?}");
+        assert_eq!(t.select(1).apply([0.0; 3]), [0.0; 3]);
+        // Not an identity: a grey is turned into red.
+        let out = t.select(1).apply([0.5; 3]);
+        assert!(close(out[0], 0.5) && out[1] == 0.0 && out[2] == 0.0);
+        // A colour is reduced by the luma of the linearised channels: (1, 0.5, 0) is 0.299 + 0.587 x 0.5^2.2 of the light.
+        let l = 0.299 + 0.587 * 0.5f64.powf(2.2);
+        assert!(close(t.select(1).apply([1.0, 0.5, 0.0])[0], l.powf(1.0 / 2.2)));
+        // The grey variant on a picture that is already red is not what the second variant is for: 0.299 of the light.
+        assert!(close(t.select(1).apply([1.0, 0.0, 0.0])[0], 0.299f64.powf(1.0 / 2.2)));
+        // Variant 2, a red picture: the red channel alone, an identity on shades of red, green and blue dropped.
+        for r in [0.0, 0.1, 0.5, 0.8, 1.0] {
+            let out = t.select(2).apply([r, 0.0, 0.0]);
+            assert!(close(out[0], r) && out[1] == 0.0 && out[2] == 0.0, "red {r}: {out:?}");
+            let tinted = t.select(2).apply([r, 0.7, 0.3]);
+            assert!(close(tinted[0], r) && tinted[1] == 0.0 && tinted[2] == 0.0, "tint {r}");
+        }
+        // Whatever the variant and the colour, no green and no blue, and black stays black.
+        for v in 1..=2 {
+            for px in [[0.2, 0.9, 0.4], [1.0, 1.0, 0.0], [0.0, 0.0, 1.0], [0.6; 3]] {
+                let out = t.select(v).apply(px);
+                assert!(
+                    out[1] == 0.0 && out[2] == 0.0 && (0.0..=1.0).contains(&out[0]),
+                    "{v} {px:?}"
+                );
+            }
+            assert_eq!(t.select(v).apply([0.0; 3]), [0.0; 3]);
+        }
+        // A number past the last variant gives the first one.
+        assert_eq!(t.select(9), t.transform);
+        // Provenance and honesty of the notes: the LED model is S, the exponent undone is S, the colour is the sibling's.
+        for key in [
+            "rows",
+            "input_bits",
+            "input_range",
+            "input_gamma",
+            "divisor",
+            "output_gamma",
+            "variants",
+        ] {
+            assert!(t.provenance.contains_key(key), "{key}");
+        }
+        assert_eq!(t.provenance["input_gamma"].chars().next(), Some('S'));
+        assert_eq!(t.provenance["variants"].chars().next(), Some('E'));
+        for word in [
+            "660",
+            "2 foot-lamberts",
+            "70:1",
+            "stand-in",
+            "no black lift",
+            "Private Eye is not the Virtual Boy",
+        ] {
+            assert!(t.notes.contains(word), "notes: {word}");
+        }
+    }
+
+    /// The validation of the Virtual Boy file: an exponent that is not positive, a divisor of 0, a repeated id, a missing
+    /// provenance, a non-finite row.
+    #[test]
+    fn a_bad_virtual_boy_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "nintendo_virtual_boy.toml")
+            .expect("the virtual boy file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replacen("input_gamma = 2.2", "input_gamma = 0", 1), "input_gamma"),
+            (ok.replacen("divisor = 1.0", "divisor = 0.0", 1), "divisor"),
+            (ok.replacen("id = \"red_ramp\"", "id = \"grey\"", 1), "used twice"),
+            (ok.replacen("id = \"red_ramp\"", "id = \"Red\"", 1), "lower case"),
+            (ok.replacen("rows = \"D:", "rows = \"X:", 1), "provenance.rows"),
+            (
+                ok.replacen("input_gamma = \"S:", "input_gamma = \"X:", 1),
+                "provenance.input_gamma",
+            ),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);

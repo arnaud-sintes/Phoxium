@@ -336,6 +336,26 @@ mod tests {
         assert!((f64::from(gba.out_scale) - 255.0 / 280.0).abs() < 1e-7);
     }
 
+    /// The Virtual Boy is a matrix with a red row only: variant 1 the BT.601 luma, variant 2 the red channel, the 2.2 in and
+    /// out, no recovery of device codes (8 bits).
+    #[test]
+    fn the_virtual_boy_pushes_a_red_row_only() {
+        for (variant, red) in [(1, [0.299f32, 0.587, 0.114]), (2, [1.0, 0.0, 0.0])] {
+            let p = Params {
+                source_colour_variant: variant,
+                ..with(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY)
+            };
+            assert!(!is_identity(&p));
+            let a = plan(&p);
+            assert_eq!((a.kind, a.bits), (0, 0));
+            assert_eq!(a.k, [red, [0.0; 3], [0.0; 3]], "variant {variant}");
+            assert_eq!((a.input_range, a.divisor, a.clamp_sum), (1.0, 1.0, f32::MAX));
+            assert!((f64::from(a.input_gamma) - 2.2).abs() < 1e-6);
+            assert!((f64::from(a.inv_out_gamma) - 1.0 / 2.2).abs() < 1e-7);
+            assert_eq!(a.out_scale, 1.0);
+        }
+    }
+
     /// The curve is packed four entries to a word, the first entry in the lowest byte.
     #[test]
     fn the_curve_is_packed_four_to_a_word() {

@@ -18,9 +18,9 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_GAME_BOY_LCD,
     SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_MSX2_V9958,
     SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO,
-    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
-    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
+    SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -224,6 +224,26 @@ fn transform(target: u32, variant: i32) -> Transform {
                 output_scale: 1.0,
             })
         }
+        // The Virtual Boy, written here independently of the data file: the emulator's 2.2 undone, red only, encoded again;
+        // variant 1 takes the BT.601 luma of the linearised channels, variant 2 the red channel alone.
+        SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY => Transform::Matrix(Matrix {
+            rows: [
+                if variant == 1 {
+                    [0.299, 0.587, 0.114]
+                } else {
+                    [1.0, 0.0, 0.0]
+                },
+                [0.0; 3],
+                [0.0; 3],
+            ],
+            input_bits: 8,
+            input_range: 1.0,
+            input_gamma: 2.2,
+            clamp: f64::INFINITY,
+            divisor: 1.0,
+            output_gamma: 2.2,
+            output_scale: 1.0,
+        }),
         // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
         SOURCE_COLOUR_TARGET_COMMODORE_64
         | SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA
@@ -534,6 +554,8 @@ fn target_slot_matches_the_oracle() {
             SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
             4,
         ),
+        ("virtual boy grey", SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, 1),
+        ("virtual boy red ramp", SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, 2),
     ] {
         let p = Params {
             source_colour_target: target,
@@ -905,6 +927,70 @@ fn pc_engine_lookup_matches_the_oracle_on_every_code_and_passes_the_rest() {
                 "{grey:?}"
             );
         }
+    }
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The Virtual Boy: Mednafen's four levels of the on-times 0, A, 2A, 3A (BRTC = 0, BRTB = 2 A) are the greys
+/// (k / 3)^(1 / 2.2) x 240 / 255 (its 1 / 2.2 encode and its default tint 0xF0F0F0, hand derivation). Through the shader the
+/// red is that value, its linear light (the 2.2 power) is in the ratio 0 : 1 : 2 : 3, and green and blue are 0; the red ramp
+/// variant leaves the same red and drops a green and a blue part.
+#[test]
+fn virtual_boy_levels_come_out_as_red_light_proportional_to_the_on_time() {
+    let Some(mut gpu) = common::gpu_or_skip("virtual_boy_levels_come_out_as_red_light") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&["target"]).unwrap();
+    let tint = 240.0f64 / 255.0;
+    let grey: Vec<f64> = (0..4).map(|k| (f64::from(k) / 3.0).powf(1.0 / 2.2) * tint).collect();
+    let mut rgba = Vec::new();
+    for g in &grey {
+        rgba.extend_from_slice(&[*g as f32; 3]);
+        rgba.push(1.0);
+    }
+    // The same levels as a red picture with some green and blue in the tint.
+    for g in &grey {
+        rgba.extend_from_slice(&[*g as f32, 0.4, 0.2, 1.0]);
+    }
+    let img = ImageF32 {
+        width: 8,
+        height: 1,
+        rgba,
+    };
+    let p = |variant| Params {
+        source_colour_target: SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY,
+        source_colour_variant: variant,
+        ..Params::default()
+    };
+    let grey_out = run(&mut gpu, &img, &p(1));
+    let mut light = Vec::new();
+    for (k, g) in grey.iter().enumerate() {
+        let px = grey_out.pixel(k as u32, 0);
+        assert!(
+            (f64::from(px[0]) - g).abs() <= MAX_ERR,
+            "level {k}: red {} want {g}",
+            px[0]
+        );
+        assert!(
+            px[1].abs() <= 1e-6 && px[2].abs() <= 1e-6,
+            "level {k}: green or blue {px:?}"
+        );
+        light.push(f64::from(px[0]).max(0.0).powf(2.2));
+    }
+    // Light ratios 0 : 1 : 2 : 3 (the FP16 store and the power move them by a few parts in a thousand).
+    assert!(light[0] <= 1e-6);
+    for k in 1..4 {
+        let r = light[k] / light[1];
+        println!("virtual boy level {k}: light ratio {r:.4}");
+        assert!((r - k as f64).abs() <= 0.02 * k as f64, "level {k}: ratio {r}");
+    }
+    // The red ramp variant: the red as it is, no green or blue.
+    let red_out = run(&mut gpu, &img, &p(2));
+    for (k, g) in grey.iter().enumerate() {
+        let px = red_out.pixel(4 + k as u32, 0);
+        assert!((f64::from(px[0]) - g).abs() <= MAX_ERR, "red level {k}: {px:?}");
+        assert!(px[1].abs() <= 1e-6 && px[2].abs() <= 1e-6, "red level {k}: {px:?}");
     }
     common::assert_no_validation_messages(&counter);
 }
