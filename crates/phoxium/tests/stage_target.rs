@@ -11,8 +11,8 @@ mod common;
 use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    Params, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA,
-    SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
+    Params, SOURCE_COLOUR_TARGET_ATARI_2600_TIA, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA,
+    SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
     SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
@@ -156,6 +156,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
         | SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE
         | SOURCE_COLOUR_TARGET_ATARI_7800_MARIA
+        | SOURCE_COLOUR_TARGET_ATARI_2600_TIA
         | SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
         | SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928
@@ -226,6 +227,18 @@ fn atari_7800(i: usize) -> [f64; 3] {
         panic!("signal")
     };
     s.references[i % 256]
+}
+
+/// The reference colour `i % 128` of the Atari 2600 target (MAME's TIA palette, in the data file): the entries 2 x and 2 x + 1
+/// over two rows, one of them a little off.
+fn atari_2600(i: usize) -> [f64; 3] {
+    let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_ATARI_2600_TIA)
+        .expect("atari 2600")
+        .transform
+    else {
+        panic!("signal")
+    };
+    s.references[i % 128]
 }
 
 /// The reference entry `i % 30` of the TMS9928A target (15 colours in two reference sets of exponents 1.1 and 1.5), read from
@@ -304,6 +317,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The PC Engine codes in both expansions of an emulator (64 of the 512 each).
                 (18, _) => pc_engine_code(x * 8 + 5, false),
                 (19, _) => pc_engine_code(x * 8 + 258, true),
+                // The Atari 2600 reference colours (MAME's TIA palette) two over two rows, the second a little off.
+                (20, _) => atari_2600(x * 2),
+                (21, _) => atari_2600(x * 2 + 1).map(|v| (v + 0.012).min(1.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -417,6 +433,9 @@ fn target_slot_matches_the_oracle() {
         ("atari 7800 25.7", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 1),
         ("atari 7800 27.7", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 4),
         ("atari 7800 ladder", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 5),
+        ("atari 2600 25.7", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 1),
+        ("atari 2600 24", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 2),
+        ("atari 2600 chroma 0.23", SOURCE_COLOUR_TARGET_ATARI_2600_TIA, 5),
         ("pc engine kitrinx", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 1),
         ("pc engine v 14/15", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 2),
     ] {

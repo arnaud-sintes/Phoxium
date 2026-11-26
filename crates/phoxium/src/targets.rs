@@ -130,6 +130,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "nec_pc_engine_composite.toml",
         include_str!("../../../presets/targets/nec_pc_engine_composite.toml"),
     ),
+    (
+        "atari_2600_tia.toml",
+        include_str!("../../../presets/targets/atari_2600_tia.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -2677,6 +2681,266 @@ mod tests {
                 "rgb_references",
             ),
             (ok.replace("amplitude = 0.274", "amplitude = 0"), "amplitude"),
+            (
+                ok.replace("reference = \"S:", "reference = \"X:"),
+                "provenance.reference",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The (I, Q) pairs of the 'Phase Shift 26.2' table of MAME's TIA video device (`src/mame/atari/tia.cpp`,
+    /// license:BSD-3-Clause, copyright-holders: Wilbert Pol, Stefan Jokisch), hue 0 to 15, typed here independently of the
+    /// data file. Numbers only; no code of MAME is used (docs/THIRD-PARTY.md).
+    const MAME_TIA_IQ: [(f64, f64); 16] = [
+        (0.000, 0.000),
+        (0.192, -0.127),
+        (0.241, -0.048),
+        (0.240, 0.040),
+        (0.191, 0.121),
+        (0.103, 0.175),
+        (-0.008, 0.196),
+        (-0.116, 0.174),
+        (-0.199, 0.118),
+        (-0.243, 0.037),
+        (-0.237, -0.052),
+        (-0.180, -0.129),
+        (-0.087, -0.181),
+        (0.021, -0.196),
+        (0.130, -0.169),
+        (0.210, -0.107),
+    ];
+
+    /// The 128 colours of MAME's TIA NTSC palette, recomputed as its `init_palette` does (luma step / 7, the YIQ matrix, the
+    /// exponent 0.9, rounded to 8 bits) from [`MAME_TIA_IQ`]: entry hue x 8 + luma.
+    fn mame_tia() -> Vec<[f64; 3]> {
+        let mut out = Vec::new();
+        for (i, q) in MAME_TIA_IQ {
+            for l in 0..8 {
+                let y = f64::from(l) / 7.0;
+                let c = [
+                    y + 0.956 * i + 0.621 * q,
+                    y - 0.272 * i - 0.647 * q,
+                    y - 1.106 * i + 1.703 * q,
+                ];
+                out.push(c.map(|v| (255.0 * v.max(0.0).powf(0.9).min(1.0) + 0.5).floor() / 255.0));
+            }
+        }
+        out
+    }
+
+    /// The Atari 2600 file: 128 colours indexed by hue x 8 + luma, five variants, every provenance key present. Hand-derived
+    /// colours at the default variant (Y = luma / 7, amplitude 0.3432, delay 25.7). Hue 1 luma 4 (index 12): Y = 0.571429,
+    /// the burst phase, U = -0.3432, V = 0; R = Y, B = Y + U / 0.492111 = -0.12597 (clamped to 0), G = (Y - 0.299 R - 0.114
+    /// B) / 0.587 = 0.70687 (from the unclamped blue, so the luma is kept). Hue 5 luma 3 (index 43): Y = 0.428571, the phase
+    /// 180 - 4 x 25.7 = 77.2 degrees: U = 0.076036, V = 0.334672; R = Y + V / 0.877283 = 0.81006, B = Y + U / 0.492111 =
+    /// 0.58308, G = 0.20424.
+    #[test]
+    fn the_atari_2600_file_and_its_hand_derived_colours() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_2600_TIA).expect("atari 2600");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["25_7", "24", "26_7", "sat_0_30", "sat_0_23"]);
+        for key in [
+            "grid",
+            "revisions",
+            "reference",
+            "threshold",
+            "black_index",
+            "white_index",
+        ] {
+            assert!(t.provenance.contains_key(key), "provenance.{key}");
+        }
+        assert!(!t.provenance.contains_key("colours"));
+        assert_eq!(t.select(1), t.transform);
+        let signal = |v: usize| match t.transform_for(v) {
+            Transform::Signal(s) => s,
+            _ => panic!("signal"),
+        };
+        let s = signal(0);
+        assert_eq!(s.count, 128);
+        assert_eq!(s.colours[0], [0.0; 3], "hue 0 luma 0 is black");
+        assert_eq!(s.colours[7], [1.0; 3], "hue 0 luma 7 is white");
+        let [r, g, b] = s.colours[12];
+        assert!(
+            (r - 4.0 / 7.0).abs() < 1e-9 && (g - 0.70687).abs() < 1e-3 && b == 0.0,
+            "{r} {g} {b}"
+        );
+        let [r, g, b] = s.colours[43];
+        assert!(
+            (r - 0.81006).abs() < 1e-3 && (g - 0.20424).abs() < 1e-3 && (b - 0.58308).abs() < 1e-3,
+            "{r} {g} {b}"
+        );
+        // The 8 greys of hue 0 are the linear luma n / 7 (Ball's 0.09 a step) on every variant.
+        for v in 0..5 {
+            let o = signal(v);
+            for l in 0..8 {
+                let c = o.colours[l];
+                assert!(
+                    c.iter().all(|x| (x - l as f64 / 7.0).abs() < 1e-12),
+                    "v{v} grey {l}: {c:?}"
+                );
+            }
+        }
+        // Ball's numbers: 0.045 x (COLU and 15) a step gives 0.63 at the top, and the chroma 20 / 92.5 over 0.63 is the
+        // amplitude: hue 1 at luma 7 is (1, G, B) with B = 1 - amplitude / 0.492111 (the red stays on the burst axis).
+        assert!((0.045f64 * 14.0 - 0.63).abs() < 1e-12);
+        let amplitude = |o: &Signal| (1.0 - o.colours[15][2]) * 0.492111;
+        let want = (20.0 / 92.5) / 0.63;
+        println!("Ball's amplitude {want:.4}");
+        for (v, a) in [(0, want), (1, want), (2, want), (3, 0.30), (4, 0.2303)] {
+            let got = amplitude(&signal(v));
+            assert!((got - a).abs() < 2e-4, "variant {v}: {got} against {a}");
+        }
+        // MAME's hue 1 chroma magnitude is the value of the last variant.
+        assert!(((0.192f64.powi(2) + 0.127f64.powi(2)).sqrt() - 0.2303).abs() < 1e-3);
+        // Hue 1 is the burst phase on every step (the same colour on all variants of the same chroma).
+        let d = |o: &Signal, a: usize, b: usize| dist(o.colours[a], o.colours[b]);
+        for v in [1, 2] {
+            assert_eq!(signal(v).colours[12], s.colours[12], "variant {v}");
+        }
+        // Hue 15 sits on hue 1 at 25.7 degrees (360 / 14, the calibrated machine), one step behind at 24 and 13.8 degrees
+        // short of it at 26.7.
+        let near = d(&s, 12, 15 * 8 + 4);
+        let far24 = d(&signal(1), 12, 15 * 8 + 4);
+        let far26 = d(&signal(2), 12, 15 * 8 + 4);
+        println!("hue 15 against hue 1 at luma 4: 25.7 {near:.4}, 24 {far24:.4}, 26.7 {far26:.4}");
+        assert!(near < 0.002, "{near}");
+        assert!(far24 > 0.04, "{far24}");
+        assert!(far26 > 0.04, "{far26}");
+        // The classification does not depend on the variant: the references are the same.
+        for v in 1..5 {
+            assert_eq!(signal(v).references, s.references, "variant {v}");
+        }
+    }
+
+    /// Recognition: MAME's TIA palette (BSD-3-Clause, numbers only), recomputed here from its (I, Q) table typed independently
+    /// of the data file, is the reference of the file, is recognised exactly, colours a little off are taken, a far colour
+    /// passes through; the model's own colours as a reference would have recognised only some of MAME's colours (the reason
+    /// the reference is MAME's table, as for the Atari 7800).
+    #[test]
+    fn the_atari_2600_reference_recognises_mames_palette_and_the_model_would_not() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_2600_TIA).expect("atari 2600");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        assert_eq!(s.threshold, 0.05);
+        let mame = mame_tia();
+        assert_eq!(mame.len(), 128);
+        let mut closest = (f64::MAX, 0, 0);
+        for i in 0..128 {
+            assert!(dist(s.reference(i), mame[i]) < 1e-12, "reference {i}");
+            assert_eq!(s.classify(mame[i]), Some(i), "colour {i}");
+            for j in i + 1..128 {
+                let d = dist(mame[i], mame[j]);
+                if d < closest.0 {
+                    closest = (d, i, j);
+                }
+            }
+        }
+        println!(
+            "closest two reference colours: {} and {}, {:.4}; threshold {}",
+            closest.1, closest.2, closest.0, s.threshold
+        );
+        // The two nearest colours are one level apart: the brightest hue 1 and hue 14 (0xFFFF9A and 0xFFFF99), both clipped.
+        assert_eq!((closest.1, closest.2), (15, 119), "{closest:?}");
+        assert!(closest.0 > 0.003, "{closest:?}");
+        // Spot checks of the typed table against the numbers a reader of MAME's palette knows: hue 1 luma 2 is 0x6D5A00 and
+        // white 0xFFFFFF.
+        assert_eq!(s.reference(10), hex("6D5A00"));
+        assert_eq!(s.reference(7), hex("FFFFFF"));
+        // A recognised pixel is replaced by the model's colour of its index.
+        assert_eq!(s.apply(mame[12]), s.colours[12]);
+        assert_ne!(s.apply(mame[12]), mame[12]);
+        // A little off (0.012 on each channel): taken, and mostly the same colour.
+        let (mut same, mut taken) = (0, 0);
+        for (i, m) in mame.iter().enumerate() {
+            let p = m.map(|v| (v + 0.012).min(1.0));
+            if let Some(j) = s.classify(p) {
+                taken += 1;
+                same += usize::from(j == i);
+            }
+        }
+        println!("a little off: {taken} of 128 taken, {same} the same colour");
+        assert_eq!(taken, 128);
+        assert!(same >= 110, "{same}");
+        // A saturated green is far from every colour of the palette: it passes through.
+        let odd = [0.0, 1.0, 0.0];
+        assert_eq!(s.classify(odd), None);
+        assert_eq!(s.apply(odd), odd);
+        // The model's colours against MAME's: mean and worst distance, and how many of MAME's colours a model reference
+        // takes for another colour or for none.
+        let (mut sum, mut worst) = (0.0, (0.0f64, 0usize));
+        for (i, m) in mame.iter().enumerate() {
+            let d = dist(*m, s.colours[i]);
+            sum += d;
+            if d > worst.0 {
+                worst = (d, i);
+            }
+        }
+        let mean = sum / 128.0;
+        println!(
+            "model against MAME: mean {mean:.3}, worst {:.3} at {}",
+            worst.0, worst.1
+        );
+        assert!(mean > 0.17 && mean < 0.21, "{mean}");
+        assert!(worst.0 > 0.34 && worst.0 < 0.40, "{worst:?}");
+        // The same for each variant, for the notes (the chroma of 0.23 is the nearest to MAME's saturation).
+        for (k, v) in t.variants.iter().enumerate() {
+            let Transform::Signal(o) = t.transform_for(k) else {
+                panic!("signal")
+            };
+            let m = (0..128).map(|i| dist(mame[i], o.colours[i])).sum::<f64>() / 128.0;
+            println!("variant {} against MAME: mean {m:.3}", v.id);
+        }
+        let model_reference = Signal {
+            references: s.colours,
+            threshold: 0.12,
+            ..s
+        };
+        let (mut wrong, mut none) = (0, 0);
+        for (i, p) in mame.iter().enumerate() {
+            match model_reference.classify(*p) {
+                Some(j) => wrong += usize::from(j != i),
+                None => none += 1,
+            }
+        }
+        println!("a model reference: {wrong} other colour, {none} none, of 128");
+        assert!(wrong > 50 && none > 30, "{wrong} {none}");
+    }
+
+    /// The validation of the Atari 2600 file: a colour past the last, a computed key next to the list, a zero amplitude, a
+    /// luma list of the wrong length, a missing provenance.
+    #[test]
+    fn a_bad_atari_2600_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "atari_2600_tia.toml")
+            .expect("the atari 2600 file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replace("colour = 127 }", "colour = 128 }"), "rgb_references"),
+            (
+                ok.replace(
+                    "gain = 1.0\ngamma = 1.0\n",
+                    "gain = 1.0\ngamma = 1.0\namplitude = 0.27\n",
+                ),
+                "rgb_references",
+            ),
+            (ok.replace("amplitude = 0.3432", "amplitude = 0"), "amplitude"),
+            (
+                ok.replacen(
+                    "luma_mv = [0, 1, 2, 3, 4, 5, 6, 7]",
+                    "luma_mv = [0, 1, 2, 3, 4, 5, 6]",
+                    1,
+                ),
+                "luma_mv",
+            ),
+            (ok.replace("lumas = 8", "lumas = 17"), "grid"),
             (
                 ok.replace("reference = \"S:", "reference = \"X:"),
                 "provenance.reference",

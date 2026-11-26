@@ -1,0 +1,114 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets", "Third research pass"
+# and "Built, the Atari 2600"). Format: crates/phoxium/src/targets.rs.
+# Every key of [signal] has a [provenance] entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived,
+# K standard knowledge, E estimate).
+schema = 1
+id = "atari_2600_tia"
+name = "Atari 2600 VCS (TIA, NTSC, computed from the signal, unverified)"
+label = "the 128 colours of the Atari 2600 as an NTSC television decodes the TIA's signal (Colour variant: the hue delay of the pot, or the chroma level); derived from a mailing-list analysis and emulator notes, not measured"
+kind = "signal"
+notes = """
+UNVERIFIED: no instrument measurement of a 2600's video signal was found. The numbers below come from a schematic analysis posted to the Stella mailing list in December 2003 by Eric Ball (who called it 'still off'), from the notes of two emulator authors (Gopher2600, jigo2600) and from MAME's notes; the Atari documents (the TIA technical manual, the Field Service Manual) give the structure, not the voltages, and the Ball figures were read second hand from an earlier research pass of this project (the message itself could not be fetched again when this target was built).
+The TIA does not make RGB: a colour register (COLUP0, COLUP1, COLUPF, COLUBK) holds a hue (bits 7 to 4, 0 to 15) and a luma (bits 3 to 1, 0 to 7, bit 0 unused), and the chip emits a composite signal made of a luma level and a chroma wave of one fixed amplitude whose phase is the hue. Hue 0 has no chroma (the 8 greys); hue 1 is in phase with the colour burst (the TIA manual); every higher hue is one more step of a delay line, whose spacing is set by a pot on the board (R211, R213 on the 2600A: the Field Service Manual has it trimmed so that hue 1 and hue 15 match 'within one shade'), so that hue 15 sits 14 steps after hue 1. An emulator shows a PC palette computed from that signal with its own settings. This target goes back to the signal: it recognises each pixel as the nearest of the 128 colours by comparison with a fixed reference palette, and shows the colour a television decoder drives the tube with, so the tube's own gamma, primaries and white take over. The colour index of the table is hue x 8 + luma, that is, the colour register divided by 2. It is the same scheme as the Atari 7800 target (atari_7800_maria) and the Atari 8-bit target (atari_8bit_gtia): the 7800's MARIA has 4 luma bits and the 2600's TIA has 3, the numbers differ (a luma of Ball's 0.09 a step, a chroma that is higher over the luma span, no machine measurement), and each target is its own.
+The luma: Ball's derivation of the CX2600 and CX2600A video networks (CX2600: SYNC 10k and LM2 12k ohm with BLK connected, a 7.5 IRE setup; CX2600A: SYNC and LM2 27k ohm, BLK open) gives a luma of 0.045 x (COLU and 15) of a span of 92.5 IRE, that is 0.09 a luma step and 0.63 at the top (luma 7), linear; the Gopher2600 notes assume a linear luma as well. The luma of a step is therefore step / 7 of the range from luma 0 to luma 7, which become the tube's black and white (the pedestal of NTSC is not modelled, and the television's contrast and brightness decide the rest). The resistors of the LM0 and LM1 bits and the output stage are not in any source read here, so the ladder of the real board could not be computed (the 7800 target has such a variant; this one has none), and the two board networks (2600 and 2600A) could not be told apart in the numbers, so there is no variant for them.
+The chroma: Ball's chroma is 20 IRE over the same 92.5 IRE, 0.2162, equal to the burst, in the units where the top luma is 0.63; over the luma range normalised to 1 that is 0.2162 / 0.63 = 0.3432, the amplitude of the table, the same for every hue but 0 (the other readings in this project's research, 0.21 to 0.343, are over the normalised range or not, a mix that could not be sorted out). Two variants set the other published values: Gopher2600's 0.3 ('assumed', no measurement) and 0.2303, the magnitude of MAME's hue 1 chroma (0.192, -0.127 in I and Q, an observed palette, not a computation). The phase of hue h is 180 - step x (h - 1) degrees on the U axis (Ball: hue 180 - (hue - 1) x 24; the TIA manual: hue 1 on the burst, 180 degrees); the step is the pot. The step of a real machine is whatever the pot was set to and drifts with warm-up: Ball and jigo2600 (BSD-2 as reported, 14 stages of 24 degrees) use 24; the Gopher2600 notes give 25.7 to 26.7 degrees (its default 26.7); 25.7 = 360 / 14 degrees is the value for which hue 15 lands on hue 1, as the Field Service Manual has it calibrated (and as the 7800 target takes); MAME's notes say the power-on phase is about 23 degrees and a long run about 28, and its active table is labelled 26.2. The default is 25.7; the variants are 24, 26.7, and 25.7 with the two other chroma levels. Colours go through the decoder of the composite model (BT.601 luma, U and V scaled 0.492111 and 0.877283), so they return unchanged through that model, and a channel that goes negative is clamped to zero as a tube does.
+The burst phase is a recorded conflict, not an open choice here: this target puts hue 1 on the burst, 180 degrees on the U axis (the TIA manual: code 1 in phase with the burst; the NTSC burst is -U), and takes the television's decode as ideal, with its tint control at the centre. The Gopher2600 notes turn the burst by 57 degrees (elsewhere 32.72) in the I and Q plane, and MAME puts hue 1 at -33 degrees in I and Q ('gold', on a CRT; 'green' on a flat panel), which is about 23 degrees off the burst axis: whether a CRT showed hue 1 as gold or as green depends on the television's tint and decoder, and is not settled by any source read. The tube's TV controls (tint) can turn it.
+The recognition reference is NOT the model: it is the 128 colours of the NTSC palette of MAME's TIA video device (src/mame/atari/tia.cpp, license:BSD-3-Clause, copyright-holders Wilbert Pol and Stefan Jokisch; the numbers only, with attribution, no code). MAME computes it in code from a table of 16 chroma pairs (I, Q) labelled 'Phase Shift 26.2' (hue 1 at 0.192, -0.127), a luma of step / 7, the usual YIQ-to-RGB matrix and an exponent of 0.9; the 128 values here are that computation done once with those numbers (rounded as MAME rounds them), and a unit test recomputes them from the table, typed independently of the file. MAME's own notes put hue 1 as gold and prefer a phase between 25.7 and 27.7 degrees; its other phase tables (24.7 to 27.7, in the source but not active) are not used. The model's colours are far from MAME's (the unit test prints the mean distance); the reference therefore recognises MAME's own palette exactly and an emulator with another palette (Stella's, which is GPL and was not read, a flat-panel or hand-tuned one) is passed through unchanged when it is farther than the threshold from MAME's colours, or may be taken for a neighbouring colour when it is nearer: that is not checked here, no other palette with a licence was found.
+The colours the target shows are the signal model's, not MAME's: a recognised pixel is replaced by the model colour of its index under the chosen variant, so the hue 1 shown is the burst-phase one unless the tube's tint turns it. The model has a linear luma where MAME's greys follow its exponent of 0.9.
+Estimated: the chroma-to-burst ratio and the amplitude over the luma (see above), the decode matrix, the television's tint, and the delay of any real machine. A pixel with no reference colour within the threshold (a scaled or smoothed picture, an edited palette) passes through unchanged: use the integer upscale and the nearest-pixel prefilter (the defaults).
+Not modelled: PAL machines (only a fitted 30-degree model with an emulator's palette exists, no schematic or measurement of the PAL mechanism: PAL is not built), SECAM machines (an exact 8-colour table, black, blue, red, magenta, green, cyan, yellow, white: SECAM is not built), the 2600A and 2600 networks as separate variants, the ladder luma, the television's controls, the composite crosstalk (use the Composite video section), and the artifact colours of the 2600's very wide pixel clock (they appear in the picture the emulator draws).
+"""
+
+[signal]
+threshold = 0.05
+black_index = 0
+white_index = 7
+
+[signal.grid]
+hues = 16
+lumas = 8
+angle = 180.0
+
+[signal.reference]
+gain = 1.0
+gamma = 1.0
+# The 128 colours of the NTSC palette of MAME's TIA video device (src/mame/atari/tia.cpp, license:BSD-3-Clause, copyright-holders:
+# Wilbert Pol, Stefan Jokisch): computed here once from the numbers of its 'Phase Shift 26.2' table (I, Q), luma step / 7, the
+# YIQ matrix and the exponent 0.9, no code; notice in docs/THIRD-PARTY.md. Entry i = hue x 8 + luma = colour register / 2.
+rgb_references = [
+    { rgb = 0x000000, colour = 0 }, { rgb = 0x2C2C2C, colour = 1 }, { rgb = 0x535353, colour = 2 }, { rgb = 0x777777, colour = 3 },
+    { rgb = 0x9A9A9A, colour = 4 }, { rgb = 0xBCBCBC, colour = 5 }, { rgb = 0xDEDEDE, colour = 6 }, { rgb = 0xFFFFFF, colour = 7 },
+    { rgb = 0x210B00, colour = 8 }, { rgb = 0x493500, colour = 9 }, { rgb = 0x6D5A00, colour = 10 }, { rgb = 0x917E00, colour = 11 },
+    { rgb = 0xB3A12C, colour = 12 }, { rgb = 0xD5C353, colour = 13 }, { rgb = 0xF6E577, colour = 14 }, { rgb = 0xFFFF9A, colour = 15 },
+    { rgb = 0x3C0000, colour = 16 }, { rgb = 0x612300, colour = 17 }, { rgb = 0x854A00, colour = 18 }, { rgb = 0xA86E1A, colour = 19 },
+    { rgb = 0xCA9242, colour = 20 }, { rgb = 0xEBB467, colour = 21 }, { rgb = 0xFFD68B, colour = 22 }, { rgb = 0xFFF7AD, colour = 23 },
+    { rgb = 0x4A0000, colour = 24 }, { rgb = 0x6F1200, colour = 25 }, { rgb = 0x923A1D, colour = 26 }, { rgb = 0xB56044, colour = 27 },
+    { rgb = 0xD78469, colour = 28 }, { rgb = 0xF8A78D, colour = 29 }, { rgb = 0xFFC9AF, colour = 30 }, { rgb = 0xFFEAD1, colour = 31 },
+    { rgb = 0x4B0000, colour = 32 }, { rgb = 0x70052B, colour = 33 }, { rgb = 0x933051, colour = 34 }, { rgb = 0xB65676, colour = 35 },
+    { rgb = 0xD77A99, colour = 36 }, { rgb = 0xF99DBB, colour = 37 }, { rgb = 0xFFBFDD, colour = 38 }, { rgb = 0xFFE1FE, colour = 39 },
+    { rgb = 0x3E0038, colour = 40 }, { rgb = 0x63015D, colour = 41 }, { rgb = 0x872D81, colour = 42 }, { rgb = 0xAA53A4, colour = 43 },
+    { rgb = 0xCC77C6, colour = 44 }, { rgb = 0xED9AE8, colour = 45 }, { rgb = 0xFFBDFF, colour = 46 }, { rgb = 0xFFDEFF, colour = 47 },
+    { rgb = 0x240061, colour = 48 }, { rgb = 0x4B0785, colour = 49 }, { rgb = 0x7031A8, colour = 50 }, { rgb = 0x9357CA, colour = 51 },
+    { rgb = 0xB67BEB, colour = 52 }, { rgb = 0xD79FFF, colour = 53 }, { rgb = 0xF8C1FF, colour = 54 }, { rgb = 0xFFE2FF, colour = 55 },
+    { rgb = 0x000076, colour = 56 }, { rgb = 0x2B1599, colour = 57 }, { rgb = 0x523DBB, colour = 58 }, { rgb = 0x7663DD, colour = 59 },
+    { rgb = 0x9986FE, colour = 60 }, { rgb = 0xBCA9FF, colour = 61 }, { rgb = 0xDDCBFF, colour = 62 }, { rgb = 0xFEECFF, colour = 63 },
+    { rgb = 0x000075, colour = 64 }, { rgb = 0x0A2698, colour = 65 }, { rgb = 0x334DBB, colour = 66 }, { rgb = 0x5971DC, colour = 67 },
+    { rgb = 0x7D95FD, colour = 68 }, { rgb = 0xA0B7FF, colour = 69 }, { rgb = 0xC3D9FF, colour = 70 }, { rgb = 0xE4FAFF, colour = 71 },
+    { rgb = 0x000F5E, colour = 72 }, { rgb = 0x003882, colour = 73 }, { rgb = 0x195DA5, colour = 74 }, { rgb = 0x4181C7, colour = 75 },
+    { rgb = 0x66A4E9, colour = 76 }, { rgb = 0x8AC6FF, colour = 77 }, { rgb = 0xADE8FF, colour = 78 }, { rgb = 0xCEFFFF, colour = 79 },
+    { rgb = 0x002035, colour = 80 }, { rgb = 0x00475B, colour = 81 }, { rgb = 0x0A6C7F, colour = 82 }, { rgb = 0x348FA2, colour = 83 },
+    { rgb = 0x5AB2C4, colour = 84 }, { rgb = 0x7ED4E5, colour = 85 }, { rgb = 0xA1F5FF, colour = 86 }, { rgb = 0xC3FFFF, colour = 87 },
+    { rgb = 0x002900, colour = 88 }, { rgb = 0x005026, colour = 89 }, { rgb = 0x0C744D, colour = 90 }, { rgb = 0x359872, colour = 91 },
+    { rgb = 0x5BBA95, colour = 92 }, { rgb = 0x7FDCB7, colour = 93 }, { rgb = 0xA2FDD9, colour = 94 }, { rgb = 0xC4FFFA, colour = 95 },
+    { rgb = 0x002C00, colour = 96 }, { rgb = 0x005200, colour = 97 }, { rgb = 0x1D7618, colour = 98 }, { rgb = 0x459A40, colour = 99 },
+    { rgb = 0x6ABC66, colour = 100 }, { rgb = 0x8DDD89, colour = 101 }, { rgb = 0xB0FFAC, colour = 102 }, { rgb = 0xD2FFCE, colour = 103 },
+    { rgb = 0x002600, colour = 104 }, { rgb = 0x0E4D00, colour = 105 }, { rgb = 0x387200, colour = 106 }, { rgb = 0x5D9518, colour = 107 },
+    { rgb = 0x81B740, colour = 108 }, { rgb = 0xA4D965, colour = 109 }, { rgb = 0xC6FA89, colour = 110 }, { rgb = 0xE8FFAB, colour = 111 },
+    { rgb = 0x071800, colour = 112 }, { rgb = 0x324000, colour = 113 }, { rgb = 0x586600, colour = 114 }, { rgb = 0x7C8900, colour = 115 },
+    { rgb = 0x9FAC2B, colour = 116 }, { rgb = 0xC1CE52, colour = 117 }, { rgb = 0xE2EF76, colour = 118 }, { rgb = 0xFFFF99, colour = 119 },
+    { rgb = 0x2A0500, colour = 120 }, { rgb = 0x503000, colour = 121 }, { rgb = 0x755600, colour = 122 }, { rgb = 0x987A06, colour = 123 },
+    { rgb = 0xBA9D30, colour = 124 }, { rgb = 0xDCBF56, colour = 125 }, { rgb = 0xFDE17A, colour = 126 }, { rgb = 0xFFFF9E, colour = 127 },
+]
+
+[[signal.revisions]]
+id = "25_7"
+name = "Hue delay 25.7 degrees, chroma 0.343 (Ball's linear luma, the default)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7]
+amplitude = 0.3432
+phase_row_deg = -25.7
+
+[[signal.revisions]]
+id = "24"
+name = "Hue delay 24 degrees (Ball and jigo2600)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7]
+amplitude = 0.3432
+phase_row_deg = -24.0
+
+[[signal.revisions]]
+id = "26_7"
+name = "Hue delay 26.7 degrees (Gopher2600's default)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7]
+amplitude = 0.3432
+phase_row_deg = -26.7
+
+[[signal.revisions]]
+id = "sat_0_30"
+name = "Hue delay 25.7 degrees, chroma 0.30 (Gopher2600's assumed saturation)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7]
+amplitude = 0.30
+phase_row_deg = -25.7
+
+[[signal.revisions]]
+id = "sat_0_23"
+name = "Hue delay 25.7 degrees, chroma 0.23 (the magnitude of MAME's hue 1)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7]
+amplitude = 0.2303
+phase_row_deg = -25.7
+
+[provenance]
+grid = "K: the colour register of the Atari 2600 holds a hue in its high nibble and a luma in bits 3 to 1 (bit 0 is unused), so the index of a colour is hue x 8 + luma = register / 2 (hue 0 has no chroma, 15 hue phases follow); S: hue 1 is in phase with the colour burst (TIA technical manual, 'Television Interface Adaptor Model 1A', Atari copyright, OCR on archive.org: 15 phases, code 1 in phase with the burst), the phase of hue h is tint - (h - 1) x step degrees with the tint 180 (the burst on the -U axis: NTSC) and all hues of one amplitude (Eric Ball, Stella mailing list, December 2003: hue = 180 - (hue - 1) x 24; read second hand); no code is used and no table is copied"
+revisions = "S: the step (phase) 24 degrees (Eric Ball's derivation; jigo2600, 14 stages of 24 degrees, licence BSD-2 as reported, not checked), 25.7 to 26.7 degrees with 26.7 as the default of Gopher2600 (its 2025 blog post, all rights reserved: a number is quoted with attribution), about 23 degrees at power-on to about 28 after a long run and the active table of MAME labelled 26.2 (MAME's notes in src/mame/atari/tia.cpp, BSD-3-Clause), the pot trimmed so that hue 1 and hue 15 match within one shade (Atari VCS Field Service Manual, as MAME's notes and Gopher2600 quote it; R211, R213 on the 2600A); D: 25.7 = 360 / 14 degrees, the step for which hue 15 lands on hue 1; S: the luma 0.045 x (COLU and 15) of a 92.5 IRE span, so 0.09 a luma step and 0.63 at luma 7, linear (Eric Ball, schematic-computed, self-described as 'still off', second hand), so luma_mv is the step itself; the networks CX2600 (SYNC 10k, LM2 12k, BLK connected) and CX2600A (SYNC and LM2 27k, BLK open) are not told apart by the numbers; S and D: the amplitude is Ball's chroma 20 / 92.5 = 0.2162 over the luma of luma 7 on his scale, 7 x 0.09 = 0.63, so 0.3432; S: 0.30 is Gopher2600's assumed saturation (no measurement) and 0.2303 is the magnitude of MAME's hue 1 chroma, sqrt(0.192^2 + 0.127^2); E: the chroma equal to the burst, the amplitude over the luma span, the unit of Ball's 0.63 against his 20 / 92.5 (the research pass that recorded them reads 0.343 as this ratio), and the step of any real machine (the default 25.7 is the calibration condition, not a measured setting); the burst phase conflict (180 degrees on the U axis here; 57 or 32.72 degrees in the Gopher2600 notes; MAME's gold hue 1 at -33 degrees in I and Q) is recorded in the notes and not resolved"
+reference = "S: the classification reference palette, not an output: the 128 RGB colours computed from the numbers of the NTSC palette of MAME's TIA video device, src/mame/atari/tia.cpp (license BSD-3-Clause, copyright-holders Wilbert Pol, Stefan Jokisch; numbers with attribution, no code): I and Q of the 'Phase Shift 26.2' table, luma step / 7, R = Y + 0.956 I + 0.621 Q, G = Y - 0.272 I - 0.647 Q, B = Y - 1.106 I + 1.703 Q, negatives set to 0, exponent 0.9, rounded; the palette is MAME's own choice, not a measurement; not checked against any other emulator palette (Stella's is GPL and was not read)"
+threshold = "E: the largest distance in drive voltage between a pixel and a reference colour at which the pixel is taken for it; MAME's palette is recognised exactly (distance 0); a palette of another emulator that differs more is meant to pass through unchanged rather than be taken for a neighbouring colour (not checked on any other palette)"
+black_index = "K: colour 0 (hue 0, luma 0) is the luma 0 of the machine, taken as the black of the tube (the pedestal of NTSC is not modelled: Ball's CX2600 network has a 7.5 IRE setup, the CX2600A none)"
+white_index = "K: colour 7 (hue 0, luma 7) is the luma 7 of the machine, taken as the white of the tube (a television's gain control and contrast decide the rest)"
