@@ -11,11 +11,12 @@ mod common;
 use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    Params, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
-    SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI,
-    SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE,
-    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    Params, SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64,
+    SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101,
+    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
+    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -86,6 +87,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         },
         // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
         SOURCE_COLOUR_TARGET_COMMODORE_64
+        | SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA
         | SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM
         | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
@@ -133,6 +135,18 @@ fn pepto(i: usize) -> [f64; 3] {
     let c = PEPTO[i % 16];
     [(c >> 16) & 255, (c >> 8) & 255, c & 255].map(|v| f64::from(v) / 255.0)
 }
+
+/// The reference colour `i % 256` of the Atari 8-bit target (what an emulator shows for the colour register `i`), read from
+/// the data file: the classification of the shader is checked on it and on the same a little off.
+fn atari(i: usize) -> [f64; 3] {
+    let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA)
+        .expect("atari")
+        .transform
+    else {
+        panic!("signal")
+    };
+    s.references[i % 256]
+}
 /// A native raster of `w` x `h` pixels: the 5-bit expanded codes of every channel in turn (grey ramp, red, green and
 /// blue ramps), then a pseudo-random fill of any 8-bit drive voltage (a frame that was not 5-bit quantised), with
 /// black and white in the corners.
@@ -158,6 +172,12 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 (8, _) => nes(x).map(|v| (v + 0.012).min(1.0)),
                 // The canonical CGA palette (each channel 0, 1/3, 2/3 or 1, the brown AA5500), then the dark yellow.
                 (9, _) => cga(x),
+                // The Atari 8-bit reference palette: the colour registers 4 x to 4 x + 3 over four rows, two of them a little
+                // off (the classification still takes them).
+                (10, _) => atari(x * 4),
+                (11, _) => atari(x * 4 + 1).map(|v| (v + 0.012).min(1.0)),
+                (12, _) => atari(x * 4 + 2),
+                (13, _) => atari(x * 4 + 3).map(|v| (v - 0.012).max(0.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -244,6 +264,9 @@ fn target_slot_matches_the_oracle() {
         ("gbc mGBA sRGB", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, 4),
         ("ags 2023 measured", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, 1),
         ("ags 2026 D65", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, 4),
+        ("atari 800XL", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 1),
+        ("atari 800", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 3),
+        ("atari 800XL delay 27.5", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 6),
     ] {
         let p = Params {
             source_colour_target: target,

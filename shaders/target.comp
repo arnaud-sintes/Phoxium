@@ -20,7 +20,7 @@
 //   3 dac:    V' = out_scale x piecewise linear map through the points (in[i], out[i]) (the 8-bit levels the emulator
 //             shows, the measured output codes; bytes 0 to 7 and 8 to 15 of `table`), V x 255 held to the first and
 //             last input level. No device code is recovered (bits = 0).
-//   4 signal: the nearest of `table[0]` reference colours (`frame.target_table[64 + i].rgb`, what an emulator shows)
+//   4 signal: the nearest of `table[0]` reference colours (`frame.target_table[256 + i].rgb`, what an emulator shows)
 //             classifies the pixel; it is replaced by that hardware colour (`frame.target_table[i].rgb`, the drive
 //             voltages) when the distance is at most `clamp_sum` (the threshold); the first of equal distances wins; a
 //             pixel with no close colour passes through. No device code is recovered (bits = 0).
@@ -59,6 +59,8 @@ layout(push_constant) uniform Push {
 // Tolerance of the recovery in 8-bit code units (`crt_model::target::RECOVERY_TOLERANCE`).
 const float RECOVERY_TOLERANCE = 0.1;
 const int CURVE_LAST = 31;
+// Where the reference colours start in `frame.target_table` (`crt_model::target::SIGNAL_MAX`, a test checks it).
+const int TABLE_REFERENCES = 256;
 
 // The input of the transform with the device codes recovered, when every channel is exactly an expansion.
 vec3 device_input(vec3 v) {
@@ -122,7 +124,7 @@ vec3 signal_colour(vec3 v) {
     float best = 1e30;
     int index = -1;
     for (int i = 0; i < count; i++) {
-        float d = distance(v, frame.target_table[64 + i].rgb);
+        float d = distance(v, frame.target_table[TABLE_REFERENCES + i].rgb);
         if (d < best) {
             best = d;
             index = i;

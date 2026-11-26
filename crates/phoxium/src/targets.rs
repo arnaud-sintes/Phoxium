@@ -28,6 +28,12 @@
 //! rows = "E: near.sh, ..."
 //! ```
 //!
+//! The `signal` kind (C64, NES, Atari 8-bit; `[signal]`, `[signal.reference]`, `[[signal.revisions]]`) lists its colours
+//! one by one (`[[signal.colours]]`) or, for a palette that is a grid of hues and luma levels (the Atari's 256), as
+//! `[signal.grid]` (`hues`, `lumas`, the phase `angle` of hue 1): the colour of hue `h` and luma `l` has the index
+//! `h x lumas + l`, hue 0 has no chroma, the phase of hue `h` is `angle + phase_row_deg x (h - 1)` and the `luma_mv` of
+//! a revision or of the reference holds one level per luma. A revision may give its own chroma `amplitude`.
+//!
 //! [`Target::parse`] rejects an unknown key, a schema other than 1, an unknown kind, a table of the other kind, a value
 //! that is not finite or not in range, and a key with no provenance entry of the form `<tag>: <text>`. A target ships
 //! only when the source of its values can be named (QUESTIONS.md, Study finding 2).
@@ -84,6 +90,10 @@ const SHIPPED: &[(&str, &str)] = &[
     (
         "game_boy_advance_sp_ags_101.toml",
         include_str!("../../../presets/targets/game_boy_advance_sp_ags_101.toml"),
+    ),
+    (
+        "atari_8bit_gtia.toml",
+        include_str!("../../../presets/targets/atari_8bit_gtia.toml"),
     ),
 ];
 
@@ -357,8 +367,26 @@ struct SignalFile {
     white_index: Option<usize>,
     /// The model of the reference palette the classification compares with.
     reference: SignalReference,
+    /// The colours one by one (C64, NES), or none when `grid` makes them.
+    #[serde(default)]
     colours: Vec<SignalColour>,
+    /// The colours as a grid of hues and luma levels (Atari 8-bit): an alternative to `colours`.
+    grid: Option<SignalGrid>,
     revisions: Vec<SignalRevision>,
+}
+
+/// A palette of `hues` x `lumas` colours, the colour of hue `h` and luma `l` at the index `h x lumas + l` (the value of an
+/// Atari colour register: hue in the high nibble, luma in the low one). Hue 0 has no chroma; hue `h` of 1 and up has the
+/// phase `angle + phase_row_deg x (h - 1)` degrees on the U axis, the `phase_row_deg` being the turn of the revision (one
+/// delay of the hue chain), and the level of a colour is the `luma_mv` entry of its luma, the same for every hue (so the
+/// `luma_mv` lists of the revisions and of the reference hold `lumas` entries).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SignalGrid {
+    hues: usize,
+    lumas: usize,
+    /// The phase in degrees of hue 1, the first one with a chroma.
+    angle: f64,
 }
 
 /// The reference palette of the classification: the colours of the file computed with these settings.
@@ -380,13 +408,14 @@ struct SignalReference {
     gamma: f64,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct SignalColour {
     name: String,
     /// The chroma phase in degrees on the U axis (U = cos, V = sin); none for a grey.
     angle: Option<f64>,
-    /// The luma row of the NES palette (0 to 3), which turns the phase by `phase_row_deg` degrees a row.
+    /// The row of the colour (the luma row 0 to 3 of the NES palette, the hue minus 1 of a grid), which turns the phase by
+    /// `phase_row_deg` degrees a row.
     row: Option<u32>,
     /// The level of the colour in mV (the mean of a square wave, the constant level of a grey), when the revision gives no
     /// `luma_mv`.
@@ -406,6 +435,8 @@ struct SignalRevision {
     white_mv: Option<f64>,
     /// The turn of the chroma phase for each luma row, in degrees (the differential phase distortion; none = 0).
     phase_row_deg: Option<f64>,
+    /// The chroma amplitude of this revision, replacing the file's `amplitude` (the Atari machines each have their own).
+    amplitude: Option<f64>,
 }
 
 /// The settings that turn the colours of a signal file into drive voltages (a revision, or the reference model).
@@ -423,7 +454,12 @@ struct SignalSettings<'a> {
 impl SignalFile {
     /// The keys that are present, for the provenance check.
     fn keys(&self) -> Vec<&'static str> {
-        let mut k = vec!["colours", "revisions", "reference", "threshold"];
+        let mut k = vec![
+            if self.grid.is_some() { "grid" } else { "colours" },
+            "revisions",
+            "reference",
+            "threshold",
+        ];
         for (name, present) in [
             ("amplitude", self.amplitude.is_some()),
             ("chroma_factor", self.chroma_factor.is_some()),
@@ -438,12 +474,18 @@ impl SignalFile {
     }
 
     /// The drive voltages of every colour under `s` (see [`SignalSettings`]).
-    fn colours_for(&self, file: &str, what: &str, s: &SignalSettings) -> Result<[[f64; 3]; SIGNAL_MAX], String> {
-        let n = self.colours.len();
+    fn colours_for(
+        &self,
+        file: &str,
+        what: &str,
+        colours: &[SignalColour],
+        s: &SignalSettings,
+    ) -> Result<[[f64; 3]; SIGNAL_MAX], String> {
+        let n = colours.len();
         let level = |i: usize| -> Result<f64, String> {
             s.luma_mv
                 .map(|l| l[i])
-                .or(self.colours[i].level_mv)
+                .or(colours[i].level_mv)
                 .filter(|v| v.is_finite())
                 .ok_or_else(|| format!("{file}: {what} has no level for colour {i}"))
         };
@@ -462,7 +504,7 @@ impl SignalFile {
         }
         let span = white - black;
         let mut out = [[0.0; 3]; SIGNAL_MAX];
-        for (i, c) in self.colours.iter().enumerate() {
+        for (i, c) in colours.iter().enumerate() {
             let y = (level(i)? - black) / span;
             let amplitude = match (c.swing_mv, self.chroma_factor, s.amplitude.or(self.amplitude)) {
                 (Some(sw), Some(k), _) => k * sw / span,
@@ -479,10 +521,49 @@ impl SignalFile {
         Ok(out)
     }
 
+    /// The colours of the file: the list, or the grid of hues and luma levels expanded (index = hue x lumas + luma).
+    fn colour_list(&self, file: &str) -> Result<Vec<SignalColour>, String> {
+        let Some(g) = &self.grid else {
+            return Ok(self.colours.clone());
+        };
+        if !self.colours.is_empty() {
+            return Err(format!(
+                "{file}: signal.grid and signal.colours are alternatives, not both"
+            ));
+        }
+        if g.hues < 2 || g.lumas < 2 || g.hues.saturating_mul(g.lumas) > SIGNAL_MAX || !g.angle.is_finite() {
+            return Err(format!(
+                "{file}: signal.grid needs 2 or more hues and lumas, at most {SIGNAL_MAX} colours, a finite angle"
+            ));
+        }
+        Ok((0..g.hues * g.lumas)
+            .map(|i| {
+                let (hue, luma) = (i / g.lumas, i % g.lumas);
+                SignalColour {
+                    name: format!("hue {hue} luma {luma}"),
+                    angle: (hue > 0).then_some(g.angle),
+                    row: (hue > 0).then(|| (hue - 1) as u32),
+                    level_mv: None,
+                    swing_mv: None,
+                }
+            })
+            .collect())
+    }
+
+    /// A list of levels for the colours: one per colour, or (with a grid) one per luma, the same for every hue.
+    fn levels(&self, list: &[f64], n: usize) -> Option<Vec<f64>> {
+        match &self.grid {
+            Some(g) if list.len() == g.lumas => Some((0..n).map(|i| list[i % g.lumas]).collect()),
+            _ if list.len() == n => Some(list.to_vec()),
+            _ => None,
+        }
+    }
+
     /// The revisions as variants: each colour's drive voltages from its level, chroma angle and amplitude, and the
     /// reference palette of the classification.
     fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
-        let n = self.colours.len();
+        let list = self.colour_list(file)?;
+        let n = list.len();
         if n == 0 || n > SIGNAL_MAX {
             return Err(format!("{file}: signal.colours must hold 1 to {SIGNAL_MAX} colours"));
         }
@@ -501,17 +582,20 @@ impl SignalFile {
                 positive(file, "signal.reference", key, v)?;
             }
         }
-        for (what, l) in [("signal.reference.luma_mv", &r.luma_mv)] {
-            if l.as_ref()
-                .is_some_and(|l| l.len() != n || l.iter().any(|v| !v.is_finite() || *v < 0.0))
-            {
-                return Err(format!("{file}: {what} must hold {n} levels, not negative"));
-            }
-        }
-        if self.colours.iter().any(|c| c.name.trim().is_empty()) {
+        let ref_luma = match &r.luma_mv {
+            None => None,
+            Some(l) => Some(
+                self.levels(l, n)
+                    .filter(|l| l.iter().all(|v| v.is_finite() && *v >= 0.0))
+                    .ok_or_else(|| {
+                        format!("{file}: signal.reference.luma_mv must hold {n} levels (a grid: one per luma), not negative")
+                    })?,
+            ),
+        };
+        if list.iter().any(|c| c.name.trim().is_empty()) {
             return Err(format!("{file}: signal.colours name must not be empty"));
         }
-        if self.colours.iter().any(|c| {
+        if list.iter().any(|c| {
             [c.angle, c.level_mv, c.swing_mv]
                 .iter()
                 .flatten()
@@ -521,7 +605,7 @@ impl SignalFile {
                 "{file}: signal.colours angle, level_mv and swing_mv must be finite"
             ));
         }
-        if self.colours.iter().any(|c| c.swing_mv.is_some()) && self.chroma_factor.is_none() {
+        if list.iter().any(|c| c.swing_mv.is_some()) && self.chroma_factor.is_none() {
             return Err(format!(
                 "{file}: signal.chroma_factor is needed by the colours with a swing_mv"
             ));
@@ -534,8 +618,9 @@ impl SignalFile {
         let references = self.colours_for(
             file,
             "signal.reference",
+            &list,
             &SignalSettings {
-                luma_mv: r.luma_mv.as_deref(),
+                luma_mv: ref_luma.as_deref(),
                 black_mv: r.black_mv,
                 white_mv: r.white_mv,
                 phase_row_deg: r.phase_row_deg.unwrap_or(0.0),
@@ -561,25 +646,32 @@ impl SignalFile {
             if out.iter().any(|v| v.id == rev.id) {
                 return Err(format!("{file}: signal.revisions id \"{}\" is used twice", rev.id));
             }
-            if rev
-                .luma_mv
-                .as_ref()
-                .is_some_and(|l| l.len() != n || l.iter().any(|v| !v.is_finite() || *v <= 0.0))
-            {
-                return Err(format!(
-                    "{file}: signal.revisions {} luma_mv must hold {n} positive levels",
-                    rev.id
-                ));
+            if let Some(a) = rev.amplitude {
+                positive(file, "signal.revisions", "amplitude", a)?;
             }
+            let rev_luma = match &rev.luma_mv {
+                None => None,
+                Some(l) => Some(
+                    self.levels(l, n)
+                        .filter(|l| l.iter().all(|v| v.is_finite() && *v > 0.0))
+                        .ok_or_else(|| {
+                            format!(
+                                "{file}: signal.revisions {} luma_mv must hold {n} positive levels (a grid: one per luma)",
+                                rev.id
+                            )
+                        })?,
+                ),
+            };
             let colours = self.colours_for(
                 file,
                 &format!("signal.revisions {}", rev.id),
+                &list,
                 &SignalSettings {
-                    luma_mv: rev.luma_mv.as_deref(),
+                    luma_mv: rev_luma.as_deref(),
                     black_mv: rev.black_mv,
                     white_mv: rev.white_mv,
                     phase_row_deg: rev.phase_row_deg.unwrap_or(0.0),
-                    amplitude: None,
+                    amplitude: rev.amplitude,
                     saturation: 1.0,
                     gain: 1.0,
                     gamma: 1.0,
@@ -1675,6 +1767,173 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The Atari 8-bit file: 256 colours indexed by the colour register (hue x 16 + luma), six variants, the first the
+    /// 800XL at the middle hue delay; every provenance key present; hand-derived colours. 130XE, hue 5, luma 12 (`$5C`):
+    /// Y = (1196 - 468) / (1380 - 468) = 0.79825, the phase 180 - 4 x 25.5 = 78 degrees, the amplitude 0.233: U = 0.04844, V =
+    /// 0.22791; R = Y + V / 0.877283 = 1.0580 (clamped to 1), B = Y + U / 0.492111 = 0.89668, G = (Y - 0.299 R - 0.114 B) /
+    /// 0.587 = 0.6468 (from the unclamped red, so the luma is kept). 800XL hue 1 luma 8 (`$18`): Y = 0.51799, the burst phase,
+    /// U = -0.239, V = 0: R = 0.51799, B = 0.03233, G = 0.6123.
+    #[test]
+    fn the_atari_file_and_its_hand_derived_colours() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA).expect("atari");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["800xl", "130xe", "800", "400", "800xl_delay_23_5", "800xl_delay_27_5"]
+        );
+        for key in [
+            "grid",
+            "revisions",
+            "reference",
+            "threshold",
+            "black_index",
+            "white_index",
+        ] {
+            assert!(t.provenance.contains_key(key), "provenance.{key}");
+        }
+        assert!(!t.provenance.contains_key("colours"));
+        assert_eq!(t.select(1), t.transform);
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        assert_eq!(s.count, 256);
+        assert_eq!(s.colours[0x00], [0.0; 3], "$00 is black");
+        assert_eq!(s.colours[0x0F], [1.0; 3], "$0F is white");
+        let [r, g, b] = s.colours[0x18];
+        assert!(
+            (r - 0.51799).abs() < 5e-4 && (g - 0.6123).abs() < 5e-4 && (b - 0.03233).abs() < 5e-4,
+            "{r} {g} {b}"
+        );
+        // Hue 0 is the 16 greys of the machine's luma: $08 on the 800XL is (1688 - 1112) / 1112.
+        for l in 0..16 {
+            let c = s.colours[l];
+            assert!(c.iter().all(|v| (v - c[0]).abs() < 1e-12), "grey {l}: {c:?}");
+        }
+        assert!((s.colours[0x08][0] - (1688.0 - 1112.0) / 1112.0).abs() < 1e-12);
+        // The greys rise, with brightness 7 and 8 closer than the others (the 4.7k ladder resistor).
+        assert!((0..15).all(|l| s.colours[l][0] < s.colours[l + 1][0]));
+        let step = |l: usize| s.colours[l + 1][0] - s.colours[l][0];
+        assert!(
+            step(7) < 0.6 * step(6) && step(7) < 0.6 * step(9),
+            "{} {} {}",
+            step(6),
+            step(7),
+            step(9)
+        );
+        let Transform::Signal(xe) = t.transform_for(1) else {
+            panic!("signal")
+        };
+        let [r, g, b] = xe.colours[0x5C];
+        assert!(
+            r == 1.0 && (g - 0.6468).abs() < 1e-3 && (b - 0.89668).abs() < 1e-3,
+            "{r} {g} {b}"
+        );
+        // The 800 is the most saturated machine: its hue 10 luma 8 (no channel clamps there) sits 0.35 / 0.239 farther from the grey of its luma.
+        let sat = |s: &Signal, i: usize| dist(s.colours[i], s.colours[i & 15]);
+        let Transform::Signal(a800) = t.transform_for(2) else {
+            panic!("signal")
+        };
+        assert!(
+            sat(&a800, 0xA8) > sat(&s, 0xA8) * 1.3,
+            "{} {}",
+            sat(&a800, 0xA8),
+            sat(&s, 0xA8)
+        );
+        // Hue 1 is the burst phase on every delay; the other hues move with the delay: $18 is the same colour, $F8 is not.
+        let (lo, hi) = (t.transform_for(4), t.transform_for(5));
+        let (Transform::Signal(lo), Transform::Signal(hi)) = (lo, hi) else {
+            panic!("signal")
+        };
+        assert_eq!(lo.colours[0x18], s.colours[0x18]);
+        assert_eq!(hi.colours[0x18], s.colours[0x18]);
+        assert_ne!(lo.colours[0xF8], hi.colours[0xF8]);
+        // The classification does not depend on the machine: the references are the same for every variant.
+        for v in 1..6 {
+            let Transform::Signal(o) = t.transform_for(v) else {
+                panic!("signal")
+            };
+            assert_eq!(o.references, s.references, "variant {v}");
+        }
+    }
+
+    /// Recognition: every colour of the reference palette is its own nearest (the two closest are printed), the output of a
+    /// recognised pixel is the machine's colour, and the computed palettes of the machines (another saturation, another
+    /// luma, another hue delay) land on a reference colour within 0.1 of the intended colour for 248 to 256 of the 256
+    /// colours, the saturated 800 for most; a pixel far from every colour passes through.
+    #[test]
+    fn the_atari_reference_classifies_itself_and_the_computed_palettes_of_the_machines() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA).expect("atari");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        let mut closest = (f64::MAX, 0, 0);
+        for i in 0..256 {
+            assert_eq!(s.classify(s.reference(i)), Some(i), "colour {i:#04X}");
+            for j in i + 1..256 {
+                let d = dist(s.reference(i), s.reference(j));
+                if d < closest.0 {
+                    closest = (d, i, j);
+                }
+            }
+        }
+        println!(
+            "closest two reference colours: {:#04X} and {:#04X}, {:.4}; threshold {}",
+            closest.1, closest.2, closest.0, s.threshold
+        );
+        assert!(closest.0 > 0.001);
+        // A recognised pixel is replaced by this machine's colour; hue 1 luma 8 of the reference gives the 800XL's $18.
+        assert_eq!(s.apply(s.reference(0x18)), s.colours[0x18]);
+        for (v, name, need) in [
+            (0, "800XL", 256),
+            (1, "130XE", 256),
+            (2, "800", 160),
+            (3, "400", 256),
+            (4, "800XL 23.5", 248),
+            (5, "800XL 27.5", 248),
+        ] {
+            let Transform::Signal(o) = t.transform_for(v) else {
+                panic!("signal")
+            };
+            let (mut exact, mut near, mut worst) = (0, 0, 0.0f64);
+            for i in 0..256 {
+                let got = s.classify(o.colours[i]);
+                exact += usize::from(got == Some(i));
+                if let Some(j) = got {
+                    let d = dist(s.reference(j), o.colours[i]);
+                    worst = worst.max(d);
+                    near += usize::from(d < 0.1);
+                }
+            }
+            println!("{name}: {exact} of 256 exact, {near} within 0.1, worst {worst:.3}");
+            assert!(near >= need, "{name}: {near} within 0.1");
+        }
+        // A saturated green is on no hue-and-luma curve of the reference at the threshold: it passes through.
+        let odd = [0.0, 1.0, 0.0];
+        assert_eq!(s.classify(odd), None, "{:?}", s.classify(odd));
+        assert_eq!(s.apply(odd), odd);
+    }
+
+    /// The grid validation: too many colours, a non finite angle, a list of colours next to the grid, a luma list of the
+    /// wrong length, a missing provenance, a zero amplitude, a black index past the colours.
+    #[test]
+    fn a_bad_grid_file_is_refused() {
+        let ok = SHIPPED[SHIPPED.len() - 1].1.to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replace("hues = 16", "hues = 17"), "grid"),
+            (ok.replace("angle = 180.0", "angle = inf"), "grid"),
+            (format!("{ok}\n[[signal.colours]]\nname = \"x\"\n"), "alternatives"),
+            (ok.replacen("luma_mv = [1112, 1184,", "luma_mv = [1112,", 1), "luma_mv"),
+            (ok.replace("grid = \"K:", "grid = \"X:"), "provenance.grid"),
+            (ok.replacen("amplitude = 0.239", "amplitude = 0", 1), "amplitude"),
+            (ok.replace("black_index = 0", "black_index = 400"), "black"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
         }
     }
 }

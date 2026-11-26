@@ -238,6 +238,37 @@ mod tests {
         assert!(glsl.contains("local_size_x = 8, local_size_y = 8"));
     }
 
+    /// The colour table of a signal target (hardware colours, then the classification references from entry `SIGNAL_MAX`)
+    /// is laid out as the shader reads it, and the frame uniform buffer with it stays within the 16384 bytes of
+    /// `maxUniformBufferRange` that every Vulkan device guarantees (96 bytes of constants and 512 `vec4`: 8288 bytes).
+    #[test]
+    fn the_colour_table_layout_matches_the_shader_and_fits_the_guaranteed_uniform_range() {
+        use crate::gpu::FRAME_TABLE_VEC4;
+        use crt_model::target::SIGNAL_MAX;
+        let glsl = include_str!("../../../../../shaders/target.comp");
+        assert!(glsl.contains(&format!("const int TABLE_REFERENCES = {SIGNAL_MAX};")));
+        assert!(glsl.contains("frame.target_table[TABLE_REFERENCES + i].rgb"));
+        let common = include_str!("../../../../../shaders/include/common.glsl");
+        assert!(common.contains(&format!("vec4 target_table[{FRAME_TABLE_VEC4}];")));
+        assert_eq!(FRAME_TABLE_VEC4, 2 * SIGNAL_MAX);
+        let bytes = size_of::<FrameConstants>() + 16 * FRAME_TABLE_VEC4;
+        assert_eq!(bytes, 8288);
+        assert!(bytes <= 16384, "{bytes}");
+        // The table the CPU writes: the hardware colours at 0.., the references from SIGNAL_MAX, 16 bytes an entry.
+        let p = Params {
+            source_colour_target: crate::params::SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA,
+            ..Params::default()
+        };
+        let table = crate::targets::frame_table(&p).expect("a signal target");
+        assert_eq!(table.len(), SIGNAL_MAX + 256);
+        assert!(table.len() <= FRAME_TABLE_VEC4);
+        let Transform::Signal(s) = crate::targets::for_value(p.source_colour_target).unwrap().select(1) else {
+            panic!("signal")
+        };
+        assert_eq!(table[0xA8][..3], s.colours[0xA8].map(|c| c as f32));
+        assert_eq!(table[SIGNAL_MAX + 0xA8][..3], s.references[0xA8].map(|c| c as f32));
+    }
+
     fn with(target: u32) -> Params {
         Params {
             source_colour_target: target,

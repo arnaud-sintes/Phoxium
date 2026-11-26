@@ -11,7 +11,7 @@
 #endif
 
 // Per-frame constants, written by the CPU once per frame in flight (src/gpu/pipeline.rs,
-// `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 96 bytes, then the 2 KiB target table.
+// `FrameConstants`; a Rust test checks these offsets against the Rust struct). std140, 96 bytes, then the 8 KiB target table (the hardware colours of a signal target at entries 0 up, the classification references from entry 256).
 layout(std140, set = 0, binding = PHOXIUM_FRAME_BINDING) uniform FrameConstants {
     // Tube rectangle in target pixels: x0, y0, x1, y1 (x1, y1 exclusive). Outside it: black surround.
     layout(offset = 0) vec4 tube_rect_px;
@@ -42,10 +42,10 @@ layout(std140, set = 0, binding = PHOXIUM_FRAME_BINDING) uniform FrameConstants 
     // FrameConstants::with_mask_tiers): 0 = one whole period (prefiltered), 1 = the host pixel (area
     // integral), between = box width in host px (blend band).
     layout(offset = 88) vec2 mask_box_px;
-    // The hardware colours of the source colour target when it is a signal one (C64, NES): `rgb` of entry i is the drive
+    // The hardware colours of the source colour target when it is a signal one (C64, NES, Atari 8-bit): `rgb` of entry i is the drive
     // voltage of colour i, the first `count` entries (the `target` slot's push constants say how many) are used. The CPU
     // writes them after the 96 bytes above, only while such a target is chosen (src/targets.rs, `frame_table`).
-    layout(offset = 96) vec4 target_table[128];
+    layout(offset = 96) vec4 target_table[512];
 } frame;
 
 // Size of the amp-domain images (amp and gun outputs).

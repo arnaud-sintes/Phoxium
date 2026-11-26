@@ -212,8 +212,8 @@ impl Dac {
     }
 }
 
-/// Colours a [`Signal`] holds at most (the NES has 64).
-pub const SIGNAL_MAX: usize = 64;
+/// Colours a [`Signal`] holds at most (the NES has 64, the Atari 8-bit GTIA 256: 16 hues of 16 luma levels).
+pub const SIGNAL_MAX: usize = 256;
 
 /// The drive voltages R'G'B' a television's decoder gives for a luma `y` (0 black, 1 white) and colour differences
 /// `u`, `v` on the scale of the composite model (`U = 0.492111 (B' - Y)`, `V = 0.877283 (R' - Y)`, BT.601 luma),
@@ -633,5 +633,137 @@ mod tests {
         assert_eq!(Transform::Signal(s).input_bits(), 8);
         // The first of two equal distances wins: a count of 0 classifies nothing.
         assert_eq!(Signal { count: 0, ..s }.classify([0.0; 3]), None);
+    }
+
+    /// The 16 measured luma levels of the Atari 800XL, in volts (Altirra Hardware Reference Manual, Table 116).
+    const XL_LUMA: [f64; 16] = [
+        1.112, 1.184, 1.264, 1.334, 1.408, 1.488, 1.568, 1.648, 1.688, 1.760, 1.840, 1.928, 1.992, 2.072, 2.144, 2.224,
+    ];
+
+    /// The NTSC GTIA written out from the manual's own formulas, independently of the data file: 16 hues of 16 luma levels,
+    /// index `hue * 16 + luma`; the luma `levels` are normalised between brightness 0 and 15, hue 0 has no chroma, hue `h`
+    /// has the U-V phase `180 - delay (h - 1)` degrees and the amplitude `saturation` (the share of the luma range).
+    fn gtia(levels: &[f64; 16], saturation: f64, delay: f64, gain: f64, gamma: f64) -> Signal {
+        let span = levels[15] - levels[0];
+        let mut colours = [[0.0; 3]; SIGNAL_MAX];
+        for hue in 0..16 {
+            for luma in 0..16 {
+                let y = (levels[luma] - levels[0]) / span;
+                let (u, v) = if hue == 0 {
+                    (0.0, 0.0)
+                } else {
+                    let a = (180.0 - delay * (hue as f64 - 1.0)).to_radians();
+                    (saturation * a.cos(), saturation * a.sin())
+                };
+                colours[hue * 16 + luma] = decode_yuv(y * gain, u * gain, v * gain).map(|c| c.powf(gamma));
+            }
+        }
+        Signal {
+            colours,
+            count: 256,
+            references: colours,
+            threshold: 0.1,
+        }
+    }
+
+    /// The luma ladder of the GTIA (LUM0 36k, LUM1 18k, LUM2 9.1k, LUM3 4.7k ohm) reproduces the shape of the measured
+    /// levels: the level of brightness `b` is the share of the conductance of its set bits in the total, 1/36k, 1/18k, 1/9.1k
+    /// and 1/4.7k out of 406.0 (in 1e-6 siemens). Hand derivation for brightness 8 (only the 4.7k): 212.77 / 406.0 = 0.5241,
+    /// measured (1.688 - 1.112) / 1.112 = 0.518, and the quirk of 7 and 8 close together: 8 - 7 is 0.048 of the range, the
+    /// mean step 0.067. The model is within 0.012 of every measured level of the 800XL.
+    #[test]
+    fn gtia_luma_ladder_follows_the_measured_shape() {
+        let g = [1.0 / 36.0, 1.0 / 18.0, 1.0 / 9.1, 1.0 / 4.7];
+        let total: f64 = g.iter().sum();
+        let model = |b: usize| (0..4).filter(|k| b >> k & 1 == 1).map(|k| g[k]).sum::<f64>() / total;
+        assert!(close(model(8), 0.5241, 5e-4), "{}", model(8));
+        assert!(close(model(15), 1.0, 1e-12) && model(0) == 0.0);
+        let mut worst: f64 = 0.0;
+        for (b, l) in XL_LUMA.iter().enumerate() {
+            worst = worst.max((model(b) - (l - XL_LUMA[0]) / (XL_LUMA[15] - XL_LUMA[0])).abs());
+        }
+        println!("ladder against the 800XL measurement: worst {worst:.4}");
+        assert!(worst < 0.012, "{worst}");
+        assert!(model(8) - model(7) < 0.05 && 0.05 < (model(15) - model(0)) / 15.0 * 0.8);
+    }
+
+    /// Hand derivation, 800XL, hue 1 luma 8 (`$18`), saturation 23.9 percent: Y = (1.688 - 1.112) / 1.112 = 0.51799; the
+    /// phase of hue 1 is 180 degrees (the burst, -U), so U = -0.239 and V = 0; R = Y = 0.51799, B = Y + U / 0.492111 =
+    /// 0.03233, G = (Y - 0.299 R - 0.114 B) / 0.587 = 0.6123. A grey (hue 0) is its luma; luma 15 of hue 0 is white. Hue 3
+    /// is 180 - 2 x 25.5 = 129 degrees: U = 0.239 cos 129 = -0.15040, V = 0.239 sin 129 = 0.18575.
+    #[test]
+    fn gtia_800xl_colours_hand_derived() {
+        let s = gtia(&XL_LUMA, 0.239, 25.5, 1.0, 1.0);
+        let [r, g, b] = s.colours[0x18];
+        assert!(
+            close(r, 0.51799, 5e-4) && close(g, 0.6123, 5e-4) && close(b, 0.03233, 5e-4),
+            "{r} {g} {b}"
+        );
+        assert_eq!(s.colours[0x00], [0.0; 3], "hue 0 luma 0 is black");
+        assert_eq!(s.colours[0x0F], [1.0; 3], "hue 0 luma 15 is white");
+        let grey = (1.688 - 1.112) / 1.112;
+        assert!(s.colours[0x08].iter().all(|c| close(*c, grey, 1e-12)));
+        // Hue 3 luma 8: the same luma, the chroma at 129 degrees (a red-orange: R above, B below the luma).
+        let [r, g, b] = s.colours[0x38];
+        let (u, v) = (0.239 * 129f64.to_radians().cos(), 0.239 * 129f64.to_radians().sin());
+        assert!(close(u, -0.15040, 5e-5) && close(v, 0.18575, 5e-5), "{u} {v}");
+        assert!(close(r, grey + v / 0.877_283, 1e-12) && close(b, grey + u / 0.492_111, 1e-12));
+        assert!(r > grey && b < grey);
+        assert!(
+            close(0.299 * r + 0.587 * g + 0.114 * b, grey, 1e-12),
+            "the luma is kept"
+        );
+        // Hue 15 is 14 delays further: 180 - 14 x 25.5 = -177 degrees, 3 degrees from hue 1.
+        let (a1, a15) = (180.0f64, 180.0 - 14.0 * 25.5);
+        assert!(close((a15 + 360.0 - a1).abs(), 3.0, 1e-9));
+    }
+
+    /// Every colour of the computed palette is its own nearest (the references are the colours themselves here), and the
+    /// palettes of the other machines and of the other ends of the hue delay (23.5 and 27.5 degrees) land on the right colour
+    /// or on a neighbour that looks the same: for the machines near the reference (saturation 0.27, hue delay 25.5) the
+    /// reference colour found is within 0.1 of the intended colour for every colour, for the 800 (saturation 0.35) for
+    /// most; the exact index is found for a third to nine tenths (hue steps of 24 degrees are narrow, so an exact index
+    /// is not what recognition promises; the counts are printed).
+    #[test]
+    fn gtia_palette_classifies_to_its_own_colours_and_survives_other_machines() {
+        let reference = gtia(&XL_LUMA, 0.27, 25.5, 1.0, 1.0);
+        for i in 0..256 {
+            assert_eq!(reference.classify(reference.colours[i]), Some(i), "colour {i:#04X}");
+        }
+        let mut closest = f64::MAX;
+        for i in 0..256 {
+            for j in i + 1..256 {
+                let (a, b) = (reference.colours[i], reference.colours[j]);
+                closest = closest.min(((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt());
+            }
+        }
+        println!("closest two of the 256 colours: {closest:.4}");
+        assert!(closest > 0.0, "no two colours coincide");
+        for (name, sat, delay) in [
+            ("800XL", 0.239, 25.5),
+            ("130XE", 0.233, 25.5),
+            ("800", 0.350, 25.5),
+            ("400", 0.306, 25.5),
+            ("delay 23.5", 0.239, 23.5),
+            ("delay 27.5", 0.239, 27.5),
+        ] {
+            let other = gtia(&XL_LUMA, sat, delay, 1.0, 1.0);
+            let (mut exact, mut near, mut worst) = (0, 0, 0.0f64);
+            for i in 0..256 {
+                let c = other.colours[i];
+                let got = reference.classify(c);
+                exact += usize::from(got == Some(i));
+                let d = got.map_or(f64::MAX, |j| {
+                    let o = reference.colours[j];
+                    ((c[0] - o[0]).powi(2) + (c[1] - o[1]).powi(2) + (c[2] - o[2]).powi(2)).sqrt()
+                });
+                near += usize::from(d < 0.1);
+                if d < f64::MAX {
+                    worst = worst.max(d);
+                }
+            }
+            println!("{name}: {exact} of 256 exact, {near} within 0.1 of the reference found, worst {worst:.3}");
+            assert!(exact >= 70 && near >= 160, "{name}: {exact} {near}");
+        }
     }
 }

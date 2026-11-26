@@ -1,0 +1,85 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets", "Design note:
+# signal-driven colour targets" and "Second research pass"). Format: crates/phoxium/src/targets.rs. Every key of [signal] has
+# a [provenance] entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E
+# estimate).
+schema = 1
+id = "atari_8bit_gtia"
+name = "Atari 8-bit computers and 5200 (GTIA, NTSC, computed from the signal)"
+label = "the 256 colours of the Atari 8-bit and 5200 as an NTSC television decodes the GTIA's signal (Colour variant: the machine, or the hue delay)"
+kind = "signal"
+notes = """
+The Atari 400, 800, XL, XE and the 5200 make their colours with the GTIA chip, which does not make RGB: a colour register holds a hue (0 to 15, the high nibble) and a luma (0 to 15, the low one), and the chip emits a composite signal made of a luma level and a chroma wave of one fixed amplitude whose phase is the hue. Hue 0 has no chroma (the 16 greys); hue 1 is the phase of the colour burst; every higher hue is one more step of a delay chain, whose spacing is set by a trimmer on the motherboard and is 'typically somewhere within 23.5 to 27.5 degrees per hue' (Altirra Hardware Reference Manual, Appendix D). An emulator shows a PC palette computed from that signal with its own settings. This target goes back to the signal: it recognises each pixel as the nearest of the 256 colours by comparison with a fixed reference palette, and shows the colour a television decoder drives the tube with, so the tube's own gamma, primaries and white take over (no conversion for a PC display). The colour index of the table is the value of the colour register, hue x 16 + luma.
+The luma is measured: Avery Lee measured the 16 luma levels on an 800XL, a 130XE and an 800 (oscilloscope, +/- 8 mV, Table 116 of the manual) and, with a probe on R203 before the RF modulator, an 400; the manual states that the luma ladder (LUM0 36k, LUM1 18k, LUM2 9.1k, LUM3 4.7k ohm) has a mismatched 4.7k, so that brightness 7 and 8 are closer than the others (a test recomputes the ladder: it follows the measurement within 0.012 of the range). Each luma is normalised between that machine's brightness 0 and brightness 15, which therefore become the tube's black and white: the pedestal of NTSC is not modelled (the GTIA emits brightness 0 at the blanking level, 'blacker than black' on a television with the 7.5 IRE setup, and a real television's contrast and brightness decide the rest).
+The chroma amplitude is the manual's derived saturation, the chroma vector (20 IRE, half of the 40 IRE burst) over the whole luma range after the sync pulse sets the gain: 23.9 percent of the range on the 800XL, 23.3 on the 130XE, 35.0 on the 800 (its weak luma signal makes it much more saturated) and 30.6 on the 400. The phase of hue h is 180 - delay x (h - 1) degrees on the U axis (the burst is 180 degrees, minus U, which is -57 degrees behind I; the manual's own formula). The delay of a real machine is whatever its trimmer was set to: the machines here take 25.5 degrees, the middle of the manual's range, which is the default; two more variants of the 800XL take the two ends, 23.5 and 27.5 degrees (at 25.5 degrees hue 15 lands 3 degrees from hue 1, at 23.5 it is 31 degrees off and at 27.5 it overshoots by 25 degrees, as the manual says the 15 hues 'may result in that color being short or even wrapping around past hue 1'). Colours go through the decoder of the composite model (BT.601 luma, U and V scaled 0.492111 and 0.877283, the standard decoding matrix, which is also the one the manual gives, 1.140, -0.395, -0.581 and 2.032), so they return unchanged through that model, and a channel that goes negative is clamped to zero as a tube does (the darkest colours shift in hue, as the manual says).
+Estimated: the chroma-to-burst ratio (the manual takes the chroma equal to the burst and the burst at 40 IRE after the television's gain control, an assumption about the television), the decode matrix (a choice: many NTSC decoder chips use other angles and gains), the television's tint (hue 1 at the burst phase; 'many NTSC games were developed on displays with more reddish hue 1 colours', and a Commodore 1702 puts it near -33 degrees), the hue delay of any real machine, and the reference palette that the recognition uses. The recognition reference is not checked against any emulator palette (Altirra's and Atari800's palettes are made by GPL code that this project does not read; no published list of 256 colours with a licence was found), so the classification is tested on computed palettes only: a palette made with another saturation or hue delay (the computed palettes of the 800XL, 130XE and 400, and of the 800XL at both ends of the delay range) is recognised as a colour within 0.1 of the intended one for 248 to 256 of the 256 colours, the 800 (saturation 0.35) for 169. A pixel with no reference colour within the threshold (a scaled or smoothed picture, an edited palette) passes through unchanged: use the integer upscale and the nearest-pixel prefilter (the defaults). Colours of the GTIA's hue 1 and hue 15 are close together on every setting, and a misrecognition between them changes the colour by about 3 degrees of hue at the middle delay.
+Not modelled: PAL machines (the hue chain has a different, unmeasured spacing and a PAL phase table without voltages), the 5200's own board (the same chip; no measurement of its luma or burst), the artifact colours of the high-resolution modes (they appear in the picture the emulator draws), the television's controls, the composite crosstalk (use the Composite video section).
+"""
+
+[signal]
+threshold = 0.12
+black_index = 0
+white_index = 15
+
+[signal.grid]
+hues = 16
+lumas = 16
+angle = 180.0
+
+[signal.reference]
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+black_mv = 0
+white_mv = 15
+amplitude = 0.27
+phase_row_deg = -25.5
+gain = 1.0
+gamma = 1.0
+
+[[signal.revisions]]
+id = "800xl"
+name = "Atari 800XL, hue delay 25.5 degrees (default)"
+luma_mv = [1112, 1184, 1264, 1334, 1408, 1488, 1568, 1648, 1688, 1760, 1840, 1928, 1992, 2072, 2144, 2224]
+amplitude = 0.239
+phase_row_deg = -25.5
+
+[[signal.revisions]]
+id = "130xe"
+name = "Atari 130XE, hue delay 25.5 degrees"
+luma_mv = [468, 532, 596, 660, 716, 780, 852, 908, 940, 1004, 1068, 1132, 1196, 1260, 1324, 1380]
+amplitude = 0.233
+phase_row_deg = -25.5
+
+[[signal.revisions]]
+id = "800"
+name = "Atari 800, hue delay 25.5 degrees (weak luma, saturated)"
+luma_mv = [640, 696, 744, 800, 856, 904, 960, 1016, 1056, 1112, 1160, 1224, 1272, 1328, 1384, 1440]
+amplitude = 0.350
+phase_row_deg = -25.5
+
+[[signal.revisions]]
+id = "400"
+name = "Atari 400, hue delay 25.5 degrees (probe before the RF modulator)"
+luma_mv = [3736, 3752, 3768, 3780, 3792, 3808, 3820, 3836, 3848, 3864, 3876, 3892, 3904, 3920, 3936, 3952]
+amplitude = 0.306
+phase_row_deg = -25.5
+
+[[signal.revisions]]
+id = "800xl_delay_23_5"
+name = "Atari 800XL, hue delay 23.5 degrees (low end of the range)"
+luma_mv = [1112, 1184, 1264, 1334, 1408, 1488, 1568, 1648, 1688, 1760, 1840, 1928, 1992, 2072, 2144, 2224]
+amplitude = 0.239
+phase_row_deg = -23.5
+
+[[signal.revisions]]
+id = "800xl_delay_27_5"
+name = "Atari 800XL, hue delay 27.5 degrees (high end of the range)"
+luma_mv = [1112, 1184, 1264, 1334, 1408, 1488, 1568, 1648, 1688, 1760, 1840, 1928, 1992, 2072, 2144, 2224]
+amplitude = 0.239
+phase_row_deg = -27.5
+
+[provenance]
+grid = "K: the colour register of the Atari 8-bit holds a hue in its high nibble and a luma in its low nibble, so the index of a colour is hue x 16 + luma (hue 0 has no chroma, hue 1 is the colour burst phase); S: the phase of hue h is 180 - delay x (h - 1) degrees on the U axis, the burst at 180 degrees (minus U, -57 degrees behind I) and all hues of one amplitude (Altirra Hardware Reference Manual by Avery Lee, Appendix D, 'NTSC GTIA color encoding'; the manual is redistributable, the numbers are quoted with attribution, no code of Altirra is used)"
+revisions = "S: the 16 luma levels in mV, Altirra Hardware Reference Manual, Appendix D, Table 116 'Measured signal levels for sync and all luminances' (+/- 0.008 V; the 800XL 1.112 to 2.224 V, the 130XE 0.468 to 1.380 V, the 800 0.640 to 1.440 V; the 400, which has no composite output, by a probe on R203 before the RF modulator with the low pass of the scope on, 3.736 to 3.952 V); S: the chroma amplitude per machine is the saturation of Table 117 'NTSC saturation ratios' (23.9, 23.3, 35.0 and 30.6 percent of the luma range 0 to 15, the chroma vector of 20 IRE over the range after the sync reference of -40 IRE); E: the hue delay of 25.5 degrees (the middle of the manual's 'typically somewhere within 23.5 to 27.5 degrees per hue' range; no machine's trimmer setting is known) and its two ends for the extra 800XL variants"
+reference = "E: the classification reference palette, not an output: a linear luma (the manual's 'simple and serviceable approximation' Y = brightness / 15), a chroma amplitude of 0.27 (between the XL and XE machines, 0.233 and 0.239, and the 400 at 0.306, below the 800 at 0.35), the hue delay 25.5 degrees, no contrast and no gamma; chosen so that palettes computed with another saturation (0.233 to 0.306) or delay (23.5 to 27.5) land on reference colours within 0.1 of the intended ones for at least 248 of the 256 colours (an experiment over the computed palettes, QUESTIONS.md); not checked against any emulator palette"
+threshold = "E: the largest distance in drive voltage between a pixel and a reference colour at which the pixel is taken for it; the farthest computed colour of the machines from the reference colour found is 0.119 (the 800, saturation 0.35; 0.112 for the 800XL at 23.5 degrees), so 0.12 keeps every one of them recognised; the 256 colours are only 0.005 to 0.1 apart in places (hue 1 and hue 15, the clamped dark colours), so the threshold limits what is left alone and does not pick the colour"
+black_index = "K: colour 0 (hue 0, luma 0) is the brightness 0 of the machine, taken as the black of the tube (the pedestal of NTSC is not modelled: D, the manual puts the GTIA's black at the blanking level, about -8 percent)"
+white_index = "K: colour 15 (hue 0, luma 15) is the brightness 15 of the machine, taken as the white of the tube (a television's AGC would show it at 57 to 86 IRE according to the machine, Table 117, the contrast of the tube decides)"

@@ -171,7 +171,9 @@ pub use context::{device_meets, gpu_required, validation_layer_available, Device
 pub use context::{list_gpus, vulkan_report, Context, DeviceRequest, ExternalMemoryProbe, GpuInfo, VulkanReport};
 pub use headless::{Headless, ImageF32, Rendered, SourceFrame, TargetFormat};
 pub use headless::{StageInput, StageReadback, StageRun};
-pub use pipeline::{tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, NATIVE_FORMAT};
+pub use pipeline::{
+    tube_rect_letterbox, FrameConstants, Settings, Transfer, FRAMES_IN_FLIGHT, FRAME_TABLE_VEC4, NATIVE_FORMAT,
+};
 pub use present::{extent_for, Acquired, Presenter};
 pub use stages::encode::{output_matrix, ClipCounts};
 pub use stages::screen::{warp_plan, WarpPlan, WARP_SIGMA_STEPS};
