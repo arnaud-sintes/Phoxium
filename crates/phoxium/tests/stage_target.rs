@@ -19,9 +19,10 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_MSX2_V9958,
     SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
     SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
-    SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL,
+    SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB, SOURCE_COLOUR_TARGET_SNK_NEO_GEO,
+    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -269,6 +270,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE
         | SOURCE_COLOUR_TARGET_ATARI_7800_MARIA
         | SOURCE_COLOUR_TARGET_APPLE_II_LORES
+        | SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL
         | SOURCE_COLOUR_TARGET_ATARI_2600_TIA
         | SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
@@ -351,6 +353,18 @@ fn apple_ii(i: usize) -> [f64; 3] {
         panic!("signal")
     };
     s.references[i % 16]
+}
+
+/// The reference entry `i % 29` of the ZX Spectrum 48K PAL target (black, three normal levels of each colour, the bright ones),
+/// read from the data file.
+fn zx_48k(i: usize) -> [f64; 3] {
+    let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL)
+        .expect("zx 48k")
+        .transform
+    else {
+        panic!("signal")
+    };
+    s.references[i % 29]
 }
 
 /// The reference colour `i % 128` of the Atari 2600 target (MAME's TIA palette, in the data file): the entries 2 x and 2 x + 1
@@ -447,6 +461,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The Apple II lo-res reference colours (MAME's palette) twice over, then a little off.
                 (22, _) if x < 32 => apple_ii(x),
                 (22, _) => apple_ii(x).map(|v| (v + 0.012).min(1.0)),
+                // The ZX Spectrum 48K reference colours (the emulator levels 192, 205, 216 and the bright 255), then a little off.
+                (23, _) if x < 32 => zx_48k(x),
+                (23, _) => zx_48k(x).map(|v| (v + 0.012).min(1.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -493,7 +510,7 @@ fn target_slot_matches_the_oracle() {
     };
     let counter = gpu.validation_counter();
     gpu.enable_only(&["target"]).unwrap();
-    let img = native(64, 24);
+    let img = native(64, 25);
 
     // No target (the default): skipped, the image passes bit for bit.
     let off = run(&mut gpu, &img, &Params::default());
@@ -621,6 +638,16 @@ fn target_slot_matches_the_oracle() {
             "zx spectrum 216 r0.63",
             SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
             6,
+        ),
+        (
+            "zx spectrum 48k pal burst gain",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL,
+            1,
+        ),
+        (
+            "zx spectrum 48k pal fixed gain",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL,
+            2,
         ),
     ] {
         let p = Params {

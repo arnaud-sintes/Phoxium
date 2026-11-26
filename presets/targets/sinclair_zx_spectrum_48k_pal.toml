@@ -1,0 +1,235 @@
+# Source colour target, data only (TODO, "To build after the fifth pass"; QUESTIONS.md, "Image-only documents read, 2026-11-26" and
+# "Built, the ZX Spectrum 48K PAL composite colours"). Format: crates/phoxium/src/targets.rs. Every key of [signal] has a [provenance]
+# entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "sinclair_zx_spectrum_48k_pal"
+name = "Sinclair ZX Spectrum 16K, 48K and Plus (ULA 5C102, PAL composite, computed from the ULA's Y, U and V levels, unverified)"
+label = "the Spectrum's 15 colours as a PAL television decodes the ULA's /Y, U and V outputs (Colour variant: a chroma gain that follows the burst, or a fixed scale); derived from die probe-test levels, relative only, no machine measured"
+kind = "signal"
+notes = """
+DERIVED, NOT MEASURED, AND RELATIVE ONLY. The 16K, 48K and Plus Spectrum make their colour with the ULA, which outputs an analogue luma /Y (the pin falls as the light rises) and two colour differences U and V (the B-Y and R-Y axes); an LM1889 and a modulator turn them into the PAL composite or RF signal. The levels below are those of the hand-drawn probe-test circuits of the Ferranti 5C102 ULA specification (pages 7, 9 and 11, read by eye from enlarged scans of the image-only PDF, QUESTIONS.md, 'Image-only documents read, 2026-11-26'; the Ferranti copies are marked 'For Educational and Archival Use Only, Strictly Non-Commercial': the voltages are quoted with attribution, nothing is copied), and the Amstrad patent EP0107687B1, figures 2 to 4 (public), draws the same resistor networks. They are the die's output voltages with a test load (1 kohm to 0 V on each pin), NOT the voltages of a Spectrum, whose own load resistors (R47 on Y, R56 and R63 on U and V: 220 ohm, 470 ohm or 1 kohm by issue and by ULA type) and LM1889 and modulator follow. So the levels give the RELATIVE amplitudes and phases of the 15 colours; the scale of the chroma against the luma, and the burst at the television, depend on that load and on the television, and are chosen by the two variants. No Spectrum, television or instrument was measured.
+The ULA draws each output from switched current sinks into a collector load and an emitter follower, so the output voltage falls linearly as sinks are switched on, and the effects of the three colour pins add. Y: reference (all colours off, the black level) 2.40 V; red only 2.10 V, green only 1.79 V, blue only 2.25 V, so the drops are 0.30, 0.61 and 0.15 V, and a normal white (all on, BRIGHT off) is predicted at 2.40 - 1.06 = 1.34 V by superposition (the row is not in the table); BRIGHT (/HL = 0) with all on is measured at 1.00 V, a drop of 1.40 V. The luma of the normal white over that of the bright white is 1.06 / 1.40 = 0.757: the normal colours sit at 0.757 of the bright ones, a figure of this circuit (the 0.85 'indicative' figure that Wikipedia quotes from a clone-design blog, 0.55 V against 0.65 V, whose own page says the real colours are 'currently unknown', and the 0.63 to 0.74 of the 128K, +2, +2A and +3 RGB output, a different circuit, file `sinclair_zx_spectrum_rgb`, are other numbers). A simple model of the Y bias network (7 kohm, 2 kohm, and 5 kohm in parallel with the 2 kohm when /HL is high, a 0.7 V diode drop) gives 0.763, within one percent, but the same model does not give the absolute levels of that circuit (it puts the emitter node at 0.73 V where the three drops imply 0.40 V), so it is a cross-check of the idea that BRIGHT raises every lit colour by one factor (1.321 here, measured 1.40 / 1.06) and not a verification: the bright colours are the normal drops times that factor. The sync tip is about 4.1 V, 1.7 V above the black level (not used).
+U: reference (all branches off, which is the colour yellow) 2.96 V; the blue pin alone 1.98 V, the /G pin alone 2.30 V, the /R pin alone 2.63 V, so the three branches drop 0.98, 0.66 and 0.33 V (the blue branch equals the other two: the greys have no chroma, black 1.97 V and white 1.98 V); all three on 1.00 V against the superposed 2.96 - 1.97 = 0.99 V. V: reference (cyan) 3.27 V; the R pin alone 1.87 V (white), the /G pin alone 2.10 V (blue), the /B pin alone 3.03 V (green), drops 1.40, 1.17 and 0.24 V; black 1.86 V and white 1.87 V. Read as the logic of the colour pins, U = 2.96 - 0.98 B - 0.66 (1 - G) - 0.33 (1 - R) and V = 3.27 - 1.40 R - 1.17 (1 - G) - 0.24 (1 - B) (the /G, /R and /B pins are the inverted colours), and every measured row is one of the colours (U: yellow, white, red, green, blue; V: cyan, white, blue, green). The single-branch rows define the weights; the checks are the all-on row (1.00 against 0.99 V), the black and the white at the same level on both axes, and the angles below. The circuits are colour differences with a gain: the three drops of U are 1.10 (B - Y) with the luma weights 0.89, 0.60, 0.30 and those of V 2.0 (R - Y) with 0.70, 0.59, 0.12, and 1.10 : 2.0 = 0.55 is the PAL ratio 0.4921 : 0.8773 = 0.56 within 2 percent (the circuit was made with the PAL weights, so equal downstream gains on U and V are taken). BRIGHT is not an input of the U and V circuits: the chroma of a bright colour is that of the normal one and only its luma rises, so the bright colours are less saturated for their luma.
+The colour of a pixel is the phasor of its U and V levels about the grey level (1.975 V and 1.865 V, the means of the black and white readings), with both signs inverted (a higher pin voltage is a lower colour difference, like the /Y pin; an inversion of both cancels in the burst, so it does not matter), and its angle on the U axis follows: blue 346.6 degrees, red 103.0, magenta 60.7, green 240.7, cyan 283.0, yellow 166.6, within 0.7 degree of the standard PAL colour-bar angles (347.1, 103.4, 60.3, 240.3, 283.4, 167.1), which agrees that the pins are read right. The burst: the U burst branch (4.4 kohm) switched off (+0.89 V: the burst row 1.89 V against 1.00 V of the same colour pins) and the V BURST* branch (3 kohm) switched on (-0.94 V: 2.33 V against 3.27 V) is the vector (-0.89, +0.94) V in the signs above, 1.294 V at 133.4 degrees, within 1.6 degrees of the standard 135 degrees of the +V line (a reading error of 0.7 degree is expected), and U and V are the same size in it, as the resistors were chosen to make them (4.4 kohm and 3 kohm). The 1.6 degrees are below the reading precision and are not applied. How the ULA alternates the V axis line by line in PAL is not in the levels read (the V circuit has two burst branches, BURST* and /BURST*, and the starred colour pins); the model's decoder with the delay line does the alternation. The last row of the V table is struck out with a '?' (R, /G, /B at 1, 0, 1, both burst pins at 0): it is the yellow state; with the burst branch on, as in the rows used here, the model gives 1.63 V and the struck number reads like 1.62, with both burst pins off 2.56 V; the row is not used.
+The two variants differ in the chroma gain of the television, the one thing the data do not give. (1) Burst gain (the default): a television whose automatic chroma control brings the burst to the standard PAL 300 mV peak to peak over 700 mV of luma, 3/14 = 0.2143 of the span from black to the bright white (peak), as the Apple II and CGA targets do for NTSC: every chroma is its phasor over the burst's 1.294 V times 0.2143, 0.1655 of the span per volt, which gives the saturated colours a chroma of 0.17 to 0.24 of the span. The burst of this circuit is large against its colours (red and cyan, the strongest, are 1.44 V against 1.29 V; a standard PAL burst is about a third of the strongest colour), so such a television shows them desaturated (a normal blue of about 16, 17, 112), more than a Spectrum on a television is usually described: the burst is the doubtful figure here. (2) Fixed gain: the standard PAL colour-difference weights over the normal white's luma, U = 0.4921 (B - Y) and V = 0.8773 (R - Y), with B - Y the U drops over 1.10 and R - Y the V drops over 2.0 (the circuit's own gains), in units of the normal white (1.06 V) and in the span of the bright white (over 1.321): 0.3354 of the span per volt (the two axes give 0.3387 and 0.3321, the mean is used); the burst is then 0.434 of the span, twice the standard, which a television that follows it would not show. This is the designer's apparent intent, an estimate, and it gives normal colours at about 187 to 199 (192, 0, 0 for red, 0, 191, 0 for green, 4, 6, 199 for blue) and bright ones at 209 to 242, close to the 192 and 205 the emulators use for the normal colours. Neither variant is a measurement of a machine: the chroma gain of a real Spectrum is set by its trimmers (VR1 and VR2, 2.2 kohm, in the 1982 Issue 2) or by the 1983 clamp proposal (a 47 kohm resistor replaced by 15 kohm 'desaturates the picture slightly, but acceptable', the Sinclair letter).
+The issues are not distinguished: the sheet read is the 5C102's; the 6C001 (PAL) and the NTSC ULA that the Sinclair letter of 28 January 1983 names have no level in the documents read (the 6C001 specification gives only the DC characteristics of the logic pins), the load resistors of the issues are not read, and the clamp circuit is not modelled. The 16K, 48K and Plus are taken to share these levels: for the 6C001 that is an assumption. The 128K, +2, +2A and +3 (the TEA2000 encoder and RGB output) are another circuit and not this target.
+Recognition: the pixel is compared with 29 reference colours, the usual 3-bit emulator picture: black, the seven colours at three normal levels (0xC0 = 192, 0xCD = 205, 0xD8 = 216; 215 is 0.004 from 216 and is recognised as it) and at the bright 255, numeric conventions listed in QUESTIONS.md (none measured, none read from any emulator's code; the GPL emulators' tables are not read); the bright black is black. A normal level of another emulator is recognised when it is within the threshold of one of the three: 224 (0xE0) is; 238 (0xEE) is not one of the three (it is 17 codes below the bright 255 and 22 above 216): a colour with one lit channel is 0.067 from the bright one and is taken for it, a colour with two or three lit channels is 0.094 or 0.115 away, past the threshold, and passes through unchanged. A pixel with no reference within the threshold (a scaled or filtered picture, a blend) passes through unchanged: use the integer upscale and the nearest-pixel prefilter (the defaults).
+Composite settings for the composite module (off by default; the target gives the colours a PAL decoder drives the tube with, the module encodes them again and decodes them, so a flat field of a colour returns unchanged and only the edge artefacts are added): `composite_standard = pal`, `composite_separation = comb` (the PAL delay line, which averages the two lines of the Hanover bars), the pixel clock (Source and the amplifier) 7.0 MHz (the ULA's 14 MHz over two, 448 pixel clocks a line), `composite_line_rate_khz` at 0 (448 pixels at 7 MHz are 64 microseconds, 15.625 kHz, the standard), `composite_frame_advance_deg` 0 (a neutral choice: the Issue 2 schematic has a separate 4.433619 MHz crystal for the subcarrier, so no fixed frame advance is known). The colour comes from 8 by 8 attribute cells, so the chroma changes only at those edges.
+Not modelled: the RF modulator and the load of the television, the clamp circuit and the issue differences, the real chroma gain and the trimmers, the interference and the dot crawl of the machine, the sync and the burst timing, the chroma bandwidth of the LM1889, the border, the PAL line alternation (the composite module's decoder does it), the 128K, +2, +2A and +3 (`sinclair_zx_spectrum_rgb`), and the clones.
+White scale: the bright white (colour 14) is 255, 255, 255, untinted, and the normal white (colour 7) is 193, 193, 193 (0.757, derived: the 1.06 V drop of the normal white over the 1.40 V of the bright white in the 5C102 /Y probe test; the ratio of the analogue luma, not an emulator's normal level) in both variants; black is the /Y reference level (2.40 V) and the bright white is the top of the scale, so nothing is rescaled and no tint is introduced (the greys have no chroma).
+"""
+
+[signal]
+threshold = 0.08
+black_index = 0
+white_index = 14
+
+[signal.reference]
+gain = 1.0
+gamma = 1.0
+
+[[signal.reference.rgb_references]]
+rgb = 0x000000
+colour = 0
+
+[[signal.reference.rgb_references]]
+rgb = 0x0000C0
+colour = 1
+
+[[signal.reference.rgb_references]]
+rgb = 0x0000CD
+colour = 1
+
+[[signal.reference.rgb_references]]
+rgb = 0x0000D8
+colour = 1
+
+[[signal.reference.rgb_references]]
+rgb = 0xC00000
+colour = 2
+
+[[signal.reference.rgb_references]]
+rgb = 0xCD0000
+colour = 2
+
+[[signal.reference.rgb_references]]
+rgb = 0xD80000
+colour = 2
+
+[[signal.reference.rgb_references]]
+rgb = 0xC000C0
+colour = 3
+
+[[signal.reference.rgb_references]]
+rgb = 0xCD00CD
+colour = 3
+
+[[signal.reference.rgb_references]]
+rgb = 0xD800D8
+colour = 3
+
+[[signal.reference.rgb_references]]
+rgb = 0x00C000
+colour = 4
+
+[[signal.reference.rgb_references]]
+rgb = 0x00CD00
+colour = 4
+
+[[signal.reference.rgb_references]]
+rgb = 0x00D800
+colour = 4
+
+[[signal.reference.rgb_references]]
+rgb = 0x00C0C0
+colour = 5
+
+[[signal.reference.rgb_references]]
+rgb = 0x00CDCD
+colour = 5
+
+[[signal.reference.rgb_references]]
+rgb = 0x00D8D8
+colour = 5
+
+[[signal.reference.rgb_references]]
+rgb = 0xC0C000
+colour = 6
+
+[[signal.reference.rgb_references]]
+rgb = 0xCDCD00
+colour = 6
+
+[[signal.reference.rgb_references]]
+rgb = 0xD8D800
+colour = 6
+
+[[signal.reference.rgb_references]]
+rgb = 0xC0C0C0
+colour = 7
+
+[[signal.reference.rgb_references]]
+rgb = 0xCDCDCD
+colour = 7
+
+[[signal.reference.rgb_references]]
+rgb = 0xD8D8D8
+colour = 7
+
+[[signal.reference.rgb_references]]
+rgb = 0x0000FF
+colour = 8
+
+[[signal.reference.rgb_references]]
+rgb = 0xFF0000
+colour = 9
+
+[[signal.reference.rgb_references]]
+rgb = 0xFF00FF
+colour = 10
+
+[[signal.reference.rgb_references]]
+rgb = 0x00FF00
+colour = 11
+
+[[signal.reference.rgb_references]]
+rgb = 0x00FFFF
+colour = 12
+
+[[signal.reference.rgb_references]]
+rgb = 0xFFFF00
+colour = 13
+
+[[signal.reference.rgb_references]]
+rgb = 0xFFFFFF
+colour = 14
+
+[[signal.colours]]
+name = "black"
+level_mv = 0.0
+
+[[signal.colours]]
+name = "blue"
+angle = 346.58
+level_mv = 150.0
+
+[[signal.colours]]
+name = "red"
+angle = 103.02
+level_mv = 300.0
+
+[[signal.colours]]
+name = "magenta"
+angle = 60.65
+level_mv = 450.0
+
+[[signal.colours]]
+name = "green"
+angle = 240.65
+level_mv = 610.0
+
+[[signal.colours]]
+name = "cyan"
+angle = 283.02
+level_mv = 760.0
+
+[[signal.colours]]
+name = "yellow"
+angle = 166.58
+level_mv = 910.0
+
+[[signal.colours]]
+name = "white"
+level_mv = 1060.0
+
+[[signal.colours]]
+name = "bright blue"
+angle = 346.58
+level_mv = 198.0
+
+[[signal.colours]]
+name = "bright red"
+angle = 103.02
+level_mv = 396.0
+
+[[signal.colours]]
+name = "bright magenta"
+angle = 60.65
+level_mv = 594.0
+
+[[signal.colours]]
+name = "bright green"
+angle = 240.65
+level_mv = 806.0
+
+[[signal.colours]]
+name = "bright cyan"
+angle = 283.02
+level_mv = 1004.0
+
+[[signal.colours]]
+name = "bright yellow"
+angle = 166.58
+level_mv = 1202.0
+
+[[signal.colours]]
+name = "bright white"
+level_mv = 1400.0
+
+[[signal.revisions]]
+id = "burst_gain"
+name = "Chroma gain follows the burst (PAL 3/14 of the span), the 5C102 levels"
+amplitudes = [0.0, 0.1676, 0.2387, 0.2212, 0.2212, 0.2387, 0.1676, 0.0, 0.1676, 0.2387, 0.2212, 0.2212, 0.2387, 0.1676, 0.0]
+
+[[signal.revisions]]
+id = "fixed_gain"
+name = "Fixed chroma gain (standard PAL weights over the normal white), the 5C102 levels"
+amplitudes = [0.0, 0.3397, 0.4837, 0.4483, 0.4483, 0.4837, 0.3397, 0.0, 0.3397, 0.4837, 0.4483, 0.4483, 0.4837, 0.3397, 0.0]
+
+[provenance]
+colours = "K: the Spectrum's colour order 0 black, 1 blue, 2 red, 3 magenta, 4 green, 5 cyan, 6 yellow, 7 white (the bits GRB), here followed by the same seven at the bright level (8 to 14), the bright black being black; S: the /Y levels, Ferranti 5C102 specification page 7 (the probe-test circuit, 5 V supply, 1 kohm load: reference 2.40 V, R only 2.10, G only 1.79, B only 2.25, bright white 1.00, read by eye on enlarged scans, confidence H) and the Amstrad patent EP0107687B1 figure 4; D: the level of each normal colour is the sum of the drops of its lit pins (0.30 R, 0.61 G, 0.15 B volts: 150, 300, 450, 610, 760, 910, 1060 mV of light above the black level), the bright colour that times 1.40 / 1.06 = 1.3208 (so the bright white is the measured 1400 mV; the factor on single colours is an assumption of one common bias, E); S: the U and V levels, page 9 (reference 2.96, B' only 1.98, /G' only 2.30, /R' only 2.63, all on 1.00, M) and page 11 (reference 3.27, R* only 1.87, /G* only 2.10, /B* only 3.03, M); D: the phasor of each colour (-(U - 1.975), -(V - 1.865)) volts from U = 2.96 - 0.98 B - 0.66 (1 - G) - 0.33 (1 - R) and V = 3.27 - 1.40 R - 1.17 (1 - G) - 0.24 (1 - B), its angle on the U axis rounded to 0.01 degree (the unit test recomputes it), the bright colours with the angle of the normal ones (no /HL input in the U and V circuits); E: the signs (both pins inverted, a global inversion cancels in the burst), equal gains of the two inputs downstream, the zero of the chroma at the black and white mean, the greys without chroma (their 0.01 V residual is below the reading precision), and that the probe-test levels and a Spectrum's load differ; U (unclear): only the struck-out last row of the V table, which is not used"
+revisions = "D: the chroma amplitude of each colour in units of the span from black to the bright white, the phasor magnitude in volts (1.0126 for blue and yellow, 1.4421 for red and cyan, 1.3365 for magenta and green) times a gain per volt: (burst_gain) 0.2143 / 1.2945 = 0.1655, the PAL burst of 300 mV peak to peak over 700 mV of luma (K, 3/14 of the span, peak) over the burst vector (the U burst branch off, +0.89 V, 1.89 V against 1.00 V, and the V BURST* branch on, -0.94 V, 2.33 V against 3.27 V; sqrt(0.89^2 + 0.94^2) = 1.2945 V at 133.4 degrees, M); (fixed_gain) 0.3354, the mean of 0.4921 / 1.10 / 1.3208 = 0.3387 (U) and 0.8773 / 2.0 / 1.3208 = 0.3321 (V), the standard PAL colour-difference weights over the circuit's own gains (1.10 V and 2.0 V per unit of colour difference, D from the three drops of each circuit) in units of the normal white, in the span of the bright white; E: the choice of these two gains, the television's behaviour, the burst level of a machine and the load, so every amplitude is an estimate of the order of the real one; the chroma of every bright colour is that of its normal colour"
+reference = "K: the classification reference, not an output: black, the seven colours at the normal levels 0xC0 (192), 0xCD (205) and 0xD8 (216) and at the bright 255 in the 3-bit RGB combinations (R, G, B each on or off), the numeric conventions of the repo's research (QUESTIONS.md, third and fifth research passes: 0xC0 named as FUSE's, 0xCD, 0xD7 or 0xD8 as an 85 percent level, 0xE0 and 0xEE also listed); E: none was measured and none was read from an emulator's code, whose GPL tables are not used; the bright black is black"
+threshold = "E: the largest distance (Euclidean in drive voltage) at which a pixel is taken for a reference colour; the normal levels are 0.04 to 0.05 apart and the bright 255 is 0.15 above the 216, so 0.08 recognises 215 and 224 as the normal level, takes a one-channel 238 for the bright colour (0.067) and leaves alone what is more than 0.08 from every reference (a blend, a filtered picture, a 238 on two or three channels)"
+black_index = "K: colour 0 (black) is the /Y reference level, 2.40 V, the blanking level, taken as the black of the tube (no setup level)"
+white_index = "K: colour 14 (the bright white, /Y 1.00 V) is the highest level of the signal, taken as the white of the tube; the normal white (colour 7) is at 0.757 of it"

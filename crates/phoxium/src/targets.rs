@@ -163,6 +163,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "sinclair_zx_spectrum_rgb.toml",
         include_str!("../../../presets/targets/sinclair_zx_spectrum_rgb.toml"),
     ),
+    (
+        "sinclair_zx_spectrum_48k_pal.toml",
+        include_str!("../../../presets/targets/sinclair_zx_spectrum_48k_pal.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -5053,6 +5057,336 @@ mod tests {
         }
     }
 
+    /// The red, green and blue pin states (0 or 1) of the Spectrum colour `n` (the bits G = 4, R = 2, B = 1: 0 black, 1 blue,
+    /// 2 red, 3 magenta, 4 green, 5 cyan, 6 yellow, 7 white).
+    fn zx_pins(n: usize) -> (f64, f64, f64) {
+        (
+            f64::from((n >> 1 & 1) as u8),
+            f64::from((n >> 2 & 1) as u8),
+            f64::from((n & 1) as u8),
+        )
+    }
+
+    /// The 5C102's U and V pin voltages of a colour with the burst branches in their normal state, from the single-branch rows of
+    /// pages 9 and 11: U falls by 0.98 V for the B pin, 0.66 V for the /G pin and 0.33 V for the /R pin, V by 1.40, 1.17 and 0.24 V
+    /// for the R, /G and /B pins (the /G, /R and /B pins are the inverted colours).
+    fn zx_uv(r: f64, g: f64, b: f64) -> (f64, f64) {
+        let u = 2.96 - (2.96 - 1.98) * b - (2.96 - 2.30) * (1.0 - g) - (2.96 - 2.63) * (1.0 - r);
+        let v = 3.27 - (3.27 - 1.87) * r - (3.27 - 2.10) * (1.0 - g) - (3.27 - 3.03) * (1.0 - b);
+        (u, v)
+    }
+
+    /// The chroma phasor in volts of a colour: both signs inverted (the pins fall as the colour difference rises), about the grey
+    /// level 1.975 V and 1.865 V (the means of the black and the white readings).
+    fn zx_phasor(n: usize) -> (f64, f64) {
+        let (r, g, b) = zx_pins(n);
+        let (u, v) = zx_uv(r, g, b);
+        (-(u - 1.975), -(v - 1.865))
+    }
+
+    /// The burst vector in the same signs: the U burst branch off (the burst row 1.89 V against 1.00 V of the same colour pins) and
+    /// the V BURST* branch on (2.33 V against 3.27 V).
+    fn zx_burst() -> (f64, f64) {
+        (-(1.89 - 1.00), -(2.33 - 3.27))
+    }
+
+    /// The normal luma in millivolts of light above the black level: the drops of the lit pins, 300, 610 and 150 mV.
+    fn zx_luma_mv(n: usize) -> f64 {
+        let (r, g, b) = zx_pins(n);
+        300.0 * r + 610.0 * g + 150.0 * b
+    }
+
+    /// The colour `i` (0 to 14: black, the seven normal colours, the seven bright ones) of the Spectrum file: the reference entries
+    /// are black, then three per normal colour (192, 205, 216), then the seven bright ones.
+    fn zx_colour(s: &Signal, i: usize) -> [f64; 3] {
+        match i {
+            0 => s.colours[0],
+            1..=7 => s.colours[1 + 3 * (i - 1)],
+            _ => s.colours[21 + (i - 7)],
+        }
+    }
+
+    /// The probe-test arithmetic: the rows as read, their superposition, the ratio of the normal to the bright luma, the burst vector
+    /// and the colour angles against the standard PAL ones.
+    #[test]
+    fn the_zx_spectrum_levels_superpose_and_the_ratios_are_what_the_notes_say() {
+        // The measured rows, as the pin states they are (page 9: yellow, blue with all branches on, white, red, green;
+        // page 11: cyan, white, blue, green); the single-branch rows define the weights, the all-on row is a check.
+        let u_rows = [(6usize, 2.96), (1, 1.00), (7, 1.98), (2, 2.30), (4, 2.63)];
+        let v_rows = [(5usize, 3.27), (7, 1.87), (1, 2.10), (4, 3.03)];
+        for (n, want) in u_rows {
+            let (r, g, b) = zx_pins(n);
+            assert!((zx_uv(r, g, b).0 - want).abs() < 0.0111, "U of colour {n}");
+        }
+        for (n, want) in v_rows {
+            let (r, g, b) = zx_pins(n);
+            assert!((zx_uv(r, g, b).1 - want).abs() < 0.0111, "V of colour {n}");
+        }
+        // The superposition of U: -0.98 - 0.66 - 0.33 = -1.97 against the measured all-on -1.96; the greys agree on both axes.
+        let sum_u: f64 = (2.96 - 1.98) + (2.96 - 2.30) + (2.96 - 2.63);
+        assert!(
+            (sum_u - 1.97).abs() < 1e-9 && ((2.96 - sum_u) - 1.00).abs() < 0.0111,
+            "{sum_u}"
+        );
+        let ((ub, vb), (uw, vw)) = (zx_uv(0.0, 0.0, 0.0), zx_uv(1.0, 1.0, 1.0));
+        assert!(
+            (ub - uw).abs() < 0.0111 && (vb - vw).abs() < 0.0111,
+            "black {ub} {vb}, white {uw} {vw}"
+        );
+        // The gains: U is 1.10 (B - Y) with the NTSC weights, V is 2.0 (R - Y); their ratio is the PAL one within 2 percent.
+        let (g_u, g_v): (f64, f64) = (0.98 / (1.0 - 0.114), 1.40 / (1.0 - 0.299));
+        assert!((g_u - 1.10).abs() < 0.01 && (g_v - 2.0).abs() < 0.01, "{g_u} {g_v}");
+        assert!(((1.10f64 / 2.0) / (U_PER_B_Y / V_PER_R_Y) - 1.0).abs() < 0.02);
+        // Y: the drops 0.30, 0.61 and 0.15 V sum to 1.06 V, so the normal white is predicted at 2.40 - 1.06 = 1.34 V; the bright
+        // white is measured at 1.00 V, a drop of 1.40 V, and the normal luma is 0.757 of the bright one.
+        let drops = [2.40 - 2.10, 2.40 - 1.79, 2.40 - 2.25];
+        let sum_y: f64 = drops.iter().sum();
+        assert!((sum_y - 1.06).abs() < 1e-9 && ((2.40 - sum_y) - 1.34).abs() < 1e-9);
+        let ratio = sum_y / (2.40 - 1.00);
+        assert!((ratio - 0.7571).abs() < 1e-4, "{ratio}");
+        // The bias network of the Y circuit (7 kohm from 5 V, the 2 kohm leg with 5 kohm in parallel when /HL is high, a
+        // 0.7 V diode drop) gives 0.763: the idea, within one percent, not the absolute levels.
+        let ve = |leg: f64| (5.0 * leg + 0.7 * 7.0) / (7.0 + leg) - 0.7;
+        let network = ve(1.0 / (1.0 / 2.0 + 1.0 / 5.0)) / ve(2.0);
+        assert!(
+            (network - 0.7627).abs() < 1e-3 && (network / ratio - 1.0).abs() < 0.01,
+            "{network}"
+        );
+        // The burst: (-0.89, +0.94) V, 1.2945 V at 133.4 degrees, within 1.6 degrees of the +V line's 135 degrees; U and V
+        // almost the same size, as the 4.4 kohm and 3 kohm branches (on nodes of 1.32 V and 0.94 V) make them.
+        let (bu, bv) = zx_burst();
+        let angle = bv.atan2(bu).to_degrees();
+        assert!((bu + 0.89).abs() < 1e-9 && (bv - 0.94).abs() < 1e-9);
+        assert!(
+            (bu.hypot(bv) - 1.2945).abs() < 1e-4 && (angle - 133.43).abs() < 0.01,
+            "{angle}"
+        );
+        assert!((135.0 - angle).abs() < 1.7 && (bu.abs() / bv.abs() - 1.0).abs() < 0.06);
+        // The angles against the standard PAL colour bars (the encoder's own U = 0.492111 (B - Y), V = 0.877283 (R - Y)).
+        for n in 1..7usize {
+            let (r, g, b) = zx_pins(n);
+            let y = 0.299 * r + 0.587 * g + 0.114 * b;
+            let standard = (V_PER_R_Y * (r - y))
+                .atan2(U_PER_B_Y * (b - y))
+                .to_degrees()
+                .rem_euclid(360.0);
+            let (pu, pv) = zx_phasor(n);
+            let ours = pv.atan2(pu).to_degrees().rem_euclid(360.0);
+            assert!((ours - standard).abs() < 0.8, "colour {n}: {ours} against {standard}");
+        }
+        // The phasors of complementary colours are opposite (blue and yellow, red and cyan, magenta and green); the greys have none.
+        for (a, b) in [(1usize, 6usize), (2, 5), (3, 4)] {
+            let (pa, pb) = (zx_phasor(a), zx_phasor(b));
+            assert!((pa.0 + pb.0).abs() < 1e-9 && (pa.1 + pb.1).abs() < 1e-9, "{a} and {b}");
+        }
+        assert!(zx_phasor(0).0.hypot(zx_phasor(0).1) < 0.0072 && zx_phasor(7).0.hypot(zx_phasor(7).1) < 0.0072);
+    }
+
+    /// The Spectrum file against the recomputation from the voltages, for both variants: the luma of each colour (the normal
+    /// drops, the bright ones that times 1.40 / 1.06), the chroma phasor times the gain of the variant (the burst's 3/14 over the
+    /// burst vector, or the PAL weights over the circuit's gains and the bright span), decoded; the greys; the bright chroma is the
+    /// normal one; the hand-derived colours of the notes.
+    #[test]
+    fn the_zx_spectrum_48k_file_is_the_probe_test_levels_decoded() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL).expect("zx 48k");
+        assert_eq!(t.id, "sinclair_zx_spectrum_48k_pal");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["burst_gain", "fixed_gain"]);
+        for key in [
+            "colours",
+            "revisions",
+            "reference",
+            "threshold",
+            "black_index",
+            "white_index",
+        ] {
+            assert!(t.provenance.contains_key(key), "provenance.{key}");
+        }
+        assert_eq!(t.select(1), t.transform);
+        let signal = |v: usize| match t.transform_for(v) {
+            Transform::Signal(s) => s,
+            _ => panic!("signal"),
+        };
+        let kb = 1.40 / 1.06;
+        let (bu, bv) = zx_burst();
+        let k_burst = 3.0 / 14.0 / bu.hypot(bv);
+        let k_fixed = 0.5 * (U_PER_B_Y / 1.10 / kb + V_PER_R_Y / 2.0 / kb);
+        assert!(
+            (k_burst - 0.1655).abs() < 1e-4 && (k_fixed - 0.3354).abs() < 1e-4,
+            "{k_burst} {k_fixed}"
+        );
+        assert!((U_PER_B_Y / 1.10 / kb - 0.3387).abs() < 1e-4 && (V_PER_R_Y / 2.0 / kb - 0.3321).abs() < 1e-4);
+        let mut worst = 0.0f64;
+        for (v, k) in [(0usize, k_burst), (1, k_fixed)] {
+            let s = signal(v);
+            assert_eq!(s.count, 29);
+            assert_eq!(s.threshold, 0.08);
+            for i in 0..15usize {
+                let n = if i < 8 { i } else { i - 7 };
+                let bright = i >= 8;
+                let luma = zx_luma_mv(n) * if bright { kb } else { 1.0 };
+                let (pu, pv) = zx_phasor(n);
+                let grey = n == 0 || n == 7;
+                let (a, ang) = if grey {
+                    (0.0, 0.0)
+                } else {
+                    (k * pu.hypot(pv), pv.atan2(pu))
+                };
+                let want = decode_yuv(luma / 1400.0, a * ang.cos(), a * ang.sin());
+                let got = zx_colour(&s, i);
+                let d = dist(got, want);
+                worst = worst.max(d);
+                assert!(d < 1e-3, "variant {v} colour {i}: {got:?} against {want:?}");
+            }
+            // The greys: black is black, the bright white is white, the normal white is 1.06 / 1.40 of it, untinted.
+            assert_eq!(zx_colour(&s, 0), [0.0; 3]);
+            assert_eq!(zx_colour(&s, 14), [1.0; 3]);
+            assert!(dist(zx_colour(&s, 7), [1060.0 / 1400.0; 3]) < 1e-9);
+            // The luma of an unclamped colour is the file's level over the span (the decode keeps it).
+            for i in 1..15usize {
+                let c = zx_colour(&s, i);
+                if c.iter().all(|x| *x > 1e-9 && *x < 1.0 - 1e-9) {
+                    let y = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                    let n = if i < 8 { i } else { i - 7 };
+                    let want = zx_luma_mv(n) * if i >= 8 { kb } else { 1.0 } / 1400.0;
+                    assert!(
+                        (y - want).abs() < 1e-3,
+                        "variant {v} colour {i}: luma {y} against {want}"
+                    );
+                }
+            }
+        }
+        println!("largest distance between the file and the recomputation: {worst:.2e}");
+        // The bright colours' luma is the normal one times 1.3208 and their chroma is the same (no /HL on U and V): the chroma
+        // (the colour minus its luma) is the same size up to the decode's clamps.
+        let (burst, fixed) = (signal(0), signal(1));
+        for n in 1..7usize {
+            let (a, b) = (zx_colour(&burst, n), zx_colour(&burst, n + 7));
+            let (ya, yb) = (
+                0.299 * a[0] + 0.587 * a[1] + 0.114 * a[2],
+                0.299 * b[0] + 0.587 * b[1] + 0.114 * b[2],
+            );
+            assert!(yb > ya, "colour {n}: the bright one is brighter");
+            let chroma = |c: [f64; 3], y: f64| ((c[0] - y) * V_PER_R_Y, (c[2] - y) * U_PER_B_Y);
+            let (ca, cb) = (chroma(a, ya), chroma(b, yb));
+            assert!(
+                (ca.0 - cb.0).abs() < 2e-3 && (ca.1 - cb.1).abs() < 2e-3,
+                "colour {n}: {ca:?} against {cb:?}"
+            );
+        }
+        // Hand derivation, burst variant, normal blue: Y = 150 / 1400 = 0.10714, phasor (0.985, -0.235) V, 1.0126 V, gain 0.16554:
+        // chroma 0.16763 at -13.42 degrees, U = 0.16301, V = -0.03890, R = 0.10714 - 0.03890 / 0.877283 = 0.0628, B = 0.10714 +
+        // 0.16301 / 0.492111 = 0.4384, G = (0.10714 - 0.299 x 0.0628 - 0.114 x 0.4384) / 0.587 = 0.0652.
+        let [r, g, b] = zx_colour(&burst, 1);
+        assert!(
+            (r - 0.0628).abs() < 1e-3 && (g - 0.0652).abs() < 1e-3 && (b - 0.4384).abs() < 1e-3,
+            "{r} {g} {b}"
+        );
+        // Fixed variant, normal red: Y = 0.21429, phasor (-0.325, 1.405) V, 1.4421 V, gain 0.33542: chroma 0.48372, V = 0.47100,
+        // U = -0.10901, R = 0.21429 + 0.47100 / 0.877283 = 0.7512, B = 0.21429 - 0.10901 / 0.492111 = -0.0072 (clamped to 0),
+        // G = (0.21429 - 0.299 x 0.7512 + 0.114 x 0.0072) / 0.587 = -0.0166 (clamped to 0): a red of (192, 0, 0) of 255.
+        let [r, g, b] = zx_colour(&fixed, 2);
+        assert!((r - 0.7512).abs() < 1e-3 && g == 0.0 && b == 0.0, "{r} {g} {b}");
+        assert_eq!((r * 255.0).round(), 192.0);
+        // The fixed variant puts the normal colours near the 192 to 205 that the emulators use, the burst variant far below.
+        for n in 1..7usize {
+            let top = zx_colour(&fixed, n).into_iter().fold(0.0f64, f64::max) * 255.0;
+            assert!((185.0..=200.0).contains(&top), "fixed, colour {n}: {top}");
+            let weak = zx_colour(&burst, n).into_iter().fold(0.0f64, f64::max) * 255.0;
+            assert!(weak + 5.0 < top, "burst, colour {n}: {weak} against {top}");
+        }
+    }
+
+    /// Recognition: the three normal levels, the bright 255 and black, as the emulators draw them, each give their colour; the
+    /// bright black is black; 215 and 224 are the normal level, 238 the bright one (nearer to 255 than to 216); a blend passes.
+    #[test]
+    fn the_zx_spectrum_48k_reference_recognises_the_emulator_levels() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL).expect("zx 48k");
+        for v in 0..2usize {
+            let Transform::Signal(s) = t.transform_for(v) else {
+                panic!("signal")
+            };
+            let colour = |i: usize| zx_colour(&s, i);
+            let level = |n: usize, l: f64| {
+                let (r, g, b) = zx_pins(n);
+                [r * l / 255.0, g * l / 255.0, b * l / 255.0]
+            };
+            assert_eq!(s.apply([0.0; 3]), colour(0), "black");
+            for n in 1..8usize {
+                for l in [192.0, 205.0, 216.0, 215.0, 224.0] {
+                    assert_eq!(s.apply(level(n, l)), colour(n), "colour {n} at {l}");
+                }
+                assert_eq!(s.apply(level(n, 255.0)), colour(n + 7), "bright colour {n}");
+                // 238 is 17 codes below the bright and 22 above 216: a colour with one lit channel is 0.067 from the bright
+                // one and taken for it, one with two or three lit channels is 0.094 or 0.115 away, past the threshold, and
+                // passes through (as the notes say).
+                let lit = (n & 1) + (n >> 1 & 1) + (n >> 2 & 1);
+                let at_238 = s.apply(level(n, 238.0));
+                if lit == 1 {
+                    assert_eq!(at_238, colour(n + 7), "colour {n} at 238");
+                } else {
+                    assert_eq!(at_238, level(n, 238.0), "colour {n} at 238");
+                }
+            }
+            // A blend of two colours (a scaled or filtered picture) is far from every reference and passes through.
+            for p in [[0.0, 0.5, 0.0], [0.5, 0.5, 0.5], [0.3, 0.0, 0.9], [0.6, 0.0, 0.0]] {
+                assert_eq!(s.classify(p), None, "{p:?}");
+                assert_eq!(s.apply(p), p);
+            }
+            // The distinct colours' references are far apart: the closest pair of entries with different colours.
+            let mut closest = f64::MAX;
+            for i in 0..s.count {
+                for j in i + 1..s.count {
+                    if s.colours[i] != s.colours[j] {
+                        closest = closest.min(dist(s.reference(i), s.reference(j)));
+                    }
+                }
+            }
+            println!(
+                "closest two reference colours of different colours: {closest:.3}; threshold {}",
+                s.threshold
+            );
+            assert!(closest > 0.15 && s.threshold < closest / 1.5, "{closest}");
+        }
+    }
+
+    /// The validation of the Spectrum file: a wrong number of amplitudes, a colour past the last in the reference, a threshold of
+    /// zero, a provenance with a wrong tag or an empty one.
+    #[test]
+    fn a_bad_zx_spectrum_48k_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "sinclair_zx_spectrum_48k_pal.toml")
+            .expect("the file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen(
+                    "0.1676, 0.2387, 0.2212, 0.2212, 0.2387, 0.1676, 0.0,",
+                    "0.1676, 0.2387,",
+                    1,
+                ),
+                "amplitudes",
+            ),
+            (ok.replacen("colour = 14", "colour = 15", 1), "rgb_references"),
+            (ok.replacen("threshold = 0.08", "threshold = 0.0", 1), "threshold"),
+            (
+                ok.replacen("reference = \"K:", "reference = \"X:", 1),
+                "provenance.reference",
+            ),
+            (
+                ok.replacen("revisions = \"D:", "revisions = \"D: \" #", 1),
+                "provenance.revisions",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
     /// The white a transform gives: for the full white (255, 255, 255) and for the emulator's own full white (the top level
     /// of a `dac`, the brightest reference colour of a `signal`; the full white otherwise).
     fn whites(t: &Transform) -> ([f64; 3], [f64; 3]) {
@@ -5125,6 +5459,7 @@ mod tests {
         ("nintendo_virtual_boy", [255, 0, 0]),
         ("apple_ii_lores", [255, 255, 255]),
         ("sinclair_zx_spectrum_rgb", [255, 255, 255]),
+        ("sinclair_zx_spectrum_48k_pal", [255, 255, 255]),
     ];
 
     /// The white of each target is pinned (variant 1), the emulator's own white (the top level of a `dac`, the brightest
