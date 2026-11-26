@@ -18,7 +18,8 @@
 //!   output (the Neo Geo's ladder levels, [`ladder_output`], and its dark bit and shadow).
 //! - [`Dac`], a console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): a piecewise linear map
 //!   from the levels the emulator shows to the measured levels. It has no device code to recover: the levels are the
-//!   points of the map.
+//!   points of the map. It may have fewer codes (the Master System's 4, the last point repeated) and its own output
+//!   codes for green and blue (the Master System's first VDP raises the first step of blue).
 //! - [`Signal`], a console whose colours are made of a composite signal (C64): the hardware colours as the drive voltages
 //!   a decoder gives ([`decode_yuv`]), and the recognition of each pixel as the nearest hardware colour.
 //! - [`Palette`], a monochrome source shown in four chosen colours (Super Game Boy): the luma of the source picks a
@@ -209,28 +210,50 @@ pub const DAC_LEN: usize = 8;
 /// documented), what the console outputs is `output[i] / output_max`. A level between two input levels (a scaled
 /// picture, the Mega Drive's shadow and highlight half steps) is mapped on the straight line between the two points, a
 /// level below the first or above the last input level takes the nearest output.
+///
+/// A DAC of fewer than 8 codes (the Master System's 2 bits, 4 codes) repeats its last point to fill the arrays: the map
+/// stops at the first repetition, which is never reached as the lower end of a segment. The green and blue channels have
+/// their own output codes when the source gives them (the Master System's first VDP raises the first step of blue);
+/// `None` is the red channel's `output`, the same for the three (every other DAC target).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dac {
-    /// The 8-bit level the emulator shows for each code, strictly increasing.
+    /// The 8-bit level the emulator shows for each code, strictly increasing up to the last distinct level.
     pub input: [u8; DAC_LEN],
-    /// The output code of each code, as the source gives them, not decreasing.
+    /// The output code of each code, as the source gives them, not decreasing: the red channel, and the green and blue
+    /// ones when they have none of their own.
     pub output: [u8; DAC_LEN],
+    /// The output codes of the green channel, when they differ from `output`.
+    pub output_green: Option<[u8; DAC_LEN]>,
+    /// The output codes of the blue channel, when they differ from `output`.
+    pub output_blue: Option<[u8; DAC_LEN]>,
     /// Largest output code (255).
     pub output_max: f64,
 }
 
 impl Dac {
+    /// The output codes of channel `c` (0 red, 1 green, 2 blue).
+    pub fn output_of(&self, c: usize) -> &[u8; DAC_LEN] {
+        match c {
+            1 => self.output_green.as_ref().unwrap_or(&self.output),
+            2 => self.output_blue.as_ref().unwrap_or(&self.output),
+            _ => &self.output,
+        }
+    }
+
     /// The target colour of the drive voltage `v`.
     pub fn apply(&self, v: [f64; 3]) -> [f64; 3] {
-        v.map(|x| {
+        let mut out = [0.0; 3];
+        for (c, (o, x)) in out.iter_mut().zip(v).enumerate() {
+            let output = self.output_of(c);
             let p = (x * 255.0).clamp(f64::from(self.input[0]), f64::from(self.input[DAC_LEN - 1]));
             let i = (0..DAC_LEN - 1)
                 .find(|&i| p <= f64::from(self.input[i + 1]))
                 .unwrap_or(DAC_LEN - 2);
             let (x0, x1) = (f64::from(self.input[i]), f64::from(self.input[i + 1]));
             let t = (p - x0) / (x1 - x0);
-            (f64::from(self.output[i]) * (1.0 - t) + f64::from(self.output[i + 1]) * t) / self.output_max
-        })
+            *o = (f64::from(output[i]) * (1.0 - t) + f64::from(output[i + 1]) * t) / self.output_max;
+        }
+        out
     }
 }
 
@@ -606,6 +629,8 @@ mod tests {
         Dac {
             input: [0, 34, 68, 102, 136, 170, 204, 238],
             output: [0, 52, 87, 116, 144, 172, 206, 255],
+            output_green: None,
+            output_blue: None,
             output_max: 255.0,
         }
     }
@@ -652,6 +677,56 @@ mod tests {
         // The same picture value 102 is code 3 for one emulator and between codes for the other.
         assert!(close(md_gpgx().apply([102.0 / 255.0; 3])[0], 116.0 / 255.0, 1e-12));
         assert!(regen.apply([102.0 / 255.0; 3])[0] > 116.0 / 255.0);
+    }
+
+    /// A 2-bit DAC (4 codes, the last point repeated to fill the arrays) with a blue of its own: the Master System's first
+    /// VDP of the scope reading, red and green at 85 per step, the first step of blue at 104.
+    fn sms_scope() -> Dac {
+        Dac {
+            input: [0, 85, 170, 255, 255, 255, 255, 255],
+            output: [0, 85, 170, 255, 255, 255, 255, 255],
+            output_green: None,
+            output_blue: Some([0, 104, 170, 255, 255, 255, 255, 255]),
+            output_max: 255.0,
+        }
+    }
+
+    /// Hand derivation: each of the four codes goes to its own level per channel (blue's first step 104 against 85), a
+    /// level between two codes is on the line (127.5 is half way between 85 and 170: red and green 127.5, blue 137), the
+    /// padding repeats the last point and changes nothing (255 is the last code and 255 its output, no division by zero),
+    /// and a Dac with no green or blue of its own treats the three channels alike.
+    #[test]
+    fn dac_with_four_codes_and_a_blue_of_its_own() {
+        let d = sms_scope();
+        let want = [
+            [0.0, 0.0, 0.0],
+            [85.0, 85.0, 104.0],
+            [170.0, 170.0, 170.0],
+            [255.0, 255.0, 255.0],
+        ];
+        for (code, w) in want.iter().enumerate() {
+            let level = [0.0, 85.0, 170.0, 255.0][code] / 255.0;
+            let got = d.apply([level; 3]);
+            for c in 0..3 {
+                assert!(close(got[c], w[c] / 255.0, 1e-12), "code {code} channel {c}: {got:?}");
+            }
+        }
+        let mid = d.apply([127.5 / 255.0; 3]);
+        assert!(
+            close(mid[0], 127.5 / 255.0, 1e-12) && close(mid[1], 127.5 / 255.0, 1e-12),
+            "{mid:?}"
+        );
+        assert!(close(mid[2], 137.0 / 255.0, 1e-12), "{mid:?}");
+        // Below the first and above the last level: the end outputs, with the padding after the last distinct point.
+        assert_eq!(d.apply([1.0; 3]), [1.0; 3]);
+        assert_eq!(d.apply([0.0; 3]), [0.0; 3]);
+        assert_eq!(d.output_of(0), &d.output);
+        assert_eq!(d.output_of(1), &d.output);
+        assert_eq!(d.output_of(2), &d.output_blue.unwrap());
+        // No own channels: the three channels are alike (the Mega Drive).
+        let md = md_gpgx();
+        let [r, g, b] = md.apply([68.0 / 255.0; 3]);
+        assert!(r == g && g == b);
     }
 
     /// A small signal with four colours: black, white, a red and a blue, from luma and colour differences.

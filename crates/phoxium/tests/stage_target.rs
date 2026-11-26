@@ -15,8 +15,9 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
     SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
+    SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO,
+    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -38,6 +39,8 @@ fn md_dac(step: u8) -> Transform {
     Transform::Dac(Dac {
         input: std::array::from_fn(|i| step * i as u8),
         output: [0, 52, 87, 116, 144, 172, 206, 255],
+        output_green: None,
+        output_blue: None,
         output_max: 255.0,
     })
 }
@@ -102,6 +105,25 @@ fn transform(target: u32, variant: i32) -> Transform {
             3 => md_dac(32),
             _ => unreachable!(),
         },
+        // The Master System, written here independently of the data file: a plain 2-bit picture (85 per code), four codes
+        // padded to eight with the last point. Variant 1 the first VDP with TmEE's levels and a blue first step of 110,
+        // 2 the first VDP of the scope (linear red and green, blue 104), 3 the second VDP (89 and 174 on the three).
+        SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM => {
+            let pad = |a: [u8; 4]| [a[0], a[1], a[2], a[3], a[3], a[3], a[3], a[3]];
+            let (red, blue) = match variant {
+                1 => ([0, 90, 173, 255], Some([0, 110, 173, 255])),
+                2 => ([0, 85, 170, 255], Some([0, 104, 170, 255])),
+                3 => ([0, 89, 174, 255], None),
+                _ => unreachable!(),
+            };
+            Transform::Dac(Dac {
+                input: pad([0, 85, 170, 255]),
+                output: pad(red),
+                output_green: None,
+                output_blue: blue.map(pad),
+                output_max: 255.0,
+            })
+        }
         // The C64: the data file's own variant (the oracle is `crt_model::target::Signal`, built from the file).
         SOURCE_COLOUR_TARGET_COMMODORE_64
         | SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA
@@ -195,6 +217,16 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 (1, _) => [expand(c), 0.0, 0.0],
                 (2, _) => [0.0, expand(c), 0.0],
                 (3, _) => [0.0, 0.0, expand(c)],
+                // The 2-bit codes of a Master System picture (0, 85, 170, 255 per channel, the three channels on different
+                // codes so that the blue first step meets every red and green). The random generator is advanced as the
+                // row used to, so that the pixels below stay what they were.
+                (4, _) => {
+                    for _ in 0..3 {
+                        s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    }
+                    let l = |k: usize| f64::from((k % 4) as u8 * 85) / 255.0;
+                    [l(x), l(x / 4), l(x / 2)]
+                }
                 // The C64 palette of Pepto, then the same a little off (a pixel the classification still takes).
                 (5, _) => pepto(x),
                 (6, _) => pepto(x).map(|v| (v + 0.012).min(1.0)),
@@ -307,6 +339,9 @@ fn target_slot_matches_the_oracle() {
         ("neo geo dark", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 2),
         ("neo geo shadow", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 3),
         ("neo geo shadow dark", SOURCE_COLOUR_TARGET_SNK_NEO_GEO, 4),
+        ("sms first vdp bench", SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, 1),
+        ("sms first vdp scope", SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, 2),
+        ("sms second vdp", SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, 3),
     ] {
         let p = Params {
             source_colour_target: target,

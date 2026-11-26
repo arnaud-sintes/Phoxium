@@ -122,9 +122,16 @@ pub(super) fn plan(p: &Params) -> Push {
             }
         }
         Transform::Dac(d) => {
-            // Eight input levels, then eight output codes, one byte each, four to a word.
+            // Eight input levels, then the eight output codes of red, of green and of blue (the same eight three
+            // times for a DAC with no channel of its own), one byte each, four to a word.
             let mut table = [0u32; CURVE_LEN / 4];
-            for (i, v) in d.input.iter().chain(d.output.iter()).enumerate() {
+            let bytes = d
+                .input
+                .iter()
+                .chain(d.output_of(0))
+                .chain(d.output_of(1))
+                .chain(d.output_of(2));
+            for (i, v) in bytes.enumerate() {
                 table[i / 4] |= u32::from(*v) << (8 * (i % 4));
             }
             Push {
@@ -368,7 +375,9 @@ mod tests {
         assert_eq!((gpgx.kind, gpgx.bits), (3, 0));
         // Inputs 0, 34, 68, 102 then 136, 170, 204, 238; outputs 0, 52, 87, 116 then 144, 172, 206, 255.
         assert_eq!(gpgx.table[..4], [0x6644_2200, 0xEECC_AA88, 0x7457_3400, 0xFFCE_AC90]);
-        assert_eq!(gpgx.table[4..], [0; 4]);
+        // A DAC with no green or blue of its own repeats the red outputs for both: the same map on the three channels.
+        assert_eq!(gpgx.table[4..6], gpgx.table[2..4]);
+        assert_eq!(gpgx.table[6..], gpgx.table[2..4]);
         assert!((f64::from(gpgx.out_scale) - 1.0 / 255.0).abs() < 1e-9);
         let kega = plan(&md(2));
         assert_eq!(kega.table[0], 0x6342_2100, "0, 33, 66, 99");
@@ -376,5 +385,30 @@ mod tests {
         let regen = plan(&md(3));
         assert_eq!(regen.table[0], 0x6040_2000, "0, 32, 64, 96");
         assert_eq!(plan(&md(20)).table, gpgx.table, "past the last emulator: the first");
+    }
+
+    /// The Master System: four codes with the last point repeated, and the blue of its own in the last eight bytes. Variant
+    /// 1 (the first VDP with TmEE's levels): input 0, 85, 170, 255 (then 255 four times), red and green 0, 90, 173, 255,
+    /// blue 0, 110, 173, 255; variant 3 (the second VDP): 0, 89, 174, 255 on the three channels.
+    #[test]
+    fn the_master_system_dac_packs_a_blue_of_its_own() {
+        let sms = |variant: i32| Params {
+            source_colour_variant: variant,
+            ..with(crate::params::SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM)
+        };
+        let word = |a: [u32; 4]| a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
+        let first = plan(&sms(1));
+        assert_eq!((first.kind, first.bits), (3, 0));
+        assert_eq!(first.table[0], word([0, 85, 170, 255]));
+        assert_eq!(first.table[1], word([255; 4]), "the padding repeats the last level");
+        assert_eq!(first.table[2], word([0, 90, 173, 255]));
+        assert_eq!(first.table[3], word([255; 4]));
+        assert_eq!(first.table[4], first.table[2], "green is red's");
+        assert_eq!(first.table[6], word([0, 110, 173, 255]), "blue's own");
+        assert_eq!(first.table[7], word([255; 4]));
+        let second = plan(&sms(3));
+        assert_eq!(second.table[2], word([0, 89, 174, 255]));
+        assert_eq!(second.table[4..6], second.table[2..4]);
+        assert_eq!(second.table[6..], second.table[2..4], "no blue of its own");
     }
 }

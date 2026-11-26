@@ -1,0 +1,46 @@
+# Source colour target, data only (TODO, "Source colour targets"; QUESTIONS.md, "Audit of the colour targets" and "Second research
+# pass"). Format: crates/phoxium/src/targets.rs. Every key of [dac] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "sega_master_system"
+name = "Sega Master System / Mark III (Mode 4 colour DAC)"
+label = "the Master System's and Mark III's 2-bit-per-channel VDP output at the levels measured on the console, behind a plain 2-bit emulator picture (Colour variant: first VDP, first VDP on a scope reading, second VDP)"
+kind = "dac"
+notes = """
+The Master System's VDP (Mode 4) makes each colour channel from 2 bits, 4 levels, 64 colours. An emulator shows the four codes of a channel as 0, 85, 170 and 255 (the 2 bits repeated, c x 85); this target replaces those levels by the ones the console's VDP outputs. The input is E: the SMS Power palette page, read, gives the format (%00BBGGRR) and no RGB values, the research notes say most emulators use 85 per step, and no emulator's code was read here; an emulator that already shows measured levels is not covered.
+The levels are TmEE's bench readings (SpritesMind forum, 22 Oct 2015): the first VDP (SMS1) 0, 324, 620 and 916 mV, which scaled to the top level is 0, 90, 173, 255 of 255; the second VDP (SMS2) 0, 364, 720 and 1052 mV, 0, 89, 174, 255 (the post gives 89, the millivolts give 88.2: the post's value is kept). These are not a conversion of a linear DAC by a known law: the thread says the unloaded DAC is roughly linear and that the loading by the dividers and the encoder compresses the levels, so the numbers belong to a measurement point (the SMS2 had a large DC offset at the usual point and was read at the VDP output instead) and not to the chip alone.
+**What conflicts.** The post reports one RGB value per level, not a value per channel, and TmEE himself (30 Dec 2020) found his readings more or less linear and did not see the blue difference below. bfbiii (SMS Power forum, 19 Dec 2020, a capture card checked against an oscilloscope; the write-up itself is a Google document that was not read) says red and green are 'pretty much linear', which is 85 per step and not 90 and 173. The two readings disagree by up to 5 of 255 at the first step and 3 at the second; both are shipped, as variants 1 and 2, and the target does not pretend to know which is the console: a loaded and an unloaded reading of a DAC give different levels, and the television is the load that matters.
+**The blue of the first VDP.** On the first VDP (315-5124, in the Mark III and the first Master System) the lowest step of blue is 22 to 23 percent above where it should be (bfbiii, scope-confirmed; the SMS Power palette page says the Mark III and SMS1 VDP slightly boost the first level of blue, its table empty); the second VDP (315-5246) is linear in blue. furrtek's die imaging of a 315-5124 (SMS Power forum, 8 Mar 2021, a biological microscope and a webcam) puts the red and green resistor taps at 0, 1, 2 and 3 tenths and the first blue tap at about 1.2 tenths, which is 0.4 of full scale against 0.333, 20 percent high, close to the 22 to 23 of the scope (a 102 against a 104 on 85 per step). Only that first step of blue is raised; bfbiii and the die give nothing about the others. Variant 2 is the scope reading directly: red and green 0, 85, 170, 255, blue 0, 104, 170, 255 (the first step 85 x 1.225 = 104.1, D). Variant 1 puts the same factor on TmEE's first level, blue 0, 110, 173, 255 (90 x 1.225 = 110.3, E): it is not a measurement of any console, the 22 to 23 percent is relative to a linear step and TmEE's levels are not linear, so the blue of variant 1 could as well be 107 (the raise carried through his compression, 0.4 of the unloaded scale on his curve).
+The variants: 1 the first VDP with TmEE's levels (the default: the TODO's reading of the console), 2 the first VDP as the capture card and scope read it, 3 the second VDP (Master System II and later) with TmEE's levels on the three channels (bfbiii: its blue is 'normal', its overall range somewhat higher). Between two codes (a scaled picture) the map is the straight line between the points.
+Not built and why. The CRAM substitution table of the TMS9918 modes 0 to 3 (the VDP shows the TMS's 15 colours as fixed CRAM entries, $00 $00 $08 $0C $10 $30 $01 $3C $02 $03 $05 $0F $04 $33 $15 $3F on the SMS Power palette page, which calls its values approximations and the page incomplete) is not a transform of an emulator picture: an emulator already shows the CRAM entry's colour (a 2-bit-per-channel one, which this target maps), not the TMS colour, so a remap would have nothing to recognise; and the table could not be read in full here. The SG-1000 uses the TMS9918 and has the target texas_instruments_tms9928; the Game Gear (12-bit, a different panel) is a separate platform; the Mega Drive in Master System mode (TmEE: 0, 99, 162, 255, the Power Base Converter, which bfbiii says is nonlinear in its own way) is not applied. No gamma is applied, and the amplifier and the television are not modelled.
+"""
+
+[dac]
+output = [0, 90, 173, 255]
+output_max = 255.0
+
+[[dac.inputs]]
+id = "sms1_bench"
+name = "First VDP (315-5124, Mark III, SMS1): TmEE levels, blue first step raised"
+levels = [0, 85, 170, 255]
+output = [0, 90, 173, 255]
+output_blue = [0, 110, 173, 255]
+
+[[dac.inputs]]
+id = "sms1_scope"
+name = "First VDP, capture card and scope: linear red and green, blue first step 22 to 23 percent high"
+levels = [0, 85, 170, 255]
+output = [0, 85, 170, 255]
+output_blue = [0, 104, 170, 255]
+
+[[dac.inputs]]
+id = "sms2_bench"
+name = "Second VDP (315-5246, Master System II and later): TmEE levels"
+levels = [0, 85, 170, 255]
+output = [0, 89, 174, 255]
+
+[provenance]
+output = "S: TmEE, 'SMS and SMS mode output levels', SpritesMind forum (gendev.spritesmind.net, topic t=2189, post of 22 Oct 2015, read 2026-11-26): SMS1 0, 324, 620, 916 mV (ratios 0, 0.354, 0.677, 1; 0, 90, 173, 255) and SMS2 0, 364, 720, 1052 mV (the post's ratios 0, 0.350, 0.684, 1; 0, 89, 174, 255; 364 / 1052 is 0.346 and 88.2, the post's 89 is kept), one RGB value per level and no channel named, SMS2 read at the VDP output (a large DC offset at the usual point), SMS1 at another point than the Mega Drive; the default of the file is the SMS1 levels"
+output_max = "K: 8-bit output code; the top level 255 is the reference white of the scaled readings (916 mV, 1052 mV)"
+inputs = "E: 85 per step (the 2 bits repeated, c x 85), the usual emulator rule per the second research pass (QUESTIONS.md), the SMS Power palette page gives the %00BBGGRR format and no RGB values (read 2026-11-26); not read in any emulator's code"
+variant_outputs = "E: (the tag is the weakest part, the blue of variant 1; each number carries its own tag) variant 1 red and green are TmEE's SMS1 levels 0, 90, 173, 255 (S, above); its blue is 0, 110, 173, 255 (E: the first step 90 x 1.225 = 110.3, the 22 to 23 percent of bfbiii applied to TmEE's level; 107 by carrying 0.4 of the unloaded scale through TmEE's curve; neither is measured); variant 2 is bfbiii's SMS Power forum reading (a capture card against an oscilloscope, 19 Dec 2020, 'pretty much linear' red and green: 0, 85, 170, 255 per the linear step, K; the SMS1 blue first step 22 to 23 percent high, S; 85 x 1.225 = 104.1, D) with furrtek's die reading as a cross-check (taps 1.2 / 10 against 1 / 10, 20 percent, 102; SMS Power forum, 8 Mar 2021, S); variant 3 is TmEE's SMS2 levels 0, 89, 174, 255 on the three channels (S; bfbiii: the SMS2 blue is 'normal', applied as the same curve on blue, E); the SMS Power palette page (smspower.org/Development/Palette) says the Mark III and SMS1 VDP slightly boost the first blue level (S, its table empty); the SMS Power thread was read through a summarising tool, not verbatim, and the Google document was not read"

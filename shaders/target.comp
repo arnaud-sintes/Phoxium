@@ -18,8 +18,10 @@
 //             first three words of `table`): V' = out_scale x lerp(colour[i], colour[i + 1], f), (i, f) the whole and
 //             fractional part of (1 - luma) x 3. No device code is recovered (bits = 0).
 //   3 dac:    V' = out_scale x piecewise linear map through the points (in[i], out[i]) (the 8-bit levels the emulator
-//             shows, the measured output codes; bytes 0 to 7 and 8 to 15 of `table`), V x 255 held to the first and
-//             last input level. No device code is recovered (bits = 0).
+//             shows, the measured output codes; bytes 0 to 7 of `table` for the inputs, 8 to 15 the output codes of red,
+//             16 to 23 of green, 24 to 31 of blue, the same eight three times for a dac with no channel of its own),
+//             V x 255 held to the first and last input level; fewer than eight points repeat the last. No device code
+//             is recovered (bits = 0).
 //   4 signal: the nearest of `table[0]` reference colours (`frame.target_table[256 + i].rgb`, what an emulator shows)
 //             classifies the pixel; it is replaced by that hardware colour (`frame.target_table[i].rgb`, the drive
 //             voltages) when the distance is at most `clamp_sum` (the threshold); the first of equal distances wins; a
@@ -100,12 +102,15 @@ vec3 palette(vec3 v) {
     return mix(palette_colour(i), palette_colour(i + 1), pos - float(i));
 }
 
-// Byte `i` of `table` (the dac's eight input levels, then its eight output codes).
+// Byte `i` of `table` (the dac's eight input levels, then its eight output codes of red, of green and of blue).
 float table_byte(int i) {
     return float((pc.table[i >> 2] >> uint((i & 3) * 8)) & 255u);
 }
 
-float dac(float x) {
+// The dac of channel `ch` (0 red, 1 green, 2 blue): its output codes start at byte 8 + 8 ch. A dac of fewer than eight
+// codes repeats its last point (the loop never takes a segment that starts at a repeat, so no division by zero).
+float dac(float x, int ch) {
+    int o = 8 + 8 * ch;
     float p = clamp(x * 255.0, table_byte(0), table_byte(7));
     int i = 0;
     for (int k = 0; k < 6; k++) {
@@ -115,7 +120,7 @@ float dac(float x) {
     }
     float x0 = table_byte(i);
     float x1 = table_byte(i + 1);
-    return mix(table_byte(8 + i), table_byte(9 + i), (p - x0) / (x1 - x0));
+    return mix(table_byte(o + i), table_byte(o + 1 + i), (p - x0) / (x1 - x0));
 }
 
 // The nearest hardware colour of a signal target, or the pixel itself (see the header).
@@ -161,7 +166,7 @@ void main() {
     } else if (pc.kind == 2) {
         c = pc.out_scale * palette(x);
     } else if (pc.kind == 3) {
-        c = pc.out_scale * vec3(dac(x.r), dac(x.g), dac(x.b));
+        c = pc.out_scale * vec3(dac(x.r, 0), dac(x.g, 1), dac(x.b, 2));
     } else {
         c = signal_colour(x);
     }

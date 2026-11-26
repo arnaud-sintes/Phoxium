@@ -105,6 +105,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "snk_neo_geo.toml",
         include_str!("../../../presets/targets/snk_neo_geo.toml"),
     ),
+    (
+        "sega_master_system.toml",
+        include_str!("../../../presets/targets/sega_master_system.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -216,8 +220,9 @@ struct CurveVariant {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DacFile {
-    /// The output code of each of the 8 codes.
-    output: [u32; DAC_LEN],
+    /// The output code of each code (2 to 8 codes), the red channel's and, unless a variant gives its own, the three
+    /// channels'.
+    output: Vec<u32>,
     output_max: f64,
     inputs: Vec<DacInput>,
 }
@@ -227,21 +232,58 @@ struct DacFile {
 struct DacInput {
     id: String,
     name: String,
-    /// The 8-bit level the emulator shows for each code.
-    levels: [u32; DAC_LEN],
+    /// The 8-bit level the emulator shows for each code (as many as `output`).
+    levels: Vec<u32>,
+    /// This variant's own output codes, red (and green and blue unless they are given): the Master System's two VDPs
+    /// differ in their output. A variant without it takes the file's `output` for the three channels.
+    output: Option<Vec<u32>>,
+    /// The green channel's own codes, only with `output`.
+    output_green: Option<Vec<u32>>,
+    /// The blue channel's own codes, only with `output`.
+    output_blue: Option<Vec<u32>>,
+}
+
+/// The codes of a `dac` table as the arrays of [`Dac`]: 2 to 8 values of at most 255, the last one repeated to fill the 8.
+fn dac_codes(file: &str, key: &str, v: &[u32], count: Option<usize>) -> Result<[u8; DAC_LEN], String> {
+    if v.len() < 2 || v.len() > DAC_LEN || count.is_some_and(|n| n != v.len()) {
+        return Err(format!(
+            "{file}: dac.{key} must hold {} entries, it has {}",
+            count.map_or("2 to 8".to_string(), |n| n.to_string()),
+            v.len()
+        ));
+    }
+    let mut out = [0u8; DAC_LEN];
+    for (i, o) in out.iter_mut().enumerate() {
+        *o = u8::try_from(v[i.min(v.len() - 1)]).map_err(|_| format!("{file}: dac.{key} entries must be 0 to 255"))?;
+    }
+    Ok(out)
 }
 
 impl DacFile {
+    /// Whether a variant has output codes of its own (then the provenance holds `variant_outputs`).
+    fn has_variant_outputs(&self) -> bool {
+        self.inputs
+            .iter()
+            .any(|s| s.output.is_some() || s.output_green.is_some() || s.output_blue.is_some())
+    }
+
+    /// The keys that are present, for the provenance check.
+    fn keys(&self) -> Vec<&'static str> {
+        let mut k = vec!["output", "output_max", "inputs"];
+        if self.has_variant_outputs() {
+            k.push("variant_outputs");
+        }
+        k
+    }
+
     /// The emulator inputs as variants, the first one the default.
     fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
         positive(file, "dac", "output_max", self.output_max)?;
         if self.output_max > 255.0 {
             return Err(format!("{file}: dac.output_max must be at most 255"));
         }
-        let mut output = [0u8; DAC_LEN];
-        for (o, v) in output.iter_mut().zip(&self.output) {
-            *o = u8::try_from(*v).map_err(|_| format!("{file}: dac.output entries must be 0 to 255"))?;
-        }
+        let count = self.output.len();
+        let output = dac_codes(file, "output", &self.output, None)?;
         if output.windows(2).any(|w| w[0] > w[1]) {
             return Err(format!("{file}: dac.output must not decrease"));
         }
@@ -264,19 +306,35 @@ impl DacFile {
             if out.iter().any(|v| v.id == s.id) {
                 return Err(format!("{file}: dac.inputs id \"{}\" is used twice", s.id));
             }
-            let mut input = [0u8; DAC_LEN];
-            for (o, v) in input.iter_mut().zip(&s.levels) {
-                *o = u8::try_from(*v).map_err(|_| format!("{file}: dac.inputs {} levels must be 0 to 255", s.id))?;
-            }
-            if input.windows(2).any(|w| w[0] >= w[1]) {
+            let input = dac_codes(file, &format!("inputs {} levels", s.id), &s.levels, Some(count))?;
+            if input[..count].windows(2).any(|w| w[0] >= w[1]) {
                 return Err(format!("{file}: dac.inputs {} levels must strictly increase", s.id));
             }
+            if s.output.is_none() && (s.output_green.is_some() || s.output_blue.is_some()) {
+                return Err(format!(
+                    "{file}: dac.inputs {} output_green and output_blue need its own output",
+                    s.id
+                ));
+            }
+            let own = |key: &str, v: &Option<Vec<u32>>| -> Result<Option<[u8; DAC_LEN]>, String> {
+                let Some(v) = v else {
+                    return Ok(None);
+                };
+                let a = dac_codes(file, &format!("inputs {} {key}", s.id), v, Some(count))?;
+                if a.windows(2).any(|w| w[0] > w[1]) {
+                    return Err(format!("{file}: dac.inputs {} {key} must not decrease", s.id));
+                }
+                Ok(Some(a))
+            };
+            let red = own("output", &s.output)?.unwrap_or(output);
             out.push(Variant {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 transform: Transform::Dac(Dac {
                     input,
-                    output,
+                    output: red,
+                    output_green: own("output_green", &s.output_green)?,
+                    output_blue: own("output_blue", &s.output_blue)?,
                     output_max: self.output_max,
                 }),
             });
@@ -1110,7 +1168,7 @@ impl Target {
             }
             (_, _, _, Some(d), ..) => {
                 variants = d.variants(file)?;
-                (variants[0].transform, vec!["output", "output_max", "inputs"])
+                (variants[0].transform, d.keys())
             }
             (_, _, _, _, Some(s), _) => {
                 variants = s.variants(file)?;
@@ -2435,5 +2493,149 @@ mod tests {
         let snes = for_value(crate::params::SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST).expect("snes");
         assert!(snes.variants.is_empty());
         assert_eq!(snes.select(3), snes.transform, "no variants: the target's own");
+    }
+
+    /// The Master System file: three variants on a plain 2-bit picture (0, 85, 170, 255), 4 codes padded to 8 with the last
+    /// point; the outputs are TmEE's millivolts scaled to the top level (SMS1 0, 324, 620, 916; SMS2 0, 364, 720, 1052,
+    /// the second step within 1 of the scaling, the post's 0.350 giving 89 where the millivolts give 88.2), the first VDP's
+    /// blue first step is the scope's 22 to 23 percent over 85 (104) or over TmEE's 90 (110), the second VDP has none.
+    #[test]
+    fn the_master_system_file_holds_the_measured_levels_and_the_blue_of_the_first_vdp() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM).expect("master system");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["sms1_bench", "sms1_scope", "sms2_bench"]);
+        let dacs: Vec<Dac> = t
+            .variants
+            .iter()
+            .map(|v| match v.transform {
+                Transform::Dac(d) => d,
+                _ => panic!("dac"),
+            })
+            .collect();
+        for d in &dacs {
+            // Four codes, the last point repeated; the input is the plain 2-bit expansion.
+            assert_eq!(d.input, [0, 85, 170, 255, 255, 255, 255, 255]);
+            assert!(d.output[3..].iter().all(|&o| o == 255));
+            assert_eq!(d.output_max, 255.0);
+            assert_eq!(d.output_green, None, "green is red's on every variant");
+            for i in 0..4 {
+                assert_eq!(d.input[i], 85 * i as u8, "c x 85");
+            }
+        }
+        assert_eq!(
+            t.transform, t.variants[0].transform,
+            "the first variant is the target's own"
+        );
+        // The levels: TmEE's millivolts scaled to the top level.
+        let scaled = |mv: [f64; 4]| mv.map(|m| m / mv[3] * 255.0);
+        for (got, want) in dacs[0].output.iter().zip(scaled([0.0, 324.0, 620.0, 916.0])) {
+            assert!((want - f64::from(*got)).abs() <= 0.5, "SMS1 {want} vs {got}");
+        }
+        for (got, want) in dacs[2].output.iter().zip(scaled([0.0, 364.0, 720.0, 1052.0])) {
+            assert!((want - f64::from(*got)).abs() <= 1.0, "SMS2 {want} vs {got}");
+        }
+        assert_eq!(dacs[0].output[..4], [0, 90, 173, 255]);
+        assert_eq!(dacs[2].output[..4], [0, 89, 174, 255]);
+        assert_eq!(
+            dacs[1].output[..4],
+            [0, 85, 170, 255],
+            "the scope: red and green linear"
+        );
+        // The blue: only the first step is raised, by 22 to 23 percent over the reference of its variant (the scope's
+        // linear 85, TmEE's 90); the second VDP has no blue of its own.
+        let b1 = dacs[1].output_blue.expect("blue")[1];
+        let b0 = dacs[0].output_blue.expect("blue")[1];
+        assert!(
+            (f64::from(b1) / 85.0 - 1.0).abs() > 0.22 && (f64::from(b1) / 85.0 - 1.0) < 0.23,
+            "{b1}"
+        );
+        assert!(
+            (f64::from(b0) / 90.0 - 1.0) > 0.21 && (f64::from(b0) / 90.0 - 1.0) < 0.24,
+            "{b0}"
+        );
+        assert_eq!((b1, b0), (104, 110));
+        assert_eq!(
+            dacs[0].output_blue.expect("blue")[2..4],
+            dacs[0].output[2..4],
+            "only the first step of blue"
+        );
+        assert_eq!(dacs[1].output_blue.expect("blue")[2..4], dacs[1].output[2..4]);
+        assert_eq!(dacs[2].output_blue, None);
+        // Through the oracle: the 2-bit code 1 (85) of a picture is 90 on red and 110 on blue on the first VDP, 104 on
+        // blue on the scope reading, and 89 on all three on the second.
+        let px = [85.0 / 255.0; 3];
+        let first = t.select(1).apply(px);
+        assert!((first[0] - 90.0 / 255.0).abs() < 1e-12 && (first[1] - 90.0 / 255.0).abs() < 1e-12);
+        assert!((first[2] - 110.0 / 255.0).abs() < 1e-12);
+        assert!((t.select(2).apply(px)[2] - 104.0 / 255.0).abs() < 1e-12);
+        let second = t.select(3).apply(px);
+        assert!(second.iter().all(|c| (c - 89.0 / 255.0).abs() < 1e-12), "{second:?}");
+        // The ends and the code 3 (255): white stays full on every variant, black stays black.
+        for v in 1..=3 {
+            assert_eq!(t.select(v).apply([1.0; 3]), [1.0; 3]);
+            assert_eq!(t.select(v).apply([0.0; 3]), [0.0; 3]);
+        }
+        assert_eq!(t.select(0), t.transform);
+        assert_eq!(t.select(9), t.transform, "past the last: the first");
+        assert_eq!(t.provenance["variant_outputs"].chars().next(), Some('E'));
+    }
+
+    /// The dac validation of the Master System's own fields: a variant output of the wrong length, a green or blue with no
+    /// output of its own, a decreasing blue, an input that is not strictly increasing in its four codes, a missing
+    /// provenance entry for the variants' outputs; a file whose variants have none of their own needs no such entry.
+    #[test]
+    fn a_bad_master_system_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "sega_master_system.toml")
+            .expect("the master system file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen("output_blue = [0, 110, 173, 255]", "output_blue = [0, 110, 173]", 1),
+                "must hold 4",
+            ),
+            (
+                ok.replacen(
+                    "output_blue = [0, 110, 173, 255]",
+                    "output_blue = [0, 200, 173, 255]",
+                    1,
+                ),
+                "must not decrease",
+            ),
+            (
+                ok.replacen("output = [0, 85, 170, 255]\n", "", 1),
+                "need its own output",
+            ),
+            (
+                ok.replacen("levels = [0, 85, 170, 255]", "levels = [0, 85, 85, 255]", 1),
+                "strictly increase",
+            ),
+            (
+                ok.replacen("levels = [0, 85, 170, 255]", "levels = [0, 85, 170, 256]", 1),
+                "0 to 255",
+            ),
+            (
+                ok.replacen("levels = [0, 85, 170, 255]", "levels = [0, 85, 170, 255, 255]", 1),
+                "must hold 4",
+            ),
+            (
+                ok.replace("output = [0, 90, 173, 255]\noutput_max", "output = [0]\noutput_max"),
+                "2 to 8",
+            ),
+            (
+                ok.replace("variant_outputs = \"E:", "variant_outputs = \"X:"),
+                "provenance.variant_outputs",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+        // The Mega Drive file has no variant outputs of its own and no such provenance entry.
+        let md = for_value(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE).expect("md");
+        assert!(!md.provenance.contains_key("variant_outputs"));
     }
 }
