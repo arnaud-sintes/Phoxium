@@ -116,6 +116,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "ibm_cga_composite.toml",
         include_str!("../../../presets/targets/ibm_cga_composite.toml"),
     ),
+    (
+        "atari_7800_maria.toml",
+        include_str!("../../../presets/targets/atari_7800_maria.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -2294,6 +2298,254 @@ mod tests {
             (ok.replace("grid = \"K:", "grid = \"X:"), "provenance.grid"),
             (ok.replacen("amplitude = 0.239", "amplitude = 0", 1), "amplitude"),
             (ok.replace("black_index = 0", "black_index = 400"), "black"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The 256 colours of the palette labelled 'PALETTE - 25.7 PHASE SHIFT' in MAME's `a7800.cpp` (license:BSD-3-Clause,
+    /// copyright-holders: Dan Boris, Fabio Priuli, Mike Saarna, Robert Tuccitto), as an emulator shows an Atari 7800 NTSC
+    /// picture: hex RRGGBB in the order of the colour register (hue x 16 + luma). Numbers only, used here to check the
+    /// recognition; no code of MAME is used. Redistribution of this table keeps that notice (docs/THIRD-PARTY.md).
+    const MAME_7800: [&str; 256] = [
+        "000000", "111111", "222222", "333333", "444444", "555555", "666666", "777777", "888888", "999999", "AAAAAA",
+        "BBBBBB", "CCCCCC", "DDDDDD", "EEEEEE", "FFFFFF", "1A0700", "2B1800", "3C2900", "4D3A00", "5E4B00", "6F5C00",
+        "806D00", "917E09", "A28F1A", "B3A02B", "C4B13C", "D5C24D", "E6D35E", "F7E46F", "FFF583", "FFF797", "310000",
+        "420600", "531700", "642800", "753900", "864A00", "975B0A", "A86C1B", "B97D2C", "CA8E3D", "DB9F4E", "ECB05F",
+        "FDC170", "FFD285", "FFE39C", "FFF4B2", "3E0000", "4F0000", "600800", "711900", "822A0D", "933B1E", "A44C2F",
+        "B55D40", "C66E51", "D77F62", "E89073", "F9A183", "FFB298", "FFC3AE", "FFD4C4", "FFE5DA", "3F0003", "50000F",
+        "61001B", "720F2B", "83203C", "94314D", "A5425E", "B6536F", "C76480", "D87591", "E986A2", "FA97B3", "FFA8C8",
+        "FFB9DE", "FFCAEF", "FFDBF4", "330035", "440041", "55004C", "660C5C", "771D6D", "882E7E", "993F8F", "AA50A0",
+        "BB61B1", "CC72C2", "DD83D3", "EE94E4", "FFA5E4", "FFB6E9", "FFC7EE", "FFD8F3", "1D005C", "2E0068", "400074",
+        "511084", "622195", "7332A6", "8443B7", "9554C8", "A665D9", "B776EA", "C887EB", "D998EB", "E9A9EC", "FBBAEB",
+        "FFCBEF", "FFDCF4", "020071", "13007D", "240B8C", "351C9D", "462DAE", "573EBF", "684FD0", "7960E1", "8A71F2",
+        "9B82F7", "AC93F7", "BDA4F7", "CEB5F7", "DFC6F7", "F0D7F7", "FFE8F8", "000068", "000A7C", "081B90", "192CA1",
+        "2A3DB2", "3B4EC3", "4C5FD4", "5D70E5", "6E81F6", "7F92FF", "90A3FF", "A1B4FF", "B2C5FF", "C3D6FF", "D4E7FF",
+        "E5F8FF", "000A4D", "001B63", "002C79", "023D8F", "134EA0", "245FB1", "3570C2", "4681D3", "5792E4", "68A3F5",
+        "79B4FF", "8AC5FF", "9BD6FF", "ACE7FF", "BDF8FF", "CEFFFF", "001A26", "002B3C", "003C52", "004D68", "065E7C",
+        "176F8D", "28809E", "3991AF", "4AA2C0", "5BB3D1", "6CC4E2", "7DD5F3", "8EE6FF", "9FF7FF", "B0FFFF", "C1FFFF",
+        "00240B", "003510", "004622", "005738", "05684D", "16795E", "278A6F", "389B80", "49AC91", "5ABDA2", "6BCEB3",
+        "7CDFC4", "8DF0D5", "9EFFE5", "AFFFF1", "C0FFFD", "00270C", "003811", "004916", "005A1B", "106B1B", "217C2C",
+        "328D3D", "439E4E", "54AF5F", "65C070", "76D181", "87E292", "98F3A3", "A9FFB3", "BAFFBF", "CBFFCB", "00230A",
+        "003410", "044513", "155613", "266713", "377813", "488914", "599A25", "6AAB36", "7BBC47", "8CCD58", "9DDE69",
+        "AEEF7A", "BFFF8B", "D0FF97", "E1FFA3", "001707", "0E2808", "1F3908", "304A08", "415B08", "526C08", "637D08",
+        "748E0D", "859F1E", "96B02F", "A7C140", "B8D251", "C9E362", "DAF473", "EBFF82", "FCFF8E", "190700", "2A1800",
+        "3B2900", "4C3A00", "5D4B00", "6E5C00", "7F6D00", "907E09", "A18F1A", "B2A02B", "C3B13C", "D4C24D", "E5D35E",
+        "F6E46F", "FFF582", "FFFF96",
+    ];
+
+    /// The Atari 7800 file: 256 colours indexed by the colour register, five variants, every provenance key present, the
+    /// numbers of the wiki and the ladder recomputed here from the resistors. Hand-derived colours at the default
+    /// variant. Hue 1 luma 8 (`$18`): Y = 8 / 15 = 0.53333, the burst phase, amplitude 0.274: U = -0.274, V = 0; R = Y =
+    /// 0.53333, B = Y + U / 0.492111 = -0.02346 (clamped to 0), G = (Y - 0.299 R - 0.114 B) / 0.587 = 0.64147 (from the
+    /// unclamped blue, so the luma is kept). Hue 5 luma 12 (`$5C`): Y = 0.8, the phase 180 - 4 x 25.7 = 77.2 degrees: U =
+    /// 0.060705, V = 0.267193; R = Y + V / 0.877283 = 1.10457 (clamped to 1), B = Y + U / 0.492111 = 0.92336, G = 0.62090.
+    #[test]
+    fn the_atari_7800_file_and_its_hand_derived_colours() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_7800_MARIA).expect("atari 7800");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["25_7", "26_7", "24_7", "27_7", "ladder_25_7"]);
+        for key in [
+            "grid",
+            "revisions",
+            "reference",
+            "threshold",
+            "black_index",
+            "white_index",
+        ] {
+            assert!(t.provenance.contains_key(key), "provenance.{key}");
+        }
+        assert!(!t.provenance.contains_key("colours"));
+        assert_eq!(t.select(1), t.transform);
+        let signal = |v: usize| match t.transform_for(v) {
+            Transform::Signal(s) => s,
+            _ => panic!("signal"),
+        };
+        let s = signal(0);
+        assert_eq!(s.count, 256);
+        assert_eq!(s.colours[0x00], [0.0; 3], "$00 is black");
+        assert_eq!(s.colours[0x0F], [1.0; 3], "$0F is white");
+        let [r, g, b] = s.colours[0x18];
+        assert!(
+            (r - 0.53333).abs() < 5e-4 && (g - 0.64147).abs() < 5e-4 && b == 0.0,
+            "{r} {g} {b}"
+        );
+        let [r, g, b] = s.colours[0x5C];
+        assert!(
+            r == 1.0 && (g - 0.62090).abs() < 5e-4 && (b - 0.92336).abs() < 5e-4,
+            "{r} {g} {b}"
+        );
+        // The 16 greys of hue 0 are the linear luma n / 15 on the four linear variants (the wiki's 0.0526 per step).
+        for v in 0..4 {
+            let o = signal(v);
+            for l in 0..16 {
+                let c = o.colours[l];
+                assert!(
+                    c.iter().all(|x| (x - l as f64 / 15.0).abs() < 1e-12),
+                    "v{v} grey {l}: {c:?}"
+                );
+            }
+        }
+        // The wiki's contrast follows from the forum's formula (a binary ladder: 40k and 80k for 39k and 82k).
+        let contrast: f64 =
+            (40.0 + 7.5) * 8.2 * ((1.0 / 10.0 + 1.0 / 20.0 + 1.0 / 40.0 + 1.0 / 80.0) / 15.0) / (100.0 - 7.5);
+        assert!((contrast - 0.0526).abs() < 1e-4, "{contrast}");
+        // The ladder variant: the sum of the conductances of the set bits over the total, recomputed from 10k, 20k, 39k, 82k.
+        let g = [1.0 / 82.0, 1.0 / 39.0, 1.0 / 20.0, 1.0 / 10.0];
+        let total: f64 = g.iter().sum();
+        let ladder = signal(4);
+        let mut worst = 0.0f64;
+        for l in 0..16 {
+            let want = (0..4).filter(|b| l & (1 << b) != 0).map(|b| g[b]).sum::<f64>() / total;
+            worst = worst.max((ladder.colours[l][0] - want).abs());
+            assert!((ladder.colours[l][0] - want).abs() < 2e-6, "ladder {l}");
+        }
+        // The ladder differs from the linear luma by at most 0.0032 of the range (luma 8: 0.5324 against 0.5333).
+        let off = (0..16)
+            .map(|l| (ladder.colours[l][0] - s.colours[l][0]).abs())
+            .fold(0.0, f64::max);
+        println!("ladder against linear: at most {off:.4}; against its own recomputation {worst:.2e}");
+        assert!(off > 0.003 && off < 0.0035, "{off}");
+        assert!((ladder.colours[8][0] - 0.5324).abs() < 1e-4);
+        // The amplitude is the saturation 40 / 185 over the luma of $F on the wiki's scale: hue 1 at luma 15 is (1, G, B)
+        // with B = 1 - amplitude / 0.492111 (the red does not move on the burst axis).
+        let amplitude = |o: &Signal| (1.0 - o.colours[0x1F][2]) * 0.492111;
+        let want = (40.0 / 185.0) / (15.0 * 0.0526);
+        assert!((amplitude(&s) - want).abs() < 2e-4, "{} {want}", amplitude(&s));
+        let want_ladder = (40.0 / 185.0) / ((40.0 + 7.5) * 8.2 / (100.0 - 7.5) * total);
+        assert!(
+            (amplitude(&ladder) - want_ladder).abs() < 2e-4,
+            "{} {want_ladder}",
+            amplitude(&ladder)
+        );
+        // Hue 1 is the burst phase on every delay; hue 15 sits on hue 1 at 25.7 degrees (the calibrated machine).
+        let d = |o: &Signal, a: usize, b: usize| dist(o.colours[a], o.colours[b]);
+        for v in 1..4 {
+            assert_eq!(signal(v).colours[0x18], s.colours[0x18], "variant {v}");
+        }
+        assert!(d(&s, 0x18, 0xF8) < 0.01, "{}", d(&s, 0x18, 0xF8));
+        // At 24.7 degrees hue 15 is 14 degrees away from hue 1; at 27.7 degrees hues 14 and 15 land on hues 1 and 2
+        // (MAME's notes: 'near-exact match').
+        assert!(d(&signal(2), 0x18, 0xF8) > 0.04, "{}", d(&signal(2), 0x18, 0xF8));
+        let warm = signal(3);
+        assert!(d(&warm, 0x18, 0xE8) < 0.01, "{}", d(&warm, 0x18, 0xE8));
+        assert!(d(&warm, 0x28, 0xF8) < 0.01, "{}", d(&warm, 0x28, 0xF8));
+        assert!(d(&s, 0x28, 0xF8) > 0.04, "hue 15 is not hue 2 at 25.7");
+        // The classification does not depend on the variant: the references are the same.
+        for v in 1..5 {
+            assert_eq!(signal(v).references, s.references, "variant {v}");
+        }
+    }
+
+    /// Recognition: MAME's 25.7 degree palette (BSD-3-Clause, numbers only), typed here independently of the data file, is
+    /// recognised exactly, colours a little off are taken, a far colour passes through; the model's own colours as a
+    /// reference would have recognised only a few of MAME's colours (the reason the reference is MAME's table).
+    #[test]
+    fn the_atari_7800_reference_recognises_mames_palette_and_the_model_would_not() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_ATARI_7800_MARIA).expect("atari 7800");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        assert_eq!(s.threshold, 0.05);
+        let mame: Vec<[f64; 3]> = MAME_7800.iter().map(|h| hex(h)).collect();
+        let mut closest = (f64::MAX, 0, 0);
+        for i in 0..256 {
+            assert!(dist(s.reference(i), mame[i]) < 1e-12, "reference {i:#04X}");
+            assert_eq!(s.classify(mame[i]), Some(i), "colour {i:#04X}");
+            for j in i + 1..256 {
+                let d = dist(mame[i], mame[j]);
+                if d < closest.0 {
+                    closest = (d, i, j);
+                }
+            }
+        }
+        println!(
+            "closest two reference colours: {:#04X} and {:#04X}, {:.4}; threshold {}",
+            closest.1, closest.2, closest.0, s.threshold
+        );
+        // Hue 1 and hue 15 differ by one level: the two nearest colours.
+        assert_eq!(closest.1 >> 4, 1);
+        assert_eq!(closest.2 >> 4, 15);
+        assert!(closest.0 > 0.003);
+        // A recognised pixel is replaced by the model's colour of its index.
+        assert_eq!(s.apply(mame[0x18]), s.colours[0x18]);
+        assert_ne!(s.apply(mame[0x18]), mame[0x18]);
+        // A little off (0.012 on each channel): taken, and for the colours with no close neighbour the same colour.
+        let (mut same, mut taken) = (0, 0);
+        for (i, m) in mame.iter().enumerate() {
+            let p = m.map(|v| (v + 0.012).min(1.0));
+            if let Some(j) = s.classify(p) {
+                taken += 1;
+                same += usize::from(j == i);
+            }
+        }
+        println!("a little off: {taken} of 256 taken, {same} the same colour");
+        assert_eq!(taken, 256);
+        assert!(same >= 220, "{same}");
+        // A saturated green is far from every colour of the palette: it passes through.
+        let odd = [0.0, 1.0, 0.0];
+        assert_eq!(s.classify(odd), None);
+        assert_eq!(s.apply(odd), odd);
+        // The model's colours against MAME's: the rejected reference. Mean and worst distance, and how many of MAME's colours
+        // a model reference (at the threshold of the Atari 8-bit target) takes for another colour or for none.
+        let (mut sum, mut worst) = (0.0, (0.0f64, 0usize));
+        for (i, m) in mame.iter().enumerate() {
+            let d = dist(*m, s.colours[i]);
+            sum += d;
+            if d > worst.0 {
+                worst = (d, i);
+            }
+        }
+        let mean = sum / 256.0;
+        println!(
+            "model against MAME: mean {mean:.3}, worst {:.3} at {:#04X}",
+            worst.0, worst.1
+        );
+        assert!(mean > 0.10 && mean < 0.14, "{mean}");
+        assert!(worst.0 > 0.19 && worst.0 < 0.23, "{worst:?}");
+        let model_reference = Signal {
+            references: s.colours,
+            threshold: 0.12,
+            ..s
+        };
+        let (mut wrong, mut none) = (0, 0);
+        for (i, p) in mame.iter().enumerate() {
+            match model_reference.classify(*p) {
+                Some(j) => wrong += usize::from(j != i),
+                None => none += 1,
+            }
+        }
+        println!("a model reference: {wrong} other colour, {none} none, of 256");
+        assert!(wrong > 150 && none > 10, "{wrong} {none}");
+    }
+
+    /// The validation of the reference of the Atari 7800 file: a colour past the last, a computed key next to the list, a zero
+    /// amplitude, a missing provenance.
+    #[test]
+    fn a_bad_atari_7800_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "atari_7800_maria.toml")
+            .expect("the atari 7800 file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replace("colour = 255 }", "colour = 256 }"), "rgb_references"),
+            (
+                ok.replace(
+                    "gain = 1.0\ngamma = 1.0\n",
+                    "gain = 1.0\ngamma = 1.0\namplitude = 0.27\n",
+                ),
+                "rgb_references",
+            ),
+            (ok.replace("amplitude = 0.274", "amplitude = 0"), "amplitude"),
+            (
+                ok.replace("reference = \"S:", "reference = \"X:"),
+                "provenance.reference",
+            ),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);

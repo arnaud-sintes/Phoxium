@@ -1,0 +1,145 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets", "Design note:
+# signal-driven colour targets", "Third research pass" and "Built, the Atari 7800"). Format: crates/phoxium/src/targets.rs.
+# Every key of [signal] has a [provenance] entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived,
+# K standard knowledge, E estimate).
+schema = 1
+id = "atari_7800_maria"
+name = "Atari 7800 ProSystem (MARIA, NTSC, computed from the signal, unverified)"
+label = "the 256 colours of the Atari 7800 as an NTSC television decodes the MARIA's signal (Colour variant: the hue delay of the pot, or a resistor-ladder luma); schematic-computed, not measured"
+kind = "signal"
+notes = """
+UNVERIFIED: no instrument measurement of a 7800's video signal was found. The numbers below come from an anonymous wiki page computed from a schematic and from the notes of an emulator author, who set them by eye on several machines and displays; the original Atari documents were not read and the resistor values were not checked against a schematic.
+The Atari 7800's MARIA chip does not make RGB: a colour register (COLU) holds a hue (0 to 15, the high nibble) and a luma (0 to 15, the low one), and the chip emits a composite signal made of a luma level and a chroma wave of one fixed amplitude whose phase is the hue. Hue 0 has no chroma (the 16 greys); hue 1 is the phase of the colour burst (180 degrees, minus U); every higher hue is one more step of a delay line, whose spacing is set by a pot on the board, which the notes call 'extremely sensitive'. An emulator shows a PC palette computed from that signal with its own settings. This target goes back to the signal: it recognises each pixel as the nearest of the 256 colours by comparison with a fixed reference palette, and shows the colour a television decoder drives the tube with, so the tube's own gamma, primaries and white take over. The colour index of the table is the value of the colour register, hue x 16 + luma. It is the same scheme as the Atari 8-bit GTIA target (atari_8bit_gtia): the numbers differ (a linear luma, a higher chroma, a delay of 25.7 degrees, no machine measurement), and the 2600's TIA, which shares the scheme, is not part of this target.
+The luma: the Atari 7800 Programming wiki (page 'RGB', anonymous, derived from a Stella mailing list discussion) lists the luma resistors of the MARIA's D/A as SYNC 8.2k, LUM3 10k, LUM2 20k, LUM1 39k, LUM0 82k ohm, and its NTSC formula is Y = (COLU and 15) x contrast, with a contrast of 0.0526 (brightness 0, black at 7.5 IRE, sync at -40 IRE; a first attempt with the blank level as reference gave 0.0444 and a brightness of -0.081, 'very dark'). A forum post of the same family derives the 0.0526 as (40 + 7.5) x 8.2 x ((1/10 + 1/20 + 1/40 + 1/80) / 15) / (100 - 7.5): the ladder with the 39k and 82k rounded to 40k and 80k, that is, a binary ladder, exactly linear. Computed with the 39k and 82k of the wiki's list the ladder is almost linear but not exactly (luma 8 at 0.5324 of the range, not 0.5333; at most 0.0032 of the range off): the default variants take the wiki's linear luma, and the last variant the ladder of the listed values (the difference is under one 8-bit level and is the only thing that variant changes besides the saturation it implies). The luma of the range from COLU luma 0 to 15 is normalised between the machine's luma 0 and luma 15, which therefore become the tube's black and white (the pedestal of NTSC is not modelled, and the television's contrast and brightness decide the rest; MAME's palette does the same, 'normalized contrast and brightness', with grey steps of 0x11).
+The chroma: the wiki's saturation is the burst, 40 IRE, over 185 IRE ('100 percent U or V', which the page takes from 'some calculations' of its own, not from a standard), 0.2162 in units where the luma of COLU 15 is 15 x 0.0526 = 0.789. Over the luma range (normalised to 1) that is 0.2162 / 0.789 = 0.2740 (0.2734 for the ladder luma); this is the amplitude of the table, the same for every hue but 0. The phase of hue h is 180 - delay x (h - 1) degrees on the U axis (the wiki: hue = tint - (h - 1) x phase, tint 180 = the burst; the same as the GTIA's formula). The wiki's delay is 360 / 14 = 25.714 degrees (hue 15 on hue 1: 'most units are calibrated so that colour 15 matches colour 1, which loses eight colours', it says, a count not checked here); MAME's changelog sets it to 25.7 ('Phase = 25.714 -> 25.7', and 180 degrees of burst 'takes place at about 25.7 degrees (a near exact match of hue 1x and 15x)'). The default is 25.7. The delay of a real machine is whatever its pot was set to and drifts with warm-up: the 7800 development wiki (Color Documentation) gives two historic calibrations of about 25.7 and 26.7 degrees and a drift of about 24.7 degrees cold to 27.7 degrees warm over the first 20 minutes, worst on hues $E and $F; MAME's author gives about 23 degrees at power-on (several seconds) to about 28 after a long run, tables from 24.7 to 27.7 degrees in half-degree steps, an active table that its changelog says is 26.2 and its source labels 25.7. The variants take 25.7 (default), 26.7, 24.7 (cold) and 27.7 (warm); at 27.7 degrees hue 14 and 15 land on hues 1 and 2, as MAME's notes say (a test checks it). Colours go through the decoder of the composite model (BT.601 luma, U and V scaled 0.492111 and 0.877283, the standard decoding matrix; the wiki gives 'the standard NTSC RGB to YUV formulas and their inverses', without listing which), so they return unchanged through that model, and a channel that goes negative is clamped to zero as a tube does.
+Hue 1 and hue 15 are one colour at the default delay (25.7 against 25.714), as the real machine is calibrated, so the colours of the two hues differ by about a level and a recognition by a computed reference could not tell them apart.
+The recognition reference is NOT the model: it is the 256 colours of the palette labelled 'PALETTE - 25.7 PHASE SHIFT' in MAME's a7800.cpp (BSD-3-Clause, copyright-holders Dan Boris, Fabio Priuli, Mike Saarna and Robert Tuccitto; the numbers only, with attribution, no code; its author set them 'based on observation of several systems across multiple displays', so they are an observed palette, not a computation). The design of the Atari 8-bit target (a reference computed by the same model at its default calibration) was tried first and rejected on the data: the model's colours are 0.12 (mean, drive voltage) from MAME's palette, up to 0.21 (colour $3F), because MAME's hue 1 is 'gold' (about -33 degrees in the I and Q plane, its notes say, 157 degrees on the U axis) where the signal model puts it on the burst, 180 degrees on the U axis, -57 degrees in I and Q, the 'green' end of what its notes call 'green on a flat panel'; a model with its tint, amplitude and delay fitted to MAME's palette (tint 166, amplitude 0.21, delay 25.9) is still 0.044 from it on average, so MAME's palette is not the wiki's formula with another tint; 178 of the 256 colours of MAME's palette were taken for another colour and 21 for none by the model reference (at the threshold of the GTIA target). The recognition therefore uses MAME's own table, which recognises MAME's 25.7-degree palette exactly (a test checks that every colour is its own nearest, and that colours a little off are taken), and an emulator with another palette (Stella's, the ProSystem family's, a hand-tuned or a flat-panel one) is passed through unchanged when it is farther than the threshold from MAME's colours, or may be taken for a neighbouring colour when it is nearer: that is not checked here (the ProSystem emulator's palette is GPL and was not read; no other palette with a licence was found). MAME's other tables (24.7 to 27.2 degrees, in its source but not active) are not used.
+The colours the target shows are the signal model's, not MAME's: a recognised pixel is replaced by the model colour of its index under the chosen variant, so the hue 1 shown is the burst-phase one (the green-gold of the signal, about 23 degrees from MAME's gold) unless the tube's TV controls turn it (tint), and the chroma is the wiki's (amplitude 0.274; the fit to MAME's palette gives about 0.21). Whether that is the colour a CRT showed is the open point of this target (MAME's notes say a CRT shows gold); the GTIA target has the same estimate (the television's tint).
+Estimated: the chroma-to-burst ratio (the wiki takes the chroma equal to the burst, 40 IRE after the television's gain control, an assumption about the television), the 185 IRE base of the saturation, the decode matrix, the television's tint (the decode puts hue 1 on the burst), and the delay of any real machine. A pixel with no reference colour within the threshold (a scaled or smoothed picture, an edited palette) passes through unchanged: use the integer upscale and the nearest-pixel prefilter (the defaults).
+Not modelled: PAL machines (the wiki gives a different contrast of 0.044, a sync of -43 IRE, a burst of 42.86 IRE over 200 IRE = 0.2143 and a PAL colour order, but no PAL hue delay; MAME's PAL table has a different hue order; no numbers to build a target on), the TIA's own colours (the 2600 mode), the artifact colours of the high-resolution modes (they appear in the picture the emulator draws), the television's controls, the composite crosstalk (use the Composite video section).
+"""
+
+[signal]
+threshold = 0.05
+black_index = 0
+white_index = 15
+
+[signal.grid]
+hues = 16
+lumas = 16
+angle = 180.0
+
+[signal.reference]
+gain = 1.0
+gamma = 1.0
+# The 256 colours of the palette "PALETTE - 25.7 PHASE SHIFT" of MAME a7800.cpp (license:BSD-3-Clause, copyright-holders: Dan Boris,
+# Fabio Priuli, Mike Saarna, Robert Tuccitto): numbers only, no code, notice in docs/THIRD-PARTY.md. Entry i = colour register i.
+rgb_references = [
+    { rgb = 0x000000, colour = 0 }, { rgb = 0x111111, colour = 1 }, { rgb = 0x222222, colour = 2 }, { rgb = 0x333333, colour = 3 },
+    { rgb = 0x444444, colour = 4 }, { rgb = 0x555555, colour = 5 }, { rgb = 0x666666, colour = 6 }, { rgb = 0x777777, colour = 7 },
+    { rgb = 0x888888, colour = 8 }, { rgb = 0x999999, colour = 9 }, { rgb = 0xAAAAAA, colour = 10 }, { rgb = 0xBBBBBB, colour = 11 },
+    { rgb = 0xCCCCCC, colour = 12 }, { rgb = 0xDDDDDD, colour = 13 }, { rgb = 0xEEEEEE, colour = 14 }, { rgb = 0xFFFFFF, colour = 15 },
+    { rgb = 0x1A0700, colour = 16 }, { rgb = 0x2B1800, colour = 17 }, { rgb = 0x3C2900, colour = 18 }, { rgb = 0x4D3A00, colour = 19 },
+    { rgb = 0x5E4B00, colour = 20 }, { rgb = 0x6F5C00, colour = 21 }, { rgb = 0x806D00, colour = 22 }, { rgb = 0x917E09, colour = 23 },
+    { rgb = 0xA28F1A, colour = 24 }, { rgb = 0xB3A02B, colour = 25 }, { rgb = 0xC4B13C, colour = 26 }, { rgb = 0xD5C24D, colour = 27 },
+    { rgb = 0xE6D35E, colour = 28 }, { rgb = 0xF7E46F, colour = 29 }, { rgb = 0xFFF583, colour = 30 }, { rgb = 0xFFF797, colour = 31 },
+    { rgb = 0x310000, colour = 32 }, { rgb = 0x420600, colour = 33 }, { rgb = 0x531700, colour = 34 }, { rgb = 0x642800, colour = 35 },
+    { rgb = 0x753900, colour = 36 }, { rgb = 0x864A00, colour = 37 }, { rgb = 0x975B0A, colour = 38 }, { rgb = 0xA86C1B, colour = 39 },
+    { rgb = 0xB97D2C, colour = 40 }, { rgb = 0xCA8E3D, colour = 41 }, { rgb = 0xDB9F4E, colour = 42 }, { rgb = 0xECB05F, colour = 43 },
+    { rgb = 0xFDC170, colour = 44 }, { rgb = 0xFFD285, colour = 45 }, { rgb = 0xFFE39C, colour = 46 }, { rgb = 0xFFF4B2, colour = 47 },
+    { rgb = 0x3E0000, colour = 48 }, { rgb = 0x4F0000, colour = 49 }, { rgb = 0x600800, colour = 50 }, { rgb = 0x711900, colour = 51 },
+    { rgb = 0x822A0D, colour = 52 }, { rgb = 0x933B1E, colour = 53 }, { rgb = 0xA44C2F, colour = 54 }, { rgb = 0xB55D40, colour = 55 },
+    { rgb = 0xC66E51, colour = 56 }, { rgb = 0xD77F62, colour = 57 }, { rgb = 0xE89073, colour = 58 }, { rgb = 0xF9A183, colour = 59 },
+    { rgb = 0xFFB298, colour = 60 }, { rgb = 0xFFC3AE, colour = 61 }, { rgb = 0xFFD4C4, colour = 62 }, { rgb = 0xFFE5DA, colour = 63 },
+    { rgb = 0x3F0003, colour = 64 }, { rgb = 0x50000F, colour = 65 }, { rgb = 0x61001B, colour = 66 }, { rgb = 0x720F2B, colour = 67 },
+    { rgb = 0x83203C, colour = 68 }, { rgb = 0x94314D, colour = 69 }, { rgb = 0xA5425E, colour = 70 }, { rgb = 0xB6536F, colour = 71 },
+    { rgb = 0xC76480, colour = 72 }, { rgb = 0xD87591, colour = 73 }, { rgb = 0xE986A2, colour = 74 }, { rgb = 0xFA97B3, colour = 75 },
+    { rgb = 0xFFA8C8, colour = 76 }, { rgb = 0xFFB9DE, colour = 77 }, { rgb = 0xFFCAEF, colour = 78 }, { rgb = 0xFFDBF4, colour = 79 },
+    { rgb = 0x330035, colour = 80 }, { rgb = 0x440041, colour = 81 }, { rgb = 0x55004C, colour = 82 }, { rgb = 0x660C5C, colour = 83 },
+    { rgb = 0x771D6D, colour = 84 }, { rgb = 0x882E7E, colour = 85 }, { rgb = 0x993F8F, colour = 86 }, { rgb = 0xAA50A0, colour = 87 },
+    { rgb = 0xBB61B1, colour = 88 }, { rgb = 0xCC72C2, colour = 89 }, { rgb = 0xDD83D3, colour = 90 }, { rgb = 0xEE94E4, colour = 91 },
+    { rgb = 0xFFA5E4, colour = 92 }, { rgb = 0xFFB6E9, colour = 93 }, { rgb = 0xFFC7EE, colour = 94 }, { rgb = 0xFFD8F3, colour = 95 },
+    { rgb = 0x1D005C, colour = 96 }, { rgb = 0x2E0068, colour = 97 }, { rgb = 0x400074, colour = 98 }, { rgb = 0x511084, colour = 99 },
+    { rgb = 0x622195, colour = 100 }, { rgb = 0x7332A6, colour = 101 }, { rgb = 0x8443B7, colour = 102 }, { rgb = 0x9554C8, colour = 103 },
+    { rgb = 0xA665D9, colour = 104 }, { rgb = 0xB776EA, colour = 105 }, { rgb = 0xC887EB, colour = 106 }, { rgb = 0xD998EB, colour = 107 },
+    { rgb = 0xE9A9EC, colour = 108 }, { rgb = 0xFBBAEB, colour = 109 }, { rgb = 0xFFCBEF, colour = 110 }, { rgb = 0xFFDCF4, colour = 111 },
+    { rgb = 0x020071, colour = 112 }, { rgb = 0x13007D, colour = 113 }, { rgb = 0x240B8C, colour = 114 }, { rgb = 0x351C9D, colour = 115 },
+    { rgb = 0x462DAE, colour = 116 }, { rgb = 0x573EBF, colour = 117 }, { rgb = 0x684FD0, colour = 118 }, { rgb = 0x7960E1, colour = 119 },
+    { rgb = 0x8A71F2, colour = 120 }, { rgb = 0x9B82F7, colour = 121 }, { rgb = 0xAC93F7, colour = 122 }, { rgb = 0xBDA4F7, colour = 123 },
+    { rgb = 0xCEB5F7, colour = 124 }, { rgb = 0xDFC6F7, colour = 125 }, { rgb = 0xF0D7F7, colour = 126 }, { rgb = 0xFFE8F8, colour = 127 },
+    { rgb = 0x000068, colour = 128 }, { rgb = 0x000A7C, colour = 129 }, { rgb = 0x081B90, colour = 130 }, { rgb = 0x192CA1, colour = 131 },
+    { rgb = 0x2A3DB2, colour = 132 }, { rgb = 0x3B4EC3, colour = 133 }, { rgb = 0x4C5FD4, colour = 134 }, { rgb = 0x5D70E5, colour = 135 },
+    { rgb = 0x6E81F6, colour = 136 }, { rgb = 0x7F92FF, colour = 137 }, { rgb = 0x90A3FF, colour = 138 }, { rgb = 0xA1B4FF, colour = 139 },
+    { rgb = 0xB2C5FF, colour = 140 }, { rgb = 0xC3D6FF, colour = 141 }, { rgb = 0xD4E7FF, colour = 142 }, { rgb = 0xE5F8FF, colour = 143 },
+    { rgb = 0x000A4D, colour = 144 }, { rgb = 0x001B63, colour = 145 }, { rgb = 0x002C79, colour = 146 }, { rgb = 0x023D8F, colour = 147 },
+    { rgb = 0x134EA0, colour = 148 }, { rgb = 0x245FB1, colour = 149 }, { rgb = 0x3570C2, colour = 150 }, { rgb = 0x4681D3, colour = 151 },
+    { rgb = 0x5792E4, colour = 152 }, { rgb = 0x68A3F5, colour = 153 }, { rgb = 0x79B4FF, colour = 154 }, { rgb = 0x8AC5FF, colour = 155 },
+    { rgb = 0x9BD6FF, colour = 156 }, { rgb = 0xACE7FF, colour = 157 }, { rgb = 0xBDF8FF, colour = 158 }, { rgb = 0xCEFFFF, colour = 159 },
+    { rgb = 0x001A26, colour = 160 }, { rgb = 0x002B3C, colour = 161 }, { rgb = 0x003C52, colour = 162 }, { rgb = 0x004D68, colour = 163 },
+    { rgb = 0x065E7C, colour = 164 }, { rgb = 0x176F8D, colour = 165 }, { rgb = 0x28809E, colour = 166 }, { rgb = 0x3991AF, colour = 167 },
+    { rgb = 0x4AA2C0, colour = 168 }, { rgb = 0x5BB3D1, colour = 169 }, { rgb = 0x6CC4E2, colour = 170 }, { rgb = 0x7DD5F3, colour = 171 },
+    { rgb = 0x8EE6FF, colour = 172 }, { rgb = 0x9FF7FF, colour = 173 }, { rgb = 0xB0FFFF, colour = 174 }, { rgb = 0xC1FFFF, colour = 175 },
+    { rgb = 0x00240B, colour = 176 }, { rgb = 0x003510, colour = 177 }, { rgb = 0x004622, colour = 178 }, { rgb = 0x005738, colour = 179 },
+    { rgb = 0x05684D, colour = 180 }, { rgb = 0x16795E, colour = 181 }, { rgb = 0x278A6F, colour = 182 }, { rgb = 0x389B80, colour = 183 },
+    { rgb = 0x49AC91, colour = 184 }, { rgb = 0x5ABDA2, colour = 185 }, { rgb = 0x6BCEB3, colour = 186 }, { rgb = 0x7CDFC4, colour = 187 },
+    { rgb = 0x8DF0D5, colour = 188 }, { rgb = 0x9EFFE5, colour = 189 }, { rgb = 0xAFFFF1, colour = 190 }, { rgb = 0xC0FFFD, colour = 191 },
+    { rgb = 0x00270C, colour = 192 }, { rgb = 0x003811, colour = 193 }, { rgb = 0x004916, colour = 194 }, { rgb = 0x005A1B, colour = 195 },
+    { rgb = 0x106B1B, colour = 196 }, { rgb = 0x217C2C, colour = 197 }, { rgb = 0x328D3D, colour = 198 }, { rgb = 0x439E4E, colour = 199 },
+    { rgb = 0x54AF5F, colour = 200 }, { rgb = 0x65C070, colour = 201 }, { rgb = 0x76D181, colour = 202 }, { rgb = 0x87E292, colour = 203 },
+    { rgb = 0x98F3A3, colour = 204 }, { rgb = 0xA9FFB3, colour = 205 }, { rgb = 0xBAFFBF, colour = 206 }, { rgb = 0xCBFFCB, colour = 207 },
+    { rgb = 0x00230A, colour = 208 }, { rgb = 0x003410, colour = 209 }, { rgb = 0x044513, colour = 210 }, { rgb = 0x155613, colour = 211 },
+    { rgb = 0x266713, colour = 212 }, { rgb = 0x377813, colour = 213 }, { rgb = 0x488914, colour = 214 }, { rgb = 0x599A25, colour = 215 },
+    { rgb = 0x6AAB36, colour = 216 }, { rgb = 0x7BBC47, colour = 217 }, { rgb = 0x8CCD58, colour = 218 }, { rgb = 0x9DDE69, colour = 219 },
+    { rgb = 0xAEEF7A, colour = 220 }, { rgb = 0xBFFF8B, colour = 221 }, { rgb = 0xD0FF97, colour = 222 }, { rgb = 0xE1FFA3, colour = 223 },
+    { rgb = 0x001707, colour = 224 }, { rgb = 0x0E2808, colour = 225 }, { rgb = 0x1F3908, colour = 226 }, { rgb = 0x304A08, colour = 227 },
+    { rgb = 0x415B08, colour = 228 }, { rgb = 0x526C08, colour = 229 }, { rgb = 0x637D08, colour = 230 }, { rgb = 0x748E0D, colour = 231 },
+    { rgb = 0x859F1E, colour = 232 }, { rgb = 0x96B02F, colour = 233 }, { rgb = 0xA7C140, colour = 234 }, { rgb = 0xB8D251, colour = 235 },
+    { rgb = 0xC9E362, colour = 236 }, { rgb = 0xDAF473, colour = 237 }, { rgb = 0xEBFF82, colour = 238 }, { rgb = 0xFCFF8E, colour = 239 },
+    { rgb = 0x190700, colour = 240 }, { rgb = 0x2A1800, colour = 241 }, { rgb = 0x3B2900, colour = 242 }, { rgb = 0x4C3A00, colour = 243 },
+    { rgb = 0x5D4B00, colour = 244 }, { rgb = 0x6E5C00, colour = 245 }, { rgb = 0x7F6D00, colour = 246 }, { rgb = 0x907E09, colour = 247 },
+    { rgb = 0xA18F1A, colour = 248 }, { rgb = 0xB2A02B, colour = 249 }, { rgb = 0xC3B13C, colour = 250 }, { rgb = 0xD4C24D, colour = 251 },
+    { rgb = 0xE5D35E, colour = 252 }, { rgb = 0xF6E46F, colour = 253 }, { rgb = 0xFFF582, colour = 254 }, { rgb = 0xFFFF96, colour = 255 },
+]
+
+[[signal.revisions]]
+id = "25_7"
+name = "Hue delay 25.7 degrees, linear luma (wiki and MAME, the default)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+amplitude = 0.274
+phase_row_deg = -25.7
+
+[[signal.revisions]]
+id = "26_7"
+name = "Hue delay 26.7 degrees (the second historic calibration of the pot)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+amplitude = 0.274
+phase_row_deg = -26.7
+
+[[signal.revisions]]
+id = "24_7"
+name = "Hue delay 24.7 degrees (cold console)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+amplitude = 0.274
+phase_row_deg = -24.7
+
+[[signal.revisions]]
+id = "27_7"
+name = "Hue delay 27.7 degrees (warm console)"
+luma_mv = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+amplitude = 0.274
+phase_row_deg = -27.7
+
+[[signal.revisions]]
+id = "ladder_25_7"
+name = "Hue delay 25.7 degrees, luma from the 10k, 20k, 39k, 82k ladder"
+luma_mv = [0, 12.195122, 25.641026, 37.836148, 50, 62.195122, 75.641026, 87.836148, 100, 112.195122, 125.641026, 137.836148, 150, 162.195122, 175.641026, 187.836148]
+amplitude = 0.2734
+phase_row_deg = -25.7
+
+[provenance]
+grid = "K: the colour register of the Atari 7800 holds a hue in its high nibble and a luma in its low nibble, so the index of a colour is hue x 16 + luma (hue 0 has no chroma, hue 1 is the colour burst phase); S: the phase of hue h is tint - (h - 1) x phase degrees with the tint 180 (the colour burst) and all hues of one amplitude (Atari 7800 Programming wiki, page 'RGB', anonymous, formulas 'Hue = Tint - (COLU/16 - 1) x Phase', 'Saturation is 0 when COLU = $0x', 'Tint 180'; MAME a7800.cpp, BSD-3-Clause, 'Colorburst/Hue = 180 degrees'; no code of either is used and no table is copied)"
+revisions = "S: the delay (phase) 25.714 = 360 / 14 degrees (the wiki), 25.7 (MAME's changelog and its palette table labelled 25.7), about 25.7 and 26.7 degrees for the two historic calibrations and about 24.7 cold to 27.7 warm over the first 20 minutes (7800 development wiki, page 'Atari 7800 Color Documentation', observations, no licence stated; MAME's notes: tables from 24.7 to 27.7 in half-degree steps); S: the luma Y = (COLU and 15) x 0.0526, brightness 0 (the wiki, schematic-computed, unverified; the 0.0526 follows from (40 + 7.5) x 8.2 x ((1/10 + 1/20 + 1/40 + 1/80) / 15) / ( 100 - 7.5), a forum derivation, with the 39k and 82k rounded to 40k and 80k, so it is exactly linear: luma_mv is the luma value itself); D: the luma of the last variant is the sum of the conductances of the set luma bits (1/10k, 1/20k, 1/39k, 1/82k ohm, in millisiemens x 1000: 100, 50, 25.641026, 12.195122, the wiki's resistor list; the 16 values of the list are the sums of the set bits) added in the same formula, proportional to the conductance as the forum's contrast formula is; S and D: the amplitude is the wiki's saturation 40 IRE / 185 IRE = 0.2162 divided by the luma of COLU 15 on the wiki's scale, 15 x 0.0526 = 0.789, so 0.2740, and for the ladder luma 4.2108 x 0.187836 = 0.7909, so 0.2734 (4.2108 = (40 + 7.5) x 8.2 / (100 - 7.5)); E: the 185 IRE base of the saturation (the wiki cites 'some calculations'), the chroma equal to the burst, and the delay of any real machine (the default 25.7 is MAME's and the wiki's, not a measured setting)"
+reference = "S: the classification reference palette, not an output: the 256 RGB colours of the palette 'PALETTE - 25.7 PHASE SHIFT' of MAME's a7800.cpp (license BSD-3-Clause, copyright-holders Dan Boris, Fabio Priuli, Mike Saarna, Robert Tuccitto; numbers with attribution, no code; its grey ramp has steps of 0x11, which supports the linear luma); the model of this file at its default calibration was tried as the reference and rejected (0.12 mean from this palette, QUESTIONS.md and the notes); the palette is an observation by its author, not a computation; not checked against any other emulator palette"
+threshold = "E: the largest distance in drive voltage between a pixel and a reference colour at which the pixel is taken for it; MAME's palette is recognised exactly (distance 0), a pixel a little off by 0.012 per channel is taken (229 of the 256 as the same colour, the others as a neighbour one level away); a palette of another emulator that differs more is meant to pass through unchanged rather than be taken for a neighbouring colour (not checked on any other palette); the closest two reference colours are 0.004 apart (hues 1 and 15, one level of difference; the unit test prints it), so the threshold limits what is left alone and does not pick the colour"
+black_index = "K: colour 0 (hue 0, luma 0) is the luma 0 of the machine, taken as the black of the tube (the pedestal of NTSC is not modelled: the wiki puts it at 7.5 IRE and the sync at -40 IRE)"
+white_index = "K: colour 15 (hue 0, luma 15) is the luma 15 of the machine, taken as the white of the tube (the wiki's Y of 0.789 against a 100 IRE white, a television's gain control and contrast decide the rest)"

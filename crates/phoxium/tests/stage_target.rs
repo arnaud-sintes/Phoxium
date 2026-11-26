@@ -11,13 +11,14 @@ mod common;
 use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
-    Params, SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64,
-    SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101,
-    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
-    SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI,
-    SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
+    Params, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA,
+    SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
+    SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
+    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
+    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
+    SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO,
+    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -154,6 +155,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM
         | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
         | SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE
+        | SOURCE_COLOUR_TARGET_ATARI_7800_MARIA
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
         | SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928
         | SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101 => phoxium::targets::for_value(target)
@@ -206,6 +208,18 @@ fn pepto(i: usize) -> [f64; 3] {
 fn atari(i: usize) -> [f64; 3] {
     let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA)
         .expect("atari")
+        .transform
+    else {
+        panic!("signal")
+    };
+    s.references[i % 256]
+}
+
+/// The reference colour `i % 256` of the Atari 7800 target (MAME's 25.7 degree palette, in the data file): the register
+/// values 4 x to 4 x + 3 over two rows, one of them a little off.
+fn atari_7800(i: usize) -> [f64; 3] {
+    let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_ATARI_7800_MARIA)
+        .expect("atari 7800")
         .transform
     else {
         panic!("signal")
@@ -269,6 +283,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The TMS9928A reference entries (both exponent sets), then the same a little off.
                 (14, _) => tms(x),
                 (15, _) => tms(x).map(|v| (v + 0.012).min(1.0)),
+                // The Atari 7800 reference colours (MAME's palette) four over two rows, the second a little off.
+                (16, _) => atari_7800(x * 4 + 1),
+                (17, _) => atari_7800(x * 4 + 2).map(|v| (v - 0.012).max(0.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -379,6 +396,9 @@ fn target_slot_matches_the_oracle() {
             SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
             4,
         ),
+        ("atari 7800 25.7", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 1),
+        ("atari 7800 27.7", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 4),
+        ("atari 7800 ladder", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 5),
     ] {
         let p = Params {
             source_colour_target: target,
