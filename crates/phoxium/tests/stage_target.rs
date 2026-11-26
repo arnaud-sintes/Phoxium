@@ -16,7 +16,7 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
-    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
+    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_MSX2_V9958, SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
     SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
     SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
     SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
@@ -158,6 +158,29 @@ fn transform(target: u32, variant: i32) -> Transform {
             Transform::Dac(Dac {
                 input: pad([0, half, 255]),
                 output: pad([0, (0.40f64 * 255.0).round() as u8, 255]),
+                output_green: None,
+                output_blue: None,
+                output_max: 255.0,
+            })
+        }
+        // The V9958 palette, written here independently of the data file: the 3-bit level n as the 5-bit code
+        // floor(4.5 n) shown at code x 255 / 31 (rounded), behind an emulator expansion of the 3 bits (variant 1 the bit
+        // repetition, variant 2 the truncated 255 n / 7).
+        SOURCE_COLOUR_TARGET_MSX2_V9958 => {
+            let level = |n: u32| {
+                let n = n as usize;
+                (
+                    if variant == 1 {
+                        ((n << 5) | (n << 2) | (n >> 1)) as u8
+                    } else {
+                        (n * 255 / 7) as u8
+                    },
+                    ((f64::from((n * 9 / 2) as u32) * 255.0) / 31.0).round() as u8,
+                )
+            };
+            Transform::Dac(Dac {
+                input: std::array::from_fn(|i| level(i.min(7) as u32).0),
+                output: std::array::from_fn(|i| level(i.min(7) as u32).1),
                 output_green: None,
                 output_blue: None,
                 output_max: 255.0,
@@ -475,6 +498,8 @@ fn target_slot_matches_the_oracle() {
         ("cpc half 128", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 1),
         ("cpc half 127", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 2),
         ("cpc mame 96", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 3),
+        ("msx2 v9958 rounded", SOURCE_COLOUR_TARGET_MSX2_V9958, 1),
+        ("msx2 v9958 truncated", SOURCE_COLOUR_TARGET_MSX2_V9958, 2),
         ("cpc green linear", SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN, 1),
         ("cpc green half 0.40", SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN, 2),
         (
@@ -695,6 +720,68 @@ fn cpc_colours_come_out_at_the_half_level_of_the_gate_array() {
         }
     }
     println!("cpc colours: green max {worst:.2e}");
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The V9958's 512 palette colours (every channel at one of the 8 steps of an emulator that expands the 3 bits by bit
+/// repetition, and of blueMSX's truncated division) through the shader: each channel comes out at its 5-bit DAC level
+/// 0, 33, 74, 107, 148, 181, 222, 255 over 255, whatever the other two are.
+#[test]
+fn msx2_v9958_palette_comes_out_at_the_five_bit_dac_levels() {
+    let Some(mut gpu) = common::gpu_or_skip("msx2_v9958_palette_comes_out_at_the_five_bit_dac_levels") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&["target"]).unwrap();
+    let want = [0u8, 33, 74, 107, 148, 181, 222, 255];
+    for (variant, input) in [
+        (1, [0u8, 36, 73, 109, 146, 182, 219, 255]),
+        (2, [0u8, 36, 72, 109, 145, 182, 218, 255]),
+    ] {
+        let mut rgba = Vec::new();
+        for r in 0..8 {
+            for g in 0..8 {
+                for b in 0..8 {
+                    rgba.extend_from_slice(&[
+                        f32::from(input[r]) / 255.0,
+                        f32::from(input[g]) / 255.0,
+                        f32::from(input[b]) / 255.0,
+                        1.0,
+                    ]);
+                }
+            }
+        }
+        let img = ImageF32 {
+            width: 512,
+            height: 1,
+            rgba,
+        };
+        let p = Params {
+            source_colour_target: SOURCE_COLOUR_TARGET_MSX2_V9958,
+            source_colour_variant: variant,
+            ..Params::default()
+        };
+        let out = run(&mut gpu, &img, &p);
+        let mut worst = 0.0f64;
+        for r in 0..8usize {
+            for g in 0..8usize {
+                for b in 0..8usize {
+                    let px = out.pixel((64 * r + 8 * g + b) as u32, 0);
+                    for (c, n) in [r, g, b].into_iter().enumerate() {
+                        let w = f64::from(want[n]) / 255.0;
+                        let e = (f64::from(px[c]) - w).abs();
+                        worst = worst.max(e);
+                        assert!(
+                            e <= MAX_ERR,
+                            "msx2 variant {variant} {r}{g}{b} channel {c}: {} want {w}",
+                            px[c]
+                        );
+                    }
+                }
+            }
+        }
+        println!("msx2 v9958 variant {variant}: max {worst:.2e}");
+    }
     common::assert_no_validation_messages(&counter);
 }
 

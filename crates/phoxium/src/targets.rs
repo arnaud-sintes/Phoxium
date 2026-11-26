@@ -142,6 +142,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "amstrad_cpc_green_screen.toml",
         include_str!("../../../presets/targets/amstrad_cpc_green_screen.toml"),
     ),
+    (
+        "msx2_v9958.toml",
+        include_str!("../../../presets/targets/msx2_v9958.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -4165,6 +4169,145 @@ mod tests {
             (
                 ok.replacen("variants = \"E:", "variants = \"X:", 1),
                 "provenance.variants",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The V9958 palette target: eight codes a channel, the output the 5-bit DAC codes floor(4.5 n) = 0, 4, 9, 13, 18, 22,
+    /// 27, 31 shown at code x 255 / 31 (derived here by hand, independently of the file), the same on the three channels;
+    /// the variants are the emulator's plain 3-bit expansions (rounded with bit repetition, blueMSX's truncation), neither
+    /// of which leaves a level where it is (openMSX on a V9958 shows the output exactly and is not a variant: it would
+    /// be an identity); the floor(4.5 n) table is the same as round(31 n / 7).
+    #[test]
+    fn the_msx2_v9958_file_shows_the_palette_through_the_five_bit_dac() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_MSX2_V9958).expect("msx2");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["linear_rounded", "bluemsx_truncated"]);
+        assert_eq!(t.transform, t.variants[0].transform);
+        // The 5-bit codes: floor(4.5 n), also (n << 2) | (n >> 1), also round(31 n / 7).
+        let codes: Vec<u32> = (0..8u32).map(|n| n * 9 / 2).collect();
+        assert_eq!(codes, [0, 4, 9, 13, 18, 22, 27, 31]);
+        assert_eq!(codes, (0..8u32).map(|n| (n << 2) | (n >> 1)).collect::<Vec<_>>());
+        assert_eq!(
+            codes,
+            (0..8u32)
+                .map(|n| (f64::from(31 * n) / 7.0).round() as u32)
+                .collect::<Vec<_>>()
+        );
+        let shown: Vec<u8> = codes
+            .iter()
+            .map(|&c| (f64::from(c) * 255.0 / 31.0).round() as u8)
+            .collect();
+        assert_eq!(shown, [0, 33, 74, 107, 148, 181, 222, 255]);
+        // The two emulator expansions of the 3 bits: bit repetition (255 n / 7 rounded) and the truncated integer division.
+        let rounded: Vec<u8> = (0..8u32).map(|n| ((n << 5) | (n << 2) | (n >> 1)) as u8).collect();
+        let truncated: Vec<u8> = (0..8u32).map(|n| (n * 255 / 7) as u8).collect();
+        assert_eq!(rounded, [0, 36, 73, 109, 146, 182, 219, 255]);
+        assert_eq!(truncated, [0, 36, 72, 109, 145, 182, 218, 255]);
+        for (v, input) in t.variants.iter().zip([&rounded, &truncated]) {
+            let Transform::Dac(d) = v.transform else { panic!("dac") };
+            assert_eq!(d.len(), 8);
+            assert_eq!(d.input[..8], input[..]);
+            assert_eq!(d.output[..8], shown[..]);
+            assert_eq!(
+                (d.output_green, d.output_blue),
+                (None, None),
+                "one level for the three channels"
+            );
+            assert_eq!(d.output_max, 255.0);
+            // Every step of the picture lands on its DAC level on every channel; the target is not an identity for it.
+            for (i, (&inp, &out)) in input.iter().zip(&shown).enumerate() {
+                let got = v.transform.apply([f64::from(inp) / 255.0; 3]);
+                assert!(
+                    got.iter().all(|c| (c - f64::from(out) / 255.0).abs() < 1e-12),
+                    "{} step {i}: {got:?}",
+                    v.id
+                );
+            }
+            assert_ne!(input, &shown, "the variant {} would be an identity", v.id);
+            assert_eq!(v.transform.apply([0.0; 3]), [0.0; 3]);
+            assert_eq!(v.transform.apply([1.0; 3]), [1.0; 3]);
+        }
+        // The size of the effect on the integer levels: at most 3 of 255 (the unrounded 255 n / 7 gives 3.5, 1.4 percent).
+        let worst = rounded
+            .iter()
+            .zip(&shown)
+            .map(|(&a, &b)| (i32::from(a) - i32::from(b)).abs())
+            .max();
+        assert_eq!(worst, Some(3));
+        let unrounded = (0..8u32)
+            .map(|n| (f64::from(n) * 255.0 / 7.0 - f64::from(shown[n as usize])).abs())
+            .fold(0.0, f64::max);
+        assert!(unrounded > 3.4 && unrounded < 3.6, "{unrounded}");
+        // An openMSX picture on a V9958 already shows the DAC levels, so a variant whose input were those levels would be an
+        // identity: there is none.
+        assert!(!t
+            .variants
+            .iter()
+            .any(|v| matches!(v.transform, Transform::Dac(d) if d.input[..8] == shown[..])));
+        // Between two steps the map is the straight line: half way between 36 and 73 (54.5) goes half way between 33 and 74.
+        let mid = t.select(1).apply([54.5 / 255.0; 3])[0] * 255.0;
+        assert!((mid - 53.5).abs() < 1e-9, "{mid}");
+        assert_eq!(t.select(9), t.transform, "past the last: the first");
+        assert_eq!(t.provenance["output"].chars().next(), Some('S'));
+        assert_eq!(t.provenance["inputs"].chars().next(), Some('E'));
+        assert!(
+            !t.provenance.contains_key("variant_outputs"),
+            "no variant has its own output"
+        );
+    }
+
+    /// The validation of the V9958 file: a level list of the wrong length or not increasing, an output that decreases or is
+    /// out of range, a repeated id, a missing provenance entry.
+    #[test]
+    fn a_bad_msx2_v9958_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "msx2_v9958.toml")
+            .expect("the msx2 file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen(
+                    "levels = [0, 36, 73, 109, 146, 182, 219, 255]",
+                    "levels = [0, 36, 73]",
+                    1,
+                ),
+                "must hold 8",
+            ),
+            (
+                ok.replacen(
+                    "levels = [0, 36, 73, 109, 146, 182, 219, 255]",
+                    "levels = [0, 36, 73, 109, 146, 182, 255, 255]",
+                    1,
+                ),
+                "strictly increase",
+            ),
+            (
+                ok.replacen("output = [0, 33, 74, 107", "output = [0, 74, 33, 107", 1),
+                "must not decrease",
+            ),
+            (
+                ok.replacen("222, 255]\noutput_max", "222, 256]\noutput_max", 1),
+                "0 to 255",
+            ),
+            (
+                ok.replacen("id = \"bluemsx_truncated\"", "id = \"linear_rounded\"", 1),
+                "used twice",
+            ),
+            (
+                ok.replacen("id = \"bluemsx_truncated\"", "id = \"BlueMSX\"", 1),
+                "lower case",
+            ),
+            (
+                ok.replacen("output_max = \"K:", "output_max = \"X:", 1),
+                "provenance.output_max",
             ),
         ];
         for (text, key) in cases {
