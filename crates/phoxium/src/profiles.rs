@@ -87,10 +87,13 @@ pub fn summary(p: &SourceProfile) -> String {
     s
 }
 
-/// The rows of the list, in file order; `current` is the program and class captured now (executable, class).
+/// The rows of the list, sorted by executable name then class ([`crate::presets::name_order`]: case-insensitive
+/// lexicographic, the exact text breaking a tie), whatever the order of the settings file; `current` is the
+/// program and class captured now (executable, class). All profiles are the user's own: one group, no separator.
 pub fn rows(settings: &Settings, current: Option<(&str, &str)>) -> Vec<ProfileRow> {
+    use crate::presets::name_order;
     let last = settings.global.source.last.as_ref();
-    settings
+    let mut rows: Vec<ProfileRow> = settings
         .sources
         .iter()
         .map(|p| ProfileRow {
@@ -100,7 +103,9 @@ pub fn rows(settings: &Settings, current: Option<(&str, &str)>) -> Vec<ProfileRo
             last_used: last.is_some_and(|l| eq(&l.exe, &p.exe) && eq(&l.class, &p.class)),
             current: current.is_some_and(|(e, c)| eq(e, &p.exe) && eq(c, &p.class)),
         })
-        .collect()
+        .collect();
+    rows.sort_by(|a, b| name_order(&a.exe, &b.exe).then_with(|| name_order(&a.class, &b.class)));
+    rows
 }
 
 /// The default profile as a line of the list (`None` without one): the same summary as a program's profile.
@@ -240,15 +245,40 @@ mod tests {
         });
         let r = rows(&s, Some(("snes9x.exe", "snes9x")));
         assert_eq!(r.len(), 2);
+        // Sorted by executable, not in the order the profiles were saved.
         assert_eq!(
             (r[0].exe.as_str(), r[0].current, r[0].last_used),
-            ("snes9x.exe", true, false)
+            ("game.exe", false, true)
         );
         assert_eq!(
             (r[1].exe.as_str(), r[1].current, r[1].last_used),
-            ("game.exe", false, true)
+            ("snes9x.exe", true, false)
         );
         assert!(rows(&Settings::default(), None).is_empty());
+    }
+
+    #[test]
+    fn rows_are_sorted_by_executable_then_class_ignoring_case() {
+        let mut s = Settings::default();
+        for (exe, class) in [
+            ("Zsnes.exe", "A"),
+            ("bsnes.exe", "B"),
+            ("bsnes.exe", "A"),
+            ("Alpha.exe", "Z"),
+        ] {
+            s.upsert_source(profile(exe, class));
+        }
+        let order: Vec<(String, String)> = rows(&s, None).into_iter().map(|r| (r.exe, r.class)).collect();
+        let want = [
+            ("Alpha.exe", "Z"),
+            ("bsnes.exe", "A"),
+            ("bsnes.exe", "B"),
+            ("Zsnes.exe", "A"),
+        ];
+        assert_eq!(order.len(), 4, "{order:?}");
+        for (got, want) in order.iter().zip(want) {
+            assert_eq!((got.0.as_str(), got.1.as_str()), want);
+        }
     }
 
     #[test]

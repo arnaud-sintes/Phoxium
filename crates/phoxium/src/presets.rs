@@ -312,6 +312,11 @@ fn string_field(table: &toml::Table, key: &str, file: &str) -> Result<String, Pr
 }
 
 impl Preset {
+    /// Whether the preset comes from the user folder (a user file replacing a shipped id included).
+    pub fn is_user(&self) -> bool {
+        matches!(self.origin, Origin::User(_))
+    }
+
     /// Parses and validates a preset file. `file` names it in messages.
     pub fn parse(file: &str, text: &str, origin: Origin) -> Result<Preset, PresetError> {
         let table: toml::Table = text.parse().map_err(|e: toml::de::Error| err(file, e.to_string()))?;
@@ -741,7 +746,23 @@ pub fn option_d_detail(presets: &[Preset], host: (u32, u32)) -> Vec<OptionDSugge
         .collect()
 }
 
-/// The presets, shipped ones first, then user ones, with the problems met while loading them.
+/// The order of two displayed names in the lists the user picks from: case-insensitive lexicographic (digits
+/// compare as text, so "13 in" comes before "9 in"), the exact text breaking a tie so the order is deterministic.
+pub fn name_order(a: &str, b: &str) -> std::cmp::Ordering {
+    a.to_lowercase().cmp(&b.to_lowercase()).then_with(|| a.cmp(b))
+}
+
+/// Where the user group starts in a list that shows the shipped entries first and then the user ones (`user`
+/// tells, entry by entry, whether it is a user one): the index of the first user entry, `None` when the list has
+/// no shipped entry before it or no user entry at all. The place of the separator of a preset combo: it is drawn
+/// only when both groups are shown.
+pub fn group_break(user: impl IntoIterator<Item = bool>) -> Option<usize> {
+    user.into_iter().position(|u| u).filter(|&i| i > 0)
+}
+
+/// The presets in the order the menu shows them: the shipped ones, then the user ones (a user preset that
+/// replaces a shipped id is a user preset), each group sorted by name ([`name_order`]), the id breaking a tie.
+/// The one source of order: the preset combos and the previous and next preset hotkeys read it.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Library {
     presets: Vec<Preset>,
@@ -762,13 +783,14 @@ impl Library {
         for (file, text) in EMBEDDED {
             lib.add(Preset::parse(&format!("presets/tubes/{file}"), text, Origin::Embedded));
         }
+        lib.sort();
         lib
     }
 
-    /// The embedded presets plus the `*.toml` files of `dir` (sorted by file name, each at most
+    /// The embedded presets plus the `*.toml` files of `dir` (read in file name order, each at most
     /// [`MAX_USER_PRESET_BYTES`]: a larger file is skipped with a warning, never read whole). A user preset with the id
-    /// of a shipped one replaces it in place; others are appended. A broken user file is skipped with a
-    /// warning naming the file and key.
+    /// of a shipped one replaces it (and becomes a user preset); others are added. A broken user file is skipped
+    /// with a warning naming the file and key. The result is in menu order (see [`Library`]).
     pub fn load(dir: Option<&Path>) -> Library {
         let mut lib = Library::embedded();
         let Some(dir) = dir else { return lib };
@@ -785,7 +807,18 @@ impl Library {
                 Err(e) => lib.warnings.push(format!("preset {shown}: {e}")),
             }
         }
+        lib.sort();
         lib
+    }
+
+    /// Puts the presets in menu order: shipped before user, then by name, then by id.
+    fn sort(&mut self) {
+        self.presets.sort_by(|a, b| {
+            a.is_user()
+                .cmp(&b.is_user())
+                .then_with(|| name_order(&a.name, &b.name))
+                .then_with(|| a.id.cmp(&b.id))
+        });
     }
 
     fn add(&mut self, parsed: Result<Preset, PresetError>) {
@@ -811,9 +844,15 @@ impl Library {
         }
     }
 
-    /// The presets in menu order.
+    /// The presets in menu order: shipped ones sorted by name, then user ones sorted by name.
     pub fn list(&self) -> &[Preset] {
         &self.presets
+    }
+
+    /// Where the user presets start in [`Library::list`], `None` when there are no shipped or no user presets
+    /// (no separator to draw).
+    pub fn user_start(&self) -> Option<usize> {
+        group_break(self.presets.iter().map(Preset::is_user))
     }
 
     pub fn find(&self, id: &str) -> Option<&Preset> {
@@ -871,14 +910,31 @@ mod tests {
         )
     }
 
+    /// The shipped presets in the order of their files (`01-...` to `10-...`), the numbering the PHY-4 tables and
+    /// PLAN P-1 use; the menu order is by name ([`Library::list`]).
+    fn in_file_order(l: &Library) -> Vec<&Preset> {
+        let mut v: Vec<&Preset> = l.list().iter().collect();
+        v.sort_by(|a, b| a.file.cmp(&b.file));
+        v
+    }
+
+    /// The file number (1 to 10) of the preset at `index` of the menu list.
+    fn file_number(l: &Library, index: usize) -> usize {
+        let p = &l.list()[index];
+        in_file_order(l).iter().position(|q| q.id == p.id).unwrap() + 1
+    }
+
     #[test]
-    fn ten_presets_load_in_order_with_unique_ids() {
+    fn ten_presets_load_in_name_order_with_unique_ids() {
         let l = lib();
         assert_eq!(l.list().len(), 10);
-        let files: Vec<&str> = l.list().iter().map(|p| p.file.as_str()).collect();
-        let mut sorted = files.clone();
-        sorted.sort();
-        assert_eq!(files, sorted);
+        let names: Vec<&str> = l.list().iter().map(|p| p.name.as_str()).collect();
+        let mut sorted = names.clone();
+        sorted.sort_by(|a, b| name_order(a, b));
+        assert_eq!(names, sorted);
+        assert_eq!(l.list()[0].id, "tv-13in", "digits compare as text: 13 in comes first");
+        assert_eq!(l.list()[9].id, "pvm-20m4u");
+        assert_eq!(l.user_start(), None, "no user preset, no separator");
         let mut ids: Vec<&str> = l.list().iter().map(|p| p.id.as_str()).collect();
         ids.sort();
         ids.dedup();
@@ -1112,7 +1168,7 @@ mod tests {
     fn amp_samples_of_every_preset_is_the_recommended_k() {
         let l = lib();
         let want = [16, 16, 16, 4, 16, 16, 4, 16, 4, 4];
-        for (p, w) in l.list().iter().zip(want) {
+        for (p, w) in in_file_order(&l).into_iter().zip(want) {
             let q = p.params();
             assert_eq!(q.amp_samples, p.recommended_amp_k(), "{}", p.id);
             assert_eq!(q.amp_samples, w, "{}: sigma {} px", p.id, amp_sigma_px(&q));
@@ -1154,7 +1210,7 @@ mod tests {
     #[test]
     fn px_per_triad_matches_the_phy4_table() {
         let want = [1.5, 1.5, 2.9, 1.0, 2.9, 4.4, 1.5, 4.0, 1.7, 1.3];
-        for (p, w) in lib().list().iter().zip(want) {
+        for (p, w) in in_file_order(&lib()).into_iter().zip(want) {
             let got = p.px_per_triad(HOST);
             assert!((got / w - 1.0).abs() <= 0.10, "{}: {got} against {w}", p.id);
         }
@@ -1163,8 +1219,12 @@ mod tests {
     #[test]
     fn option_d_for_2560x1440_is_presets_3_5_6_8() {
         let l = lib();
-        let ids: Vec<usize> = l.option_d(HOST).iter().map(|i| i + 1).collect();
-        assert_eq!(ids, vec![3, 5, 6, 8]);
+        let number = |v: Vec<usize>| -> Vec<usize> {
+            let mut n: Vec<usize> = v.iter().map(|&i| file_number(&l, i)).collect();
+            n.sort();
+            n
+        };
+        assert_eq!(number(l.option_d(HOST)), vec![3, 5, 6, 8]);
         // The mask oracle with the PHY-4 triad counts gives the same set.
         let counts = [
             1245.0, 1287.0, 660.0, 1827.0, 660.0, 440.0, 1300.0, 480.0, 1157.0, 1443.0,
@@ -1181,14 +1241,14 @@ mod tests {
         assert_eq!(oracle, vec![3, 5, 6, 8]);
         // A 4K host resolves more of them, a 1080p host fewer.
         assert_eq!(l.option_d((3840, 2160)).len(), 4);
-        assert_eq!(l.option_d((1920, 1080)), vec![5, 7], "13 in TV and arcade only");
+        assert_eq!(number(l.option_d((1920, 1080))), vec![6, 8], "13 in TV and arcade only");
     }
 
     #[test]
     fn host_note_labels_the_unresolvable_presets() {
         let l = lib();
-        let noted: Vec<usize> = l
-            .list()
+        let files = in_file_order(&l);
+        let noted: Vec<usize> = files
             .iter()
             .enumerate()
             .filter(|(_, p)| p.host_note(HOST) == Some(NOT_RESOLVABLE_NOTE))
@@ -1196,18 +1256,18 @@ mod tests {
             .collect();
         // PLAN P-1: 1, 2, 4, 7, 9 and 10 (PHY-4 px per triad up to 1.7), plus nothing else.
         assert_eq!(noted, vec![1, 2, 4, 7, 9, 10]);
-        assert_eq!(l.list()[2].tier(HOST), Tier::C);
-        assert_eq!(l.list()[5].tier(HOST), Tier::B);
+        assert_eq!(files[2].tier(HOST), Tier::C);
+        assert_eq!(files[5].tier(HOST), Tier::B);
         // Presets 3 (2.96) and 5 (2.98) are offered by option D but tier C by the shader's 3 px threshold:
         // they set mask_tier = integrated and say so.
         for i in [2, 4] {
-            let p = &l.list()[i];
+            let p = files[i];
             assert!(p.px_per_triad(HOST) > OPTION_D_THRESHOLD_PX_PER_TRIAD && p.px_per_triad(HOST) < 3.0);
             assert_eq!(p.params().mask_tier, MASK_TIER_INTEGRATED, "{}", p.id);
             assert_eq!(p.host_note(HOST), Some(INTEGRATED_NOTE), "{}", p.id);
         }
         // Everything else has the automatic tier, and no other preset carries the integrated note.
-        for (i, p) in l.list().iter().enumerate() {
+        for (i, p) in files.iter().enumerate() {
             if ![2, 4].contains(&i) {
                 assert_ne!(p.params().mask_tier, MASK_TIER_INTEGRATED, "{}", p.id);
                 assert_ne!(p.host_note(HOST), Some(INTEGRATED_NOTE), "{}", p.id);
@@ -1219,7 +1279,11 @@ mod tests {
     fn option_d_reports_which_suggestions_need_the_integrated_tier() {
         let l = lib();
         let d = l.option_d_detail(HOST);
-        let flags: Vec<(usize, bool)> = d.iter().map(|s| (s.index + 1, s.needs_integrated)).collect();
+        let mut flags: Vec<(usize, bool)> = d
+            .iter()
+            .map(|s| (file_number(&l, s.index), s.needs_integrated))
+            .collect();
+        flags.sort();
         assert_eq!(flags, vec![(3, true), (5, true), (6, false), (8, false)]);
         // The same list as the plain suggestions.
         assert_eq!(l.option_d(HOST), d.iter().map(|s| s.index).collect::<Vec<_>>());
@@ -1232,7 +1296,7 @@ mod tests {
                 assert_eq!(p.params().mask_tier, MASK_TIER_INTEGRATED, "{}", p.id);
             }
         }
-        let mut auto = l.list()[2].clone();
+        let mut auto = in_file_order(&l)[2].clone();
         auto.values.retain(|(id, _)| *id != "mask_tier");
         assert_eq!(auto.host_note(HOST), Some(NOT_RESOLVABLE_NOTE));
         // A 4K host resolves from 3 px per triad: nothing needs the integrated tier there.
@@ -1593,12 +1657,98 @@ mod tests {
         let p = l.find("pvm-20m4u").unwrap();
         assert!(matches!(p.origin, Origin::User(_)));
         assert_eq!(p.params().exposure, 0.9);
-        assert_eq!(l.list()[0].id, "pvm-20m4u", "replaced in place");
+        // The override is a user preset: it leaves the shipped group for the user group (same name "X" as the
+        // other user file, so the id breaks the tie).
+        assert_eq!(l.list()[9].id, "pvm-20m4u");
         assert_eq!(l.list()[10].id, "x");
         assert_eq!(l.warnings.len(), 1);
         assert!(l.warnings[0].contains("broken.toml") && l.warnings[0].contains("bogus_id"));
         assert_eq!(Library::load(Some(&dir.join("missing"))).list().len(), 10);
         assert_eq!(user_dir(Path::new("C:\\a")), Path::new("C:\\a").join("presets"));
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    fn user_preset(id: &str, name: &str) -> String {
+        sample("")
+            .replace("id = \"x\"", &format!("id = \"{id}\""))
+            .replace("name = \"X\"", &format!("name = \"{name}\""))
+    }
+
+    /// The menu order: the shipped presets sorted by name, then a break, then the user presets sorted by name on
+    /// their own; case and the id do not decide unless the names tie.
+    #[test]
+    fn menu_order_is_shipped_then_user_each_sorted_by_name() {
+        let dir = std::env::temp_dir().join(format!("phoxium-presets-order-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // Names that sort before and after every shipped name, in a case mix, and one that replaces a shipped id.
+        fs::write(dir.join("1.toml"), user_preset("zeta", "zeta tube")).unwrap();
+        fs::write(dir.join("2.toml"), user_preset("alpha", "Alpha tube")).unwrap();
+        fs::write(dir.join("3.toml"), user_preset("mid", "alpha tube")).unwrap();
+        fs::write(dir.join("4.toml"), user_preset("tv-13in", "A my own 13 in")).unwrap();
+        let l = Library::load(Some(&dir));
+        assert!(l.warnings.is_empty(), "{:?}", l.warnings);
+        let ids: Vec<&str> = l.list().iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids.len(), 10 - 1 + 4);
+        let shipped = 9;
+        assert!(
+            !ids[..shipped].contains(&"tv-13in"),
+            "the override left the shipped group"
+        );
+        // The user group: the override ("A my own..."), then the two "alpha tube" (tie by exact text, then
+        // lower case after capitals), then zeta.
+        assert_eq!(&ids[shipped..], ["tv-13in", "alpha", "mid", "zeta"]);
+        let embedded: Vec<&str> = l.list()[..shipped].iter().map(|p| p.name.as_str()).collect();
+        let mut sorted = embedded.clone();
+        sorted.sort_by(|a, b| name_order(a, b));
+        assert_eq!(embedded, sorted);
+        assert!(l.list()[..shipped].iter().all(|p| !p.is_user()));
+        assert!(l.list()[shipped..].iter().all(Preset::is_user));
+        assert_eq!(l.user_start(), Some(shipped));
+        assert_eq!(group_break(l.list().iter().map(Preset::is_user)), Some(shipped));
+        // A list with one group only has no break.
+        assert_eq!(group_break([false, false]), None);
+        assert_eq!(group_break([true, true]), None);
+        assert_eq!(group_break([false, true, true]), Some(1));
+        assert_eq!(group_break(std::iter::empty()), None);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The hotkey cycling follows the menu order: shipped sorted, then user sorted, wrapping at both ends.
+    #[test]
+    fn next_and_previous_follow_the_menu_order_across_the_groups() {
+        let dir = std::env::temp_dir().join(format!("phoxium-presets-cycle-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("a.toml"), user_preset("aaa", "Aaa first")).unwrap();
+        fs::write(dir.join("b.toml"), user_preset("bbb", "Bbb second")).unwrap();
+        let l = Library::load(Some(&dir));
+        let ids: Vec<String> = l.list().iter().map(|p| p.id.clone()).collect();
+        assert_eq!(
+            &ids[10..],
+            ["aaa", "bbb"],
+            "user presets after every shipped one, even 'Aaa'"
+        );
+        let mut cur = None;
+        let mut seen = Vec::new();
+        for _ in 0..ids.len() {
+            let n = l.next(cur).unwrap();
+            seen.push(n.id.clone());
+            cur = Some(n.id.as_str());
+        }
+        assert_eq!(seen, ids);
+        assert_eq!(
+            l.next(Some("bbb")).unwrap().id,
+            ids[0],
+            "wraps from the last user preset to the first shipped"
+        );
+        assert_eq!(l.previous(Some(&ids[0])).unwrap().id, "bbb", "and back");
+        assert_eq!(
+            l.previous(Some("aaa")).unwrap().id,
+            ids[9],
+            "the last shipped precedes the first user preset"
+        );
+        assert_eq!(l.next(Some(&ids[9])).unwrap().id, "aaa");
         let _ = fs::remove_dir_all(&dir);
     }
     /// Viewable diagonal of the preset tube (mm).

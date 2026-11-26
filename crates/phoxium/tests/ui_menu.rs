@@ -1171,6 +1171,99 @@ fn user_preset_save_and_load_round_trip() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The preset combo lists the shipped presets sorted by name, a horizontal separator, then the user presets
+/// sorted by name on their own; a row picks the preset the order says (so the order shown is the order of the
+/// library, which the previous and next preset hotkeys follow). With a filter that leaves one group there is no
+/// separator.
+#[test]
+fn preset_combo_lists_shipped_then_a_separator_then_user_presets_each_sorted() {
+    let _g = lock();
+    let dir = temp_dir("preset-groups");
+    // Saved in an order that is neither the name order nor the id order; the names sort case-insensitively.
+    for (id, name) in [("zz-mine", "Zz mine"), ("aa-mine", "bb Mine"), ("bb-mine", "Aa mine")] {
+        phoxium::presets::Preset::from_params(id, name, &Params::default())
+            .unwrap()
+            .save(&dir)
+            .unwrap();
+    }
+    let library = Library::load(Some(&dir));
+    let ids: Vec<String> = library.list().iter().map(|p| p.id.clone()).collect();
+    assert_eq!(ids.len(), 13);
+    assert_eq!(
+        &ids[10..],
+        ["bb-mine", "aa-mine", "zz-mine"],
+        "user presets by name: Aa, bb, Zz"
+    );
+    assert_eq!(library.user_start(), Some(10));
+    let config = UiConfig {
+        presets: library,
+        presets_dir: Some(dir.clone()),
+        ..tall_config()
+    };
+    let Some(mut rig) = Rig::with_config("preset_combo_lists_shipped_then_user_each_sorted", 1280, 1080, config) else {
+        return;
+    };
+    rig.state.preset = Some(ids[0].clone());
+    rig.open_menu();
+    let combo = |rig: &mut Rig| {
+        rig.click(MenuRects::at(rig.ui.menu_rects().preset, 0.5, 0.5));
+        rig.frame(&[]);
+    };
+    combo(&mut rig);
+    let rows: Vec<[[f32; 2]; 2]> = (0..ids.len())
+        .map(|i| {
+            rig.ui
+                .item_rect(&format!("preset:{i}"))
+                .unwrap_or_else(|| panic!("row {i} is not in the open combo"))
+        })
+        .collect();
+    assert!(
+        rows.windows(2).all(|w| w[0][1][1] <= w[1][0][1] + 0.5),
+        "rows run top to bottom"
+    );
+    let separator = rig.ui.item_rect("preset:separator").expect("the separator row");
+    assert!(
+        rows[9][1][1] <= separator[0][1] + 0.5 && separator[1][1] <= rows[10][0][1] + 0.5,
+        "the separator {separator:?} sits between the last shipped row {:?} and the first user row {:?}",
+        rows[9],
+        rows[10]
+    );
+    // A preview of the open combo (look at it: shipped, a rule, then the user presets with their tag).
+    rig.frame(&[(WM_MOUSEMOVE, 0, mouse_lparam(i16::MAX, i16::MAX))]);
+    let img = rig.frame(&[]);
+    let path = write_png(&img, "menu-preset-groups");
+    eprintln!("menu-preset-groups: preview {}", path.display());
+    // The rows pick the presets in the order of the library: the first, the last shipped one, the first and the
+    // last user ones.
+    for i in [0, 9, 10, 12] {
+        let r = rig.ui.item_rect(&format!("preset:{i}")).expect("row in the open combo");
+        rig.click(MenuRects::at(r, 0.5, 0.5));
+        rig.frame(&[]);
+        assert_eq!(rig.out.preset.as_deref(), Some(ids[i].as_str()), "row {i}");
+        rig.out.preset = None;
+        combo(&mut rig);
+    }
+    // A filter that leaves only user presets, or only shipped ones, draws no separator.
+    // (The first click on the filter closes the open combo, the second focuses the box.)
+    let filter = rig.ui.menu_rects().filter;
+    rig.click(MenuRects::at(filter, 0.5, 0.5));
+    rig.click(MenuRects::at(filter, 0.5, 0.5));
+    rig.type_text("-mine");
+    combo(&mut rig);
+    assert!(rig.ui.item_rect("preset:2").is_some() && rig.ui.item_rect("preset:3").is_none());
+    assert!(rig.ui.item_rect("preset:separator").is_none(), "only user presets");
+    rig.click(MenuRects::at(filter, 0.5, 0.5));
+    rig.click(MenuRects::at(filter, 0.5, 0.5));
+    for _ in 0..5 {
+        rig.key(0x08, 0x0E, false);
+    }
+    rig.type_text("sony");
+    combo(&mut rig);
+    assert!(rig.ui.item_rect("preset:0").is_some() && rig.ui.item_rect("preset:separator").is_none());
+    rig.finish();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// A made-up adapter list like the reference PC's: the RTX (Vulkan 0) and the Intel UHD driving the monitors.
 fn fake_gpu() -> phoxium::adapters::Current {
     use phoxium::adapters::{AdapterEntry, AdapterId, Current, GpuSelection, Luid, Owner, Reason, VulkanDevice};

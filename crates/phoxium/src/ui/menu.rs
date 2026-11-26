@@ -336,19 +336,56 @@ pub struct MenuResult {
     pub rects: MenuRects,
     /// Widget rectangles by key: `label:<id>`, `widget:<id>` (`widget:<id>.<k>` for a vector component),
     /// `header:<panel>`, `reset:<panel>`, `search`, `advanced`, `revert`, `reload`, `preset_name`,
-    /// `save_preset`, `update_preset`, `gpu_adapter`.
+    /// `save_preset`, `update_preset`, `gpu_adapter`, and while the preset combo is open `preset:<row>` (the
+    /// rows of the combo in order) and `preset:separator` (between the shipped and the user presets).
     pub items: Vec<(String, [[f32; 2]; 2])>,
 }
 
-/// The presets whose id or name contains `filter` (case insensitive), as (id, name).
-pub fn filtered_presets(library: &Library, filter: &str) -> Vec<(String, String)> {
+/// One row of the preset combo: the preset and whether it is a user preset (the ` · user` tag, the group
+/// after the separator).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PresetChoice {
+    pub id: String,
+    pub name: String,
+    pub user: bool,
+}
+
+impl PresetChoice {
+    /// The row text with the tag of a user preset; the id after `##` keeps the ImGui ids unique.
+    pub fn label(&self) -> String {
+        if self.user {
+            format!("{}  \u{00B7}  user##{}", self.name, self.id)
+        } else {
+            format!("{}##{}", self.name, self.id)
+        }
+    }
+}
+
+/// The presets whose id or name contains `filter` (case insensitive), in the order of the combo: the shipped
+/// ones sorted by name, then the user ones sorted by name (`Library::list`).
+pub fn filtered_presets(library: &Library, filter: &str) -> Vec<PresetChoice> {
     let f = filter.trim().to_lowercase();
     library
         .list()
         .iter()
         .filter(|p| f.is_empty() || p.id.to_lowercase().contains(&f) || p.name.to_lowercase().contains(&f))
-        .map(|p| (p.id.clone(), p.name.clone()))
+        .map(|p| PresetChoice {
+            id: p.id.clone(),
+            name: p.name.clone(),
+            user: p.is_user(),
+        })
         .collect()
+}
+
+/// The options of the preset combos: a popup tall enough (about 20 rows instead of 8) for the shipped presets, the
+/// separator and a few user presets to show without scrolling.
+pub fn preset_combo_options() -> dear_imgui_rs::ComboBoxOptions {
+    dear_imgui_rs::ComboBoxOptions::new().height(dear_imgui_rs::ComboBoxHeight::Large)
+}
+
+/// Where the separator goes in `list` (the index of the first user row): only when both groups are shown.
+pub fn preset_separator(list: &[PresetChoice]) -> Option<usize> {
+    crate::presets::group_break(list.iter().map(|c| c.user))
 }
 
 /// Position and size of the menu window on a display of `display` px at UI scale `scale`, from the saved
@@ -440,6 +477,14 @@ fn wear_buttons(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult) {
     }
 }
 
+/// The indices of `names` in the order a combo shows them: by name, case-insensitive lexicographic
+/// ([`crate::presets::name_order`]), the index breaking a tie. The data tables keep their own order.
+pub fn display_order(names: &[&str]) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..names.len()).collect();
+    order.sort_by(|&a, &b| crate::presets::name_order(names[a], names[b]).then(a.cmp(&b)));
+    order
+}
+
 /// One combo of the colour sets: `names`, the index of the one in force (None shows "Custom"), and the pick.
 fn colour_combo(
     ui: &Frame,
@@ -454,9 +499,10 @@ fn colour_combo(
     let mut pick = None;
     let preview = current.map_or("Custom", |i| names[i]);
     if let Some(_combo) = ui.begin_combo(format!("##colour_set_{label}"), preview) {
-        for (i, name) in names.iter().enumerate() {
+        // Shown sorted by name; the pick is still the index in the data table (`colour_sets`), whose order stays.
+        for i in display_order(names) {
             let selected = current == Some(i);
-            if ui.selectable_config(*name).selected(selected).build() && !selected {
+            if ui.selectable_config(names[i]).selected(selected).build() && !selected {
                 pick = Some(i);
             }
         }
@@ -718,16 +764,17 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
     let start = ui.cursor_screen_pos();
     ui.set_cursor_pos_x(ui.cursor_pos()[0] + gutter);
     ui.set_next_item_width(-f32::MIN_POSITIVE);
-    if let Some(_combo) = ui.begin_combo("##preset", &preview) {
-        for (id, name) in &list {
+    if let Some(_combo) = ui.begin_combo_with_flags("##preset", &preview, preset_combo_options()) {
+        let separator = preset_separator(&list);
+        for (i, choice) in list.iter().enumerate() {
+            if separator == Some(i) {
+                // The shipped presets above, the user ones below.
+                ui.separator();
+                record(ui, r, "preset:separator");
+            }
+            let id = &choice.id;
             let selected = current == Some(id.as_str());
-            let user = m.library.find(id).is_some_and(|p| matches!(p.origin, Origin::User(_)));
-            let text = if user {
-                format!("{name}  \u{00B7}  user##{id}")
-            } else {
-                format!("{name}##{id}")
-            };
-            if ui.selectable_config(text).selected(selected).build() {
+            if ui.selectable_config(choice.label()).selected(selected).build() {
                 if let Some(p) = m.library.find(id) {
                     let old = *m.params;
                     *m.params = p.params();
@@ -738,6 +785,7 @@ fn preset_section(ui: &Frame, m: &mut MenuModel<'_>, r: &mut MenuResult, referen
                     m.presets.message = None;
                 }
             }
+            record(ui, r, &format!("preset:{i}"));
             if ui.is_item_hovered() {
                 theme::tooltip(ui, id);
             }
@@ -2081,7 +2129,59 @@ mod tests {
         assert_eq!(all.len(), lib.list().len());
         let first = &lib.list()[0];
         let by_id = filtered_presets(&lib, &first.id.to_uppercase());
-        assert!(by_id.iter().any(|(id, _)| *id == first.id));
+        assert!(by_id.iter().any(|c| c.id == first.id));
         assert!(filtered_presets(&lib, "no preset is called this").is_empty());
+    }
+
+    #[test]
+    fn colour_sets_are_shown_sorted_by_name_over_their_own_order() {
+        use crate::colour_sets as sets;
+        for names in [
+            sets::STANDARDS.iter().map(|s| s.name).collect::<Vec<_>>(),
+            sets::PRIMARIES.iter().map(|s| s.name).collect::<Vec<_>>(),
+            sets::WHITES.iter().map(|s| s.name).collect::<Vec<_>>(),
+        ] {
+            let order = display_order(&names);
+            let mut once = order.clone();
+            once.sort();
+            assert_eq!(once, (0..names.len()).collect::<Vec<_>>(), "every row once");
+            let shown: Vec<&str> = order.iter().map(|&i| names[i]).collect();
+            let mut want = shown.clone();
+            want.sort_by(|a, b| crate::presets::name_order(a, b));
+            assert_eq!(shown, want);
+        }
+        assert_eq!(
+            display_order(&["b", "A", "a", "B"]),
+            vec![1, 2, 3, 0],
+            "case-insensitive, exact text then index"
+        );
+        assert_eq!(display_order(&["x", "x"]), vec![0, 1]);
+    }
+
+    #[test]
+    fn preset_choices_are_grouped_and_the_separator_needs_both_groups() {
+        let lib = Library::embedded();
+        let all = filtered_presets(&lib, "");
+        assert!(all.iter().all(|c| !c.user), "only shipped presets: {all:?}");
+        assert_eq!(preset_separator(&all), None);
+        let user = |id: &str, name: &str| PresetChoice {
+            id: id.into(),
+            name: name.into(),
+            user: true,
+        };
+        let mixed = vec![all[0].clone(), all[1].clone(), user("mine", "Mine")];
+        assert_eq!(preset_separator(&mixed), Some(2));
+        assert_eq!(
+            preset_separator(&mixed[2..]),
+            None,
+            "a filter that leaves only user presets"
+        );
+        assert_eq!(
+            preset_separator(&mixed[..2]),
+            None,
+            "a filter that leaves only shipped ones"
+        );
+        assert_eq!(mixed[2].label(), "Mine  \u{00B7}  user##mine");
+        assert_eq!(all[0].label(), format!("{}##{}", all[0].name, all[0].id));
     }
 }

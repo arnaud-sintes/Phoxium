@@ -439,8 +439,12 @@ fn hotkeys_are_rebound_from_the_menu() {
     rig.finish();
 }
 
-/// A user preset file with the id of the first shipped preset (so it is the first entry of the lists, where the
-/// combo shows it without scrolling); renaming it brings the shipped one back.
+/// The row of the user preset of [`user_preset`] in the combos: the nine shipped presets that remain come first.
+const USER_ROW: usize = 9;
+
+/// A user preset file with the id of the first shipped preset: the documented override, so it leaves the shipped
+/// group for the user group, after the last shipped preset (row [`USER_ROW`] of the combos, below the
+/// separator); renaming it brings the shipped one back.
 fn user_preset(dir: &Path, name: &str) -> String {
     let id = Library::embedded().list()[0].id.clone();
     let p = Params {
@@ -483,9 +487,10 @@ fn preset_files_are_managed_from_the_menu() {
     // The Preset section is open by default; its file tools start hidden ("Manage files").
     assert!(rig.ui.item_rect("files:preset").is_none());
     rig.click("files:toggle");
-    // Choose the user preset (the first entry).
+    // Choose the user preset (the first of the user group, below the separator).
     rig.click("files:preset");
-    rig.click("files:preset:0");
+    rig.item("files:preset:separator");
+    rig.click(&format!("files:preset:{USER_ROW}"));
     rig.item("files:rename");
     rig.item("files:delete");
     // Rename.

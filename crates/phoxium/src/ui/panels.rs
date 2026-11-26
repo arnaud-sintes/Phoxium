@@ -632,6 +632,27 @@ fn number_slider(ui: &Frame, wid: &str, v: &mut f32, m: &ParamMeta, width: f32, 
     (changed, rect, hovered)
 }
 
+/// The enum indices of `m` in the order its combo shows them. Most enums keep the order of `params/*.toml`
+/// (off first, increasing strength, the default first: the order means something). The device list of the colour
+/// target is a catalogue: `none` stays first, the devices follow sorted by the name the combo shows
+/// ([`crate::presets::name_order`], the index breaking a tie). Only the display is sorted: the stored value and
+/// the order of the enum and of `presets/targets/` do not change.
+pub fn enum_display_order(m: &ParamMeta) -> Vec<usize> {
+    let mut order: Vec<usize> = (0..m.values.len()).collect();
+    if m.id == "source_colour_target" {
+        let shown: Vec<String> = m.values.iter().map(|s| words(s)).collect();
+        order.sort_by(|&a, &b| {
+            // `none` (the untouched source colours) first, whatever the sort says.
+            let none = |i: usize| m.values[i] != "none";
+            none(a)
+                .cmp(&none(b))
+                .then_with(|| crate::presets::name_order(&shown[a], &shown[b]))
+                .then(a.cmp(&b))
+        });
+    }
+    order
+}
+
 /// One row (or, for a vector, one row per component) for the parameter `m`. True when the value changed.
 pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> bool {
     let Some(value) = ctx.params.get(m.id) else {
@@ -706,8 +727,8 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
             ui.set_next_item_width(width);
             let current = m.values.get(v as usize).map_or_else(|| "?".to_string(), |s| words(s));
             if let Some(_combo) = ui.begin_combo(&wid, &current) {
-                for (i, name) in m.values.iter().enumerate() {
-                    let selected = i == v as usize;
+                for i in enum_display_order(m) {
+                    let (name, selected) = (m.values[i], i == v as usize);
                     if ui.selectable_config(words(name)).selected(selected).build() && !selected {
                         new = Some(ParamValue::Enum(i as u32));
                     }
@@ -1272,5 +1293,30 @@ mod tests {
         assert!(is_log(m("phosphor_decay_scale")) && is_log(m("phosphor_extra_afterglow_time_ms")));
         assert!(is_log(m("phosphor_tail_strength_rgb")));
         assert!(panel("Mask").and_then(|p| p.intro).is_none());
+    }
+
+    /// The colour target combo shows `none` first and the devices sorted by the name shown; every other enum keeps the
+    /// order of the parameter table, and the sort changes the display only (the value names keep their order).
+    #[test]
+    fn the_colour_target_combo_is_sorted_for_display_only() {
+        let target = crate::params::meta("source_colour_target").unwrap();
+        let order = enum_display_order(target);
+        let mut once = order.clone();
+        once.sort();
+        assert_eq!(once, (0..target.values.len()).collect::<Vec<_>>(), "every value once");
+        assert_eq!(target.values[order[0]], "none");
+        let shown: Vec<String> = order[1..].iter().map(|&i| words(target.values[i])).collect();
+        let mut sorted = shown.clone();
+        sorted.sort_by(|a, b| crate::presets::name_order(a, b));
+        assert_eq!(shown, sorted);
+        assert_eq!(shown[0], "Amstrad cpc", "{shown:?}");
+        assert_ne!(order, once, "the table is not in name order, so the display differs");
+        // The enum itself is untouched: the first value is still `none`, the second `game_boy_color`.
+        assert_eq!(&target.values[..2], ["none", "game_boy_color"]);
+        // The other enums keep their table order (off, increasing strength, default first).
+        let mask = crate::params::meta("mask_type").unwrap();
+        assert_eq!(enum_display_order(mask), vec![0, 1, 2]);
+        let gun = crate::params::meta("gun_law").unwrap();
+        assert_eq!(enum_display_order(gun), vec![0, 1, 2, 3]);
     }
 }

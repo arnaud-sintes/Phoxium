@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Changed
+
+- **The preset lists are sorted by name, and the shipped presets are set apart from yours.** The tube preset list (the Preset combo and the Preset files combo) now shows the shipped presets first, sorted by name (case-insensitive, digits compared as text, the id breaking a tie), then a horizontal separator, then your own presets (tagged "user") sorted by name on their own; a user preset that replaces a shipped id is listed with yours. The separator is drawn only when both groups are shown, so a filter that leaves one group has none. The Preset combo popup is taller (about 20 rows) so both groups show without scrolling. The next and previous preset hotkeys cycle in this same order (`Library::list` is the one source of order; the ids saved in the settings are unchanged). The Saved profiles list is sorted by program name then window class (it followed the settings file), the three Colour sets combos (Standard, Primaries, White point) are sorted by name, and the Colour target combo lists `None` first then the devices sorted by the name it shows; only the display is sorted there (the stored values, the order of `source_colour_target` in `params\source.toml` and of `presets\targets\` do not change). The Colour variant combo, the other choice lists and the window picker (most recent first) keep their meaningful order. Headless tests cover the order, the separator and the cycling.
+
 ## [0.11.0] - 2026-11-26
 
 ### Added

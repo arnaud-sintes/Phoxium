@@ -12,7 +12,7 @@ use dear_imgui_rs::Ui as Frame;
 use crate::preset_files::{self as files, Conflict, ImportMode, Prepared};
 use crate::presets::{Library, Origin};
 
-use super::menu::{record, same_line_if_fits, MenuResult};
+use super::menu::{preset_combo_options, record, same_line_if_fits, MenuResult};
 use super::theme::{self, Fonts, METRICS, PALETTE};
 
 /// A native dialog the app opens for the menu.
@@ -150,13 +150,15 @@ pub fn section(
     let user = matches!(preset.origin, Origin::User(_));
     let width = theme::row_label(ui, "Preset");
     ui.set_next_item_width(width);
-    if let Some(_combo) = ui.begin_combo("##files_preset", &preset.name) {
+    if let Some(_combo) = ui.begin_combo_with_flags("##files_preset", &preset.name, preset_combo_options()) {
+        // The order of the preset combo: the shipped presets, a separator, the user presets.
+        let separator = lib.user_start();
         for (i, p) in lib.list().iter().enumerate() {
-            let tag = if matches!(p.origin, Origin::User(_)) {
-                "  \u{00B7}  user"
-            } else {
-                ""
-            };
+            if separator == Some(i) {
+                ui.separator();
+                record(ui, r, "files:preset:separator");
+            }
+            let tag = if p.is_user() { "  \u{00B7}  user" } else { "" };
             if ui
                 .selectable_config(format!("{}{tag}##files{i}", p.name))
                 .selected(p.id == id)

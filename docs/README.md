@@ -45,7 +45,7 @@ That is all: no command line is needed. The integer upscale of the game and the 
 
 F10 opens the settings menu inside the output window. Every parameter of the tube is there, in panels by topic; changes apply at once and are saved. Hover a label for what it does.
 
-- **Presets:** ten tube presets ship with the app (Sony PVM and BVM monitors, a Trinitron TV, the GDM-F520 PC monitor, a slot-mask TV, a consumer TV, an NEC CromaClear, an arcade monitor, VGA and delta-dot monitors). They are starting points built from published data, not measurements of one unit. Pick one, change anything, save your own.
+- **Presets:** ten tube presets ship with the app (Sony PVM and BVM monitors, a Trinitron TV, the GDM-F520 PC monitor, a slot-mask TV, a consumer TV, an NEC CromaClear, an arcade monitor, VGA and delta-dot monitors). They are starting points built from published data, not measurements of one unit. Pick one, change anything, save your own. The list shows the shipped presets first, then a separator, then yours, each group sorted by name; the next and previous preset keys follow the same order.
 - **Mask:** aperture grille, slot mask or delta dot, and its pitch in millimetres.
 - **Beam and scanlines:** the spot width and how it grows with brightness, which shapes the scanlines.
 - **Geometry:** curvature, overscan, pincushion, convergence and colour fringes.
