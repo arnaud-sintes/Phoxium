@@ -7,7 +7,7 @@
 //! identity, and skipped, while the target is `none`.
 
 use ash::vk;
-use crt_model::target::{Transform, CURVE_LEN};
+use crt_model::target::{Transform, CURVE_LEN, DAC_CHANNEL_LEN};
 
 use super::{ComputePass, Domain, Registration, Stage};
 use crate::gpu::{Context, FrameConstants};
@@ -33,10 +33,11 @@ const KIND_CURVE: i32 = 1;
 const KIND_PALETTE: i32 = 2;
 const KIND_DAC: i32 = 3;
 const KIND_SIGNAL: i32 = 4;
+const KIND_DAC15: i32 = 5;
 
 /// The push constants of `target.comp` (std430, 100 bytes): the matrix row by row and its scalars, the curve (or the
 /// bytes of a palette) packed four entries to a word, the bits per channel of the device code (0 = no recovery) and the
-/// kind (0 matrix, 1 curve, 2 palette, 3 dac, 4 signal).
+/// kind (0 matrix, 1 curve, 2 palette, 3 dac, 4 signal, 5 dac15: a dac of 9 to 15 points).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -121,16 +122,35 @@ pub(super) fn plan(p: &Params) -> Push {
                 ..identity
             }
         }
+        Transform::Dac(d) if d.len() > DAC_CHANNEL_LEN => {
+            // More than eight points (the Mega Drive's 15 levels): the 15 input levels, then the 15 output codes, the same
+            // on the three channels (a file with an output of its own for green or blue is refused above eight points),
+            // one byte each, four to a word: 30 of the 32 bytes.
+            debug_assert!(d.output_green.is_none() && d.output_blue.is_none());
+            let mut table = [0u32; CURVE_LEN / 4];
+            for (i, v) in d.input.iter().chain(&d.output).enumerate() {
+                table[i / 4] |= u32::from(*v) << (8 * (i % 4));
+            }
+            Push {
+                table,
+                out_scale: (1.0 / d.output_max) as f32,
+                bits: 0,
+                kind: KIND_DAC15,
+                ..identity
+            }
+        }
         Transform::Dac(d) => {
             // Eight input levels, then the eight output codes of red, of green and of blue (the same eight three
-            // times for a DAC with no channel of its own), one byte each, four to a word.
+            // times for a DAC with no channel of its own), one byte each, four to a word. A DAC of 8 points or fewer
+            // repeats its last point in the arrays, so the first eight entries hold all of it.
             let mut table = [0u32; CURVE_LEN / 4];
             let bytes = d
                 .input
                 .iter()
-                .chain(d.output_of(0))
-                .chain(d.output_of(1))
-                .chain(d.output_of(2));
+                .take(DAC_CHANNEL_LEN)
+                .chain(d.output_of(0).iter().take(DAC_CHANNEL_LEN))
+                .chain(d.output_of(1).iter().take(DAC_CHANNEL_LEN))
+                .chain(d.output_of(2).iter().take(DAC_CHANNEL_LEN));
             for (i, v) in bytes.enumerate() {
                 table[i / 4] |= u32::from(*v) << (8 * (i % 4));
             }
@@ -363,28 +383,58 @@ mod tests {
         assert_ne!(plan(&with_variant(2)).table, a.table);
     }
 
-    /// The Mega Drive: eight input levels, then eight output codes, one byte each. Variant 1 is Genesis Plus GX (steps of
-    /// 34, the default), 2 Kega Fusion (33), 3 Regen (32); a number past the last gives the first.
+    /// The Mega Drive: variant 1 is Genesis Plus GX (the default, 17 per level on the 15 levels): kind 5, the 15 input
+    /// levels then the 15 output codes, one byte each, the same on the three channels. Variant 2 Kega Fusion (steps of 33)
+    /// and 3 Regen (32) keep the eight normal levels: kind 3, eight input levels, then eight output codes (three times); a
+    /// number past the last gives the first.
     #[test]
     fn the_dac_is_packed_as_input_levels_then_output_codes() {
         let md = |variant: i32| Params {
             source_colour_variant: variant,
             ..with(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE)
         };
+        let word = |a: [u32; 4]| a[0] | a[1] << 8 | a[2] << 16 | a[3] << 24;
         let gpgx = plan(&md(1));
-        assert_eq!((gpgx.kind, gpgx.bits), (3, 0));
-        // Inputs 0, 34, 68, 102 then 136, 170, 204, 238; outputs 0, 52, 87, 116 then 144, 172, 206, 255.
-        assert_eq!(gpgx.table[..4], [0x6644_2200, 0xEECC_AA88, 0x7457_3400, 0xFFCE_AC90]);
-        // A DAC with no green or blue of its own repeats the red outputs for both: the same map on the three channels.
-        assert_eq!(gpgx.table[4..6], gpgx.table[2..4]);
-        assert_eq!(gpgx.table[6..], gpgx.table[2..4]);
+        assert_eq!((gpgx.kind, gpgx.bits), (5, 0));
+        // Bytes 0 to 14: the inputs 0, 17, ... 238; bytes 15 to 29: the outputs 0, 29, 52, 70, 87, 101, 116, 130, 144, 158,
+        // 172, 187, 206, 228, 255; bytes 30 and 31 are unused.
+        assert_eq!(
+            gpgx.table,
+            [
+                word([0, 17, 34, 51]),
+                word([68, 85, 102, 119]),
+                word([136, 153, 170, 187]),
+                word([204, 221, 238, 0]),
+                word([29, 52, 70, 87]),
+                word([101, 116, 130, 144]),
+                word([158, 172, 187, 206]),
+                word([228, 255, 0, 0]),
+            ]
+        );
         assert!((f64::from(gpgx.out_scale) - 1.0 / 255.0).abs() < 1e-9);
         let kega = plan(&md(2));
+        assert_eq!((kega.kind, kega.bits), (3, 0));
         assert_eq!(kega.table[0], 0x6342_2100, "0, 33, 66, 99");
-        assert_eq!(kega.table[2..], gpgx.table[2..], "the same measured outputs");
+        // Outputs 0, 52, 87, 116 then 144, 172, 206, 255.
+        assert_eq!(kega.table[2..4], [0x7457_3400, 0xFFCE_AC90]);
+        // A DAC with no green or blue of its own repeats the red outputs for both: the same map on the three channels.
+        assert_eq!(kega.table[4..6], kega.table[2..4]);
+        assert_eq!(kega.table[6..], kega.table[2..4]);
+        assert!((f64::from(kega.out_scale) - 1.0 / 255.0).abs() < 1e-9);
         let regen = plan(&md(3));
-        assert_eq!(regen.table[0], 0x6040_2000, "0, 32, 64, 96");
+        assert_eq!((regen.kind, regen.table[0]), (3, 0x6040_2000), "0, 32, 64, 96");
+        assert_eq!(regen.table[2..], kega.table[2..], "the same measured outputs");
         assert_eq!(plan(&md(20)).table, gpgx.table, "past the last emulator: the first");
+    }
+
+    /// The shader keeps its two dac layouts apart: kind 5 reads 15 inputs then 15 outputs.
+    #[test]
+    fn the_shader_reads_the_fifteen_point_dac_layout() {
+        let glsl = include_str!("../../../../../shaders/target.comp");
+        assert!(glsl.contains("else if (pc.kind == 5)"));
+        assert!(glsl.contains("table_byte(15 + i), table_byte(16 + i)"));
+        assert!(glsl.contains("clamp(x * 255.0, table_byte(0), table_byte(14))"));
+        assert_eq!(super::KIND_DAC15, 5);
     }
 
     /// The Master System: four codes with the last point repeated, and the blue of its own in the last eight bytes. Variant

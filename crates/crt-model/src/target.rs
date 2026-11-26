@@ -18,8 +18,9 @@
 //!   output (the Neo Geo's ladder levels, [`ladder_output`], and its dark bit and shadow).
 //! - [`Dac`], a console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): a piecewise linear map
 //!   from the levels the emulator shows to the measured levels. It has no device code to recover: the levels are the
-//!   points of the map. It may have fewer codes (the Master System's 4, the last point repeated) and its own output
-//!   codes for green and blue (the Master System's first VDP raises the first step of blue).
+//!   points of the map. It may have fewer codes (the Master System's 4, the last point repeated), up to 15 (the Mega
+//!   Drive's normal, shadow and highlight levels on one map) and its own output codes for green and blue (the Master
+//!   System's first VDP raises the first step of blue).
 //! - [`Signal`], a console whose colours are made of a composite signal (C64): the hardware colours as the drive voltages
 //!   a decoder gives ([`decode_yuv`]), and the recognition of each pixel as the nearest hardware colour.
 //! - [`Palette`], a monochrome source shown in four chosen colours (Super Game Boy): the luma of the source picks a
@@ -202,19 +203,29 @@ impl Palette {
     }
 }
 
-/// Codes of a [`Dac`]: 3 bits per channel.
-pub const DAC_LEN: usize = 8;
+/// Points of a [`Dac`] at most: the 15 levels of the Mega Drive's divider (the 8 codes of the normal mode, and the shadow
+/// and highlight modes, each 8 codes on the same 15 levels).
+pub const DAC_LEN: usize = 15;
 
-/// A console whose 3-bit channel codes leave a DAC at measured levels (Mega Drive): what the emulator shows for the
-/// code `i` is the 8-bit level `input[i]` (an emulator choice: a linear step of 34, 33 or 32 for the three that are
+/// Points of a [`Dac`] the shader's first layout holds with an output per channel (`target.comp`, kind 3): up to 8. A DAC
+/// of more points has the same outputs on the three channels (kind 5).
+pub const DAC_CHANNEL_LEN: usize = 8;
+
+/// A console whose channel codes leave a DAC at measured levels (Mega Drive, Master System): what the emulator shows for
+/// the code `i` is the 8-bit level `input[i]` (an emulator choice: a linear step of 34, 33 or 32 for the three that are
 /// documented), what the console outputs is `output[i] / output_max`. A level between two input levels (a scaled
-/// picture, the Mega Drive's shadow and highlight half steps) is mapped on the straight line between the two points, a
-/// level below the first or above the last input level takes the nearest output.
+/// picture) is mapped on the straight line between the two points, a level below the first or above the last input
+/// level takes the nearest output.
 ///
-/// A DAC of fewer than 8 codes (the Master System's 2 bits, 4 codes) repeats its last point to fill the arrays: the map
-/// stops at the first repetition, which is never reached as the lower end of a segment. The green and blue channels have
-/// their own output codes when the source gives them (the Master System's first VDP raises the first step of blue);
-/// `None` is the red channel's `output`, the same for the three (every other DAC target).
+/// A DAC of fewer than [`DAC_LEN`] points (the Master System's 2 bits, 4 codes; the Mega Drive's 8 codes of the normal
+/// mode behind an emulator that does not show the shadow and highlight levels) repeats its last point to fill the arrays:
+/// the map stops at the first repetition, which is never reached as the lower end of a segment. A DAC of 15 points puts
+/// the three modes of the Mega Drive on one map: the normal mode takes every second level, the shadow mode the first 8
+/// and the highlight mode the last 8, so that an emulator which shows each of the 15 levels as its own 8-bit value
+/// (Genesis Plus GX, 17 per level) has its shadow and highlight pixels at the measured levels. The green and blue
+/// channels have their own output codes when the source gives them (the Master System's first VDP raises the first step
+/// of blue; at most [`DAC_CHANNEL_LEN`] points); `None` is the red channel's `output`, the same for the three (every
+/// other DAC target).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Dac {
     /// The 8-bit level the emulator shows for each code, strictly increasing up to the last distinct level.
@@ -231,6 +242,16 @@ pub struct Dac {
 }
 
 impl Dac {
+    /// The number of distinct points: the padding repeats the last one.
+    pub fn len(&self) -> usize {
+        1 + self.input.windows(2).filter(|w| w[1] > w[0]).count()
+    }
+
+    /// Never empty: a DAC has at least two points.
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+
     /// The output codes of channel `c` (0 red, 1 green, 2 blue).
     pub fn output_of(&self, c: usize) -> &[u8; DAC_LEN] {
         match c {
@@ -624,15 +645,94 @@ mod tests {
         assert_eq!(Transform::Palette(p).input_bits(), 8);
     }
 
-    /// The Mega Drive DAC of TmEE''s scope readings (normal mode) behind a Genesis Plus GX picture (step 34).
+    /// The points of `a` padded to the arrays of a [`Dac`] with the last one repeated.
+    fn pad<const N: usize>(a: [u8; N]) -> [u8; DAC_LEN] {
+        std::array::from_fn(|i| a[i.min(N - 1)])
+    }
+
+    /// The Mega Drive DAC of TmEE''s scope readings (normal mode, 8 points) behind an emulator that shows a step of 34
+    /// per code and nothing in between (the map of Kega Fusion and Regen, with their own steps).
     fn md_gpgx() -> Dac {
         Dac {
-            input: [0, 34, 68, 102, 136, 170, 204, 238],
-            output: [0, 52, 87, 116, 144, 172, 206, 255],
+            input: pad([0, 34, 68, 102, 136, 170, 204, 238]),
+            output: pad([0, 52, 87, 116, 144, 172, 206, 255]),
             output_green: None,
             output_blue: None,
             output_max: 255.0,
         }
+    }
+
+    /// TmEE's 15 levels of the divider output in mV (SpritesMind forum), from black to the top level.
+    const MD_MV: [f64; 15] = [
+        0.0, 108.0, 192.0, 261.0, 324.0, 378.0, 432.0, 483.0, 537.0, 588.0, 642.0, 699.0, 768.0, 849.0, 951.0,
+    ];
+
+    /// The Mega Drive's 15 levels behind Genesis Plus GX, which shows each of them as 17 times its index (the normal code
+    /// n is the level 2n, 34 n; the shadow code n the level n, 17 n; the highlight code n the level 7 + n).
+    fn md_gpgx15() -> Dac {
+        Dac {
+            input: std::array::from_fn(|k| 17 * k as u8),
+            output: [0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255],
+            output_green: None,
+            output_blue: None,
+            output_max: 255.0,
+        }
+    }
+
+    /// Hand derivation: 951 mV is 255, so 108 mV is 108 / 951 x 255 = 28.96, 192 mV is 51.48, 261 mV is 69.98, 378 mV is
+    /// 101.35, 483 mV is 129.51, 588 mV is 157.67, 699 mV is 187.4 and 849 mV is 227.6, each within a level of the
+    /// 15 outputs; the normal mode (the even levels) is the 8 outputs of the published table, the shadow mode (levels 0 to
+    /// 7) ends at 130 and the highlight mode (levels 7 to 14) starts at it. All of this at no more than half a level.
+    #[test]
+    fn dac_of_fifteen_levels_is_the_951_mv_scaling_and_the_normal_levels_are_the_even_ones() {
+        let d = md_gpgx15();
+        assert_eq!(d.len(), 15);
+        for (k, (mv, out)) in MD_MV.iter().zip(d.output).enumerate() {
+            let want = mv / 951.0 * 255.0;
+            assert!(
+                (want - f64::from(out)).abs() <= 0.52,
+                "level {k}: {mv} mV is {want}, written {out}"
+            );
+        }
+        // The normal mode is the even levels: they are the 8-point map, level for level.
+        let normal = md_gpgx();
+        assert_eq!(normal.len(), 8);
+        for n in 0..8 {
+            assert_eq!(d.output[2 * n], normal.output[n], "normal code {n}");
+            assert_eq!(d.input[2 * n], normal.input[n], "normal code {n}");
+        }
+        // The shadow mode is the first 8 levels, the highlight mode the last 8, sharing level 7 (130).
+        assert_eq!(d.output[..8], [0, 29, 52, 70, 87, 101, 116, 130]);
+        assert_eq!(d.output[7..], [130, 144, 158, 172, 187, 206, 228, 255]);
+        // Genesis Plus GX: shadow n is 17 n (0 to 119), normal n is 34 n (0 to 238), highlight n is 119 + 17 n: every one is
+        // a point of the map, so every pixel of such a picture is at its measured level (the normal ones as before).
+        for n in 0..8u32 {
+            for (name, level, want) in [
+                ("shadow", 17 * n, d.output[n as usize]),
+                ("normal", 34 * n, normal.output[n as usize]),
+                ("highlight", 119 + 17 * n, d.output[7 + n as usize]),
+            ] {
+                let got = d.apply([f64::from(level) / 255.0; 3]);
+                assert!(
+                    got.iter().all(|c| close(*c, f64::from(want) / 255.0, 1e-12)),
+                    "{name} {n}: level {level} gives {got:?}, want {want}"
+                );
+            }
+        }
+        // The coincidences are not ambiguous: 119 is shadow 7 and highlight 0, 136 normal 4 and highlight 1, 170 normal 5 and
+        // highlight 3, 204 normal 6 and highlight 5, 238 normal 7 and highlight 7; each pair has one measured level.
+        for (level, k) in [(119, 7), (136, 8), (170, 10), (204, 12), (238, 14)] {
+            assert_eq!(level, 17 * k);
+            let got = d.apply([f64::from(level) / 255.0; 3])[0];
+            assert!(close(got, f64::from(d.output[k as usize]) / 255.0, 1e-12));
+        }
+        // The first shadow step is at 29, not at the 26 of the 8-point map's straight line.
+        assert!(close(d.apply([17.0 / 255.0; 3])[0], 29.0 / 255.0, 1e-12));
+        assert!(close(normal.apply([17.0 / 255.0; 3])[0], 26.0 / 255.0, 1e-12));
+        // Halfway between two levels is on the line between them.
+        assert!(close(d.apply([25.5 / 255.0; 3])[0], 40.5 / 255.0, 1e-12));
+        assert_eq!(d.apply([0.0; 3]), [0.0; 3]);
+        assert_eq!(d.apply([1.0; 3]), [1.0; 3]);
     }
 
     /// Hand derivation: the code 3 of a Genesis Plus GX picture is 102 of 255 and goes to 116 of 255 (the third measured
@@ -669,7 +769,7 @@ mod tests {
     #[test]
     fn dac_input_levels_are_the_emulators() {
         let regen = Dac {
-            input: [0, 32, 64, 96, 128, 160, 192, 224],
+            input: pad([0, 32, 64, 96, 128, 160, 192, 224]),
             ..md_gpgx()
         };
         assert!(close(regen.apply([224.0 / 255.0; 3])[0], 1.0, 1e-12));
@@ -683,10 +783,10 @@ mod tests {
     /// VDP of the scope reading, red and green at 85 per step, the first step of blue at 104.
     fn sms_scope() -> Dac {
         Dac {
-            input: [0, 85, 170, 255, 255, 255, 255, 255],
-            output: [0, 85, 170, 255, 255, 255, 255, 255],
+            input: pad([0, 85, 170, 255]),
+            output: pad([0, 85, 170, 255]),
             output_green: None,
-            output_blue: Some([0, 104, 170, 255, 255, 255, 255, 255]),
+            output_blue: Some(pad([0, 104, 170, 255])),
             output_max: 255.0,
         }
     }

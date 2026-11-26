@@ -43,7 +43,8 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use crt_model::target::{
-    decode_yuv, Curve, Dac, Matrix, Palette, Signal, Transform, CURVE_LEN, DAC_LEN, SIGNAL_MAX, U_PER_B_Y, V_PER_R_Y,
+    decode_yuv, Curve, Dac, Matrix, Palette, Signal, Transform, CURVE_LEN, DAC_CHANNEL_LEN, DAC_LEN, SIGNAL_MAX,
+    U_PER_B_Y, V_PER_R_Y,
 };
 use serde::Deserialize;
 
@@ -226,7 +227,7 @@ struct CurveVariant {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct DacFile {
-    /// The output code of each code (2 to 8 codes), the red channel's and, unless a variant gives its own, the three
+    /// The output code of each code (2 to 15 codes), the red channel's and, unless a variant gives its own, the three
     /// channels'.
     output: Vec<u32>,
     output_max: f64,
@@ -238,10 +239,11 @@ struct DacFile {
 struct DacInput {
     id: String,
     name: String,
-    /// The 8-bit level the emulator shows for each code (as many as `output`).
+    /// The 8-bit level the emulator shows for each code (as many as the variant's `output`, else the file's).
     levels: Vec<u32>,
     /// This variant's own output codes, red (and green and blue unless they are given): the Master System's two VDPs
-    /// differ in their output. A variant without it takes the file's `output` for the three channels.
+    /// differ in their output, and the Mega Drive's emulators that show the normal levels only have the 8 even ones of
+    /// the file's 15. A variant without it takes the file's `output` for the three channels.
     output: Option<Vec<u32>>,
     /// The green channel's own codes, only with `output`.
     output_green: Option<Vec<u32>>,
@@ -249,12 +251,12 @@ struct DacInput {
     output_blue: Option<Vec<u32>>,
 }
 
-/// The codes of a `dac` table as the arrays of [`Dac`]: 2 to 8 values of at most 255, the last one repeated to fill the 8.
+/// The codes of a `dac` table as the arrays of [`Dac`]: 2 to 15 values of at most 255, the last one repeated to fill the 15.
 fn dac_codes(file: &str, key: &str, v: &[u32], count: Option<usize>) -> Result<[u8; DAC_LEN], String> {
     if v.len() < 2 || v.len() > DAC_LEN || count.is_some_and(|n| n != v.len()) {
         return Err(format!(
             "{file}: dac.{key} must hold {} entries, it has {}",
-            count.map_or("2 to 8".to_string(), |n| n.to_string()),
+            count.map_or("2 to 15".to_string(), |n| n.to_string()),
             v.len()
         ));
     }
@@ -288,7 +290,6 @@ impl DacFile {
         if self.output_max > 255.0 {
             return Err(format!("{file}: dac.output_max must be at most 255"));
         }
-        let count = self.output.len();
         let output = dac_codes(file, "output", &self.output, None)?;
         if output.windows(2).any(|w| w[0] > w[1]) {
             return Err(format!("{file}: dac.output must not decrease"));
@@ -312,6 +313,8 @@ impl DacFile {
             if out.iter().any(|v| v.id == s.id) {
                 return Err(format!("{file}: dac.inputs id \"{}\" is used twice", s.id));
             }
+            // The number of codes of this variant: its own output's, else the file's.
+            let count = s.output.as_ref().map_or(self.output.len(), Vec::len);
             let input = dac_codes(file, &format!("inputs {} levels", s.id), &s.levels, Some(count))?;
             if input[..count].windows(2).any(|w| w[0] >= w[1]) {
                 return Err(format!("{file}: dac.inputs {} levels must strictly increase", s.id));
@@ -319,6 +322,12 @@ impl DacFile {
             if s.output.is_none() && (s.output_green.is_some() || s.output_blue.is_some()) {
                 return Err(format!(
                     "{file}: dac.inputs {} output_green and output_blue need its own output",
+                    s.id
+                ));
+            }
+            if count > DAC_CHANNEL_LEN && (s.output_green.is_some() || s.output_blue.is_some()) {
+                return Err(format!(
+                    "{file}: dac.inputs {} output_green and output_blue are limited to {DAC_CHANNEL_LEN} codes",
                     s.id
                 ));
             }
@@ -1475,32 +1484,76 @@ mod tests {
         }
     }
 
-    /// The Mega Drive file: the measured levels and three emulator variants of known steps, the first one (variant 1,
-    /// the default) Genesis Plus GX; the palette-style number picks one.
+    /// The Mega Drive file: the 15 measured levels and three emulator variants, the first one (variant 1, the default)
+    /// Genesis Plus GX on all 15 levels (17 per level: normal, shadow and highlight), Kega Fusion and Regen on the 8 normal
+    /// levels with their steps of 33 and 32; the palette-style number picks one.
     #[test]
     fn the_mega_drive_file_holds_the_measured_levels_and_the_emulator_variants() {
         let t = for_value(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE).expect("md");
         let Transform::Dac(d) = t.transform else { panic!("dac") };
-        assert_eq!(d.output, [0, 52, 87, 116, 144, 172, 206, 255]);
+        assert_eq!(d.len(), 15);
+        assert_eq!(
+            d.output,
+            [0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255]
+        );
         assert_eq!(
             d.input,
-            [0, 34, 68, 102, 136, 170, 204, 238],
-            "the first variant is Genesis Plus GX"
+            std::array::from_fn(|k| 17 * k as u8),
+            "the first variant is Genesis Plus GX, 17 per level"
         );
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, ["genesis_plus_gx", "kega_fusion", "regen"]);
         let names: Vec<&str> = t.variants.iter().map(|v| v.name.as_str()).collect();
         assert_eq!(names, ["Genesis Plus GX", "Kega Fusion", "Regen"]);
-        // The steps of the three emulators: 34, 33 and 32 per code.
-        for (v, step) in t.variants.iter().zip([34u8, 33, 32]) {
-            let Transform::Dac(d) = v.transform else { panic!("dac") };
-            assert_eq!(d.input, std::array::from_fn(|i| step * i as u8), "{}", v.id);
+        // The normal mode of Genesis Plus GX is its 34 per code (the even levels), as before.
+        for n in 0..8 {
+            assert_eq!(d.input[2 * n], 34 * n as u8, "normal code {n}");
         }
-        // The measured levels come from TmEE's 15 mV levels, every second one, scaled so that 951 mV is 255.
-        let mv: [f64; 8] = [0.0, 192.0, 324.0, 432.0, 537.0, 642.0, 768.0, 951.0];
-        for (m, out) in mv.iter().zip(d.output) {
-            assert!((m / 951.0 * 255.0 - f64::from(out)).abs() <= 0.6, "{m} mV is {out}");
+        // The steps of the two other emulators: 33 and 32 per code, 8 points each, the normal levels (the even entries of
+        // the 15 levels), the last point repeated.
+        for (v, step) in t.variants[1..].iter().zip([33u8, 32]) {
+            let Transform::Dac(e) = v.transform else { panic!("dac") };
+            assert_eq!(e.len(), 8, "{}", v.id);
+            assert_eq!(
+                e.input[..8],
+                std::array::from_fn::<u8, 8, _>(|i| step * i as u8),
+                "{}",
+                v.id
+            );
+            assert!(e.input[8..].iter().all(|&i| i == e.input[7]), "{}", v.id);
+            for n in 0..8 {
+                assert_eq!(e.output[n], d.output[2 * n], "{} normal code {n}", v.id);
+            }
+            assert!(e.output[8..].iter().all(|&o| o == 255), "{}", v.id);
         }
+        // The 15 levels are TmEE's 15 mV levels scaled so that 951 mV is 255 (half a level either side at 51.5 and 129.5).
+        let mv: [f64; 15] = [
+            0.0, 108.0, 192.0, 261.0, 324.0, 378.0, 432.0, 483.0, 537.0, 588.0, 642.0, 699.0, 768.0, 849.0, 951.0,
+        ];
+        for (k, (m, out)) in mv.iter().zip(d.output).enumerate() {
+            assert!(
+                (m / 951.0 * 255.0 - f64::from(out)).abs() <= 0.52,
+                "level {k}: {m} mV is {out}"
+            );
+        }
+        // The normal levels are the even ones: the published table of eight.
+        let normal: Vec<u8> = (0..8).map(|n| d.output[2 * n]).collect();
+        assert_eq!(normal, [0, 52, 87, 116, 144, 172, 206, 255]);
+        // Shadow is levels 0 to 7 and highlight levels 7 to 14, in the shared 15 points.
+        assert_eq!(d.output[..8], [0, 29, 52, 70, 87, 101, 116, 130]);
+        assert_eq!(d.output[7..], [130, 144, 158, 172, 187, 206, 228, 255]);
+        // Every Genesis Plus GX pixel (shadow 17 n, normal 34 n, highlight 119 + 17 n) is at its measured level.
+        for n in 0..8usize {
+            let at = |level: usize| t.select(1).apply([level as f64 / 255.0; 3])[0] * 255.0;
+            assert!((at(17 * n) - f64::from(d.output[n])).abs() < 1e-9, "shadow {n}");
+            assert!((at(34 * n) - f64::from(d.output[2 * n])).abs() < 1e-9, "normal {n}");
+            assert!(
+                (at(119 + 17 * n) - f64::from(d.output[7 + n])).abs() < 1e-9,
+                "highlight {n}"
+            );
+        }
+        // Kega Fusion keeps the straight line for a shadow half step (17 is half way from 0 to 33, 26 on 52).
+        assert!((t.select(2).apply([16.5 / 255.0; 3])[0] * 255.0 - 26.0).abs() < 1e-9);
         // `select` takes the 1-based variant; 0, a negative number and a number past the last give the first.
         assert_eq!(t.select(1), t.variants[0].transform);
         assert_eq!(t.select(3), t.variants[2].transform);
@@ -1516,12 +1569,36 @@ mod tests {
         assert!(Target::parse("t.toml", &ok).is_ok());
         let cases = [
             (
-                ok.replace("levels = [0, 34, 68,", "levels = [0, 68, 34,"),
+                ok.replace("levels = [0, 17, 34,", "levels = [0, 34, 17,"),
                 "strictly increase",
             ),
             (
-                ok.replace("output = [0, 52, 87,", "output = [0, 87, 52,"),
+                ok.replace("output = [0, 29, 52,", "output = [0, 52, 29,"),
                 "not decrease",
+            ),
+            (
+                ok.replace("levels = [0, 17, 34,", "levels = [0, 17, 34, 34,"),
+                "must hold 15",
+            ),
+            (
+                ok.replacen("output = [0, 52, 87, 116, 144, 172, 206, 255]", "output = [0, 52, 87]", 1),
+                "must hold 3",
+            ),
+            (
+                ok.replacen(
+                    "levels = [0, 33, 66,",
+                    "output_blue = [0, 52, 87, 116, 144, 172, 206, 255, 255]\nlevels = [0, 33, 66,",
+                    1,
+                ),
+                "must hold 8",
+            ),
+            (
+                ok.replacen(
+                    "153, 170, 187, 204, 221, 238]\n",
+                    "153, 170, 187, 204, 221, 238]\noutput = [0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255]\noutput_blue = [0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255]\n",
+                    1,
+                ),
+                "limited to 8",
             ),
             (ok.replace("id = \"regen\"", "id = \"kega_fusion\""), "twice"),
             (ok.replace("output_max = 255", "output_max = 300"), "output_max"),
@@ -2576,7 +2653,11 @@ mod tests {
             .collect();
         for d in &dacs {
             // Four codes, the last point repeated; the input is the plain 2-bit expansion.
-            assert_eq!(d.input, [0, 85, 170, 255, 255, 255, 255, 255]);
+            assert_eq!(
+                d.input,
+                [0, 85, 170, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255, 255]
+            );
+            assert_eq!(d.len(), 4);
             assert!(d.output[3..].iter().all(|&o| o == 255));
             assert_eq!(d.output_max, 255.0);
             assert_eq!(d.output_green, None, "green is red's on every variant");
@@ -2685,7 +2766,7 @@ mod tests {
             ),
             (
                 ok.replace("output = [0, 90, 173, 255]\noutput_max", "output = [0]\noutput_max"),
-                "2 to 8",
+                "2 to 15",
             ),
             (
                 ok.replace("variant_outputs = \"E:", "variant_outputs = \"X:"),
@@ -2696,9 +2777,28 @@ mod tests {
             let err = Target::parse("t.toml", &text).expect_err(key);
             assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
         }
-        // The Mega Drive file has no variant outputs of its own and no such provenance entry.
+        // A file whose variants have none of their own needs no such entry: the Mega Drive file without its two variant
+        // outputs (and so without the provenance entry) parses, with the 15 levels on every variant of 15 levels.
         let md = for_value(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE).expect("md");
-        assert!(!md.provenance.contains_key("variant_outputs"));
+        assert!(md.provenance.contains_key("variant_outputs"));
+        let md_text = SHIPPED[4].1.to_string();
+        let without = md_text
+            .replace("output = [0, 52, 87, 116, 144, 172, 206, 255]\n", "")
+            .replace(
+                "levels = [0, 33, 66, 99, 132, 165, 198, 231]",
+                "levels = [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238]",
+            )
+            .replace(
+                "levels = [0, 32, 64, 96, 128, 160, 192, 224]",
+                "levels = [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238]",
+            )
+            .replace("id = \"kega_fusion\"", "id = \"kega_fusion_15\"")
+            .replace("id = \"regen\"", "id = \"regen_15\"");
+        let parsed = Target::parse("t.toml", &without).expect("no variant outputs");
+        assert!(parsed
+            .variants
+            .iter()
+            .all(|v| matches!(v.transform, Transform::Dac(d) if d.len() == 15)));
     }
 
     /// The chroma waves of the CGA over one colour cycle of eight steps, by colour index 0 to 7 (B is bit 0, G bit 1, R

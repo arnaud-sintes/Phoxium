@@ -34,11 +34,34 @@ fn sgb_palette(words: [u32; 4]) -> Transform {
     })
 }
 
-/// The Mega Drive DAC behind the emulator that shows `step` per 3-bit code, written independently of the data file.
+/// The Mega Drive DAC behind the emulator that shows `step` per 3-bit code (the 8 normal levels, the last point repeated to
+/// fill the 15 of the arrays), written independently of the data file.
 fn md_dac(step: u8) -> Transform {
     Transform::Dac(Dac {
-        input: std::array::from_fn(|i| step * i as u8),
-        output: [0, 52, 87, 116, 144, 172, 206, 255],
+        input: std::array::from_fn(|i| step * i.min(7) as u8),
+        output: [0, 52, 87, 116, 144, 172, 206, 255, 255, 255, 255, 255, 255, 255, 255],
+        output_green: None,
+        output_blue: None,
+        output_max: 255.0,
+    })
+}
+
+/// The Mega Drive's 15 levels behind Genesis Plus GX (17 per level: normal 34 n, shadow 17 n, highlight 119 + 17 n), the
+/// levels written here from TmEE's millivolts (0, 108, 192, 261, 324, 378, 432, 483, 537, 588, 642, 699, 768, 849, 951)
+/// scaled so that 951 mV is 255 and rounded (the published table has 52 for 51.5), independently of the data file.
+fn md_dac15() -> Transform {
+    let mv = [
+        0.0f64, 108.0, 192.0, 261.0, 324.0, 378.0, 432.0, 483.0, 537.0, 588.0, 642.0, 699.0, 768.0, 849.0, 951.0,
+    ];
+    Transform::Dac(Dac {
+        input: std::array::from_fn(|k| 17 * k as u8),
+        output: std::array::from_fn(|k| {
+            if k == 2 {
+                52
+            } else {
+                (mv[k] / 951.0 * 255.0).round() as u8
+            }
+        }),
         output_green: None,
         output_blue: None,
         output_max: 255.0,
@@ -98,9 +121,10 @@ fn transform(target: u32, variant: i32) -> Transform {
             32 => sgb_palette([0x67FF, 0x2F17, 0x2230, 0x1548]),
             _ => unreachable!(),
         },
-        // Variant 1 is Genesis Plus GX (steps of 34, the default), 2 Kega Fusion (33), 3 Regen (32).
+        // Variant 1 is Genesis Plus GX (17 per level on 15 levels, the default), 2 Kega Fusion (steps of 33 on the 8 normal
+        // levels), 3 Regen (32).
         SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE => match variant {
-            1 => md_dac(34),
+            1 => md_dac15(),
             2 => md_dac(33),
             3 => md_dac(32),
             _ => unreachable!(),
@@ -109,7 +133,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         // padded to eight with the last point. Variant 1 the first VDP with TmEE's levels and a blue first step of 110,
         // 2 the first VDP of the scope (linear red and green, blue 104), 3 the second VDP (89 and 174 on the three).
         SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM => {
-            let pad = |a: [u8; 4]| [a[0], a[1], a[2], a[3], a[3], a[3], a[3], a[3]];
+            let pad = |a: [u8; 4]| std::array::from_fn(|i| a[i.min(3)]);
             let (red, blue) = match variant {
                 1 => ([0, 90, 173, 255], Some([0, 110, 173, 255])),
                 2 => ([0, 85, 170, 255], Some([0, 104, 170, 255])),
@@ -308,7 +332,7 @@ fn target_slot_matches_the_oracle() {
         ("sgb 1-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 1),
         ("sgb 2-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9),
         ("sgb 4-H", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 32),
-        ("md gpgx", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1),
+        ("md gpgx 15 levels", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1),
         ("md kega", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 2),
         ("md regen", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 3),
         ("c64 6569R3", SOURCE_COLOUR_TARGET_COMMODORE_64, 1),
@@ -406,5 +430,91 @@ fn target_slot_matches_the_oracle() {
             );
         }
     }
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The Mega Drive behind Genesis Plus GX (variant 1, the 15-point map of shader kind 5): a picture of the three modes
+/// (shadow n as 17 n, normal n as 34 n, highlight n as 119 + 17 n, for the codes 0 to 7, the channels on different codes)
+/// comes out at the measured levels (0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255 of 255), and Kega
+/// Fusion (variant 2, kind 3) still puts the first shadow half step on the straight line (26).
+#[test]
+fn mega_drive_shadow_and_highlight_levels_come_out_at_the_measured_levels() {
+    let Some(mut gpu) = common::gpu_or_skip("mega_drive_shadow_and_highlight_levels") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&["target"]).unwrap();
+    let measured = [0u32, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255];
+    // One row per mode, 8 codes across; the three channels are on the codes n, n + 3 and n + 5 (mod 8) of the same mode.
+    let mode = |m: usize, n: usize| -> f64 {
+        let level = match m {
+            0 => 17 * n,
+            1 => 34 * n,
+            _ => 119 + 17 * n,
+        };
+        level as f64 / 255.0
+    };
+    let mut rgba = Vec::new();
+    for m in 0..3 {
+        for n in 0..8 {
+            rgba.extend_from_slice(&[
+                mode(m, n) as f32,
+                mode(m, (n + 3) % 8) as f32,
+                mode(m, (n + 5) % 8) as f32,
+                1.0,
+            ]);
+        }
+    }
+    let img = ImageF32 {
+        width: 8,
+        height: 3,
+        rgba,
+    };
+    let p = Params {
+        source_colour_target: SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE,
+        source_colour_variant: 1,
+        ..Params::default()
+    };
+    let out = run(&mut gpu, &img, &p);
+    // The level index of a code in each mode: shadow n, normal 2 n, highlight 7 + n.
+    let index = |m: usize, n: usize| [n, 2 * n, 7 + n][m];
+    let mut worst = 0.0f64;
+    for m in 0..3 {
+        for n in 0..8usize {
+            let px = out.pixel(n as u32, m as u32);
+            for (c, code) in [n, (n + 3) % 8, (n + 5) % 8].into_iter().enumerate() {
+                let want = f64::from(measured[index(m, code)]) / 255.0;
+                let e = (f64::from(px[c]) - want).abs();
+                worst = worst.max(e);
+                assert!(e <= MAX_ERR, "mode {m} code {n} channel {c}: {} want {want}", px[c]);
+            }
+        }
+    }
+    println!("md shadow and highlight: max {worst:.2e}");
+    // The first shadow step (17) is 29, the first highlight step (136) 144.
+    assert!((f64::from(out.pixel(1, 0)[0]) * 255.0 - 29.0).abs() < 0.3);
+    assert!((f64::from(out.pixel(1, 2)[0]) * 255.0 - 144.0).abs() < 0.3);
+    // Kega Fusion keeps the eight normal levels: a picture value of 17 is half way from 0 to 33, so 26 on the line 0 to 52.
+    let kega = Params {
+        source_colour_variant: 2,
+        ..p
+    };
+    let half = ImageF32 {
+        width: 2,
+        height: 1,
+        rgba: vec![
+            16.5 / 255.0,
+            16.5 / 255.0,
+            16.5 / 255.0,
+            1.0,
+            33.0 / 255.0,
+            33.0 / 255.0,
+            33.0 / 255.0,
+            1.0,
+        ],
+    };
+    let out = run(&mut gpu, &half, &kega);
+    assert!((f64::from(out.pixel(0, 0)[1]) * 255.0 - 26.0).abs() < 0.3);
+    assert!((f64::from(out.pixel(1, 0)[1]) * 255.0 - 52.0).abs() < 0.3);
     common::assert_no_validation_messages(&counter);
 }

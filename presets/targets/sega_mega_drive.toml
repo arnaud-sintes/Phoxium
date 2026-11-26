@@ -4,34 +4,38 @@
 schema = 1
 id = "sega_mega_drive"
 name = "Sega Mega Drive / Genesis (measured DAC levels)"
-label = "the Mega Drive's measured colour DAC behind a Genesis Plus GX, Kega Fusion or Regen picture (Colour variant 1 to 3)"
+label = "the Mega Drive's measured colour DAC, shadow and highlight levels included for Genesis Plus GX, behind a Genesis Plus GX, Kega Fusion or Regen picture (Colour variant 1 to 3)"
 kind = "dac"
 notes = """
-The Mega Drive's video chip makes each colour channel from 3 bits (8 levels). Most emulators show them as evenly spaced 8-bit values, but the DAC is not linear: its levels, read with an oscilloscope at the divider output before the RGB encoder, rise 0, 52, 87, 116, 144, 172, 206, 255 (scaled to full white), the middle steps being larger. This target replaces the emulator's levels by those: the code 3 an emulator shows as 102 (Genesis Plus GX) becomes 116.
-The measurement is TmEE's (SpritesMind forum): 15 levels of the divider output from 0 to 951 mV, read on the MD1, several MD2 ASIC revisions and the Genny3 ASIC with identical results on all channels; the normal mode takes every second level. BlastEm uses a table derived from the same voltages (49, 87, 119, 146, 174, 206 for the middle codes, up to 3 apart). Open questions: the white scale (an argument says the 4.7 V code corresponds to about 0.9 V at the video encoder, which would make full white 238 and not 255; here the top level is full white), the black level (about 6 IRE), and the effect of the TV (brightness, contrast, the encoder's loading: the numbers are DAC outputs on the board, not at the television). No gamma is modelled.
-The input levels depend on the emulator (Colour variant: 1 Genesis Plus GX, the default, 2 Kega Fusion, 3 Regen): Genesis Plus GX shows a linear step of 34 per code (0 to 238, 'raw internal RGB'), Kega Fusion 33, Regen 32; the other emulators are not documented here, and BlastEm already shows the measured levels (leave the target off for it). A level between two codes (a scaled picture, the shadow and highlight half steps of a Genesis Plus GX picture) is placed on the straight line between the two points; the measured shadow and highlight levels (0, 29, 52, 70, 87, 101, 116, 130 and 130, 144, 158, 172, 187, 206, 228, 255) are not applied, so a shadowed pixel comes out a few levels off (26 for 29 at the first step).
+The Mega Drive's video chip makes each colour channel from 3 bits (8 levels) in each of three modes, normal, shadow and highlight. Most emulators show the 8 codes as evenly spaced 8-bit values, but the DAC is not linear: its 15 levels, read with an oscilloscope at the divider output before the RGB encoder, rise 0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255 (scaled to full white, 951 mV). The normal mode takes every second level (0, 52, 87, 116, 144, 172, 206, 255, the middle steps being larger), the shadow mode the first eight (0 to 130) and the highlight mode the last eight (130 to 255). This target replaces the emulator's levels by those: the code 3 an emulator shows as 102 (Genesis Plus GX) becomes 116.
+The measurement is TmEE's (SpritesMind forum): 15 levels of the divider output from 0 to 951 mV, read on the MD1, several MD2 ASIC revisions and the Genny3 ASIC with identical results on all channels. BlastEm uses a table derived from the same voltages (49, 87, 119, 146, 174, 206 for the middle codes, up to 3 apart).
+The input levels depend on the emulator (Colour variant: 1 Genesis Plus GX, the default, 2 Kega Fusion, 3 Regen). Genesis Plus GX shows each of the 15 levels as 17 times its index (a 4-bit value copied into both halves of the byte): the normal code n is level 2n and 34 n (0 to 238, 'raw internal RGB'), the shadow code n is level n and 17 n (0 to 119), the highlight code n is level 7 + n and 119 + 17 n (119 to 238). The three modes therefore sit on the same 15 points of one map, and a pixel is at its measured level in every mode with no ambiguity (119 is shadow 7 and highlight 0, both level 7, 130; 136 is normal 4 and highlight 1, both level 8, 144; 170, 204 and 238 likewise, each a function of the level only): the first shadow step is 29 and not the 26 of a straight line from 0 to 52. This is the 32-bit (8 bits per channel) picture of Genesis Plus GX; its builds of fewer bits per channel are not modelled. Kega Fusion shows a linear step of 33 per code and Regen 32, the other emulators are not documented here, and BlastEm already shows the measured levels (leave the target off for it). How Kega Fusion and Regen show the shadow and highlight half steps is not documented here (nothing in the repository, no page read), so those two variants keep the 8 normal levels only, and a level between two codes (a scaled picture, a shadowed pixel of those emulators) is placed on the straight line between the two points, which puts a shadow pixel a few levels off.
+Open questions: the white scale (an argument says the 4.7 V code corresponds to about 0.9 V at the video encoder, which would make full white 238 and not 255; here the top level is full white), the black level (about 6 IRE), and the effect of the TV (brightness, contrast, the encoder's loading: the numbers are DAC outputs on the board, not at the television). No gamma is modelled.
 """
 
 [dac]
-output = [0, 52, 87, 116, 144, 172, 206, 255]
+output = [0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255]
 output_max = 255
 
 [[dac.inputs]]
 id = "genesis_plus_gx"
 name = "Genesis Plus GX"
-levels = [0, 34, 68, 102, 136, 170, 204, 238]
+levels = [0, 17, 34, 51, 68, 85, 102, 119, 136, 153, 170, 187, 204, 221, 238]
 
 [[dac.inputs]]
 id = "kega_fusion"
 name = "Kega Fusion"
 levels = [0, 33, 66, 99, 132, 165, 198, 231]
+output = [0, 52, 87, 116, 144, 172, 206, 255]
 
 [[dac.inputs]]
 id = "regen"
 name = "Regen"
 levels = [0, 32, 64, 96, 128, 160, 192, 224]
+output = [0, 52, 87, 116, 144, 172, 206, 255]
 
 [provenance]
-output = "S: TmEE, MD VDP color levels, SpritesMind forum (gendev.spritesmind.net, topic viewtopic p=27359): oscilloscope at the divider output, 15 levels 0, 108, 192, 261, 324, 378, 432, 483, 537, 588, 642, 699, 768, 849, 951 mV; the normal mode is the even levels 0, 192, 324, 432, 537, 642, 768, 951 mV, which scaled so that 951 mV is 255 give 0, 51.5, 86.9, 115.8, 144.0, 172.1, 205.9, 255 and are written 0, 52, 87, 116, 144, 172, 206, 255 as the published table has them (the first step is 51.5, half a level either side); Eke's voltages 0, 0.9, 1.6, 2.2, 2.7, 3.2, 3.8, 4.7 V agree to within the rounding of the voltages"
+output = "S: TmEE, MD VDP color levels, SpritesMind forum (gendev.spritesmind.net, topic viewtopic p=27359): oscilloscope at the divider output, 15 levels 0, 108, 192, 261, 324, 378, 432, 483, 537, 588, 642, 699, 768, 849, 951 mV; scaled so that 951 mV is 255 they give 0, 29.0, 51.5, 70.0, 86.9, 101.4, 115.8, 129.5, 144.0, 157.7, 172.1, 187.4, 205.9, 227.6, 255 and are written 0, 29, 52, 70, 87, 101, 116, 130, 144, 158, 172, 187, 206, 228, 255 (the two halves 51.5 and 129.5 are half a level either side; 52 is the published table's normal level); the normal mode is the even levels, shadow the first eight and highlight the last eight (the same TODO and QUESTIONS reading, Eke's and Mask of Destiny's values differ by up to 3); Eke's voltages 0, 0.9, 1.6, 2.2, 2.7, 3.2, 3.8, 4.7 V agree to within the rounding of the voltages"
 output_max = "K: 8-bit output code; the white scale is open (255 here, 238 if 4.7 V is 0.9 V at the encoder)"
-inputs = "E: Genesis Plus GX step 34 and maximum 238 (Eke, GPGX issue 345); Kega Fusion step 33, white 0xE7 and Regen step 32, white 0xE0 (forum analyses on SpritesMind, topic viewtopic p=33557); not read in the emulators' code"
+inputs = "E: Genesis Plus GX 17 per level on the 15 levels (normal n is 34 n, shadow n is 17 n, highlight n is 119 + 17 n; maximum 238 = 14 x 17 = 0xEE, stated by ekeeke in GPGX issue 345 and Eke; the shadow and highlight convention read on 2026-11-26 as a description of the pixel macro of the emulator's vdp_render.c, a 4-bit value per channel copied into both nibbles of the byte, shadow n, normal 2 n, highlight 7 + n: only these numbers are used, no code or table is copied, and the source file was not read line by line); Kega Fusion step 33, white 0xE7 and Regen step 32, white 0xE0 (forum analyses on SpritesMind, topic viewtopic p=33557), their shadow and highlight levels not documented; not read in those two emulators' code"
+variant_outputs = "D: Kega Fusion and Regen take the eight normal levels, the even entries of output (0, 52, 87, 116, 144, 172, 206, 255), as the file had them before the shadow and highlight levels were applied to Genesis Plus GX"
