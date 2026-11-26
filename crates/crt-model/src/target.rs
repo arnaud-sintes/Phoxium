@@ -23,6 +23,9 @@
 //!   System's first VDP raises the first step of blue).
 //! - [`Signal`], a console whose colours are made of a composite signal (C64): the hardware colours as the drive voltages
 //!   a decoder gives ([`decode_yuv`]), and the recognition of each pixel as the nearest hardware colour.
+//! - [`Lut`], a console whose 9-bit RGB codes go through a table of 512 colours that is not a function of the channels (the
+//!   PC Engine's composite encoder): the code is recovered exactly from the 3-bit levels ([`lut_index`]) and the entry is the
+//!   colour ([`decode_pbpr`] makes it from the table's 5-bit Y, U and V).
 //! - [`Palette`], a monochrome source shown in four chosen colours (Super Game Boy): the luma of the source picks a
 //!   position between the colours. It has no device code to recover.
 //!
@@ -342,8 +345,85 @@ impl Signal {
     }
 }
 
-/// The transform of a target. A [`Signal`] is a few kilobytes of colours: the enum stays `Copy` for the cheap small kinds and
-/// is only built and read, never stored in bulk.
+/// Colours of a [`Lut`]: every 9-bit RGB code (3 bits a channel) of the PC Engine's video colour encoder.
+pub const LUT_LEN: usize = 512;
+
+/// The 3-bit level (0 to 7) of an 8-bit channel code an emulator shows, `None` when the code is not one of the two usual
+/// expansions of a 3-bit level: `255 n / 7` rounded (the bits repeated, `n << 5 | n << 2 | n >> 1`: 0, 36, 73, 109, 146, 182,
+/// 219, 255) or `36 n` (0, 36, 72 ... 252). The level is `(code + 18) / 36`, which both rules land on; the two expansions
+/// differ by at most 3 codes, so a code that is neither (a scaled or filtered picture) is not taken for a level.
+pub fn level3(code: u32) -> Option<u32> {
+    let n = (code + 18) / 36;
+    (n <= 7 && (code == (n << 5 | n << 2 | n >> 1) || code == 36 * n)).then_some(n)
+}
+
+/// The index `G x 64 + R x 8 + B` (the hardware's `GGGRRRBBB`) of the drive voltage `v` when all three channels are 3-bit
+/// levels ([`level3`], within [`RECOVERY_TOLERANCE`] of the whole 8-bit code), `None` otherwise.
+pub fn lut_index(v: [f64; 3]) -> Option<usize> {
+    let mut n = [0u32; 3];
+    for (n, x) in n.iter_mut().zip(v) {
+        let code = (x * 255.0).clamp(0.0, 255.0);
+        let r = code.round();
+        if (code - r).abs() > RECOVERY_TOLERANCE {
+            return None;
+        }
+        *n = level3(r as u32)?;
+    }
+    Some((n[1] * 64 + n[0] * 8 + n[2]) as usize)
+}
+
+/// The signed value of a chroma code in the 1's complement form of the PC Engine's colour encoder, over `max`: codes 0 to 15
+/// are -15 to -0 and 16 to 31 are 0 to +15 (`code - 15`, then `code - 16`), so -1 to 1 for `max` 15.
+pub fn ones_complement(code: u32, max: u32) -> f64 {
+    let half = max + 1;
+    (if code < half {
+        f64::from(code) - f64::from(max)
+    } else {
+        f64::from(code - half)
+    }) / f64::from(max)
+}
+
+/// The drive voltages R'G'B' of a luma `y` (0 to 1) and colour-difference voltages `pb`, `pr` (on the scale of the BT.601
+/// maxima, so up to 0.436 and 0.615), decoded with the Rec.601 matrix after a rotation of the chroma plane by `hue_deg`
+/// degrees (`pb' = pb cos - pr sin`, `pr' = pr cos + pb sin`) and a desaturation toward the luma, `saturation` being the share
+/// of the colour kept (`rgb x s + Y x (1 - s)`, 1 for none), clamped to [0, 1]. This is the decode that Kitrinx fitted to
+/// vectorscope plots of a PC Engine Duo-R (`presets/targets/nec_pc_engine_composite.toml`); the matrix is the exact BT.601
+/// one (`(1 - 0.299) / 0.615` for R', which is not [`decode_yuv`]'s rounded `0.877283`).
+pub fn decode_pbpr(y: f64, pb: f64, pr: f64, hue_deg: f64, saturation: f64) -> [f64; 3] {
+    const KR: f64 = 0.299;
+    const KB: f64 = 0.114;
+    const KG: f64 = 1.0 - KR - KB;
+    const U_MAX: f64 = 0.436;
+    const V_MAX: f64 = 0.615;
+    let (s, c) = hue_deg.to_radians().sin_cos();
+    let (pb, pr) = (pb * c - pr * s, pr * c + pb * s);
+    let r = y + pr * ((1.0 - KR) / V_MAX);
+    let g = y - pb * (KB * (1.0 - KB) / (U_MAX * KG)) - pr * (KR * (1.0 - KR) / (V_MAX * KG));
+    let b = y + pb * ((1.0 - KB) / U_MAX);
+    let luma = KR * r + KG * g + KB * b;
+    [r, g, b].map(|c| (c * saturation + luma * (1.0 - saturation)).clamp(0.0, 1.0))
+}
+
+/// A console whose 9-bit RGB codes (the NEC PC Engine, TurboGrafx-16 and SuperGrafx) leave a colour encoder through a
+/// table of 512 entries, one per code, that is not a function of the channels: the composite output of the HuC6260 is
+/// a lookup of 5-bit Y, U and V. The target colour of a pixel is the table entry of its code, recovered exactly ([`lut_index`]:
+/// the emulator's picture is a function of the 9-bit code, there is nothing to search); a pixel that is not a 3-bit level on
+/// all three channels passes through.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Lut {
+    /// The drive voltages R'G'B' of each code, index `G x 64 + R x 8 + B`.
+    pub colours: [[f64; 3]; LUT_LEN],
+}
+
+impl Lut {
+    /// The target colour of the drive voltage `v`: the colour of its code, else itself.
+    pub fn apply(&self, v: [f64; 3]) -> [f64; 3] {
+        lut_index(v).map_or(v, |i| self.colours[i])
+    }
+}
+
+/// The transform of a target. A [`Signal`] and a [`Lut`] are a few kilobytes of colours: the enum stays `Copy` for the cheap small
+/// kinds and is only built and read, never stored in bulk.
 #[derive(Clone, Copy, Debug, PartialEq)]
 #[allow(clippy::large_enum_variant)]
 pub enum Transform {
@@ -352,6 +432,7 @@ pub enum Transform {
     Palette(Palette),
     Dac(Dac),
     Signal(Signal),
+    Lut(Lut),
 }
 
 impl Transform {
@@ -360,7 +441,7 @@ impl Transform {
         match self {
             Transform::Matrix(m) => m.input_bits,
             Transform::Curve(_) => 5,
-            Transform::Palette(_) | Transform::Dac(_) | Transform::Signal(_) => 8,
+            Transform::Palette(_) | Transform::Dac(_) | Transform::Signal(_) | Transform::Lut(_) => 8,
         }
     }
 
@@ -372,6 +453,7 @@ impl Transform {
             Transform::Palette(p) => p.apply(v),
             Transform::Dac(d) => d.apply(v),
             Transform::Signal(s) => s.apply(v),
+            Transform::Lut(l) => l.apply(v),
         }
     }
 }
@@ -1109,5 +1191,129 @@ mod tests {
         assert_eq!(s.apply(s.reference(n + 3)), s.colours[3]);
         // A pixel far from every colour passes through.
         assert_eq!(s.classify([0.0, 1.0, 0.0]), None);
+    }
+
+    /// Both usual expansions of a 3-bit level are recovered (`255 n / 7` rounded and `36 n`), their difference of up to 3 codes
+    /// is not mistaken for a level, and a code that is neither is refused.
+    #[test]
+    fn a_three_bit_level_is_recovered_from_either_expansion() {
+        let rounded = [0u32, 36, 73, 109, 146, 182, 219, 255];
+        for (n, c) in rounded.into_iter().enumerate() {
+            assert_eq!(level3(c), Some(n as u32), "255 n / 7 at {n}");
+            assert_eq!(level3(36 * n as u32), Some(n as u32), "36 n at {n}");
+            assert_eq!(
+                f64::from(c),
+                (255.0 * n as f64 / 7.0).round(),
+                "the bits repeated are 255 n / 7 rounded"
+            );
+        }
+        for c in [1, 35, 37, 54, 74, 100, 128, 145, 253, 254] {
+            assert_eq!(level3(c), None, "{c}");
+        }
+    }
+
+    /// The index is `G x 64 + R x 8 + B` (the hardware's GGGRRRBBB): red 1 is 8, green 1 is 64, blue 1 is 1, white 511. A pixel
+    /// stored in FP16 (up to 0.07 of a code off) is recovered; a code 0.2 off, or any channel that is not a level, is not.
+    #[test]
+    fn a_code_is_recovered_exactly_as_the_channel_order_of_the_hardware() {
+        let px = |r: u32, g: u32, b: u32| [r, g, b].map(|c| f64::from(c) / 255.0);
+        assert_eq!(lut_index(px(0, 0, 0)), Some(0));
+        assert_eq!(lut_index(px(0, 0, 36)), Some(1));
+        assert_eq!(lut_index(px(36, 0, 0)), Some(8));
+        assert_eq!(lut_index(px(0, 36, 0)), Some(64));
+        assert_eq!(lut_index(px(255, 255, 255)), Some(511));
+        // Red 7, green 3, blue 5: 3 x 64 + 7 x 8 + 5.
+        assert_eq!(lut_index(px(255, 109, 182)), Some(253));
+        assert_eq!(lut_index(px(252, 108, 180)), Some(253), "the 36 n expansion");
+        assert_eq!(lut_index([73.06 / 255.0, 0.0, 0.0]), Some(2 * 8));
+        assert_eq!(lut_index([73.2 / 255.0, 0.0, 0.0]), None);
+        assert_eq!(lut_index(px(255, 109, 100)), None, "one channel off the levels");
+        assert_eq!(lut_index([0.5; 3]), None);
+    }
+
+    /// The chroma code is 1's complement: 0 to 15 are -15 to -0, 16 to 31 are 0 to 15 (the code the HuC6260 table holds, 1 to
+    /// 30 in practice).
+    #[test]
+    fn the_chroma_code_is_ones_complement() {
+        assert_eq!(ones_complement(0, 15), -1.0);
+        assert!(close(ones_complement(8, 15), -7.0 / 15.0, 1e-15));
+        assert_eq!(ones_complement(15, 15), 0.0);
+        assert_eq!(ones_complement(16, 15), 0.0);
+        assert!(close(ones_complement(18, 15), 2.0 / 15.0, 1e-15));
+        assert_eq!(ones_complement(31, 15), 1.0);
+    }
+
+    /// The decode of Kitrinx's converter, by hand. White (Y 31, no chroma) and black are 1 and 0, and a grey is its luma (the
+    /// desaturation toward the luma leaves it alone): Y 18 of 31 is 148.06 of 255. The first step of blue (U code 18, V 15, Y 0):
+    /// Pb = 2/15 x 0.436 = 0.058133 and Pr = 0, turned by -10.4 degrees (`pb x c - pr x s`, `pr x c + pb x s`) to Pb' = 0.057178
+    /// and Pr' = -0.010494, which gives R = -0.011962, G = -0.016473, B = 0.116193 (their luma is 0); the negative ones are
+    /// clamped, blue is kept at 192/255: 0.087486, 22.3 of 255.
+    #[test]
+    fn the_pbpr_decode_follows_the_converter() {
+        let keep = 192.0 / 255.0;
+        assert_eq!(decode_pbpr(1.0, 0.0, 0.0, -10.4, keep), [1.0; 3]);
+        assert_eq!(decode_pbpr(0.0, 0.0, 0.0, -10.4, keep), [0.0; 3]);
+        for c in decode_pbpr(18.0 / 31.0, 0.0, 0.0, -10.4, keep) {
+            assert!(close(c * 255.0, 148.06, 0.01), "{c}");
+        }
+        let [r, g, b] = decode_pbpr(0.0, 2.0 / 15.0 * 0.436, 0.0, -10.4, keep);
+        assert_eq!((r, g), (0.0, 0.0));
+        assert!(close(b, 0.087_486_175, 1e-8), "{b}");
+        // No rotation and no desaturation: Pb alone is B' = Y + Pb x 0.886 / 0.436, R' = Y, G' from the luma.
+        let [r, g, b] = decode_pbpr(0.5, 0.1, 0.0, 0.0, 1.0);
+        assert!(close(b, 0.5 + 0.1 * 0.886 / 0.436, 1e-12) && close(r, 0.5, 1e-12));
+        assert!(close(0.299 * r + 0.587 * g + 0.114 * b, 0.5, 1e-12), "the luma is kept");
+        // Desaturation halfway: each channel halfway to the luma.
+        let full = decode_pbpr(0.5, 0.05, 0.05, 0.0, 1.0);
+        let half = decode_pbpr(0.5, 0.05, 0.05, 0.0, 0.5);
+        for c in 0..3 {
+            assert!(close(half[c], 0.5 * full[c] + 0.5 * 0.5, 1e-12), "{c}");
+        }
+    }
+
+    /// The published palette of the converter (`palette.pal`, 8 bits, rounded) for entries of the table: the decode with its
+    /// constants gives the same bytes. Each entry is a (U, V, Y) code triple of the table with the bytes of the palette file
+    /// for the same colour code (all 512 were compared when the target was built, `QUESTIONS.md`).
+    #[test]
+    fn the_decode_reproduces_the_published_palette_entries() {
+        let table: [([u32; 3], [u8; 3]); 8] = [
+            ([16, 15, 0], [0, 0, 0]),
+            ([18, 15, 0], [0, 0, 22]),
+            ([30, 15, 3], [9, 3, 181]),
+            ([14, 18, 1], [26, 0, 3]),
+            ([8, 30, 9], [201, 17, 35]),
+            ([8, 1, 18], [37, 227, 31]),
+            ([23, 30, 13], [218, 28, 224]),
+            ([16, 15, 31], [255, 255, 255]),
+        ];
+        for ([u, v, y], bytes) in table {
+            let c = decode_pbpr(
+                f64::from(y) / 31.0,
+                ones_complement(u, 15) * 0.436,
+                ones_complement(v, 15) * 0.615 * 0.96,
+                -10.4,
+                192.0 / 255.0,
+            );
+            assert_eq!(c.map(|c| (c * 255.0).round() as u8), bytes, "{u} {v} {y}");
+        }
+    }
+
+    /// A lookup replaces a pixel that is a code by that code's colour, whichever expansion the emulator uses, and lets any other
+    /// pixel through; the colour of the code is the entry `G x 64 + R x 8 + B`.
+    #[test]
+    fn a_lut_replaces_the_codes_and_passes_the_rest() {
+        let mut colours = [[0.0; 3]; LUT_LEN];
+        for (i, c) in colours.iter_mut().enumerate() {
+            *c = [i as f64 / 1000.0, 0.25, 1.0 - i as f64 / 1000.0];
+        }
+        let t = Transform::Lut(Lut { colours });
+        assert_eq!(t.input_bits(), 8);
+        let level = |n: u32| f64::from(n << 5 | n << 2 | n >> 1) / 255.0;
+        // Red 5, green 2, blue 7 = 2 x 64 + 5 x 8 + 7 = 175.
+        assert_eq!(t.apply([level(5), level(2), level(7)]), colours[175]);
+        assert_eq!(t.apply([180.0 / 255.0, 72.0 / 255.0, 252.0 / 255.0]), colours[175]);
+        let other = [0.31, 0.5, 0.9];
+        assert_eq!(t.apply(other), other);
+        assert_eq!(t.apply([level(5), level(2), 0.9]), [level(5), level(2), 0.9]);
     }
 }

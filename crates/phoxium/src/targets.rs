@@ -28,6 +28,12 @@
 //! rows = "E: near.sh, ..."
 //! ```
 //!
+//! The `lut` kind (the NEC PC Engine's composite output; `[lut]`, `[[lut.variants]]`) holds a table of 512 entries, one for each
+//! 9-bit RGB colour code in the order of the palette word GGGRRRBBB (`codes`, each `[U, V, Y]` as 5-bit codes: U and V in
+//! 1's complement over `chroma_max`, Y over `y_max`, the scales `u_max` and `v_max` of full-range codes) and the decodes that
+//! turn an entry into drive voltages (`v_gain`, `hue_deg`, `saturation` of each variant: [`decode_pbpr`]). A pixel whose three
+//! channels are 3-bit levels is replaced by the colour of its code; any other pixel passes through.
+//!
 //! The `signal` kind (C64, NES, Atari 8-bit; `[signal]`, `[signal.reference]`, `[[signal.revisions]]`) lists its colours
 //! one by one (`[[signal.colours]]`) or, for a palette that is a grid of hues and luma levels (the Atari's 256), as
 //! `[signal.grid]` (`hues`, `lumas`, the phase `angle` of hue 1): the colour of hue `h` and luma `l` has the index
@@ -43,8 +49,8 @@
 use std::{collections::BTreeMap, sync::OnceLock};
 
 use crt_model::target::{
-    decode_yuv, Curve, Dac, Matrix, Palette, Signal, Transform, CURVE_LEN, DAC_CHANNEL_LEN, DAC_LEN, SIGNAL_MAX,
-    U_PER_B_Y, V_PER_R_Y,
+    decode_pbpr, decode_yuv, ones_complement, Curve, Dac, Lut, Matrix, Palette, Signal, Transform, CURVE_LEN,
+    DAC_CHANNEL_LEN, DAC_LEN, LUT_LEN, SIGNAL_MAX, U_PER_B_Y, V_PER_R_Y,
 };
 use serde::Deserialize;
 
@@ -120,6 +126,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "atari_7800_maria.toml",
         include_str!("../../../presets/targets/atari_7800_maria.toml"),
     ),
+    (
+        "nec_pc_engine_composite.toml",
+        include_str!("../../../presets/targets/nec_pc_engine_composite.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -179,6 +189,7 @@ struct File {
     dac: Option<DacFile>,
     signal: Option<SignalFile>,
     remap: Option<RemapFile>,
+    lut: Option<LutFile>,
     provenance: BTreeMap<String, String>,
 }
 
@@ -934,6 +945,116 @@ impl SignalFile {
         Ok(out)
     }
 }
+
+/// A `lut` file: a table of 512 colour codes, one entry for each 9-bit RGB code of the console's video colour encoder (the PC
+/// Engine's HuC6260: 5-bit U, V and Y), and the decodes (variants) that turn an entry into drive voltages.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LutFile {
+    /// The largest luma code (31): the luma voltage is Y over this.
+    y_max: u32,
+    /// The steps of a chroma code each way in its 1's complement form (15): U and V are the signed code over this.
+    chroma_max: u32,
+    /// The BT.601 maxima that a full-range U and V code stand for (0.436, 0.615).
+    u_max: f64,
+    v_max: f64,
+    /// The entries in the order of the palette word GGGRRRBBB, each `[U, V, Y]` codes.
+    codes: Vec<[u32; 3]>,
+    variants: Vec<LutVariant>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LutVariant {
+    id: String,
+    name: String,
+    /// A gain on V (Kitrinx's 0.96: the V the table gives is slightly too strong for the console).
+    v_gain: f64,
+    /// The turn of the chroma plane in degrees (-10.4).
+    hue_deg: f64,
+    /// The share of the colour kept by the desaturation toward the luma, above 0 and at most 1 (192/255).
+    saturation: f64,
+}
+
+impl LutFile {
+    /// The keys that are present, for the provenance check.
+    fn keys(&self) -> Vec<&'static str> {
+        vec!["codes", "y_max", "chroma_max", "u_max", "v_max", "variants"]
+    }
+
+    /// The decodes as variants: every entry of the table decoded to drive voltages by `decode_pbpr`.
+    fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
+        if self.codes.len() != LUT_LEN {
+            return Err(format!(
+                "{file}: lut.codes must hold {LUT_LEN} entries, one for each 9-bit colour code, not {}",
+                self.codes.len()
+            ));
+        }
+        if self.y_max == 0 || self.y_max > 255 || self.chroma_max == 0 || self.chroma_max > 127 {
+            return Err(format!(
+                "{file}: lut.y_max must be 1 to 255 and lut.chroma_max 1 to 127"
+            ));
+        }
+        positive(file, "lut", "u_max", self.u_max)?;
+        positive(file, "lut", "v_max", self.v_max)?;
+        let chroma_codes = 2 * self.chroma_max + 2;
+        for (i, [u, v, y]) in self.codes.iter().enumerate() {
+            if *u >= chroma_codes || *v >= chroma_codes || *y > self.y_max {
+                return Err(format!(
+                    "{file}: lut.codes entry {i} ({u}, {v}, {y}) is outside U and V 0 to {}, Y 0 to {}",
+                    chroma_codes - 1,
+                    self.y_max
+                ));
+            }
+        }
+        if self.variants.is_empty() || self.variants.len() > MAX_PALETTES {
+            return Err(format!("{file}: lut.variants must hold 1 to {MAX_PALETTES} decodes"));
+        }
+        let mut out: Vec<Variant> = Vec::new();
+        for v in &self.variants {
+            if v.id.is_empty()
+                || !v
+                    .id
+                    .chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+            {
+                return Err(format!(
+                    "{file}: lut.variants id \"{}\" must be lower case letters, digits and '_'",
+                    v.id
+                ));
+            }
+            if out.iter().any(|o| o.id == v.id) {
+                return Err(format!("{file}: lut.variants id \"{}\" is used twice", v.id));
+            }
+            positive(file, "lut.variants", "v_gain", v.v_gain)?;
+            if !v.hue_deg.is_finite() || v.hue_deg.abs() > 180.0 {
+                return Err(format!("{file}: lut.variants hue_deg must be within 180 degrees"));
+            }
+            if !(v.saturation > 0.0 && v.saturation <= 1.0) {
+                return Err(format!(
+                    "{file}: lut.variants saturation must be above 0 and at most 1, the share of the colour kept"
+                ));
+            }
+            let mut colours = [[0.0; 3]; LUT_LEN];
+            for (c, [u, vv, y]) in colours.iter_mut().zip(&self.codes) {
+                *c = decode_pbpr(
+                    f64::from(*y) / f64::from(self.y_max),
+                    ones_complement(*u, self.chroma_max) * self.u_max,
+                    ones_complement(*vv, self.chroma_max) * self.v_max * v.v_gain,
+                    v.hue_deg,
+                    v.saturation,
+                );
+            }
+            out.push(Variant {
+                id: v.id.clone(),
+                name: v.name.clone(),
+                transform: Transform::Lut(Lut { colours }),
+            });
+        }
+        Ok(out)
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaletteFile {
@@ -1207,9 +1328,10 @@ impl Target {
             "dac" => 3,
             "signal" => 4,
             "remap" => 5,
+            "lut" => 6,
             other => {
                 return Err(format!(
-                "{file}: kind \"{other}\" is not \"matrix\", \"curve\", \"palette\", \"dac\", \"signal\" or \"remap\""
+                "{file}: kind \"{other}\" is not \"matrix\", \"curve\", \"palette\", \"dac\", \"signal\", \"remap\" or \"lut\""
             ))
             }
         };
@@ -1220,11 +1342,12 @@ impl Target {
             f.dac.is_some(),
             f.signal.is_some(),
             f.remap.is_some(),
+            f.lut.is_some(),
         ];
         if tables.iter().enumerate().any(|(i, has)| *has != (i == which)) {
             return Err(format!("{file}: kind \"{}\" needs its own table and no other", f.kind));
         }
-        let (transform, keys) = match (&f.matrix, &f.curve, &f.palette, &f.dac, &f.signal, &f.remap) {
+        let (transform, keys) = match (&f.matrix, &f.curve, &f.palette, &f.dac, &f.signal, &f.remap, &f.lut) {
             (Some(m), ..) => {
                 let base = m.matrix(file)?;
                 variants = m.matrix_variants(file, &base)?;
@@ -1245,13 +1368,17 @@ impl Target {
                 variants = d.variants(file)?;
                 (variants[0].transform, d.keys())
             }
-            (_, _, _, _, Some(s), _) => {
+            (_, _, _, _, Some(s), ..) => {
                 variants = s.variants(file)?;
                 (variants[0].transform, s.keys())
             }
-            (_, _, _, _, _, Some(r)) => {
+            (_, _, _, _, _, Some(r), _) => {
                 variants = r.variants(file)?;
                 (variants[0].transform, vec!["references", "variants", "threshold"])
+            }
+            (_, _, _, _, _, _, Some(l)) => {
+                variants = l.variants(file)?;
+                (variants[0].transform, l.keys())
             }
             _ => unreachable!("the kind has its table"),
         };
@@ -1293,12 +1420,20 @@ pub fn by_id(id: &str) -> Option<&'static Target> {
     shipped().iter().find(|t| t.id == id)
 }
 
-/// The colours of the chosen signal target for the `target_table` of the frame uniform buffer
-/// (`gpu::FRAME_TABLE_VEC4` entries): the hardware colours (drive voltages) at entries 0 to count, the reference colours
-/// the classification compares with at entries 64 to 64 + count; `None` when the target is not a signal one.
+/// The colours of the chosen signal or lookup target for the `target_table` of the frame uniform buffer
+/// (`gpu::FRAME_TABLE_VEC4` entries): for a signal target the hardware colours (drive voltages) at entries 0 to count and the
+/// reference colours the classification compares with from entry `SIGNAL_MAX`; for a lookup target (the PC Engine) its
+/// `LUT_LEN` colours at entries 0 up, in the order of the colour code `G x 64 + R x 8 + B`; `None` for any other target.
+/// Only one target is active, so the two uses share the table.
 pub fn frame_table(p: &crate::params::Params) -> Option<Vec<[f32; 4]>> {
     let t = for_value(p.source_colour_target)?;
     match t.select(p.source_colour_variant) {
+        Transform::Lut(l) => Some(
+            l.colours
+                .iter()
+                .map(|c| [c[0] as f32, c[1] as f32, c[2] as f32, 0.0])
+                .collect(),
+        ),
         Transform::Signal(s) => {
             let mut table = vec![[0.0f32; 4]; SIGNAL_MAX + s.count];
             for i in 0..s.count {
@@ -3336,6 +3471,203 @@ mod tests {
                 "provenance.black_index",
             ),
             (ok.replacen("luma_mv = [0, 215,", "luma_mv = [215,", 1), "luma_mv"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The bytes of the converter's published palette (`palette.pal`, rounded 8-bit colours) for colour codes whose (U, V, Y)
+    /// triples are in the table: (index G x 64 + R x 8 + B, U, V, Y, R, G, B). All 512 entries of the palette were compared with
+    /// the decode of this file's table when the target was built; these are the ones typed in here.
+    const PC_ENGINE_PALETTE: [(usize, [u32; 3], [u8; 3]); 12] = [
+        (0, [16, 15, 0], [0, 0, 0]),
+        (1, [18, 15, 0], [0, 0, 22]),
+        (7, [30, 15, 3], [9, 3, 181]),
+        (8, [14, 18, 1], [26, 0, 3]),
+        (9, [17, 18, 2], [32, 5, 33]),
+        (56, [8, 30, 9], [201, 17, 35]),
+        (63, [23, 30, 13], [218, 28, 224]),
+        (73, [16, 15, 4], [33, 33, 33]),
+        (219, [16, 15, 13], [107, 107, 107]),
+        (292, [16, 15, 18], [148, 148, 148]),
+        (448, [8, 1, 18], [37, 227, 31]),
+        (511, [16, 15, 31], [255, 255, 255]),
+    ];
+
+    fn pc_engine() -> &'static Target {
+        for_value(crate::params::SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE).expect("pc engine")
+    }
+
+    /// The PC Engine file: the table has the 512 entries of the silicon dump in the order of the palette word, read back from the
+    /// file text and not from the parsed colours (the ranges, black, white, the blue steps, the first red), the two variants
+    /// are the fitted decode at the converter's V gain and at 14/15, and the colours decoded by the first one are the 8-bit
+    /// bytes of the converter's published palette.
+    #[test]
+    fn the_pc_engine_file_holds_the_silicon_table_and_the_fitted_decode() {
+        let t = pc_engine();
+        assert_eq!(t.variants.len(), 2);
+        assert_eq!(t.variants[0].id, "kitrinx");
+        assert_eq!(t.variants[1].id, "v_gain_14_15");
+        for key in ["codes", "y_max", "chroma_max", "u_max", "v_max", "variants"] {
+            assert!(t.provenance.contains_key(key), "provenance {key}");
+        }
+        // The table as the file spells it.
+        let text = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "nec_pc_engine_composite.toml")
+            .expect("the pc engine file")
+            .1;
+        let v: toml::Value = toml::from_str(text).expect("toml");
+        let codes: Vec<[i64; 3]> = v["lut"]["codes"]
+            .as_array()
+            .expect("codes")
+            .iter()
+            .map(|e| {
+                let e = e.as_array().expect("entry");
+                [0, 1, 2].map(|i| e[i].as_integer().expect("integer"))
+            })
+            .collect();
+        assert_eq!(codes.len(), 512);
+        // Ranges of the dump: U and V from 1 to 30 (never the extremes), Y from 0 to 31.
+        assert!(codes
+            .iter()
+            .all(|c| (1..=30).contains(&c[0]) && (1..=30).contains(&c[1])));
+        assert!(codes.iter().all(|c| (0..=31).contains(&c[2])));
+        assert_eq!(codes.iter().map(|c| c[2]).max(), Some(31));
+        // The samples of the research pass: black, the seven steps of blue, the first red, white.
+        assert_eq!(codes[0], [16, 15, 0]);
+        assert_eq!(
+            codes[1..8],
+            [
+                [18, 15, 0],
+                [20, 15, 1],
+                [22, 15, 1],
+                [24, 15, 2],
+                [26, 15, 2],
+                [28, 15, 3],
+                [30, 15, 3]
+            ]
+        );
+        assert_eq!(codes[8], [14, 18, 1]);
+        assert_eq!(codes[511], [16, 15, 31]);
+        // The grey diagonal (n, n, n) is linear in luma, 31 n / 7 rounded, with no chroma (U 16, V 15).
+        let grey: Vec<[i64; 3]> = (0..8).map(|n| codes[n * 73]).collect();
+        let luma: Vec<i64> = grey.iter().map(|c| c[2]).collect();
+        assert_eq!(luma, [0, 4, 9, 13, 18, 22, 27, 31]);
+        assert!(grey.iter().all(|c| c[..2] == [16, 15]));
+        // The decode: the first variant gives the published 8-bit palette bytes.
+        let Transform::Lut(first) = t.select(1) else {
+            panic!("a lut")
+        };
+        assert_eq!(t.select(0), t.select(1));
+        for (index, [u, vv, y], bytes) in PC_ENGINE_PALETTE {
+            assert_eq!(
+                codes[index],
+                [i64::from(u), i64::from(vv), i64::from(y)],
+                "table entry {index}"
+            );
+            assert_eq!(
+                first.colours[index].map(|c| (c * 255.0).round() as u8),
+                bytes,
+                "colour code {index}"
+            );
+        }
+        // Every colour is on the rails' range; a grey (no chroma) is its luma over 31, whatever the variant.
+        assert!(first.colours.iter().flatten().all(|c| (0.0..=1.0).contains(c)));
+        let Transform::Lut(second) = t.select(2) else {
+            panic!("a lut")
+        };
+        assert!((first.colours[292][0] - 18.0 / 31.0).abs() < 1e-12);
+        assert_eq!(
+            first.colours[292], second.colours[292],
+            "no chroma: the gain does not act"
+        );
+        assert_eq!(first.colours[0], [0.0; 3]);
+        // A V gain of 14/15 instead of 0.96 lowers the red of the strongest V (red 7: V code 30).
+        assert!(second.colours[56][0] < first.colours[56][0] - 0.005);
+        assert_ne!(first.colours, second.colours);
+        // A number past the last variant gives the first.
+        assert_eq!(t.select(9), t.select(1));
+    }
+
+    /// A pixel that is a 9-bit code, in either expansion of the emulator, becomes the colour of its code, for all 512 codes; one
+    /// that is not (a 5-bit expansion, a half level, a filtered grey) passes through.
+    #[test]
+    fn the_pc_engine_replaces_the_codes_of_either_expansion_and_nothing_else() {
+        let t = pc_engine();
+        let Transform::Lut(l) = t.select(1) else {
+            panic!("a lut")
+        };
+        for i in 0..512usize {
+            let (g, r, b) = ((i >> 6) as u32, ((i >> 3) & 7) as u32, (i & 7) as u32);
+            for expand in [|n: u32| n << 5 | n << 2 | n >> 1, |n: u32| 36 * n] {
+                let px = [r, g, b].map(|n| f64::from(expand(n)) / 255.0);
+                assert_eq!(t.select(1).apply(px), l.colours[i], "code {i}");
+            }
+        }
+        for px in [
+            [132.0 / 255.0; 3],
+            [0.5, 0.5, 0.5],
+            [1.0, 1.0, 100.0 / 255.0],
+            [36.0 / 255.0, 73.0 / 255.0, 0.3],
+        ] {
+            assert_eq!(t.select(1).apply(px), px);
+        }
+    }
+
+    /// The colours reach the shader as the frame table: 512 entries in the order of the colour code, the chosen variant's, and
+    /// the slot's push constants say lookup (kind 6) with no device code.
+    #[test]
+    fn the_pc_engine_colours_travel_in_the_frame_table() {
+        let p = |variant: i32| crate::params::Params {
+            source_colour_target: crate::params::SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
+            source_colour_variant: variant,
+            ..crate::params::Params::default()
+        };
+        let table = frame_table(&p(1)).expect("a lookup target");
+        assert_eq!(table.len(), LUT_LEN);
+        let Transform::Lut(l) = pc_engine().select(1) else {
+            panic!("a lut")
+        };
+        for i in [0usize, 1, 8, 64, 292, 511] {
+            assert_eq!(table[i][..3], l.colours[i].map(|c| c as f32), "entry {i}");
+        }
+        assert_ne!(frame_table(&p(2)).expect("variant 2"), table);
+        assert_eq!(frame_table(&p(1)).expect("again"), table);
+    }
+
+    /// The validation of a lookup file: a short or out-of-range table, a decode out of range, a repeated id, a table of another
+    /// kind, a missing provenance.
+    #[test]
+    fn a_bad_lut_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "nec_pc_engine_composite.toml")
+            .expect("the pc engine file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replacen("[16, 15, 0], ", "", 1), "512 entries"),
+            (ok.replacen("[18, 15, 0]", "[32, 15, 0]", 1), "outside"),
+            (ok.replacen("[18, 15, 0]", "[18, 15, 32]", 1), "outside"),
+            (ok.replacen("y_max = 31", "y_max = 0", 1), "y_max"),
+            (ok.replacen("u_max = 0.436", "u_max = 0", 1), "u_max"),
+            (ok.replacen("v_gain = 0.96", "v_gain = 0", 1), "v_gain"),
+            (ok.replacen("hue_deg = -10.4", "hue_deg = 200", 1), "hue_deg"),
+            (
+                ok.replace("saturation = 0.7529411764705882", "saturation = 1.5"),
+                "saturation",
+            ),
+            (
+                ok.replacen("id = \"v_gain_14_15\"", "id = \"kitrinx\"", 1),
+                "used twice",
+            ),
+            (ok.replacen("id = \"kitrinx\"", "id = \"Kitrinx\"", 1), "lower case"),
+            (ok.replacen("kind = \"lut\"", "kind = \"signal\"", 1), "own table"),
+            (ok.replacen("codes = \"S:", "codes = \"X:", 1), "provenance.codes"),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);

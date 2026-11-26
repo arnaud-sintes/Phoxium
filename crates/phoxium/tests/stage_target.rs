@@ -15,10 +15,10 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
-    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO,
-    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
-    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
+    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
+    SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -156,6 +156,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
         | SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE
         | SOURCE_COLOUR_TARGET_ATARI_7800_MARIA
+        | SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
         | SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928
         | SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101 => phoxium::targets::for_value(target)
@@ -239,6 +240,20 @@ fn tms(i: usize) -> [f64; 3] {
     s.references[i % 30]
 }
 
+/// The PC Engine colour code `i % 512` (index G x 64 + R x 8 + B) as an emulator shows it: each 3-bit level spread by repeating
+/// its bits (255 n / 7 rounded) or, with `times36`, as 36 n.
+fn pc_engine_code(i: usize, times36: bool) -> [f64; 3] {
+    let i = i % 512;
+    let level = |n: usize| {
+        f64::from(if times36 {
+            36 * n as u32
+        } else {
+            (n << 5 | n << 2 | n >> 1) as u32
+        }) / 255.0
+    };
+    [level((i >> 3) & 7), level(i >> 6), level(i & 7)]
+}
+
 /// A native raster of `w` x `h` pixels: the 5-bit expanded codes of every channel in turn (grey ramp, red, green and
 /// blue ramps), then a pseudo-random fill of any 8-bit drive voltage (a frame that was not 5-bit quantised), with
 /// black and white in the corners.
@@ -286,6 +301,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The Atari 7800 reference colours (MAME's palette) four over two rows, the second a little off.
                 (16, _) => atari_7800(x * 4 + 1),
                 (17, _) => atari_7800(x * 4 + 2).map(|v| (v - 0.012).max(0.0)),
+                // The PC Engine codes in both expansions of an emulator (64 of the 512 each).
+                (18, _) => pc_engine_code(x * 8 + 5, false),
+                (19, _) => pc_engine_code(x * 8 + 258, true),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -399,6 +417,8 @@ fn target_slot_matches_the_oracle() {
         ("atari 7800 25.7", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 1),
         ("atari 7800 27.7", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 4),
         ("atari 7800 ladder", SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, 5),
+        ("pc engine kitrinx", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 1),
+        ("pc engine v 14/15", SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, 2),
     ] {
         let p = Params {
             source_colour_target: target,
@@ -536,5 +556,107 @@ fn mega_drive_shadow_and_highlight_levels_come_out_at_the_measured_levels() {
     let out = run(&mut gpu, &half, &kega);
     assert!((f64::from(out.pixel(0, 0)[1]) * 255.0 - 26.0).abs() < 0.3);
     assert!((f64::from(out.pixel(1, 0)[1]) * 255.0 - 52.0).abs() < 0.3);
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The PC Engine lookup (shader kind 6) on all 512 colour codes in both expansions of an emulator (255 n / 7 rounded, 36 n),
+/// against the oracle's table, for both variants; and a row of pixels that are not codes (one channel a few codes off a
+/// level, a 5-bit expansion, a half level) that must come out as they went in. The 8-bit bytes of the converter's published
+/// palette are checked on the CPU side (`targets.rs`); here the shader must read the same table at the same index.
+#[test]
+fn pc_engine_lookup_matches_the_oracle_on_every_code_and_passes_the_rest() {
+    let Some(mut gpu) = common::gpu_or_skip("pc_engine_lookup_matches_the_oracle") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&["target"]).unwrap();
+    // Rows 0 to 7: the 512 codes with the repeated-bits expansion, 8 to 15 with 36 n, 16 and 17: pixels that are not codes.
+    let (w, h) = (64usize, 18usize);
+    let mut rgba = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            let v = match y {
+                0..=7 => pc_engine_code(y * w + x, false),
+                8..=15 => pc_engine_code((y - 8) * w + x, true),
+                // A channel eight codes off its level (the other two on levels; the levels are at least 36 apart, so it is
+                // on none), then 5-bit expansions (codes 1 to 16: 8, 16, 24, 33 ... 132, none is a level), a half level, a
+                // channel at 76.5 and one at 253.
+                16 => {
+                    let mut c = pc_engine_code(x * 8 + 3, false);
+                    let k = x % 3;
+                    c[k] += if c[k] > 0.5 { -8.0 } else { 8.0 } / 255.0;
+                    c
+                }
+                _ => match x % 4 {
+                    0 => [f64::from((((x / 4) + 1) as u32) << 3 | (((x / 4) + 1) as u32) >> 2) / 255.0; 3],
+                    1 => [0.5, 0.5, 0.5],
+                    2 => [pc_engine_code(x, false)[0], 0.3, pc_engine_code(x, false)[2]],
+                    _ => [1.0, 1.0, 253.0 / 255.0],
+                },
+            };
+            rgba.extend_from_slice(&[v[0] as f32, v[1] as f32, v[2] as f32, 1.0]);
+        }
+    }
+    let img = ImageF32 {
+        width: w as u32,
+        height: h as u32,
+        rgba,
+    };
+    for variant in [1, 2] {
+        let p = Params {
+            source_colour_target: SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
+            source_colour_variant: variant,
+            ..Params::default()
+        };
+        let out = run(&mut gpu, &img, &p);
+        assert!(!gpu.last_skipped_slots().contains(&"target"));
+        let t = transform(SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, variant);
+        let Transform::Lut(lut) = t else { panic!("lut") };
+        let (mut max, mut replaced, mut passed) = (0.0_f64, 0, 0);
+        for y in 0..h as u32 {
+            for x in 0..w as u32 {
+                let i = img.pixel(x, y);
+                let px = [f64::from(i[0]), f64::from(i[1]), f64::from(i[2])];
+                let want = t.apply(px);
+                let index = crt_model::target::lut_index(px);
+                // The oracle's own reading of the picture: the first 16 rows are all codes, the last two none.
+                assert_eq!(index.is_some(), y < 16, "variant {variant} pixel ({x}, {y}): {px:?}");
+                if let Some(index) = index {
+                    assert_eq!(want, lut.colours[index]);
+                    replaced += 1;
+                } else {
+                    assert_eq!(want, px);
+                    passed += 1;
+                }
+                let g = out.pixel(x, y);
+                for c in 0..3 {
+                    let e = (f64::from(g[c]) - want[c]).abs();
+                    max = max.max(e);
+                    assert!(
+                        e <= MAX_ERR,
+                        "variant {variant} ({x}, {y}) channel {c}: {} want {}",
+                        g[c],
+                        want[c]
+                    );
+                }
+            }
+        }
+        assert_eq!((replaced, passed), (1024, 128));
+        println!("pc engine variant {variant}: max {max:.2e} over {replaced} codes and {passed} other pixels");
+        // White and black of the table, and the grey diagonal (n, n, n) at the first variant: 148 of 255 for 4.
+        assert!(out
+            .pixel(63, 7)
+            .iter()
+            .take(3)
+            .all(|c| (f64::from(*c) - 1.0).abs() <= MAX_ERR));
+        assert!(out.pixel(0, 0).iter().take(3).all(|c| f64::from(*c).abs() <= MAX_ERR));
+        if variant == 1 {
+            let grey = out.pixel(36, 4);
+            assert!(
+                (0..3).all(|c| (f64::from(grey[c]) * 255.0 - 148.0).abs() < 0.6),
+                "{grey:?}"
+            );
+        }
+    }
     common::assert_no_validation_messages(&counter);
 }

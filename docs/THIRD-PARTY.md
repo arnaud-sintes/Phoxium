@@ -310,3 +310,37 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## NEC HuC6260 colour table (the PC Engine composite target)
+
+`presets/targets/nec_pc_engine_composite.toml` holds the 512 entries (5-bit U, V and Y, one for each 9-bit colour code) of the silicon table of the HuC6260 video colour encoder, the chip of the NEC PC Engine, the TurboGrafx-16 and the SuperGrafx. The table is NEC's data: furrtek read it from a real console through the chip's test pins, and Kitrinx (Jamie Blanks) published it as `pbpry_int_lut` with `index_lut` in `bfbii.h` of the repository <https://github.com/Kitrinx/TG16_Palette>. **That file carries no licence header and GitHub reports no licence for the repository** (the converter `tg16color.c` in the same repository is MIT, Copyright (c) 2020 Jamie Blanks aka Kitrinx; `color_lib.h` carries a copyright line only). The 512 numbers are shipped as hardware facts (measured values of a chip, not a creative work) with this attribution, not under a licence of their own; if the author or furrtek objects, the file can be removed and the target with it.
+
+Also taken from the same repository, as numbers only (no code is copied): the constants of the decode that Kitrinx fitted to vectorscope plots of the 240p Test Suite colour bars on a PC Engine Duo-R (V gain 0.96, chroma plane turned by -10.4 degrees, desaturation 192/255, BT.601 maxima 0.436 and 0.615). The decode in `crates/crt-model/src/target.rs` was written independently from these numbers and checked against the converter's published `palette.pal` (all 512 entries).
+
+Nothing was taken from the MiSTer core's palette file (GPL).
+
+The notice of the converter that the constants come from, reproduced for completeness:
+
+```
+MIT License
+
+Copyright (c) 2020 Jamie Blanks aka Kitrinx
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```

@@ -34,10 +34,11 @@ const KIND_PALETTE: i32 = 2;
 const KIND_DAC: i32 = 3;
 const KIND_SIGNAL: i32 = 4;
 const KIND_DAC15: i32 = 5;
+const KIND_LUT: i32 = 6;
 
 /// The push constants of `target.comp` (std430, 100 bytes): the matrix row by row and its scalars, the curve (or the
 /// bytes of a palette) packed four entries to a word, the bits per channel of the device code (0 = no recovery) and the
-/// kind (0 matrix, 1 curve, 2 palette, 3 dac, 4 signal, 5 dac15: a dac of 9 to 15 points).
+/// kind (0 matrix, 1 curve, 2 palette, 3 dac, 4 signal, 5 dac15: a dac of 9 to 15 points, 6 lut: 512 colours by 9-bit code).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub(super) struct Push {
@@ -119,6 +120,15 @@ pub(super) fn plan(p: &Params) -> Push {
                 table,
                 bits: 0,
                 kind: KIND_SIGNAL,
+                ..identity
+            }
+        }
+        Transform::Lut(_) => {
+            // The 512 colours travel in the frame uniform buffer (`target_table`, `targets::frame_table`, entry `G x 64 + R x
+            // 8 + B`); nothing else is pushed, and the shader recovers the 3-bit levels itself (`bits` stays 0).
+            Push {
+                bits: 0,
+                kind: KIND_LUT,
                 ..identity
             }
         }
@@ -435,6 +445,31 @@ mod tests {
         assert!(glsl.contains("table_byte(15 + i), table_byte(16 + i)"));
         assert!(glsl.contains("clamp(x * 255.0, table_byte(0), table_byte(14))"));
         assert_eq!(super::KIND_DAC15, 5);
+    }
+
+    /// The lookup target (the PC Engine's 512 colours): the push constants carry only the kind (6, no device code recovery by the
+    /// push), the colours are the frame table (entry `G x 64 + R x 8 + B`, no more entries than the table holds, so that the
+    /// frame uniform buffer stays at 8288 bytes), and the shader recovers the level and reads that table.
+    #[test]
+    fn the_lookup_target_pushes_its_kind_and_reads_the_frame_table() {
+        use crate::gpu::FRAME_TABLE_VEC4;
+        use crt_model::target::LUT_LEN;
+        let p = with(crate::params::SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE);
+        assert!(!is_identity(&p));
+        let push = plan(&p);
+        assert_eq!((push.kind, push.bits, push.table), (6, 0, [0; CURVE_LEN / 4]));
+        assert_eq!(push.k, plan(&Params::default()).k, "no matrix");
+        assert_eq!(super::KIND_LUT, 6);
+        const { assert!(LUT_LEN <= FRAME_TABLE_VEC4) };
+        let table = crate::targets::frame_table(&p).expect("a lookup target");
+        assert_eq!(table.len(), LUT_LEN);
+        assert_eq!(table[511][..3], [1.0, 1.0, 1.0], "white is white");
+        let glsl = include_str!("../../../../../shaders/target.comp");
+        assert!(glsl.contains("else if (pc.kind == 6)"));
+        assert!(glsl.contains("c = index >= 0 ? frame.target_table[index].rgb : x;"));
+        assert!(glsl.contains("ivec3 n = (ci + 18) / 36;"));
+        assert!(glsl.contains("equal(ci, (n << 5) | (n << 2) | (n >> 1))"));
+        assert!(glsl.contains("return n.g * 64 + n.r * 8 + n.b;"));
     }
 
     /// The Master System: four codes with the last point repeated, and the blue of its own in the last eight bytes. Variant

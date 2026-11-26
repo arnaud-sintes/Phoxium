@@ -214,7 +214,8 @@ impl Settings {
 /// The entries of the target table that follows the [`FrameConstants`] in the frame uniform buffer (`target_table` of
 /// `common.glsl`): one `vec4` per hardware colour of a signal colour target, then one per reference colour, from entry
 /// `SIGNAL_MAX`: twice [`crt_model::target::SIGNAL_MAX`] entries, 8 KiB, so that the frame uniform buffer (96 bytes of
-/// constants and the table) stays within the 16 KiB of `maxUniformBufferRange` that Vulkan guarantees.
+/// constants and the table) stays within the 16 KiB of `maxUniformBufferRange` that Vulkan guarantees. A lookup target (the
+/// PC Engine's 512 colours, [`crt_model::target::LUT_LEN`]) fills the same table from entry 0: one target is active at a time.
 pub const FRAME_TABLE_VEC4: usize = 2 * crt_model::target::SIGNAL_MAX;
 
 /// Bytes of the frame uniform buffer: the constants, then the target table.

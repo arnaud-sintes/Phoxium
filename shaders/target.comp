@@ -30,6 +30,11 @@
 //             classifies the pixel; it is replaced by that hardware colour (`frame.target_table[i].rgb`, the drive
 //             voltages) when the distance is at most `clamp_sum` (the threshold); the first of equal distances wins; a
 //             pixel with no close colour passes through. No device code is recovered (bits = 0).
+//   6 lut:    the PC Engine's 512 colours: when all three channels are 3-bit levels (n = (code + 18) / 36, the code being
+//             255 n / 7 rounded or 36 n, `lut_index`) the pixel is replaced by `frame.target_table[G x 64 + R x 8 + B].rgb`
+//             (the drive voltages of the colour code, decoded on the CPU for the chosen variant); any other pixel passes
+//             through. The table shares the frame block with the signal kind (one target at a time). No device code is
+//             recovered (bits = 0).
 // Alpha is copied.
 
 #include "params.glsl"
@@ -59,7 +64,7 @@ layout(push_constant) uniform Push {
     float out_scale;
     uint table[8];        // the curve, entry i in byte i % 4 of word i / 4
     int bits;             // bits per channel of the device code, 4 to 7; 0 = no recovery
-    int kind;             // 0 matrix, 1 curve, 2 palette, 3 dac, 4 signal, 5 dac15
+    int kind;             // 0 matrix, 1 curve, 2 palette, 3 dac, 4 signal, 5 dac15, 6 lut
 } pc;
 
 // Tolerance of the recovery in 8-bit code units (`crt_model::target::RECOVERY_TOLERANCE`).
@@ -157,6 +162,25 @@ vec3 signal_colour(vec3 v) {
     return (index >= 0 && best <= pc.clamp_sum) ? frame.target_table[index].rgb : v;
 }
 
+// The index G x 64 + R x 8 + B of a pixel whose three channels are 3-bit levels (the 8-bit code is the level n spread by
+// repeating its bits, `n << 5 | n << 2 | n >> 1`, or 36 n; within the recovery tolerance of the code), -1 for any other pixel
+// (`crt_model::target::lut_index`).
+int lut_index(vec3 v) {
+    vec3 code = clamp(v * 255.0, vec3(0.0), vec3(255.0));
+    vec3 r = round(code);
+    if (any(greaterThan(abs(code - r), vec3(RECOVERY_TOLERANCE)))) {
+        return -1;
+    }
+    ivec3 ci = ivec3(r);
+    ivec3 n = (ci + 18) / 36;
+    bvec3 repeated = equal(ci, (n << 5) | (n << 2) | (n >> 1));
+    bvec3 times36 = equal(ci, 36 * n);
+    if (!all(bvec3(repeated.x || times36.x, repeated.y || times36.y, repeated.z || times36.z))) {
+        return -1;
+    }
+    return n.g * 64 + n.r * 8 + n.b;
+}
+
 float curve(float x) {
     float pos = clamp(x, 0.0, 1.0) * float(CURVE_LAST);
     int i = min(int(floor(pos)), CURVE_LAST - 1);
@@ -188,6 +212,9 @@ void main() {
         c = pc.out_scale * vec3(dac(x.r, 0), dac(x.g, 1), dac(x.b, 2));
     } else if (pc.kind == 5) {
         c = pc.out_scale * vec3(dac15(x.r), dac15(x.g), dac15(x.b));
+    } else if (pc.kind == 6) {
+        int index = lut_index(x);
+        c = index >= 0 ? frame.target_table[index].rgb : x;
     } else {
         c = signal_colour(x);
     }

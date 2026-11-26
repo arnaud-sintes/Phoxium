@@ -44,7 +44,8 @@ layout(std140, set = 0, binding = PHOXIUM_FRAME_BINDING) uniform FrameConstants 
     layout(offset = 88) vec2 mask_box_px;
     // The hardware colours of the source colour target when it is a signal one (C64, NES, Atari 8-bit): `rgb` of entry i is the drive
     // voltage of colour i, the first `count` entries (the `target` slot's push constants say how many) are used. The CPU
-    // writes them after the 96 bytes above, only while such a target is chosen (src/targets.rs, `frame_table`).
+    // writes them after the 96 bytes above, only while such a target is chosen (src/targets.rs, `frame_table`). For a lookup target
+    // (the PC Engine's 512 colours, `target` kind 6) entry `G x 64 + R x 8 + B` is the drive voltage of that colour code.
     layout(offset = 96) vec4 target_table[512];
 } frame;
 
