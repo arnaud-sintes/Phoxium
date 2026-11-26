@@ -7,6 +7,8 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-26
+
 ### Added
 
 - **The colour target's details in the Source section.** Under the **Colour variant** row, while a target is chosen, the menu shows the target's name and the variant in force, the one-line label of its data file, a collapsed **Notes** header (the file's notes) and a collapsed **Provenance (S, D, K, E counts)** header with a one-line legend of the four tags and, for every value of the file, its tag, key and source text. Everything is read from the data file (`src/ui/target_info.rs`, the layout is a pure function with unit tests); a headless menu test opens both headers and previews are written to `target/ui-preview` (`menu-colour-target*.png`). Not yet looked at live.
@@ -32,7 +34,7 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 - **The notes and provenance of the MSX2+ / turbo R (V9958) palette target now rest on the read Yamaha data books, no number changed.** The V9958's 5-bit DAC is documented linear (the booklet's block diagram labels it 'DAC (LINEAR)'; the linearity moves from an estimate to a sourced statement, the displayed levels are still derived), with the RGB output levels quoted (VRGB31 2.8 / 3.1 / 3.5 V, VRGB0 1.9 / 2.2 / 2.5 V, VP-P 0.8 / 0.9 / 1.1 V; the V9938's 3-bit DAC VP-P 0.65 / 0.8 / 1.00 V, no per-step table, not labelled linear: still an identity, no variant). The palette-code-to-DAC-code mapping is not in the books: it stays Grauw's single claim. The V9938's composite table has no colour-difference matrix or burst phase, so no colour composite model of the MSX2 can be built from the books (stated in the notes). Documentation only.
 
-- **One white-scale policy for the 25 colour targets, no number changed.** A target never rescales white to hide or invent a level: its white is what its sourced model gives for the emulator's full white; a white a source states (the Game Boy Color's 240 of 255, the AGS-101's measured tinted white, the palettes' lightest shades) is kept, and where the sources leave the scale open (the Mega Drive's 255 against 238) the file says which it uses and why. Every file of `presets/targets/` now has a `White scale:` sentence in its notes (level and tint, per variant when they differ, and whether it is sourced, derived or open); `docs/REFERENCE.md` has the table "White of each target" and the policy (also `docs/DESIGN.md` section 8 and `docs/QUESTIONS.md`). Two tests: every file states its white, and the computed white of variant 1 of each target is pinned.
+- **One white-scale policy for the 26 colour targets, no number changed.** A target never rescales white to hide or invent a level: its white is what its sourced model gives for the emulator's full white; a white a source states (the Game Boy Color's 240 of 255, the AGS-101's measured tinted white, the palettes' lightest shades) is kept, and where the sources leave the scale open (the Mega Drive's 255 against 238) the file says which it uses and why. Every file of `presets/targets/` now has a `White scale:` sentence in its notes (level and tint, per variant when they differ, and whether it is sourced, derived or open); `docs/REFERENCE.md` has the table "White of each target" and the policy (also `docs/DESIGN.md` section 8 and `docs/QUESTIONS.md`). Two tests: every file states its white, and the computed white of variant 1 of each target is pinned.
 
 ### Fixed
 
