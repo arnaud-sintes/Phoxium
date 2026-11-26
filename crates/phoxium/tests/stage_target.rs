@@ -640,12 +640,12 @@ fn target_slot_matches_the_oracle() {
             6,
         ),
         (
-            "zx spectrum 48k pal burst gain",
+            "zx spectrum 48k pal fixed gain",
             SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL,
             1,
         ),
         (
-            "zx spectrum 48k pal fixed gain",
+            "zx spectrum 48k pal burst gain",
             SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL,
             2,
         ),

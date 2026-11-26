@@ -5191,7 +5191,7 @@ mod tests {
         let t = for_value(crate::params::SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL).expect("zx 48k");
         assert_eq!(t.id, "sinclair_zx_spectrum_48k_pal");
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
-        assert_eq!(ids, ["burst_gain", "fixed_gain"]);
+        assert_eq!(ids, ["fixed_gain", "burst_gain"]);
         for key in [
             "colours",
             "revisions",
@@ -5217,7 +5217,7 @@ mod tests {
         );
         assert!((U_PER_B_Y / 1.10 / kb - 0.3387).abs() < 1e-4 && (V_PER_R_Y / 2.0 / kb - 0.3321).abs() < 1e-4);
         let mut worst = 0.0f64;
-        for (v, k) in [(0usize, k_burst), (1, k_fixed)] {
+        for (v, k) in [(0usize, k_fixed), (1, k_burst)] {
             let s = signal(v);
             assert_eq!(s.count, 29);
             assert_eq!(s.threshold, 0.08);
@@ -5259,7 +5259,7 @@ mod tests {
         println!("largest distance between the file and the recomputation: {worst:.2e}");
         // The bright colours' luma is the normal one times 1.3208 and their chroma is the same (no /HL on U and V): the chroma
         // (the colour minus its luma) is the same size up to the decode's clamps.
-        let (burst, fixed) = (signal(0), signal(1));
+        let (fixed, burst) = (signal(0), signal(1));
         for n in 1..7usize {
             let (a, b) = (zx_colour(&burst, n), zx_colour(&burst, n + 7));
             let (ya, yb) = (
