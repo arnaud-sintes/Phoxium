@@ -393,6 +393,23 @@ mod tests {
         assert_ne!(plan(&with_variant(2)).table, a.table);
     }
 
+    /// An 8-bit palette (the Game Boy LCDs) is packed the same way and scaled by 1 / 255. Hand derivation of variant 1
+    /// (BGB reality DMG, lightest 0x759833 = 117, 152, 51, then 0x588F51 = 88, 143, 81, 0x3B7560 = 59, 117, 96, and the
+    /// darkest 0x2E615A = 46, 97, 90): the first word is 117, 152, 51, 88 from the low byte.
+    #[test]
+    fn an_eight_bit_palette_is_packed_and_scaled_by_255() {
+        let p = Params {
+            source_colour_variant: 1,
+            ..with(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_LCD)
+        };
+        let a = plan(&p);
+        assert_eq!((a.kind, a.bits), (2, 0));
+        assert_eq!(a.table[0], 117 | 152 << 8 | 51 << 16 | 88 << 24);
+        assert_eq!(a.table[1], 143 | 81 << 8 | 59 << 16 | 117 << 24);
+        assert_eq!(a.table[2], 96 | 46 << 8 | 97 << 16 | 90 << 24);
+        assert!((f64::from(a.out_scale) - 1.0 / 255.0).abs() < 1e-9);
+    }
+
     /// The Mega Drive: variant 1 is Genesis Plus GX (the default, 17 per level on the 15 levels): kind 5, the 15 input
     /// levels then the 15 output codes, one byte each, the same on the three channels. Variant 2 Kega Fusion (steps of 33)
     /// and 3 Regen (32) keep the eight normal levels: kind 3, eight input levels, then eight output codes (three times); a

@@ -1,0 +1,46 @@
+# Source colour target, data only (TODO, "Game Boy family"; QUESTIONS.md, "Fourth research pass" and "Fifth research pass"). Format:
+# crates/phoxium/src/targets.rs. Every key of [palette] has a [provenance] entry "<tag>: <source>" with the CRT.md
+# confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "game_boy_lcd"
+name = "Game Boy, Pocket and Light (the LCD's four shades)"
+label = "a Game Boy picture in the four colours of a DMG, Pocket or Light screen (Colour variant), from a grey source"
+kind = "palette"
+notes = """
+The Game Boy (DMG-01), the Game Boy Pocket (MGB-001) and the Game Boy Light (MGB-101) show four shades on a reflective LCD (the Light also has a backlight). An emulator draws them as a grey picture (its 'grayscale' palette: white, light grey, dark grey, black) or in a green palette of its own. This target turns the grey picture into the four colours of a real screen: the luma of the source picks a position between the palette's four colours, lightest first, so four evenly spaced greys (255, 170, 85, 0, or close to them, as in mGBA's default) land on the four colours and anything between blends. The source must be grey: a green emulator palette would not span the luma range, and a picture already in one of these colours is not to be put through the target. Choose the colours with Colour variant: 1 = BGB 'reality' DMG, 2 = BGB 'reality' Pocket, 3 = SameBoy DMG, 4 = SameBoy Pocket, 5 = SameBoy Light.
+What the numbers are. Variants 1 and 2 are the 'reality' colour schemes of the BGB emulator (closed-source freeware, no licence stated: the numbers are used with this attribution and nothing else of BGB; BGB's author has not been asked, TODO). BGB says it made them from photographs of a real screen under colour-accurate light, corrected with a ColorChecker to sRGB with a gamma of 2.2, several photographs averaged; the camera, the unit, the revision and the contrast setting are not stated. The values were read from the palette chunk of BGB's four-bit swatch images (DMG: 948A04, 759833, 588F51, 3B7560, 2E615A; Pocket: C2CFA8, ADBF92, 96A67C, 727E64, 5A635C). The images carry no labels: the order (the LCD-off colour first, then shade 0, the lightest, to shade 3, the darkest) is an inference, supported by BGB's own images and page text but not proven. Variants 3 to 5 are the palettes of SameBoy (Core/display.c, MIT / Expat, Copyright (c) 2015-2026 Lior Halphon; the notice is in THIRD-PARTY.md): DMG 081810, 396139, 84A563, C6DE8C, Pocket 07100E, 3A4C3A, 818D66, C2CE93, Light 0A1C15, 357862, 56B495, 7FE2C3 (darkest to lightest in the source, stored here lightest first). SameBoy's author calls the DMG one 'not faithful, the same palette as the SDL GUI and the CGB boot ROM'; the Pocket and Light sets have no stated derivation: they are an emulator's convention, stylised, not a measurement. The Gambatte and other GPL palettes are not used.
+No instrument measurement of a DMG, Pocket or Light screen was found anywhere the research could reach (colorimeter or spectrophotometer data, the Light's backlight spectrum, the LCD panel datasheets, the voltage-to-luminance curve); the BGB values are photographs, so they carry the camera, the light and the unit. The Light's backlight spectrum is unknown, and SameBoy gives one palette for it without saying whether the backlight is on.
+Not modelled. The LCD-off colour (the colour of the screen when the LCD is off, and in BGB the colour of the pixel gaps): the palette kind has no background colour, so the four shades are used and a black source pixel is the darkest shade. On a real screen the lightest shade is the LCD-off colour (BGB's page says so), but BGB's swatches show a slightly different hue for the two (948A04 is a yellow-olive, 759833 a green; their luminances are close), so the first swatch is left out. The contrast wheel (the shades are points on one continuous gradient; at low contrast the darkest shade moves up, at high contrast it falls below its normal value: no numbers exist for it), the response time and ghosting, the pixel matrix, the revision and unit spread, and the ambient light, which matters on a reflective panel (the Optics section has the ambient light and screen reflectance). The sources disagree on the hue of the Pocket (olive in SameBoy, grey-green in Gambatte and mGBA, beige in a photograph), which fits a reflective screen seen under different lights and cameras (an inference); the Light is mint in SameBoy and cyan in Gambatte and mGBA.
+The colours are drawn as their codes over 255, like an emulator draws them as sRGB, with no black boost or other correction.
+"""
+
+[palette]
+colour_bits = 8
+[[palette.sets]]
+id = "bgb_dmg"
+name = "BGB reality, Game Boy (DMG-01)"
+words = [0x759833, 0x588F51, 0x3B7560, 0x2E615A]
+
+[[palette.sets]]
+id = "bgb_pocket"
+name = "BGB reality, Game Boy Pocket (MGB)"
+words = [0xADBF92, 0x96A67C, 0x727E64, 0x5A635C]
+
+[[palette.sets]]
+id = "sameboy_dmg"
+name = "SameBoy, Game Boy (DMG)"
+words = [0xC6DE8C, 0x84A563, 0x396139, 0x081810]
+
+[[palette.sets]]
+id = "sameboy_pocket"
+name = "SameBoy, Game Boy Pocket"
+words = [0xC2CE93, 0x818D66, 0x3A4C3A, 0x07100E]
+
+[[palette.sets]]
+id = "sameboy_light"
+name = "SameBoy, Game Boy Light"
+words = [0x7FE2C3, 0x56B495, 0x357862, 0x0A1C15]
+
+[provenance]
+sets = "S: variants 1 and 2, the BGB emulator's 'reality' colour schemes (closed freeware, no licence stated; photographs under colour-accurate light, ColorChecker-corrected to sRGB gamma 2.2, several averaged; the values read from the palette chunk of the swatch images dmg-reality-colorscheme.png and mgb-reality-colorscheme.png, five swatches left to right; the slot order, LCD off first then shade 0 to 3, is inferred and not proven; photo-derived, not an instrument measurement). Variants 3 to 5, SameBoy Core/display.c GB_PALETTE_DMG, GB_PALETTE_MGB and GB_PALETTE_GBL (MIT / Expat; stored darkest to lightest with the LCD-off colour last, read again for this file; an emulator convention, 'not faithful' for the DMG per its author, no derivation for the others). No instrument measurement of a DMG, Pocket or Light screen was found"
+colour_bits = "K: 8 bits per channel, the words are 0xRRGGBB hex colours drawn as sRGB codes over 255 (the Super Game Boy file has 5 bits per channel and RGB555 words; one file has one width)"

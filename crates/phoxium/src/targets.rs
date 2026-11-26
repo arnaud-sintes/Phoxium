@@ -2,7 +2,8 @@
 //!
 //! A target is a TOML file of `presets/targets/`, embedded in the binary with `include_str!`; the parameter
 //! `source_colour_target` (`params/source.toml`) names it by the id, which is also its value name. Two kinds exist
-//! (the formulas are in `crt_model::target`; a third kind, `palette`, below):
+//! (the formulas are in `crt_model::target`; a third kind, `palette`, below; its `[palette]` table has `colour_bits = 5`
+//! with RGB555 `words` (the Super Game Boy) or `colour_bits = 8` with 0xRRGGBB `words` (the Game Boy LCDs)):
 //!
 //! ```toml
 //! schema = 1
@@ -145,6 +146,10 @@ const SHIPPED: &[(&str, &str)] = &[
     (
         "msx2_v9958.toml",
         include_str!("../../../presets/targets/msx2_v9958.toml"),
+    ),
+    (
+        "game_boy_lcd.toml",
+        include_str!("../../../presets/targets/game_boy_lcd.toml"),
     ),
 ];
 
@@ -1074,7 +1079,8 @@ impl LutFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PaletteFile {
-    /// Bits per colour channel of the words (5: RGB555, red in bits 0 to 4, green 5 to 9, blue 10 to 14).
+    /// Bits per colour channel of the words: 5 (RGB555, red in bits 0 to 4, green 5 to 9, blue 10 to 14: the Super Game
+    /// Boy) or 8 (0xRRGGBB hex colours: the Game Boy LCDs).
     colour_bits: u32,
     sets: Vec<PaletteSet>,
 }
@@ -1091,9 +1097,12 @@ struct PaletteSet {
 impl PaletteFile {
     /// The palettes as variants, each with its four colours decoded from the words.
     fn variants(&self, file: &str) -> Result<Vec<Variant>, String> {
-        if self.colour_bits != 5 {
-            return Err(format!("{file}: palette.colour_bits must be 5 (RGB555 words)"));
+        if self.colour_bits != 5 && self.colour_bits != 8 {
+            return Err(format!(
+                "{file}: palette.colour_bits must be 5 (RGB555 words) or 8 (0xRRGGBB words)"
+            ));
         }
+        let rgb555 = self.colour_bits == 5;
         if self.sets.is_empty() || self.sets.len() > MAX_PALETTES {
             return Err(format!("{file}: palette.sets must hold 1 to {MAX_PALETTES} palettes"));
         }
@@ -1113,16 +1122,27 @@ impl PaletteFile {
             if out.iter().any(|v| v.id == s.id) {
                 return Err(format!("{file}: palette.sets id \"{}\" is used twice", s.id));
             }
-            if s.words.iter().any(|w| *w > 0x7FFF) {
-                return Err(format!("{file}: palette {} has a word above 0x7FFF (15 bits)", s.id));
+            let (max_word, output_max) = if rgb555 { (0x7FFF, 31.0) } else { (0xFF_FFFF, 255.0) };
+            if s.words.iter().any(|w| *w > max_word) {
+                return Err(format!(
+                    "{file}: palette {} has a word above {max_word:#X} ({} bits)",
+                    s.id,
+                    3 * self.colour_bits
+                ));
             }
-            let colour = |w: u32| [(w & 31) as u8, ((w >> 5) & 31) as u8, ((w >> 10) & 31) as u8];
+            let colour = |w: u32| {
+                if rgb555 {
+                    [(w & 31) as u8, ((w >> 5) & 31) as u8, ((w >> 10) & 31) as u8]
+                } else {
+                    [(w >> 16 & 255) as u8, (w >> 8 & 255) as u8, (w & 255) as u8]
+                }
+            };
             out.push(Variant {
                 id: s.id.clone(),
                 name: s.name.clone(),
                 transform: Transform::Palette(Palette {
                     colours: s.words.map(colour),
-                    output_max: 31.0,
+                    output_max,
                 }),
             });
         }
@@ -4309,6 +4329,126 @@ mod tests {
                 ok.replacen("output_max = \"K:", "output_max = \"X:", 1),
                 "provenance.output_max",
             ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The Game Boy LCD file: five palettes in the order of `source_colour_variant` (BGB DMG and Pocket, SameBoy DMG, Pocket
+    /// and Light), four 8-bit colours each, lightest first, written here again from the hex of the sources (BGB's swatches
+    /// left to right with the LCD-off swatch dropped; SameBoy's `GB_PALETTE_*` read darkest to lightest and reversed), the
+    /// LCD-off colour in none of them, and a grey emulator picture landing on the four colours exactly.
+    #[test]
+    fn the_game_boy_lcd_file_holds_the_bgb_and_sameboy_colours() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_LCD).expect("game boy lcd");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "bgb_dmg",
+                "bgb_pocket",
+                "sameboy_dmg",
+                "sameboy_pocket",
+                "sameboy_light"
+            ]
+        );
+        assert_eq!(t.transform, t.variants[0].transform);
+        // BGB, left to right in the swatch: LCD off, shade 0 (lightest) to shade 3; SameBoy, darkest to lightest, then LCD off.
+        let rgb = |h: u32| [(h >> 16) as u8, (h >> 8 & 255) as u8, (h & 255) as u8];
+        let bgb_dmg = [0x948A04, 0x759833, 0x588F51, 0x3B7560, 0x2E615A];
+        let bgb_mgb = [0xC2CFA8, 0xADBF92, 0x96A67C, 0x727E64, 0x5A635C];
+        let sb_dmg = [0x081810, 0x396139, 0x84A563, 0xC6DE8C, 0xD2E6A6];
+        let sb_mgb = [0x07100E, 0x3A4C3A, 0x818D66, 0xC2CE93, 0xCFDAAC];
+        let sb_gbl = [0x0A1C15, 0x357862, 0x56B495, 0x7FE2C3, 0x91EAD0];
+        let want = [
+            [bgb_dmg[1], bgb_dmg[2], bgb_dmg[3], bgb_dmg[4]],
+            [bgb_mgb[1], bgb_mgb[2], bgb_mgb[3], bgb_mgb[4]],
+            [sb_dmg[3], sb_dmg[2], sb_dmg[1], sb_dmg[0]],
+            [sb_mgb[3], sb_mgb[2], sb_mgb[1], sb_mgb[0]],
+            [sb_gbl[3], sb_gbl[2], sb_gbl[1], sb_gbl[0]],
+        ];
+        let off = [bgb_dmg[0], bgb_mgb[0], sb_dmg[4], sb_mgb[4], sb_gbl[4]];
+        for (i, (v, w)) in t.variants.iter().zip(want).enumerate() {
+            let Transform::Palette(p) = v.transform else {
+                panic!("palette")
+            };
+            assert_eq!(p.output_max, 255.0);
+            assert_eq!(p.colours, w.map(rgb), "variant {}", v.id);
+            // The LCD-off colour is not one of the four shades.
+            assert!(
+                !p.colours.contains(&rgb(off[i])),
+                "variant {} has no LCD-off colour",
+                v.id
+            );
+            // Lightest first: the luma never rises along the four colours of a variant.
+            let luma: Vec<f64> = p
+                .colours
+                .iter()
+                .map(|c| Palette::luma(c.map(|x| f64::from(x) / 255.0)))
+                .collect();
+            assert!(luma.windows(2).all(|l| l[0] > l[1]), "variant {} luma {luma:?}", v.id);
+            // Four evenly spaced greys land on the four colours exactly, and the two ends are the end colours.
+            for (j, g) in [1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0].into_iter().enumerate() {
+                let out = v.transform.apply([g; 3]);
+                for (c, (o, code)) in out.iter().zip(p.colours[j]).enumerate() {
+                    assert!(
+                        (o - f64::from(code) / 255.0).abs() < 1e-12,
+                        "{} shade {j} channel {c}",
+                        v.id
+                    );
+                }
+            }
+        }
+        // Hand check of the first colour of BGB DMG: 0x759833 is red 117, green 152, blue 51.
+        let close = |got: [f64; 3], want: [f64; 3]| got.iter().zip(want).all(|(g, w)| (g - w).abs() < 1e-12);
+        assert!(close(
+            t.select(1).apply([1.0; 3]),
+            [117.0 / 255.0, 152.0 / 255.0, 51.0 / 255.0]
+        ));
+        // The darkest of SameBoy Light: 0x0A1C15 is 10, 28, 21.
+        assert!(close(
+            t.select(5).apply([0.0; 3]),
+            [10.0 / 255.0, 28.0 / 255.0, 21.0 / 255.0]
+        ));
+        // The palette is not an identity: a grey is turned into a colour (no variant maps grey to grey).
+        for v in &t.variants {
+            let out = v.transform.apply([0.5; 3]);
+            assert!(
+                out.iter().any(|c| (c - out[0]).abs() > 0.02),
+                "{} turns grey into a colour",
+                v.id
+            );
+        }
+        // A number past the last variant gives the first one.
+        assert_eq!(t.select(9), t.transform);
+        assert_eq!(t.provenance["sets"].chars().next(), Some('S'));
+        assert!(t.provenance["sets"].contains("No instrument measurement"));
+        assert!(t.notes.contains("closed-source freeware") && t.notes.contains("no licence stated"));
+        assert!(t.notes.contains("Expat") || t.notes.contains("MIT / Expat"));
+    }
+
+    /// The validation of the Game Boy LCD file: a width other than 5 or 8, a word of more than 24 bits, a repeated id, a
+    /// missing provenance entry, a 5-bit file with an 8-bit word.
+    #[test]
+    fn a_bad_game_boy_lcd_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "game_boy_lcd.toml")
+            .expect("the game boy lcd file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (ok.replacen("colour_bits = 8", "colour_bits = 4", 1), "colour_bits"),
+            (ok.replacen("colour_bits = 8", "colour_bits = 6", 1), "colour_bits"),
+            (ok.replacen("0x759833", "0x1759833", 1), "0xFFFFFF"),
+            (ok.replacen("id = \"bgb_pocket\"", "id = \"bgb_dmg\"", 1), "twice"),
+            (ok.replacen("id = \"bgb_pocket\"", "id = \"BGB\"", 1), "lower case"),
+            (ok.replacen("sets = \"S:", "sets = \"X:", 1), "provenance.sets"),
+            // Read as RGB555, an 8-bit word is above 15 bits.
+            (ok.replacen("colour_bits = 8", "colour_bits = 5", 1), "0x7FFF"),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);

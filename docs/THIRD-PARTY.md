@@ -379,3 +379,33 @@ CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
+
+## SameBoy `Core/display.c` palette values (the DMG, Pocket and Light colours of the Game Boy target)
+
+`presets/targets/game_boy_lcd.toml` holds, as its variants 3 to 5, the colours of the three palettes `GB_PALETTE_DMG`, `GB_PALETTE_MGB` and `GB_PALETTE_GBL` in `Core/display.c` of SameBoy (<https://github.com/LIJI32/SameBoy>, Copyright (c) 2015-2026 Lior Halphon, the Expat (MIT) licence for every file except the iOS and HexFiend directories, which are not used): DMG 081810, 396139, 84A563, C6DE8C, Pocket 07100E, 3A4C3A, 818D66, C2CE93 and Light 0A1C15, 357862, 56B495, 7FE2C3 (darkest to lightest in the source; the LCD-off colour of each is not used). They are numbers only, no code is copied. SameBoy's author calls the DMG palette 'not faithful' (issue 269); the numbers are an emulator convention, not a measurement.
+
+The same file holds, as its variants 1 and 2, the 'reality' colours of the BGB emulator (closed-source freeware, no licence stated, its author not asked). They are not covered by the notice below; see the notes of the target file.
+
+```
+Expat License
+
+Copyright (c) 2015-2026 Lior Halphon
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+```
