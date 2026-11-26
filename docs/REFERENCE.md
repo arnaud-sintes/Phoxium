@@ -544,6 +544,53 @@ How the source is mapped to the output, adaptive to any host monitor (no resolut
 - `--scale-mode manual` (`source_scale_mode = manual`) with `source_pixel_size`: the size of a source pixel (a source row) in host pixels, fractional allowed (2.5, 3.33), set in the Source and placement panel. A size that does not fit the output is reduced to the largest that does, and the readout says so; a non-whole size breaks the alignment of the scanlines and the mask with the host pixels, as `fit-free` does.
 - `--stats` prints the resolved placement when the native raster or the output size changes: mode, host px per source px (and whether every source pixel is a whole number of host pixels), picture size and offset, px per mm, scanline pitch in px, px per triad of the current preset, the mask tier per axis, and a note when the requested scale did not fit.
 
+### White of each target
+
+The policy (decided 2026-11-26; DESIGN.md section 8, QUESTIONS.md "White-scale policy of the colour targets"): **A target never rescales white to hide or invent a level: its white is whatever its sourced model gives for the emulator's full white (255, 255, 255 in, or the emulator's own full white where the data file says the emulator's white is lower, e.g. Mega Drive Genesis Plus GX 238). Where a source states the device's white (the Game Boy Color's 240 of 255 from the emulator-correction clip, the AGS-101's measured tinted white, the CRT-like set white of a composite model), the target keeps it. Where the sources leave the scale open (the Mega Drive's 255 against 238), the file says which it uses and why. Every file states its white (the level and the tint, per variant when they differ) in a sentence of its notes that starts with "White scale:".** The policy changed no number.
+
+Where it sits in the chain: the decode stage runs first and gives the target the drive voltage of the picture (a code of 255 is a drive of 1 under both source meanings); the target maps it to the drive of the device, and the video amplifier, the gun law and the stages after them take that drive. A white below 255 in the table is therefore a lower drive at the gun, and raising it is a job for the chain's controls (video amplifier, gun drive), not for the target. The values are the output of the oracle (`Target::select(1)` then `Transform::apply` of a full white; for a `dac` the emulator's top level and for a `signal` the brightest reference colour give the same white), rounded to 8 bits; the test `targets::tests::the_white_of_each_target_is_pinned` pins the white of variant 1 of each target, and `every_file_states_its_white_scale` checks the sentence. A change of a model that moves a white updates this table, the file's sentence and the test table together.
+
+| Target (`id`) | Variant | White (8-bit RGB) | Brightest channel / 255 | Source of the scale |
+| --- | --- | --- | --- | --- |
+| `game_boy_color` | 1 | 240, 240, 240 | 0.941 | sourced: the clip at 960 of 1020 of the near.sh formula, kept as the source gives it (an emulator convention, no measurement; SameBoy and Gambatte keep 255) |
+| `game_boy_color_colorimetric` | 1 to 3 | 248, 248, 248 | 0.972 | sourced: the 0.94 scale of the libretro and Gambatte matrices, after the output exponent |
+| | 4 | 244, 244, 244 | 0.958 | sourced: the 0.91 scale of mGBA's profile |
+| `game_boy_advance` | 1 | 252, 238, 242 | 0.988 | sourced: the article's formula with its 255 / 280 scale and no clip; a tinted white, an estimate |
+| `game_boy_advance_sp_ags_101` | 1 | 243, 236, 255 | 1.000 | sourced: the screen's own white (2023 session); brightest channel at full drive is derived |
+| | 2 | 255, 255, 255 (blue 254.98) | 1.000 | derived: the same white adapted to D65 (Bradford) |
+| | 3 | 248, 238, 255 | 1.000 | sourced: the screen's own white (2026 session), brightest channel at full drive |
+| | 4 | 255, 255, 255 (blue 254.98) | 1.000 | derived: the 2026 white adapted to D65 |
+| `super_nintendo_black_boost` | 1 | 255, 255, 255 | 1.000 | sourced: the table's last entry, code 31 to 255 |
+| `super_game_boy` | 1 to 32 | colour 0 of the palette (below) | per palette | sourced: the firmware's lightest shade at its 5-bit code over 31 |
+| `game_boy_lcd` | 1 | 117, 152, 51 | 0.596 | sourced: BGB 'reality' DMG, lightest of the four colours |
+| | 2 | 173, 191, 146 | 0.749 | sourced: BGB 'reality' Pocket |
+| | 3 | 198, 222, 140 | 0.871 | sourced: SameBoy DMG |
+| | 4 | 194, 206, 147 | 0.808 | sourced: SameBoy Pocket |
+| | 5 | 127, 226, 195 | 0.886 | sourced: SameBoy Light |
+| `nintendo_virtual_boy` | 1, 2 | 255, 0, 0 (240, 0, 0 for Mednafen's 0xF0F0F0) | 1.000 (0.941) | derived: the 2.2 exponents cancel on red and the emulator's level is not rescaled; the red is a stand-in, no chromaticity exists (open) |
+| `snk_neo_geo` | 1 | 255, 255, 255 | 1.000 | derived: the ladder with all bits set and no pulldown is the reference white |
+| | 2 | 251, 251, 251 | 0.986 | derived: the dark bit's 8.2 kohm pulldown |
+| | 3 | 142, 142, 142 | 0.557 | derived: the shadow's 150 ohm pulldown |
+| | 4 | 141, 141, 141 | 0.553 | derived: both |
+| `sega_mega_drive` | 1 to 3 | 255, 255, 255 (from 238 in Genesis Plus GX, 231 in Kega Fusion, 224 in Regen, and from 255) | 1.000 | open: 255 against 238 (4.7 V taken as 0.9 V at the encoder); 255 is used because the readings are published scaled to the 951 mV top level and no source gives the encoder's gain |
+| `sega_master_system` | 1 to 3 | 255, 255, 255 | 1.000 | derived: each VDP's top level (916 mV or 1052 mV) is 255 |
+| `texas_instruments_tms9928` | 1, 2 | 255, 255, 255 | 1.000 | sourced: levels in percent of the white level (variant 2 over its 964 mV white) |
+| `msx2_v9958` | 1, 2 | 255, 255, 255 | 1.000 | derived: the top level of the 3-bit palette; no source gives a lower white |
+| `amstrad_cpc` | 1 to 3 | 255, 255, 255 | 1.000 | derived: only the half level moves; full is the unit |
+| `amstrad_cpc_green_screen` | 1 to 4 | 255, 255, 255 (a grey) | 1.000 | derived: the weighted grey of full red, green and blue is 1 |
+| `sinclair_zx_spectrum_rgb` | 1 to 6 | bright 255, 255, 255; normal 173 (ratio 0.68: variants 1, 3, 5) or 161 (0.63: variants 2, 4, 6) | 1.000 (0.678, 0.631) | derived: the bright level is left alone, the normal level is a ratio of it |
+| `ibm_cga_rgbi` | 1 | bright 255, 255, 255; normal 196, 196, 196 | 1.000 (0.769) | sourced: Holden's voltages over the 1.30 V top level; the normal half (1.00 V) is kept |
+| `commodore_64` | 1 to 4 | 255, 255, 255 | 1.000 | derived: each chip's luma normalised between colour 0 and colour 1 |
+| `nintendo_entertainment_system` | 1 to 4 | 255, 255, 255 | 1.000 | derived: the decode puts the top level (1100 mV) at full drive |
+| `atari_8bit_gtia` | 1 to 6 | 255, 255, 255 | 1.000 | derived: luma normalised between brightness 0 and 15 |
+| `atari_2600_tia` | 1 to 5 | 255, 255, 255 | 1.000 | derived: luma normalised between luma 0 and 7 |
+| `atari_7800_maria` | 1 to 5 | 255, 255, 255 | 1.000 | derived: luma normalised between luma 0 and 15 |
+| `ibm_cga_composite` | 1 to 4 | 255, 255, 255 | 1.000 | derived: black to white (1460 mV) normalised to 1 |
+| `apple_ii_lores` | 1 to 4 | 255, 255, 255 | 1.000 | derived: the signal normalised from black to the white level |
+| `nec_pc_engine_composite` | 1, 2 | 255, 255, 255 | 1.000 | sourced: the checked table's entry of the white code (Y 31, neutral U and V) |
+
+The white of each Super Game Boy palette (colour 0, 8-bit RGB, rounded), 1-A to 1-H: 255 239 206, 222 222 197, 255 197 255, 255 255 173, 255 222 181, 222 239 255, 0 0 82, 255 239 230; 2-A to 2-H: 247 206 165, 255 255 255, 255 197 255, 255 255 165, 255 206 132, 214 255 255, 107 189 58, 255 255 255; 3-A to 3-H: 255 214 156, 222 222 197, 230 173 206, 247 255 189, 255 255 197, 123 123 206, 99 222 82, 230 255 165; 4-A to 4-H: 247 173 107, 247 239 247, 255 230 230, 255 255 189, 255 222 173, 189 214 214, 181 230 25, 255 255 206. Colour 0 is the colour of the lightest Game Boy shade, not always the lightest colour (1-G, 2-G and 3-F are not monotonic).
+
 ## Target lifecycle (T-56)
 
 - **Reattach:** when the captured window closes, the app waits for a new window with the same executable and window class (title preferred, then the largest) and captures it. Only windows that appear after the loss are candidates, or the old handle if it comes back: sibling windows of a shared host (every Chrome window, every UWP app) that were already open are ignored. A sibling that was hidden or minimised when the target closed and is shown later counts as new.

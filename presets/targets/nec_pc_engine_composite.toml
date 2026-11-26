@@ -25,6 +25,7 @@ The recognition. An emulator's picture of this console is a function of the 9-bi
 SuperGrafx and the other models: the SuperGrafx and the PC Engine use the same HuC6260 (standard knowledge), and nothing says which console furrtek read or whether a later revision (HuC6260A, the CoreGrafx II and the Duo family) has a different table; no difference is recorded either way.
 
 Not modelled and not known: the RGB output (the chip's raw RGB has a large DC offset and needs an amplifier; no measured voltage per level and no gamma exist, so there is no RGB target: the plain n x 255 / 7 an emulator shows is the only reading); the analogue levels, the burst amplitude and the setup of the composite signal; the phase and gain differences between consoles (the two variants only move the gain); the blur and dot crawl of the composite path (use the Composite video section, whose colour clock is that of the console's NTSC output).
+White scale: white (the code 511, table entry {16, 15, 31}, Y at its maximum with neutral U and V) is 255, 255, 255 in both variants, untinted (sourced: the entry of the checked table, which the decode returns as equal drives; the V gain moves the colours and not the white).
 """
 
 [lut]

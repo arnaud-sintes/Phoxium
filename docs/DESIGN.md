@@ -61,6 +61,7 @@ Rules marked **(checked)** are verified by a tool, but there is no continuous in
 - No hidden compensation for the look. Anything non-physical (bloom to recover brightness, enlarged triads) sits in a separate, labelled stage that is off in reference presets.
 - Parameters are defined once (the declarative table `params/*.toml`, turned into Rust and GLSL by `paramgen`) and shared with Rust, GLSL and the UI. Never copy a default into two places.
 - No randomness without a seed.
+- **White scale of the source colour targets** (decided 2026-11-26): a target never rescales white to hide or invent a level. Its white is whatever its sourced model gives for the emulator's full white (255, 255, 255 in, or the emulator's own full white where the data file says the emulator's white is lower, e.g. Mega Drive Genesis Plus GX 238). Where a source states the device's white (the Game Boy Color's 240 of 255, the AGS-101's measured tinted white, the CRT-like set white of a composite model), the target keeps it; where the sources leave the scale open (the Mega Drive's 255 against 238), the file says which it uses and why. Every file of `presets/targets/` states its white (level and tint, per variant when they differ) in a line of its notes that starts with `White scale:` (a test checks it), and `targets::tests::the_white_of_each_target_is_pinned` pins the computed white of variant 1, so a model change that moves a white is seen. The table is in `REFERENCE.md`, "White of each target".
 
 ## 9. Patterns in use
 

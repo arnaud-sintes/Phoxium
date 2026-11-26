@@ -5052,4 +5052,127 @@ mod tests {
             assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
         }
     }
+
+    /// The white a transform gives: for the full white (255, 255, 255) and for the emulator's own full white (the top level
+    /// of a `dac`, the brightest reference colour of a `signal`; the full white otherwise).
+    fn whites(t: &Transform) -> ([f64; 3], [f64; 3]) {
+        let full = t.apply([1.0; 3]);
+        let emulator = match t {
+            Transform::Dac(d) => t.apply([f64::from(d.input[crt_model::target::DAC_LEN - 1]) / 255.0; 3]),
+            Transform::Signal(s) => {
+                let i = (0..s.count)
+                    .max_by(|a, b| {
+                        let l = |i: &usize| s.references[*i][0] + s.references[*i][1] + s.references[*i][2];
+                        l(a).total_cmp(&l(b))
+                    })
+                    .expect("a colour");
+                t.apply(s.references[i])
+            }
+            _ => full,
+        };
+        (full, emulator)
+    }
+
+    /// The white-scale policy (REFERENCE.md, "White of each target"): every file says its white in a line of its notes that
+    /// starts with "White scale:", once.
+    #[test]
+    fn every_file_states_its_white_scale() {
+        for (file, text) in SHIPPED {
+            let t = Target::parse(file, text).unwrap_or_else(|e| panic!("{e}"));
+            let lines: Vec<&str> = t
+                .notes
+                .lines()
+                .filter(|l| l.trim_start().starts_with("White scale:"))
+                .collect();
+            assert_eq!(
+                lines.len(),
+                1,
+                "{file}: the notes need one line that starts with \"White scale:\""
+            );
+            assert!(
+                lines[0].trim().len() > "White scale:".len() + 40,
+                "{file}: the \"White scale:\" sentence is empty"
+            );
+        }
+    }
+
+    /// The white of variant 1 of each target, 8-bit RGB, for a full white (255, 255, 255) picture: a later change of a model
+    /// that moves a white fails here and the table of REFERENCE.md, "White of each target", and the file's "White scale:"
+    /// sentence are to be updated with it.
+    const WHITES: &[(&str, [u8; 3])] = &[
+        ("game_boy_color", [240, 240, 240]),
+        ("game_boy_advance", [252, 238, 242]),
+        ("super_nintendo_black_boost", [255, 255, 255]),
+        ("super_game_boy", [255, 239, 206]),
+        ("sega_mega_drive", [255, 255, 255]),
+        ("commodore_64", [255, 255, 255]),
+        ("nintendo_entertainment_system", [255, 255, 255]),
+        ("ibm_cga_rgbi", [255, 255, 255]),
+        ("game_boy_color_colorimetric", [248, 248, 248]),
+        ("game_boy_advance_sp_ags_101", [243, 236, 255]),
+        ("atari_8bit_gtia", [255, 255, 255]),
+        ("texas_instruments_tms9928", [255, 255, 255]),
+        ("snk_neo_geo", [255, 255, 255]),
+        ("sega_master_system", [255, 255, 255]),
+        ("ibm_cga_composite", [255, 255, 255]),
+        ("atari_7800_maria", [255, 255, 255]),
+        ("nec_pc_engine_composite", [255, 255, 255]),
+        ("atari_2600_tia", [255, 255, 255]),
+        ("amstrad_cpc", [255, 255, 255]),
+        ("amstrad_cpc_green_screen", [255, 255, 255]),
+        ("msx2_v9958", [255, 255, 255]),
+        ("game_boy_lcd", [117, 152, 51]),
+        ("nintendo_virtual_boy", [255, 0, 0]),
+        ("apple_ii_lores", [255, 255, 255]),
+        ("sinclair_zx_spectrum_rgb", [255, 255, 255]),
+    ];
+
+    /// The white of each target is pinned (variant 1), the emulator's own white (the top level of a `dac`, the brightest
+    /// colour of a `signal`) gives the same white as 255, and no variant's white is above the input's.
+    #[test]
+    fn the_white_of_each_target_is_pinned() {
+        assert_eq!(WHITES.len(), SHIPPED.len());
+        for t in shipped() {
+            let want = WHITES
+                .iter()
+                .find(|(id, _)| *id == t.id)
+                .unwrap_or_else(|| panic!("{}: no white in the table", t.id))
+                .1;
+            let (full, emulator) = whites(&t.select(1));
+            let got = full.map(|c| (c * 255.0).round() as u8);
+            assert_eq!(got, want, "{}: the white of variant 1", t.id);
+            for i in 0..t.variants.len().max(1) {
+                let (full, emulator) = whites(&t.transform_for(i));
+                for c in 0..3 {
+                    // The 1e-4 is the rounding of the AGS-101's six-digit matrices (its blue reaches 1.00000x).
+                    assert!(
+                        (0.0..=1.0 + 1e-4).contains(&full[c]) && (0.0..=1.0 + 1e-4).contains(&emulator[c]),
+                        "{} variant {}: a white above the input's",
+                        t.id,
+                        i + 1
+                    );
+                    if matches!(t.transform_for(i), Transform::Dac(_) | Transform::Signal(_)) {
+                        assert!(
+                            (full[c] - emulator[c]).abs() < 0.5 / 255.0,
+                            "{} variant {}: the emulator's white and 255 differ",
+                            t.id,
+                            i + 1
+                        );
+                    }
+                }
+            }
+            assert_eq!(
+                emulator.map(|c| (c * 255.0).round() as u8),
+                want,
+                "{}: the emulator's white",
+                t.id
+            );
+        }
+        // Mednafen's default tint is the Virtual Boy target's own white: it is not rescaled to 255.
+        let vb = by_id("nintendo_virtual_boy").expect("vb").select(1);
+        assert_eq!(
+            vb.apply([240.0 / 255.0; 3]).map(|c| (c * 255.0).round() as u8),
+            [240, 0, 0]
+        );
+    }
 }

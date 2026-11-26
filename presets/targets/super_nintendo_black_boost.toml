@@ -11,6 +11,7 @@ This is not what a Super Nintendo outputs. The console's colour DAC is close to 
 The table is an exact formula, found in an independent audit (2026-11-25): code i (0 to 31) maps to i (i + 1) / 2 for i below 16 (a quadratic: 0, 1, 3, 6, 10 ... 120) and to min(255, 8 (i + 1)) from 16 up. Code 8 shows 36 of 255 instead of 66, code 16 shows 136 instead of 132.
 Phoxium's tube already applies its own gamma (the gun law, default power 2.4). Stacked in front of it this table gives an effective exponent of about 3.5 at code 8 and crushes the shadows well below a real SNES on a CRT. Use it only to reproduce the look of bsnes' deep black boost, with a flat gun law, never as 'the SNES colours'. For the real console on a tube the right setting is none.
 A pixel whose three channels are all exact 5-bit expansions is read back to its 5-bit code and looked up; any other colour is interpolated linearly between the two nearest entries.
+White scale: white is 255, 255, 255 (the last entry of the table, code 31 to 255), untinted, in the single variant (sourced: the table of the bsnes and ares 'deep black boost', which darkens the lower half of the palette and keeps the top).
 """
 
 [curve]

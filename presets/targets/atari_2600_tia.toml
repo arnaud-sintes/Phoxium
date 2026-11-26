@@ -17,6 +17,7 @@ The recognition reference is NOT the model: it is the 128 colours of the NTSC pa
 The colours the target shows are the signal model's, not MAME's: a recognised pixel is replaced by the model colour of its index under the chosen variant, so the hue 1 shown is the burst-phase one unless the tube's tint turns it. The model has a linear luma where MAME's greys follow its exponent of 0.9.
 Estimated: the chroma-to-burst ratio and the amplitude over the luma (see above), the decode matrix, the television's tint, and the delay of any real machine. A pixel with no reference colour within the threshold (a scaled or smoothed picture, an edited palette) passes through unchanged: use the integer upscale and the nearest-pixel prefilter (the defaults).
 Not modelled: PAL machines (only a fitted 30-degree model with an emulator's palette exists, no schematic or measurement of the PAL mechanism: PAL is not built), SECAM machines (an exact 8-colour table, black, blue, red, magenta, green, cyan, yellow, white: SECAM is not built), the 2600A and 2600 networks as separate variants, the ladder luma, the television's controls, the composite crosstalk (use the Composite video section), and the artifact colours of the 2600's very wide pixel clock (they appear in the picture the emulator draws).
+White scale: white (hue 0, luma 7) is 255, 255, 255 in the five variants, untinted (derived: the luma is normalised between luma 0 and luma 7, which become the tube's black and white; the NTSC pedestal and the television's contrast are not modelled).
 """
 
 [signal]

@@ -40,7 +40,7 @@ Across the targets:
 
 - [ ] **A live look at the target details in the menu** (built 2026-11-26, checked only in headless previews `target/ui-preview/menu-colour-target*.png` and a headless click test): choose a target in the Source and placement panel and look at the label and variant line, the collapsed Notes and Provenance headers, the legend, the wrapping of the long notes at the menu width and at a large UI scale, and `phoxium --source-colour super_game_boy:2-a` (and a mistyped target and variant: the error lists what is accepted).
 - [ ] **A live look on a real emulator window for every shipped target**, with the target on and off (nothing but the headless renders and the GPU tests has run).
-- [ ] **One white-scale policy** for the targets (the Game Boy Color keeps 240 of 255, the Game Boy Advance a tinted white, the Mega Drive full white at 255 against an open 238): decide, then say it in each file.
+- [ ] **Check the order of a monochrome phosphor and a colour target** (found 2026-11-26 while listing the whites): `decode.comp` takes the BT.601 luma of the source when `phosphor_type` is not P22, before the `target` slot, so the target sees three equal channels. The `amstrad_cpc_green_screen` target's 9 : 3 : 1 mix of the colours (and the weights of any other target) then cannot act on the original colours, and its notes say the opposite ("the chain's decode stage takes the BT.601 luma of the grey"). Verify with a render (green screen target, P31, a pure red and a pure blue patch), then either let the target run before the luma or fix the notes and the REFERENCE entry. The white (255) is not affected.
 
 ## Very low
 
