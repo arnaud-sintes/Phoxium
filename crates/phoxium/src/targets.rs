@@ -155,6 +155,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "nintendo_virtual_boy.toml",
         include_str!("../../../presets/targets/nintendo_virtual_boy.toml"),
     ),
+    (
+        "apple_ii_lores.toml",
+        include_str!("../../../presets/targets/apple_ii_lores.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -590,6 +594,11 @@ struct SignalRevision {
     phase_row_deg: Option<f64>,
     /// The chroma amplitude of this revision, replacing the file's `amplitude` (the Atari machines each have their own).
     amplitude: Option<f64>,
+    /// The chroma amplitude of each colour, in the order of `colours`, in the units of the white-black span (replaces the
+    /// colours' `swing_mv` and the `amplitude`): for a chip whose colours do not share one amplitude (the Apple II's lo-res
+    /// colours of two, three or one pixel bit lit have the fundamentals 0.45, 0.64 and 0 of the span) and whose readings
+    /// differ in the ratio between them. It excludes `amplitude`.
+    amplitudes: Option<Vec<f64>>,
     /// The colour differences of each colour, in the order of `colours` (replace the colours' `r_y` and `b_y`), and their
     /// zero level (replaces the file's `neutral`).
     r_y: Option<Vec<f64>>,
@@ -607,6 +616,7 @@ struct SignalSettings<'a> {
     white_mv: Option<f64>,
     phase_row_deg: f64,
     amplitude: Option<f64>,
+    amplitudes: Option<&'a [f64]>,
     saturation: f64,
     gain: f64,
     gamma: f64,
@@ -669,9 +679,15 @@ impl SignalFile {
         let mut out = [[0.0; 3]; SIGNAL_MAX];
         for (i, c) in colours.iter().enumerate() {
             let y = (level(i)? - black) / span;
-            let amplitude = match (c.swing_mv, self.chroma_factor, s.amplitude.or(self.amplitude)) {
-                (Some(sw), Some(k), _) => k * sw / span,
-                (_, _, Some(a)) => a,
+            let amplitude = match (
+                s.amplitudes,
+                c.swing_mv,
+                self.chroma_factor,
+                s.amplitude.or(self.amplitude),
+            ) {
+                (Some(list), ..) => list[i],
+                (None, Some(sw), Some(k), _) => k * sw / span,
+                (None, _, _, Some(a)) => a,
                 _ => 0.0,
             };
             // Colour differences given by the chip: R' - Y and B' - Y on the scale of the luma, scaled to U and V.
@@ -863,6 +879,7 @@ impl SignalFile {
                     white_mv: r.white_mv,
                     phase_row_deg: r.phase_row_deg.unwrap_or(0.0),
                     amplitude: r.amplitude,
+                    amplitudes: None,
                     saturation: r.saturation.unwrap_or(1.0),
                     gain: r.gain,
                     gamma,
@@ -888,6 +905,20 @@ impl SignalFile {
             }
             if let Some(a) = rev.amplitude {
                 positive(file, "signal.revisions", "amplitude", a)?;
+            }
+            if rev.amplitudes.is_some() && rev.amplitude.is_some() {
+                return Err(format!(
+                    "{file}: signal.revisions {} amplitude and amplitudes are alternatives, not both",
+                    rev.id
+                ));
+            }
+            if let Some(a) = &rev.amplitudes {
+                if a.len() != n || a.iter().any(|v| !v.is_finite() || *v < 0.0) {
+                    return Err(format!(
+                        "{file}: signal.revisions {} amplitudes must hold {n} finite values, not negative",
+                        rev.id
+                    ));
+                }
             }
             let rev_luma = match &rev.luma_mv {
                 None => None,
@@ -934,6 +965,7 @@ impl SignalFile {
                     white_mv: rev.white_mv,
                     phase_row_deg: rev.phase_row_deg.unwrap_or(0.0),
                     amplitude: rev.amplitude,
+                    amplitudes: rev.amplitudes.as_deref(),
                     saturation: 1.0,
                     gain: 1.0,
                     gamma: 1.0,
@@ -4584,6 +4616,289 @@ mod tests {
             (
                 ok.replacen("input_gamma = \"S:", "input_gamma = \"X:", 1),
                 "provenance.input_gamma",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The 16 colours of the lo-res palette of MAME's `apple2video.cpp` (`apple2_palette`, license:BSD-3-Clause,
+    /// copyright-holders: R. Belmont), in the order of the lo-res colour numbers, typed here independently of the data file.
+    /// Numbers only; no code of MAME is used (docs/THIRD-PARTY.md).
+    const MAME_APPLE2: [&str; 16] = [
+        "000000", "A70B40", "401CF7", "E628FF", "007440", "808080", "1990FF", "BF9CFF", "406300", "E66F00", "808080",
+        "FF8BBF", "19D700", "BFE308", "58F4BF", "FFFFFF",
+    ];
+
+    /// The fundamental of the lo-res colour `n` as (peak amplitude in units of the span, phase in degrees on the U axis)
+    /// from the bits, written out here: the colour is a four-bit pattern repeated on four pixel-clock periods to the colour
+    /// cycle, each lit bit a rectangular pulse of a quarter cycle whose fundamental has the peak 2 sin(pi / 4) / pi and a
+    /// phase that turns by 90 degrees a bit (bit 0 at 90 degrees, the phase of the dark red; Munafo's table has the
+    /// one-bit colours 1, 2, 4, 8 at 90, 0, 270, 180); the pulses of a colour add as phasors.
+    fn apple_fundamental(n: usize) -> (f64, f64) {
+        let pulse = 2.0 * (std::f64::consts::PI / 4.0).sin() / std::f64::consts::PI;
+        let (re, im) = (0..4).filter(|k| n >> k & 1 == 1).fold((0.0, 0.0), |(re, im), k| {
+            let a = (90.0 - 90.0 * f64::from(k)).to_radians();
+            (re + pulse * a.cos(), im + pulse * a.sin())
+        });
+        let (re, im) = (
+            if re.abs() < 1e-12 { 0.0 } else { re },
+            if im.abs() < 1e-12 { 0.0 } else { im },
+        );
+        (re.hypot(im), im.atan2(re).to_degrees().rem_euclid(360.0))
+    }
+
+    /// The lo-res file: the 16 colours recomputed from the bits (the lit fraction as the luma over Gayler's span, the
+    /// phasor sum as the chroma), the two readings of the dark and light chroma ratio and the two decoder gains; Gayler's
+    /// phases and Munafo's table recovered; the greys have no chroma.
+    #[test]
+    fn the_apple_ii_file_is_the_waves_of_the_video_circuit() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_APPLE_II_LORES).expect("apple ii");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "wave_burst_gain",
+                "munafo_burst_gain",
+                "wave_fixed_gain",
+                "munafo_fixed_gain"
+            ]
+        );
+        for key in [
+            "colours",
+            "revisions",
+            "reference",
+            "threshold",
+            "black_index",
+            "white_index",
+        ] {
+            assert!(t.provenance.contains_key(key), "provenance.{key}");
+        }
+        assert_eq!(t.select(1), t.transform);
+        let signal = |v: usize| match t.transform_for(v) {
+            Transform::Signal(s) => s,
+            _ => panic!("signal"),
+        };
+        // Gayler's level set: black 0.5 V, white 2.0 V (span 1.5 V), burst 0.7 V peak to peak; the burst is brought to 20 IRE
+        // peak (0.2 of the span) by a television with automatic chroma control.
+        let span: f64 = 2.0 - 0.5;
+        let burst: f64 = 0.7 / 2.0 / span;
+        let k: f64 = 0.2 / burst;
+        assert!(
+            (burst - 0.23333).abs() < 1e-4 && (k - 0.857_143).abs() < 1e-6,
+            "{burst} {k}"
+        );
+        // The fundamentals: two bits 2 / pi, one or three bits that times sin 45 degrees, the greys none; Ticmanis' ratio.
+        let (mid, dark) = (apple_fundamental(3).0, apple_fundamental(1).0);
+        assert!((mid - 2.0 / std::f64::consts::PI).abs() < 1e-12, "{mid}");
+        assert!((dark / mid - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-12);
+        for n in [0usize, 5, 10, 15] {
+            assert_eq!(apple_fundamental(n).0, 0.0, "colour {n}");
+        }
+        for n in [7usize, 11, 13, 14] {
+            assert!((apple_fundamental(n).0 - dark).abs() < 1e-12, "colour {n}");
+        }
+        // Munafo's phases (burst 180) recovered from the bit phasors, and Gayler's relative to the burst.
+        for (n, phase) in [
+            (1, 90.0),
+            (2, 0.0),
+            (3, 45.0),
+            (4, 270.0),
+            (6, 315.0),
+            (7, 0.0),
+            (8, 180.0),
+            (9, 135.0),
+            (11, 90.0),
+            (12, 225.0),
+            (13, 180.0),
+            (14, 270.0),
+        ] {
+            let p = apple_fundamental(n).1;
+            assert!((p - phase).abs() < 1e-9, "colour {n}: {p} against Munafo's {phase}");
+        }
+        for (n, gayler) in [(3, 135.0), (6, 225.0), (12, 315.0)] {
+            let rel = (180.0 - apple_fundamental(n).1).rem_euclid(360.0);
+            assert!(
+                (rel - gayler).abs() < 1e-9,
+                "colour {n}: {rel} against Gayler's {gayler}"
+            );
+        }
+        // Every variant: the colours decoded from the recomputed luma and chroma, within the rounding of the file's amplitudes.
+        // Gain `g` scales the fundamentals (the burst gain k, or 1), `ratio` the one and three bit colours (1 for the waves'
+        // 0.707 already in the fundamentals, Munafo's 0.60 over the mid colour's amplitude).
+        let mut worst = 0.0f64;
+        for (v, gain, munafo) in [(0, k, false), (1, k, true), (2, 1.0, false), (3, 1.0, true)] {
+            let s = signal(v);
+            assert_eq!(s.count, 16);
+            for n in 0..16usize {
+                let (mut a, phase) = apple_fundamental(n);
+                if munafo && matches!(n.count_ones(), 1 | 3) {
+                    a = 0.60 * mid;
+                }
+                let y = f64::from(n.count_ones()) / 4.0;
+                let a = a * gain;
+                let want = decode_yuv(y, a * phase.to_radians().cos(), a * phase.to_radians().sin());
+                let d = dist(s.colours[n], want);
+                worst = worst.max(d);
+                assert!(d < 1e-3, "variant {v} colour {n}: {:?} against {want:?}", s.colours[n]);
+            }
+            assert_eq!(s.colours[0], [0.0; 3], "black");
+            assert_eq!(s.colours[15], [1.0; 3], "white");
+            assert!(dist(s.colours[5], [0.5; 3]) < 1e-9, "grey 1");
+            assert_eq!(s.colours[10], s.colours[5], "grey 2");
+            // The luma is the lit fraction: the mean of the three decoded channels weighted as BT.601 is the share.
+            for n in 0..16usize {
+                let c = s.colours[n];
+                let y = f64::from(n.count_ones()) / 4.0;
+                // The channels that are clamped lose their excess, so only the colours with no clamped channel keep the luma.
+                if c.iter().all(|x| *x > 1e-9 && *x < 1.0 - 1e-9) {
+                    let luma = 0.299 * c[0] + 0.587 * c[1] + 0.114 * c[2];
+                    assert!(
+                        (luma - y).abs() < 1e-3,
+                        "variant {v} colour {n}: luma {luma} against {y}"
+                    );
+                }
+            }
+        }
+        println!("largest distance between the file and the recomputation: {worst:.2e}");
+        // The four decoders share the greys and the phases; the burst gain lowers the chroma to 0.857 of the fixed gain's.
+        let (burst_gain, fixed) = (signal(0), signal(2));
+        assert_ne!(burst_gain.colours[3], fixed.colours[3]);
+        assert_eq!(burst_gain.colours[5], fixed.colours[5]);
+        // Hand derivation, orange (colour 9), variant 1: Y = 0.5, phase 135 degrees, amplitude 0.5457: U = -0.38586,
+        // V = 0.38586; R = 0.5 + 0.38586 / 0.877283 = 0.93985, B = 0.5 - 0.38586 / 0.492111 = -0.28408 (clamped to 0),
+        // G = (0.5 - 0.299 x 0.93985 + 0.114 x 0.28408) / 0.587 = 0.4285 (from the unclamped blue, so the luma is kept).
+        let [r, g, b] = burst_gain.colours[9];
+        assert!(
+            (r - 0.93985).abs() < 2e-3 && (g - 0.4285).abs() < 2e-3 && b == 0.0,
+            "{r} {g} {b}"
+        );
+        // The numbers the notes quote: Munafo's mid chroma to burst ratio 2.5 (100 against 40), here 2.73.
+        println!("mid chroma over burst: {:.3} (Munafo 2.5)", mid / burst);
+    }
+
+    /// Recognition: MAME's palette (BSD-3-Clause, numbers only), typed here independently of the data file, is recognised
+    /// exactly and a little off, a far colour passes; its distinct colours are far apart; the model's own colours, on any of
+    /// the four variants, would not have recognised it.
+    #[test]
+    fn the_apple_ii_reference_is_mames_palette() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_APPLE_II_LORES).expect("apple ii");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        assert_eq!(s.count, 16);
+        assert_eq!(s.threshold, 0.1);
+        let mame: Vec<[f64; 3]> = MAME_APPLE2.iter().map(|h| hex(h)).collect();
+        let mut closest = (f64::MAX, 0, 0);
+        for i in 0..16 {
+            assert!(dist(s.reference(i), mame[i]) < 1e-12, "reference {i}");
+            // The two greys are one colour in MAME's palette: the first is taken, the output is the same.
+            let want = if i == 10 { 5 } else { i };
+            assert_eq!(s.classify(mame[i]), Some(want), "colour {i}");
+            for j in i + 1..16 {
+                let d = dist(mame[i], mame[j]);
+                if d > 1e-12 && d < closest.0 {
+                    closest = (d, i, j);
+                }
+            }
+        }
+        println!(
+            "closest two distinct reference colours: {} and {}, {:.3}; threshold {}",
+            closest.1, closest.2, closest.0, s.threshold
+        );
+        assert!(closest.0 > 0.35, "{closest:?}");
+        assert_eq!(s.apply(mame[9]), s.colours[9]);
+        assert_ne!(s.apply(mame[9]), mame[9]);
+        assert_eq!(s.apply(mame[10]), s.colours[10]);
+        // A little off (0.012 on each channel): still the same colour; a saturated cyan far from every colour passes.
+        for (i, m) in mame.iter().enumerate() {
+            let p = m.map(|v| (v + 0.012).min(1.0));
+            let want = if i == 10 { 5 } else { i };
+            assert_eq!(s.classify(p), Some(want), "a little off, colour {i}");
+        }
+        let odd = [0.0, 1.0, 1.0];
+        assert_eq!(s.classify(odd), None);
+        assert_eq!(s.apply(odd), odd);
+        // The model's colours against MAME's, per variant: the distance, and what a model reference at the same threshold
+        // would have done with MAME's 16 colours.
+        for v in 0..4 {
+            let Transform::Signal(o) = t.transform_for(v) else {
+                panic!("signal")
+            };
+            let (mut sum, mut worst) = (0.0, (0.0f64, 0usize));
+            for (i, m) in mame.iter().enumerate() {
+                let d = dist(*m, o.colours[i]);
+                sum += d;
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+            let model_reference = Signal {
+                references: o.colours,
+                ..o
+            };
+            let (mut wrong, mut none) = (0, 0);
+            for (i, p) in mame.iter().enumerate() {
+                match model_reference.classify(*p) {
+                    Some(j) => wrong += usize::from(j != i && !(i == 10 && j == 5)),
+                    None => none += 1,
+                }
+            }
+            println!(
+                "variant {}: model against MAME mean {:.3}, worst {:.3} at {}; a model reference: {wrong} other, {none} none",
+                v + 1,
+                sum / 16.0,
+                worst.0,
+                worst.1
+            );
+            // The burst-following decoders land within 0.055 of MAME's palette (the purple and the dark blue the furthest),
+            // a model reference would have recognised all of it; the fixed-gain decoders are further (purple 0.137).
+            if v < 2 {
+                assert!(
+                    sum / 16.0 < 0.03 && worst.0 < 0.055 && wrong == 0 && none == 0,
+                    "variant {}",
+                    v + 1
+                );
+            } else {
+                assert!(worst.0 > 0.1 && worst.0 < 0.15, "variant {}: {worst:?}", v + 1);
+            }
+        }
+    }
+
+    /// The validation of the lo-res file: a wrong number of amplitudes, an amplitude next to amplitudes, a missing
+    /// provenance, a colour past the last in the reference.
+    #[test]
+    fn a_bad_apple_ii_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "apple_ii_lores.toml")
+            .expect("the apple ii file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen("0.3859, 0.5457, 0.0, 0.3859", "0.3859, 0.5457, 0.3859", 1),
+                "amplitudes",
+            ),
+            (
+                ok.replacen("0.3859, 0.5457, 0.0,", "-0.3859, 0.5457, 0.0,", 1),
+                "amplitudes",
+            ),
+            (
+                ok.replacen(
+                    "name = \"Ideal waves (dark and light 0.707 of mid), chroma gain follows the burst\"",
+                    "name = \"x\"\namplitude = 0.3",
+                    1,
+                ),
+                "alternatives",
+            ),
+            (ok.replacen("colour = 15", "colour = 16", 1), "rgb_references"),
+            (
+                ok.replacen("reference = \"S:", "reference = \"X:", 1),
+                "provenance.reference",
             ),
         ];
         for (text, key) in cases {

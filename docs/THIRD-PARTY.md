@@ -409,3 +409,42 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 ```
+
+## MAME `apple2video.cpp` palette values (reference colours of the Apple II lo-res target)
+
+`presets/targets/apple_ii_lores.toml` holds, as the colours its recognition compares with, the 16 RGB values of the array `apple2_palette` in `src/mame/apple/apple2video.cpp` of MAME (<https://github.com/mamedev/mame>), which the file comments as the 'Latest Apple II NTSC palette from "Apple II Video Display Theory"' (a spreadsheet). The file's header declares `license:BSD-3-Clause` and `copyright-holders:R. Belmont` (MAME as a whole is GPL, which is why only these numbers are used, from this one file, and none of its code). The values are kept with this notice. The licence text below is the standard BSD 3-Clause text with the holder the file header names; MAME's own legal directory (`docs/legal`) was not read. The AppleWin palette (GPL) was not used.
+
+```
+BSD 3-Clause License
+
+Copyright (c) R. Belmont
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions are met:
+
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+
+3. Neither the name of the copyright holder nor the names of its
+   contributors may be used to endorse or promote products derived from
+   this software without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+```
+
+## Apple II sources of numbers (the Apple II lo-res target)
+
+`presets/targets/apple_ii_lores.toml` takes numbers only, no text and no code, from: Winston Gayler, 'The Apple II Circuit Description' (Howard W. Sams, copyright, the output levels and the burst, Fig. 4-4 and p. 40); Robert Munafo, 'Apple II colors' (<https://mrob.com/pub/xapple2/colors.html>, CC BY-NC 4.0: the lo-res phases, luma and chroma, used here as numbers with attribution only, no text copied; the page's licence forbids commercial use, and this project is MIT: if the owner judges the numbers not freely usable, the only values that come from this page alone are the chroma ratio 0.60 of variants 2 and 4 and the grid's direction, the phases being derivable from the bit phasors and confirmed by Gayler's); Linards Ticmanis (comp.sys.apple2, 2005 and 2007, the luma steps and the chroma ratio 0.707); and the Apple II+ and IIe resistor values read from the KiCad schematic captures of baldengineer/bit-preserve (CC BY 4.0, attribution: 'Apple II+ and IIe schematics, baldengineer / bit-preserve'), which appear in the notes of the file only.

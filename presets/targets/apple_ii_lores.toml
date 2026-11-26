@@ -1,0 +1,196 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Third", "Fourth" and "Fifth research pass" and "Built,
+# the Apple II lo-res colours"). Format: crates/phoxium/src/targets.rs. Every key of [signal] has a [provenance] entry
+# "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
+schema = 1
+id = "apple_ii_lores"
+name = "Apple II, II+ and IIe lo-res colours (NTSC composite, computed from the signal, unverified)"
+label = "the 16 lo-res colours of the Apple II as an NTSC television decodes the machine's composite signal (Colour variant: the dark and light chroma ratio and the decoder's chroma gain); derived from the circuit logic, only the level set measured"
+kind = "signal"
+notes = """
+DERIVED, NOT MEASURED. The colours below are computed from the logic of the machine's video circuit and from one measured level set; no vectorscope or colorimeter reading of any Apple II colour was found. Only Gayler's level set (sync, black, white and burst voltages, read on one machine with the level pot at its maximum) is a measurement, and the hue trimmer and the level pot of every machine, and the monitor or television in front of it, move the real colours.
+The Apple II makes its colours from the bit stream of the video shifter: the pixel clock is 14.31818 MHz, four bits to one cycle of the 3.579545 MHz colour subcarrier, and a lo-res colour is a four-bit pattern repeated along the line. A lit bit drives the white level, an unlit one the black level (one resistor, R7 on the II+, into the summing transistor that also adds the sync and the burst), so the composite signal of a colour is a rectangular wave at the subcarrier frequency whose fraction of lit bits is the colour's luma and whose fundamental is the chroma. An emulator shows each of the 16 colours as a PC colour; this target recognises each pixel as the nearest of the 16 colours of MAME's palette and shows the colour an NTSC decoder drives the tube with for the signal instead, so the tube's own gamma, primaries and white take over.
+Levels (measured): Winston Gayler, 'The Apple II Circuit Description' (Howard W. Sams, Fig. 4-4 and p. 40; a copyrighted book, numbers only), composite output, open circuit, level pot R11 at maximum: sync 0 V, black 0.5 V, white 2.0 V, and a colour burst of 0.7 V peak to peak centred about 0.45 V. Into 75 ohm the whole output drops about 50 percent, mostly across the 27 ohm R10; every level scales together, so the shares used here do not depend on the load or on the pot. The black level is the blanking level (no 7.5 IRE setup). With black to white as 100 IRE (1.5 V, 1 IRE about 15 mV) the sync tip is about -33 IRE (standard -40) and the burst is 0.35 V peak, 23.3 IRE peak (standard 20, 40 peak to peak): a derivation of this file, not a figure of the book. The Apple II Reference Manual (January 1978) and the Apple IIe Technical Reference (table 7-15) give 0.75 V for black and 2.0 V for white at the auxiliary video pin (and 'about 1 volt' into 75 ohm at the RCA jack); they disagree with the 0.5 V black and are not used, and no variant is made of them: the burst level at that pin is not documented, and the black level only moves the chroma through the ratio to the burst (with a span of 1.25 V instead of 1.5 V and the same burst the mid colours' chroma would be 0.455 instead of 0.546, a fifth less saturated), a guess on a number nobody gave.
+Resistors (Apple II+ Rev 7, from the KiCad captures of baldengineer/bit-preserve, CC BY 4.0, attribution given here): the transistor Q3 sums R6 2.7k (the burst, which matches Sather's 'COLOR BURST summing resistor'), R7 1.5k (the video), R8 2k (the sync); R10 27 ohm protects the output, R11 200 ohm is the level pot. With these values the white gives 2.66 V at the base (Gayler's worked example 2.6 V) and the black about 0.49 V at the emitter (Gayler 0.5 V), so the roles and the values agree with the measurement. The IIe has a different network (Q1 mixer, Q2 output, R3 6.8k, R5 330, R7 2.7k, R10 5.6k, R13 6.8k, R15 1k, R8 75, R11 200, from rjhelms' capture of the 050-0051-D board): the role of each IIe resistor was not determined, and the IIe is taken to give the same shares as the II+ (its table 7-15 levels are white 2.0 V, sync 0 V).
+Luma: the lit fraction of the four bits, black 0, one lit bit 0.25, two 0.5, three 0.75, four 1 (Robert Munafo, 'Apple II colors', mrob.com/pub/xapple2/colors.html, CC BY-NC 4.0, numbers with attribution only: luma 25, 50, 75, 100 for the dark, mid, light colours and white, the two greys 50; Linards Ticmanis, comp.sys.apple2, 2005 and 2007: 0, 0.25, 0.5, 0.75, 1): in the units of this file the levels 500, 875, 1250, 1625 and 2000 mV of Gayler's black-to-white span. The mean of the wave is the luma, so the levels follow the lit fraction linearly, with no gamma (Munafo applies Y to the power -0.3 to turn his numbers into RGB for a PC; the tube's own gamma does that here).
+Phase (the 45 degree grid): the four colours with one lit bit, 1, 2, 4 and 8, have the phases 90, 0, 270 and 180 degrees on the U axis (U = cos, V = sin, the burst at 180 degrees, minus U, as in the other signal targets): Munafo's table (dark red 90, dark blue 0, dark green 270, brown 180). A colour with several lit bits is the sum of the phasors of its bits, so two bits side by side land half way (purple 3 at 45, medium blue 6 at 315, orange 9 at 135, light green 12 at 225), two bits opposite cancel (the greys 5 and 10 have no chroma, as Munafo says: 'averaged out' by the television) and three bits leave the one bit that has no opposite (light blue 7 at 0, pink 11 at 90, yellow 13 at 180, aqua 14 at 270): these are Munafo's phases, which the unit test recomputes from the bit phasors. Gayler gives the phases of violet, blue and green relative to the burst as 135, 225 and 315 degrees (the burst phase minus the colour's): purple 45, medium blue 315 and light green 225 on the axes here, an independent confirmation of the grid and of its direction.
+Chroma amplitude (derived): the fundamental of a rectangular wave of height h that is high for the fraction d of the cycle is 2 h sin(pi d) / pi in peak value, which for two lit bits (d 0.5) is 2 / pi = 0.6366 and for one or three lit bits (d 0.25 or 0.75) is 0.6366 x sin(45 degrees) = 0.4502, in the units of the span h (Ticmanis' ratio 0.707 of the dark and the light colours to the mid ones; his 1/(2 pi) and 1/(2 sqrt 2 pi) are the same numbers on a scale of a quarter). Munafo has the ratio 0.60 (chroma 60 against 100) with 'chroma adjusted when needed to avoid oversaturation', and Ticmanis later said he was no longer convinced of his own (the real output is not an ideal rectangular wave: the flip-flop that makes the picture signal is 25 ns slower from high to low according to Sather, so a lit bit is about 24 ns wider than an unlit one, and the bandwidth of the network is finite), so the ratio is the first choice of the variants. A second choice is what the television does with the burst: the mid colours' fundamental is 0.6366 x 1.5 V = 0.955 V peak against a burst of 0.35 V peak, 2.73 times (Munafo's table has 100 against 40, 2.5 times); (a) a decoder whose chroma gain follows the burst, which brings the burst to 20 IRE peak (a television's automatic chroma control, the usual case) shows the chroma at 0.2 x 2.73 = 0.5457 of the span for the mid colours (0.3859 for the dark and light ones at the ratio 0.707), the burst here being 0.857 of the standard; (b) a decoder with a fixed chroma gain shows the fundamentals at their own ratio to the span, 0.6366 and 0.4502. The chroma saturates the channels (orange loses all its blue, purple clips its blue at 1): the real Apple II colours are known for it. The television's saturation control scales the vector (the composite model's colour control).
+Recognition: MAME's lo-res palette (`src/mame/apple/apple2video.cpp`, `license:BSD-3-Clause`, `copyright-holders:R. Belmont`, taken from the spreadsheet 'Apple II Video Display Theory'; numbers only, notice in docs/THIRD-PARTY.md) holds the 16 colours as RGB (the two greys are both 808080). The AppleWin palette is GPL and is not used; another emulator that draws other values passes through unchanged when its pixels are farther than the threshold from MAME's, or is taken for a neighbour. The model's own colours would have recognised MAME's palette too on the first two variants (they are 0.025 from it on average and 0.05 at most, so those two variants change the colours of a MAME picture only a little: a near agreement of two independent derivations, which is itself the finding), but not on the fixed-gain ones (0.137 at purple); MAME's own table is the reference so that the recognition does not depend on the variant chosen.
+Not modelled: hi-res and double hi-res (the colours are artifacts of the bit pattern, which an emulator picture no longer carries: it needs a decode of the bit stream), the text-mode fringing and the artifact colours of the lo-res mixed modes, the 25 ns flip-flop delay and the finite bandwidth of the network (a harmonic content and a hue offset), the colour killer (Revision 1 leaves a small residual burst in text), the hue trimmer (a television's tint control does the same; the unit's own trimmer C3 varies), the level pot, a television whose gain follows the sync tip (the sync is 0.5 V, so such a gain would read the picture as 120 IRE and the burst as 28 IRE), the Apple IIgs (it has its own RGB palette, n x 17 on 4 bits: an identity, no target), a monochrome or Apple Monitor II or III, a television's gamma and the composite crosstalk and dot crawl (use the Composite video section: the colour clock is 3.579545 MHz and the line has 228 cycles with no line to line alternation).
+"""
+
+[signal]
+threshold = 0.1
+black_index = 0
+white_index = 15
+
+[signal.reference]
+gain = 1.0
+gamma = 1.0
+
+[[signal.reference.rgb_references]]
+rgb = 0x000000
+colour = 0
+
+[[signal.reference.rgb_references]]
+rgb = 0xA70B40
+colour = 1
+
+[[signal.reference.rgb_references]]
+rgb = 0x401CF7
+colour = 2
+
+[[signal.reference.rgb_references]]
+rgb = 0xE628FF
+colour = 3
+
+[[signal.reference.rgb_references]]
+rgb = 0x007440
+colour = 4
+
+[[signal.reference.rgb_references]]
+rgb = 0x808080
+colour = 5
+
+[[signal.reference.rgb_references]]
+rgb = 0x1990FF
+colour = 6
+
+[[signal.reference.rgb_references]]
+rgb = 0xBF9CFF
+colour = 7
+
+[[signal.reference.rgb_references]]
+rgb = 0x406300
+colour = 8
+
+[[signal.reference.rgb_references]]
+rgb = 0xE66F00
+colour = 9
+
+[[signal.reference.rgb_references]]
+rgb = 0x808080
+colour = 10
+
+[[signal.reference.rgb_references]]
+rgb = 0xFF8BBF
+colour = 11
+
+[[signal.reference.rgb_references]]
+rgb = 0x19D700
+colour = 12
+
+[[signal.reference.rgb_references]]
+rgb = 0xBFE308
+colour = 13
+
+[[signal.reference.rgb_references]]
+rgb = 0x58F4BF
+colour = 14
+
+[[signal.reference.rgb_references]]
+rgb = 0xFFFFFF
+colour = 15
+
+[[signal.colours]]
+name = "black"
+level_mv = 500.0
+
+[[signal.colours]]
+name = "dark red"
+angle = 90.0
+level_mv = 875.0
+
+[[signal.colours]]
+name = "dark blue"
+angle = 0.0
+level_mv = 875.0
+
+[[signal.colours]]
+name = "purple"
+angle = 45.0
+level_mv = 1250.0
+
+[[signal.colours]]
+name = "dark green"
+angle = 270.0
+level_mv = 875.0
+
+[[signal.colours]]
+name = "grey 1"
+level_mv = 1250.0
+
+[[signal.colours]]
+name = "medium blue"
+angle = 315.0
+level_mv = 1250.0
+
+[[signal.colours]]
+name = "light blue"
+angle = 0.0
+level_mv = 1625.0
+
+[[signal.colours]]
+name = "brown"
+angle = 180.0
+level_mv = 875.0
+
+[[signal.colours]]
+name = "orange"
+angle = 135.0
+level_mv = 1250.0
+
+[[signal.colours]]
+name = "grey 2"
+level_mv = 1250.0
+
+[[signal.colours]]
+name = "pink"
+angle = 90.0
+level_mv = 1625.0
+
+[[signal.colours]]
+name = "light green"
+angle = 225.0
+level_mv = 1250.0
+
+[[signal.colours]]
+name = "yellow"
+angle = 180.0
+level_mv = 1625.0
+
+[[signal.colours]]
+name = "aqua"
+angle = 270.0
+level_mv = 1625.0
+
+[[signal.colours]]
+name = "white"
+level_mv = 2000.0
+
+[[signal.revisions]]
+id = "wave_burst_gain"
+name = "Ideal waves (dark and light 0.707 of mid), chroma gain follows the burst"
+amplitudes = [0.0, 0.3859, 0.3859, 0.5457, 0.3859, 0.0, 0.5457, 0.3859, 0.3859, 0.5457, 0.0, 0.3859, 0.5457, 0.3859, 0.3859, 0.0]
+
+[[signal.revisions]]
+id = "munafo_burst_gain"
+name = "Munafo's ratio (dark and light 0.60 of mid), chroma gain follows the burst"
+amplitudes = [0.0, 0.3274, 0.3274, 0.5457, 0.3274, 0.0, 0.5457, 0.3274, 0.3274, 0.5457, 0.0, 0.3274, 0.5457, 0.3274, 0.3274, 0.0]
+
+[[signal.revisions]]
+id = "wave_fixed_gain"
+name = "Ideal waves (dark and light 0.707 of mid), fixed chroma gain"
+amplitudes = [0.0, 0.4502, 0.4502, 0.6366, 0.4502, 0.0, 0.6366, 0.4502, 0.4502, 0.6366, 0.0, 0.4502, 0.6366, 0.4502, 0.4502, 0.0]
+
+[[signal.revisions]]
+id = "munafo_fixed_gain"
+name = "Munafo's ratio (dark and light 0.60 of mid), fixed chroma gain"
+amplitudes = [0.0, 0.3820, 0.3820, 0.6366, 0.3820, 0.0, 0.6366, 0.3820, 0.3820, 0.6366, 0.0, 0.3820, 0.6366, 0.3820, 0.3820, 0.0]
+
+[provenance]
+colours = "S: the lo-res colour numbers and names (0 black, 1 dark red, 2 dark blue, 3 purple, 4 dark green, 5 grey, 6 medium blue, 7 light blue, 8 brown, 9 orange, 10 grey, 11 pink, 12 light green, 13 yellow, 14 aqua, 15 white) and the phases of the four one-bit colours 1, 2, 4, 8 at 90, 0, 270, 180 degrees with the burst at 180 degrees (Munafo, 'Apple II colors', mrob.com/pub/xapple2/colors.html, CC BY-NC 4.0, numbers with attribution only; the order of the names is also MAME's); D: the phases of the other colours as the sum of the phasors of their lit bits (3 at 45, 6 at 315, 9 at 135, 12 at 225, 7 at 0, 11 at 90, 13 at 180, 14 at 270, the greys 5 and 10 and black and white with none), equal to Munafo's table and recomputed by the unit test; S: Gayler's phases of violet, blue and green relative to the burst, 135, 225 and 315 degrees (the burst's minus the colour's), which agree with purple, medium blue and light green at 45, 315 and 225 degrees on the axes of this file; D: the level of each colour, the black level (500 mV) plus the lit fraction of the four bits (0.25, 0.5, 0.75) of the black-to-white span (1500 mV), the mean of the rectangular wave (Munafo luma 25, 50, 75 and Ticmanis 0.25, 0.5, 0.75 agree); S: Gayler's black 0.5 V and white 2.0 V; K: the standard NTSC burst at 180 degrees on the U axis, black at the blank level with no 7.5 IRE setup"
+revisions = "D: the chroma amplitude of each colour, in units of the span, the peak of the fundamental of a rectangular wave lit for a fraction d of the cycle, 2 sin(pi d) / pi: 0.6366 for two lit bits and 0.4502 for one or three (the unit test recomputes it from the bit phasors), the ratio 0.707 of Ticmanis (comp.sys.apple2, 2005 and 2007; his 1/(2 pi) and 1/(2 sqrt 2 pi) are on a scale of a quarter), or 0.60 times the mid colours' (Munafo's chroma 60 against 100, 'chroma adjusted when needed to avoid oversaturation'): 0.3820 = 0.60 x 0.6366; D: variants 1 and 2 scale by the burst, the chroma gain of a television with automatic chroma control brings the burst to 20 IRE peak (0.2 of the span) and Gayler's burst is 0.7 V peak to peak, 0.35 V peak, 0.2333 of the 1.5 V span, so the factor is 0.2 / 0.2333 = 0.8571 and the mid colours are 0.5457, the dark and light 0.3859 (ideal) or 0.3274 (0.60); D: variants 3 and 4 keep the fundamentals at their own ratio to the span; S: the burst amplitude 0.7 V peak to peak (Gayler); E: the choice of a decoder, the ratio and the omission of the real output's harmonics, the flip-flop delay (Sather, 25 ns) and the network's bandwidth, so every amplitude is an estimate of the order of the real one (Munafo's mid chroma to burst ratio 2.5 against 2.73 here)"
+reference = "S: the classification reference, not an output: the 16 RGB colours of the palette `apple2_palette` of MAME's apple2video.cpp (license BSD-3-Clause, copyright-holders R. Belmont, from the spreadsheet 'Apple II Video Display Theory'; numbers only, notice in docs/THIRD-PARTY.md), in the order of the lo-res colour numbers; K: the greys 5 and 10 are both 808080, the first is taken when a pixel is equally close to both and the output is the same for the two; not compared with any other emulator's palette"
+threshold = "E: the largest distance (Euclidean in drive voltage) at which a pixel is taken for a colour of MAME's palette; the distinct colours of the palette are at least 0.36 apart, so the threshold only decides what is left alone"
+black_index = "K: colour 0 (black, the lit fraction 0) is the lowest level of the signal, the blank level, taken as the tube's black (the 7.5 IRE setup is not modelled, Gayler's black being the blanking level)"
+white_index = "K: colour 15 (white, the four bits lit) is the highest level of the signal, taken as the tube's white (a television's gain and the tube's contrast decide the rest)"

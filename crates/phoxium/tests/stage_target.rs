@@ -12,8 +12,8 @@ use crt_model::target::{Curve, Dac, Matrix, Palette, Transform};
 use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, StageRun, TargetFormat};
 use phoxium::params::{
     Params, SOURCE_COLOUR_TARGET_AMSTRAD_CPC, SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
-    SOURCE_COLOUR_TARGET_ATARI_2600_TIA, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA, SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA,
-    SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
+    SOURCE_COLOUR_TARGET_APPLE_II_LORES, SOURCE_COLOUR_TARGET_ATARI_2600_TIA, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA,
+    SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
     SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_GAME_BOY_LCD,
     SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_MSX2_V9958,
@@ -251,6 +251,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
         | SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE
         | SOURCE_COLOUR_TARGET_ATARI_7800_MARIA
+        | SOURCE_COLOUR_TARGET_APPLE_II_LORES
         | SOURCE_COLOUR_TARGET_ATARI_2600_TIA
         | SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
@@ -322,6 +323,17 @@ fn atari_7800(i: usize) -> [f64; 3] {
         panic!("signal")
     };
     s.references[i % 256]
+}
+
+/// The reference colour `i % 16` of the Apple II lo-res target (MAME's palette, in the data file).
+fn apple_ii(i: usize) -> [f64; 3] {
+    let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_APPLE_II_LORES)
+        .expect("apple ii")
+        .transform
+    else {
+        panic!("signal")
+    };
+    s.references[i % 16]
 }
 
 /// The reference colour `i % 128` of the Atari 2600 target (MAME's TIA palette, in the data file): the entries 2 x and 2 x + 1
@@ -415,6 +427,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 // The Atari 2600 reference colours (MAME's TIA palette) two over two rows, the second a little off.
                 (20, _) => atari_2600(x * 2),
                 (21, _) => atari_2600(x * 2 + 1).map(|v| (v + 0.012).min(1.0)),
+                // The Apple II lo-res reference colours (MAME's palette) twice over, then a little off.
+                (22, _) if x < 32 => apple_ii(x),
+                (22, _) => apple_ii(x).map(|v| (v + 0.012).min(1.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -556,6 +571,10 @@ fn target_slot_matches_the_oracle() {
         ),
         ("virtual boy grey", SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, 1),
         ("virtual boy red ramp", SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, 2),
+        ("apple ii wave burst gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 1),
+        ("apple ii munafo burst gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 2),
+        ("apple ii wave fixed gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 3),
+        ("apple ii munafo fixed gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 4),
     ] {
         let p = Params {
             source_colour_target: target,
