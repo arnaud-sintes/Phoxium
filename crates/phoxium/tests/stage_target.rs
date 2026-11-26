@@ -16,7 +16,7 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
     SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
     SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+    SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -91,6 +91,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM
         | SOURCE_COLOUR_TARGET_IBM_CGA_RGBI
         | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
+        | SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928
         | SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101 => phoxium::targets::for_value(target)
             .expect("signal target")
             .transform_for(usize::try_from(variant - 1).unwrap()),
@@ -147,6 +148,19 @@ fn atari(i: usize) -> [f64; 3] {
     };
     s.references[i % 256]
 }
+
+/// The reference entry `i % 30` of the TMS9928A target (15 colours in two reference sets of exponents 1.1 and 1.5), read from
+/// the data file.
+fn tms(i: usize) -> [f64; 3] {
+    let Transform::Signal(s) = phoxium::targets::for_value(SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928)
+        .expect("tms9928")
+        .transform
+    else {
+        panic!("signal")
+    };
+    s.references[i % 30]
+}
+
 /// A native raster of `w` x `h` pixels: the 5-bit expanded codes of every channel in turn (grey ramp, red, green and
 /// blue ramps), then a pseudo-random fill of any 8-bit drive voltage (a frame that was not 5-bit quantised), with
 /// black and white in the corners.
@@ -178,6 +192,9 @@ fn native(w: usize, h: usize) -> ImageF32 {
                 (11, _) => atari(x * 4 + 1).map(|v| (v + 0.012).min(1.0)),
                 (12, _) => atari(x * 4 + 2),
                 (13, _) => atari(x * 4 + 3).map(|v| (v - 0.012).max(0.0)),
+                // The TMS9928A reference entries (both exponent sets), then the same a little off.
+                (14, _) => tms(x),
+                (15, _) => tms(x).map(|v| (v + 0.012).min(1.0)),
                 _ => {
                     s = s.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     let r = f64::from((s >> 24) & 255) / 255.0;
@@ -267,6 +284,8 @@ fn target_slot_matches_the_oracle() {
         ("atari 800XL", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 1),
         ("atari 800", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 3),
         ("atari 800XL delay 27.5", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 6),
+        ("tms9928 datasheet", SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928, 1),
+        ("tms9929 scope", SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928, 2),
     ] {
         let p = Params {
             source_colour_target: target,

@@ -215,13 +215,19 @@ impl Dac {
 /// Colours a [`Signal`] holds at most (the NES has 64, the Atari 8-bit GTIA 256: 16 hues of 16 luma levels).
 pub const SIGNAL_MAX: usize = 256;
 
+/// The colour-difference scales of [`decode_yuv`]: `U = U_PER_B_Y (B' - Y)` and `V = V_PER_R_Y (R' - Y)`. A chip that gives
+/// R' - Y and B' - Y directly (the TMS9928A) is decoded as `decode_yuv(y, U_PER_B_Y b_y, V_PER_R_Y r_y)`, which is
+/// `R' = Y + r_y`, `B' = Y + b_y` and G' from the BT.601 luma.
+pub const U_PER_B_Y: f64 = 0.492_111;
+pub const V_PER_R_Y: f64 = 0.877_283;
+
 /// The drive voltages R'G'B' a television's decoder gives for a luma `y` (0 black, 1 white) and colour differences
 /// `u`, `v` on the scale of the composite model (`U = 0.492111 (B' - Y)`, `V = 0.877283 (R' - Y)`, BT.601 luma),
 /// clamped to the rails [0, 1]: the matrix of `crate::composite`, so a colour made here goes through the composite
 /// model and returns unchanged.
 pub fn decode_yuv(y: f64, u: f64, v: f64) -> [f64; 3] {
-    let r = y + v / 0.877_283;
-    let b = y + u / 0.492_111;
+    let r = y + v / V_PER_R_Y;
+    let b = y + u / U_PER_B_Y;
     let g = (y - 0.299 * r - 0.114 * b) / 0.587;
     [r, g, b].map(|c| c.clamp(0.0, 1.0))
 }
@@ -765,5 +771,92 @@ mod tests {
             println!("{name}: {exact} of 256 exact, {near} within 0.1 of the reference found, worst {worst:.3}");
             assert!(exact >= 70 && near >= 160, "{name}: {exact} {near}");
         }
+    }
+
+    /// Y, R-Y and B-Y of seven colours of the TMS9928A (Texas Instruments data manual, November 1982, Table 2-3), in percent of
+    /// white with the differences around 47: black, medium green, dark blue, light red, dark yellow, grey, white.
+    const TMS: [[f64; 3]; 7] = [
+        [0.0, 47.0, 47.0],
+        [53.0, 7.0, 20.0],
+        [40.0, 40.0, 100.0],
+        [67.0, 93.0, 27.0],
+        [73.0, 57.0, 7.0],
+        [80.0, 47.0, 47.0],
+        [100.0, 47.0, 47.0],
+    ];
+
+    /// The colour of a [`TMS`] entry as the chip's colour differences decode: `decode_yuv` with the differences scaled to U and V.
+    fn tms(c: [f64; 3]) -> [f64; 3] {
+        decode_yuv(
+            c[0] / 100.0,
+            U_PER_B_Y * (c[2] - 47.0) / 100.0,
+            V_PER_R_Y * (c[1] - 47.0) / 100.0,
+        )
+    }
+
+    /// R' = Y + (R-Y) and B' = Y + (B-Y) for a chip that gives the differences directly, G' from the BT.601 luma, clamped.
+    /// Medium green (0.53, -0.40, -0.27): (0.13, 0.78622, 0.26). Dark blue (0.40, -0.07, 0.53): (0.33, 0.33273, 0.93). Light
+    /// red (0.67, 0.46, -0.20): R' = 1.13 clamps to 1, G' = 0.47453 (from the unclamped red, which keeps the luma), B' = 0.47.
+    /// Dark yellow (0.73, 0.10, -0.40): (0.83, 0.75675, 0.33). A grey and the white are their luma.
+    #[test]
+    fn colour_differences_at_unit_scale_decode_to_the_luma_plus_the_difference() {
+        let [r, g, b] = tms(TMS[1]);
+        assert!(
+            close(r, 0.13, 1e-12) && close(g, 0.78622, 1e-4) && close(b, 0.26, 1e-12),
+            "{r} {g} {b}"
+        );
+        let [r, g, b] = tms(TMS[2]);
+        assert!(
+            close(r, 0.33, 1e-12) && close(g, 0.33273, 1e-4) && close(b, 0.93, 1e-12),
+            "{r} {g} {b}"
+        );
+        let [r, g, b] = tms(TMS[3]);
+        assert!(
+            r == 1.0 && close(g, 0.47453, 1e-4) && close(b, 0.47, 1e-12),
+            "{r} {g} {b}"
+        );
+        let [r, g, b] = tms(TMS[4]);
+        assert!(
+            close(r, 0.83, 1e-12) && close(g, 0.75675, 1e-4) && close(b, 0.33, 1e-12),
+            "{r} {g} {b}"
+        );
+        assert_eq!(tms(TMS[0]), [0.0; 3]);
+        assert!(tms(TMS[5]).iter().all(|c| close(*c, 0.8, 1e-12)));
+        assert!(tms(TMS[6]).iter().all(|c| close(*c, 1.0, 1e-12)));
+        // The scales are the ones decode_yuv divides by, so U and V of the composite model are U_PER_B_Y (B' - Y), V_PER_R_Y (R' - Y).
+        assert_eq!((U_PER_B_Y, V_PER_R_Y), (0.492_111, 0.877_283));
+    }
+
+    /// A signal with two reference sets (the colours repeated, the references at two exponents, entry `k x n + i` for the set
+    /// `k` and the colour `i`, as the data file builds it): a pixel is taken for the nearest entry of either set, a colour at an
+    /// exponent between the two lands on the right colour, and `apply` gives the same hardware colour for both sets.
+    #[test]
+    fn two_reference_sets_recognise_a_palette_at_either_exponent() {
+        let n = TMS.len();
+        let mut colours = [[0.0; 3]; SIGNAL_MAX];
+        let mut references = [[0.0; 3]; SIGNAL_MAX];
+        for (k, gamma) in [1.1, 1.5].into_iter().enumerate() {
+            for (i, c) in TMS.iter().enumerate() {
+                colours[k * n + i] = tms(*c);
+                references[k * n + i] = tms(*c).map(|v| v.powf(gamma));
+            }
+        }
+        let s = Signal {
+            colours,
+            count: 2 * n,
+            references,
+            threshold: 0.12,
+        };
+        for g in [1.0, 1.1, 1.25, 1.4, 1.5, 1.6] {
+            for (i, c) in TMS.iter().enumerate() {
+                let pixel = tms(*c).map(|v| v.powf(g));
+                let got = s.classify(pixel).expect("recognised");
+                assert_eq!(got % n, i, "colour {i} at exponent {g}");
+                assert_eq!(s.apply(pixel), tms(*c));
+            }
+        }
+        assert_eq!(s.apply(s.reference(n + 3)), s.colours[3]);
+        // A pixel far from every colour passes through.
+        assert_eq!(s.classify([0.0, 1.0, 0.0]), None);
     }
 }

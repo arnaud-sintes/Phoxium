@@ -1,0 +1,138 @@
+# Source colour target, data only (TODO, source colour targets; QUESTIONS.md, "Audit of the colour targets", "Design note:
+# signal-driven colour targets", "Second research pass" and the note on the TMS9928A). Format: crates/phoxium/src/targets.rs.
+# Every key of [signal] has a [provenance] entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K
+# standard knowledge, E estimate).
+schema = 1
+id = "texas_instruments_tms9928"
+name = "Texas Instruments TMS9928A / TMS9929A video chip (SG-1000, SC-3000, MSX1, ColecoVision, TI-99/4A, computed from the signal)"
+label = "the 15 colours of the TMS9918 family as the chip's luma and colour-difference outputs give them (Colour variant: the data manual, or a scope reading of a TMS9929A)"
+kind = "signal"
+notes = """
+The TMS9918 family (TMS9918A, TMS9928A, TMS9929A, in the Sega SG-1000 and SC-3000, the MSX1 computers, the ColecoVision, the TI-99/4A, the Sord M5 and others) has a fixed palette of 15 colours and a transparent code that shows the backdrop (it is not a colour, so it is not in this file). The chip does not make RGB: the TMS9928A (NTSC) and TMS9929A (PAL) put out a luma Y and two colour differences, R-Y and B-Y, and the TMS9918A a composite signal. An emulator shows a PC palette computed from those levels with its own conventions. This target goes back to the signal: it recognises each pixel as the nearest of the 15 colours by comparison with a reference palette, and shows the colour a decoder drives the tube with, so the tube's own gamma, primaries and white take over (no conversion for a PC display). The index of a colour in this file is the colour code minus 1 (0 black, 1 medium green, ... 14 white).
+The levels are those of Table 2-3 'Color Assignments' of the TMS9918A, TMS9928A, TMS9929A Video Display Processors Data Manual (Texas Instruments, November 1982, page 2-17), in percent of the white level for Y and for R-Y and B-Y around the neutral level of 47 percent (black, grey and white sit at 47 percent in both differences, so the colour difference of a grey is 0): in the file thousandths of white (530 is 53 percent). The same table serves the 9928A and the 9929A. A second variant uses the oscilloscope readings of 'TmEE' of a TMS9929ANL in his SC-3000 (SMS Power forum, thread 'TMS9929A video output levels', 30 January 2017: millivolts, 0 V is the black level of the chroma outputs, white 964 mV, the load not stated); every level of it is within about 0.02 of the data manual's once both are divided by their white (a test checks it, so two independent readings of the chip agree).
+The decode is settled by the data, not by a standard. Three decodes were computed with the 15 colours. (1) The colour differences taken at unit scale, R' = Y + (R-Y) and B' = Y + (B-Y), with G' from the luma equation (BT.601 weights of the composite model): every channel falls between 0.13 and 1.0 except the red of light red (1.13, 1.14 on the scope readings: the tube's rail clamps it, the luma is kept because G' comes from the unclamped red) and the blue of light blue on the scope readings (1.01); dark yellow comes out (0.83, 0.76, 0.33), a yellow. This is the decode kept. (2) The same differences taken as BT.601 Pb and Pr (R' = Y + 1.402 Pr, B' = Y + 1.772 Pb): five channels end between 1.14 and 1.35 (the blue of dark blue 1.34, the red of light red 1.31), colours the chip cannot have been designed to show, so this is the 'wrong scale' and it is ruled out; the NTSC YIQ matrix with the differences read as I and Q is farther out of the gamut still. (3) A forum answer scales B-Y by 0.564 and R-Y by 0.713 'for BT.601' before decoding with BT.601: the decode gives R' = Y + 0.9996 (R-Y) and B' = Y + 0.9994 (B-Y), which is (1), so it is the same decode. The 'wrong yellows' that the forum thread reports for the coefficients G-Y = -0.509 (R-Y) - 0.194 (B-Y) were not reproduced: those coefficients are the ones of (1), and the yellows of (1) are yellow. What caused that observation is not known (the thread names a different scaling on the SC-3000's own RGB board, the extra pulses of the 9929A on the back porch of the colour differences that shift the neutral level, and the display's gamma; none is checked here). The luma weights 0.30, 0.59, 0.11 (NTSC 1953, used by the Wikipedia derivation) and BT.601's 0.299, 0.587, 0.114 differ by at most 0.005 in any channel (0.0040 in the green of dark blue): the composite model's are used.
+Recognition: emulators show the same chip with different display gammas (the datasheet decode as it is, and raised to 1.6 in the Wikipedia article's table, are the two ends found), so the reference palette is the same 15 colours at two exponents, 1.1 and 1.5, and a pixel is taken for the colour of the nearest of the 30 entries. Against the Wikipedia article's palette (the datasheet decode raised to 1.6, its derivation of the values from the same table) every colour is recognised; against the decode raised to any exponent from 1.0 to 1.6 in steps of 0.025 at most one colour of 15 is taken for a neighbour. The nearest colours are medium and dark green (0.12 apart in drive voltage) and medium and light red (0.2 apart in one set, 0.04 between one colour at the exponent 1.1 and the other at 1.5): a wrong choice there changes the output by a lightness step of the same hue. The reference is not checked against any emulator's own palette (their tables are in GPL repositories, which this project does not read), only against that article's and against decodes of the data. A pixel with no reference colour within the threshold (a scaled or smoothed picture, an edited palette) passes through unchanged: use the integer upscale and the nearest-pixel prefilter (the defaults).
+Not built: the TMS9918A's own composite colours (its luminance column differs from the 9928A's in two colours, cyan 67 against 73 percent and dark green 46 against 47, and its chroma phases are not in the sources), the machine encoders of the MSX, ColecoVision, TI-99/4A and SG-1000 and the television's decode (their colour-difference scale and tint are unmeasured, use the Composite video section and the hue and saturation controls), the TMS9918A's overshoot and bleed of the chroma between neighbouring pixels, and the V9938 and V9958 of the MSX2 (another target). The black and the white of the tube are the chip's black (Y 0) and white (Y 100 percent); the neutral level of the colour differences is exact in the file, an offset of the real output is not modelled.
+"""
+
+[signal]
+neutral = 470.0
+threshold = 0.12
+black_index = 0
+white_index = 14
+
+[signal.reference]
+gain = 1.0
+gamma = 1.1
+extra_gammas = [1.5]
+
+[[signal.colours]]
+name = "black"
+level_mv = 0
+r_y = 470
+b_y = 470
+
+[[signal.colours]]
+name = "medium green"
+level_mv = 530
+r_y = 70
+b_y = 200
+
+[[signal.colours]]
+name = "light green"
+level_mv = 670
+r_y = 170
+b_y = 270
+
+[[signal.colours]]
+name = "dark blue"
+level_mv = 400
+r_y = 400
+b_y = 1000
+
+[[signal.colours]]
+name = "light blue"
+level_mv = 530
+r_y = 430
+b_y = 930
+
+[[signal.colours]]
+name = "dark red"
+level_mv = 470
+r_y = 830
+b_y = 300
+
+[[signal.colours]]
+name = "cyan"
+level_mv = 730
+r_y = 0
+b_y = 700
+
+[[signal.colours]]
+name = "medium red"
+level_mv = 530
+r_y = 930
+b_y = 270
+
+[[signal.colours]]
+name = "light red"
+level_mv = 670
+r_y = 930
+b_y = 270
+
+[[signal.colours]]
+name = "dark yellow"
+level_mv = 730
+r_y = 570
+b_y = 70
+
+[[signal.colours]]
+name = "light yellow"
+level_mv = 800
+r_y = 570
+b_y = 170
+
+[[signal.colours]]
+name = "dark green"
+level_mv = 470
+r_y = 130
+b_y = 230
+
+[[signal.colours]]
+name = "magenta"
+level_mv = 530
+r_y = 730
+b_y = 670
+
+[[signal.colours]]
+name = "grey"
+level_mv = 800
+r_y = 470
+b_y = 470
+
+[[signal.colours]]
+name = "white"
+level_mv = 1000
+r_y = 470
+b_y = 470
+
+[[signal.revisions]]
+id = "datasheet"
+name = "TMS9928A / TMS9929A, data manual Table 2-3 (default)"
+
+[[signal.revisions]]
+id = "sc3000_scope"
+name = "TMS9929A in an SC-3000, oscilloscope readings (TmEE, white 964 mV)"
+luma_mv = [0, 520, 648, 392, 520, 456, 712, 520, 648, 712, 780, 456, 520, 780, 964]
+r_y = [0, -384, -288, -60, -32, 354, -452, 452, 452, 96, 96, -320, 260, 0, 0]
+b_y = [0, -256, -192, 516, 456, -160, 228, -192, -192, -384, -288, -220, 196, 0, 0]
+neutral = 0.0
+
+[provenance]
+colours = "S: Y, R-Y and B-Y of the 15 colours (the transparent code is not a colour), TMS9918A, TMS9928A, TMS9929A Video Display Processors Data Manual, Texas Instruments, November 1982, Table 2-3 'Color Assignments' (page 2-17), as the Wikipedia article 'TMS9918' reproduces it (CC BY-SA, which cites that table; a scan with no text layer, not read here) and as two researchers read it from the scan (QUESTIONS.md, 'Second research pass'); in thousandths of the white level, the colour differences around 470 (47 percent); the scope variant agrees within about 0.02 of white; the colour index is the colour code minus 1"
+neutral = "S: the data manual's colour differences of black, grey and white are all 47 percent (R-Y and B-Y), so 470 thousandths is the level of a zero colour difference; the scope variant, which is relative to the black level of the chroma outputs ('0V is black level'), has a neutral level of 0"
+revisions = "S: datasheet, the file's colours as they are; sc3000_scope, the levels of a TMS9929ANL in an SC-3000 measured by TmEE on an oscilloscope (SMS Power forum, 'TMS9929A video output levels', 30 January 2017, in millivolts, white 964 mV, Y 0 to 964, R-Y -452 to 452, B-Y -384 to 516; the load is not stated and the post gives no error); D: the decode of every colour: R' = Y + (R-Y), B' = Y + (B-Y), G' = (Y - 0.299 R' - 0.114 B') / 0.587 from the unclamped red and blue, clamped to 0 to 1 (the colour differences at unit scale, which keeps every channel but one inside the rails; Rec.601 Pb and Pr scales were computed and put five channels at 1.14 to 1.35, so they are ruled out); E: that the chip's differences are at that scale for a real television, and the neutral offset of the real output"
+reference = "E: the classification reference palette, not an output: the datasheet colours decoded as above and raised to the exponents 1.1 and 1.5 (a PC display's gamma), compared as two sets of 15 colours; chosen with a search over a single exponent and over sets of two to five (the pair 1.1 and 1.5 recognises the Wikipedia 'TMS9918' palette, the decode raised to 1.6, in full, and the decode raised to any exponent from 1.0 to 1.6 with at most one colour of 15 taken for a neighbour); not checked against any emulator's own palette"
+threshold = "E: the largest distance in drive voltage between a pixel and a reference colour at which the pixel is taken for it; the palettes tested are recognised within 0.07 of their own colour, and the closest two different colours of the reference are 0.04 to 0.12 apart, so the threshold only decides what is left alone (a colour far from all 15)"
+black_index = "K: colour code 1 is black, Y = 0 (index 0), taken as the black of the tube"
+white_index = "K: colour code 15 is white, Y = 100 percent (index 14), taken as the white of the tube"

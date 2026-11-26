@@ -40,7 +40,9 @@
 
 use std::{collections::BTreeMap, sync::OnceLock};
 
-use crt_model::target::{decode_yuv, Curve, Dac, Matrix, Palette, Signal, Transform, CURVE_LEN, DAC_LEN, SIGNAL_MAX};
+use crt_model::target::{
+    decode_yuv, Curve, Dac, Matrix, Palette, Signal, Transform, CURVE_LEN, DAC_LEN, SIGNAL_MAX, U_PER_B_Y, V_PER_R_Y,
+};
 use serde::Deserialize;
 
 /// The schema version of the files.
@@ -94,6 +96,10 @@ const SHIPPED: &[(&str, &str)] = &[
     (
         "atari_8bit_gtia.toml",
         include_str!("../../../presets/targets/atari_8bit_gtia.toml"),
+    ),
+    (
+        "texas_instruments_tms9928.toml",
+        include_str!("../../../presets/targets/texas_instruments_tms9928.toml"),
     ),
 ];
 
@@ -360,6 +366,9 @@ struct SignalFile {
     /// The share of a square wave's swing that the decoder's fundamental keeps (0.6440 for the 12-sample window of the
     /// NES, 2 / pi in the continuous limit): the chroma of a colour with a `swing_mv` is this times the swing.
     chroma_factor: Option<f64>,
+    /// The level, in the units of the luma levels, at which a colour difference (`r_y`, `b_y`) is zero (the TMS9928A's
+    /// datasheet gives its differences around 0.47 of the white level); 0 when absent.
+    neutral: Option<f64>,
     threshold: f64,
     /// The colours whose luma is the black and the white level, for a revision that does not give `black_mv` and
     /// `white_mv`.
@@ -406,6 +415,11 @@ struct SignalReference {
     gain: f64,
     /// The exponent a PC display applies, to compare with an emulator's colours.
     gamma: f64,
+    /// Further exponents: the reference palette is made once at `gamma` and once at each of these, and every set is
+    /// compared (the colour `i` of the set `k` is the table entry `k x colours + i`, and gives the colour `i`). Emulators
+    /// show the same chip with different display gammas (the TMS9928A palettes go from 1.0 to 1.6), and one exponent
+    /// cannot sit near them all.
+    extra_gammas: Option<Vec<f64>>,
 }
 
 #[derive(Deserialize, Clone)]
@@ -422,6 +436,10 @@ struct SignalColour {
     level_mv: Option<f64>,
     /// The peak-to-peak swing in mV of the square wave that makes the chroma.
     swing_mv: Option<f64>,
+    /// The colour differences R' - Y and B' - Y as the chip gives them (the TMS9928A), in the units of the levels and around
+    /// `neutral`, when the revision gives no `r_y` and `b_y` lists: an alternative to `angle`.
+    r_y: Option<f64>,
+    b_y: Option<f64>,
 }
 
 #[derive(Deserialize)]
@@ -437,11 +455,19 @@ struct SignalRevision {
     phase_row_deg: Option<f64>,
     /// The chroma amplitude of this revision, replacing the file's `amplitude` (the Atari machines each have their own).
     amplitude: Option<f64>,
+    /// The colour differences of each colour, in the order of `colours` (replace the colours' `r_y` and `b_y`), and their
+    /// zero level (replaces the file's `neutral`).
+    r_y: Option<Vec<f64>>,
+    b_y: Option<Vec<f64>>,
+    neutral: Option<f64>,
 }
 
 /// The settings that turn the colours of a signal file into drive voltages (a revision, or the reference model).
 struct SignalSettings<'a> {
     luma_mv: Option<&'a [f64]>,
+    r_y: Option<&'a [f64]>,
+    b_y: Option<&'a [f64]>,
+    neutral: Option<f64>,
     black_mv: Option<f64>,
     white_mv: Option<f64>,
     phase_row_deg: f64,
@@ -463,6 +489,7 @@ impl SignalFile {
         for (name, present) in [
             ("amplitude", self.amplitude.is_some()),
             ("chroma_factor", self.chroma_factor.is_some()),
+            ("neutral", self.neutral.is_some()),
             ("black_index", self.black_index.is_some()),
             ("white_index", self.white_index.is_some()),
         ] {
@@ -503,6 +530,7 @@ impl SignalFile {
             return Err(format!("{file}: {what}: white must be above black"));
         }
         let span = white - black;
+        let neutral = s.neutral.or(self.neutral).unwrap_or(0.0);
         let mut out = [[0.0; 3]; SIGNAL_MAX];
         for (i, c) in colours.iter().enumerate() {
             let y = (level(i)? - black) / span;
@@ -511,9 +539,16 @@ impl SignalFile {
                 (_, _, Some(a)) => a,
                 _ => 0.0,
             };
-            let (u, v) = c.angle.map_or((0.0, 0.0), |a| {
-                let a = (a + s.phase_row_deg * f64::from(c.row.unwrap_or(0))).to_radians();
-                (amplitude * a.cos(), amplitude * a.sin())
+            // Colour differences given by the chip: R' - Y and B' - Y on the scale of the luma, scaled to U and V.
+            let differences = match (s.r_y.map(|l| l[i]).or(c.r_y), s.b_y.map(|l| l[i]).or(c.b_y)) {
+                (Some(ry), Some(by)) => Some((U_PER_B_Y * (by - neutral) / span, V_PER_R_Y * (ry - neutral) / span)),
+                _ => None,
+            };
+            let (u, v) = differences.unwrap_or_else(|| {
+                c.angle.map_or((0.0, 0.0), |a| {
+                    let a = (a + s.phase_row_deg * f64::from(c.row.unwrap_or(0))).to_radians();
+                    (amplitude * a.cos(), amplitude * a.sin())
+                })
             });
             out[i] =
                 decode_yuv(y * s.gain, u * s.gain * s.saturation, v * s.gain * s.saturation).map(|c| c.powf(s.gamma));
@@ -545,6 +580,8 @@ impl SignalFile {
                     row: (hue > 0).then(|| (hue - 1) as u32),
                     level_mv: None,
                     swing_mv: None,
+                    r_y: None,
+                    b_y: None,
                 }
             })
             .collect())
@@ -582,6 +619,21 @@ impl SignalFile {
                 positive(file, "signal.reference", key, v)?;
             }
         }
+        let extra_gammas = r.extra_gammas.clone().unwrap_or_default();
+        for g in &extra_gammas {
+            positive(file, "signal.reference", "extra_gammas", *g)?;
+        }
+        let sets = 1 + extra_gammas.len();
+        if n.saturating_mul(sets) > SIGNAL_MAX {
+            return Err(format!(
+                "{file}: {n} colours in {sets} reference sets are more than the {SIGNAL_MAX} the table holds"
+            ));
+        }
+        if let Some(v) = self.neutral {
+            if !v.is_finite() {
+                return Err(format!("{file}: signal.neutral must be finite"));
+            }
+        }
         let ref_luma = match &r.luma_mv {
             None => None,
             Some(l) => Some(
@@ -596,13 +648,20 @@ impl SignalFile {
             return Err(format!("{file}: signal.colours name must not be empty"));
         }
         if list.iter().any(|c| {
-            [c.angle, c.level_mv, c.swing_mv]
+            [c.angle, c.level_mv, c.swing_mv, c.r_y, c.b_y]
                 .iter()
                 .flatten()
                 .any(|v| !v.is_finite())
         }) {
             return Err(format!(
-                "{file}: signal.colours angle, level_mv and swing_mv must be finite"
+                "{file}: signal.colours angle, level_mv, swing_mv, r_y and b_y must be finite"
+            ));
+        }
+        if list.iter().any(|c| {
+            c.r_y.is_some() != c.b_y.is_some() || (c.r_y.is_some() && (c.angle.is_some() || c.swing_mv.is_some()))
+        }) {
+            return Err(format!(
+                "{file}: signal.colours r_y and b_y go together and replace angle and swing_mv"
             ));
         }
         if list.iter().any(|c| c.swing_mv.is_some()) && self.chroma_factor.is_none() {
@@ -615,21 +674,29 @@ impl SignalFile {
                 "{file}: signal.revisions must hold 1 to {MAX_PALETTES} revisions"
             ));
         }
-        let references = self.colours_for(
-            file,
-            "signal.reference",
-            &list,
-            &SignalSettings {
-                luma_mv: ref_luma.as_deref(),
-                black_mv: r.black_mv,
-                white_mv: r.white_mv,
-                phase_row_deg: r.phase_row_deg.unwrap_or(0.0),
-                amplitude: r.amplitude,
-                saturation: r.saturation.unwrap_or(1.0),
-                gain: r.gain,
-                gamma: r.gamma,
-            },
-        )?;
+        // The reference palette, once per exponent: the set `k` fills the entries `k x n` to `k x n + n - 1`.
+        let mut references = [[0.0; 3]; SIGNAL_MAX];
+        for (k, gamma) in std::iter::once(r.gamma).chain(extra_gammas.iter().copied()).enumerate() {
+            let set = self.colours_for(
+                file,
+                "signal.reference",
+                &list,
+                &SignalSettings {
+                    luma_mv: ref_luma.as_deref(),
+                    r_y: None,
+                    b_y: None,
+                    neutral: None,
+                    black_mv: r.black_mv,
+                    white_mv: r.white_mv,
+                    phase_row_deg: r.phase_row_deg.unwrap_or(0.0),
+                    amplitude: r.amplitude,
+                    saturation: r.saturation.unwrap_or(1.0),
+                    gain: r.gain,
+                    gamma,
+                },
+            )?;
+            references[k * n..(k + 1) * n].copy_from_slice(&set[..n]);
+        }
         let mut out: Vec<Variant> = Vec::new();
         for rev in &self.revisions {
             if rev.id.is_empty()
@@ -653,21 +720,43 @@ impl SignalFile {
                 None => None,
                 Some(l) => Some(
                     self.levels(l, n)
-                        .filter(|l| l.iter().all(|v| v.is_finite() && *v > 0.0))
+                        .filter(|l| l.iter().all(|v| v.is_finite() && *v >= 0.0))
                         .ok_or_else(|| {
                             format!(
-                                "{file}: signal.revisions {} luma_mv must hold {n} positive levels (a grid: one per luma)",
+                                "{file}: signal.revisions {} luma_mv must hold {n} levels, not negative (a grid: one per luma)",
                                 rev.id
                             )
                         })?,
                 ),
             };
+            if rev.r_y.is_some() != rev.b_y.is_some() {
+                return Err(format!("{file}: signal.revisions {} r_y and b_y go together", rev.id));
+            }
+            let rev_differences = match (&rev.r_y, &rev.b_y) {
+                (Some(ry), Some(by)) => Some(
+                    (ry.len() == n && by.len() == n && ry.iter().chain(by).all(|v| v.is_finite()))
+                        .then_some((ry.as_slice(), by.as_slice()))
+                        .ok_or_else(|| {
+                            format!(
+                                "{file}: signal.revisions {} r_y and b_y must hold {n} finite values each",
+                                rev.id
+                            )
+                        })?,
+                ),
+                _ => None,
+            };
+            if rev.neutral.is_some_and(|v| !v.is_finite()) {
+                return Err(format!("{file}: signal.revisions {} neutral must be finite", rev.id));
+            }
             let colours = self.colours_for(
                 file,
                 &format!("signal.revisions {}", rev.id),
                 &list,
                 &SignalSettings {
                     luma_mv: rev_luma.as_deref(),
+                    r_y: rev_differences.map(|d| d.0),
+                    b_y: rev_differences.map(|d| d.1),
+                    neutral: rev.neutral,
                     black_mv: rev.black_mv,
                     white_mv: rev.white_mv,
                     phase_row_deg: rev.phase_row_deg.unwrap_or(0.0),
@@ -677,12 +766,17 @@ impl SignalFile {
                     gamma: 1.0,
                 },
             )?;
+            // One copy of the colours per reference set: the entry `k x n + i` of a later set gives the colour `i`.
+            let mut table = [[0.0; 3]; SIGNAL_MAX];
+            for k in 0..sets {
+                table[k * n..(k + 1) * n].copy_from_slice(&colours[..n]);
+            }
             out.push(Variant {
                 id: rev.id.clone(),
                 name: rev.name.clone(),
                 transform: Transform::Signal(Signal {
-                    colours,
-                    count: n,
+                    colours: table,
+                    count: n * sets,
                     references,
                     threshold: self.threshold,
                 }),
@@ -1920,7 +2014,12 @@ mod tests {
     /// wrong length, a missing provenance, a zero amplitude, a black index past the colours.
     #[test]
     fn a_bad_grid_file_is_refused() {
-        let ok = SHIPPED[SHIPPED.len() - 1].1.to_string();
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "atari_8bit_gtia.toml")
+            .expect("the atari file")
+            .1
+            .to_string();
         assert!(Target::parse("t.toml", &ok).is_ok());
         let cases = [
             (ok.replace("hues = 16", "hues = 17"), "grid"),
@@ -1930,6 +2029,250 @@ mod tests {
             (ok.replace("grid = \"K:", "grid = \"X:"), "provenance.grid"),
             (ok.replacen("amplitude = 0.239", "amplitude = 0", 1), "amplitude"),
             (ok.replace("black_index = 0", "black_index = 400"), "black"),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// Y, R-Y and B-Y in percent of the 15 colours of the TMS9928A and TMS9929A, colour codes 1 to 15 (Table 2-3 of the
+    /// Texas Instruments data manual of November 1982, as the Wikipedia article 'TMS9918' reproduces it), typed here
+    /// independently of the data file.
+    const TMS: [(&str, f64, f64, f64); 15] = [
+        ("black", 0.0, 47.0, 47.0),
+        ("medium green", 53.0, 7.0, 20.0),
+        ("light green", 67.0, 17.0, 27.0),
+        ("dark blue", 40.0, 40.0, 100.0),
+        ("light blue", 53.0, 43.0, 93.0),
+        ("dark red", 47.0, 83.0, 30.0),
+        ("cyan", 73.0, 0.0, 70.0),
+        ("medium red", 53.0, 93.0, 27.0),
+        ("light red", 67.0, 93.0, 27.0),
+        ("dark yellow", 73.0, 57.0, 7.0),
+        ("light yellow", 80.0, 57.0, 17.0),
+        ("dark green", 47.0, 13.0, 23.0),
+        ("magenta", 53.0, 73.0, 67.0),
+        ("grey", 80.0, 47.0, 47.0),
+        ("white", 100.0, 47.0, 47.0),
+    ];
+
+    /// The channels of colour `i` of [`TMS`] before the rails clamp them, decoded as `scale_r` and `scale_b` times the
+    /// colour differences (1 and 1 is the decode of the file); G' comes from the BT.601 luma equation, or (with
+    /// `g_from_differences`) from the BT.601 Pb and Pr matrix, G' = Y - 0.714 Pr - 0.344 Pb.
+    fn tms_decode(i: usize, scale_r: f64, scale_b: f64, g_from_differences: bool) -> [f64; 3] {
+        let (_, y, ry, by) = TMS[i];
+        let (y, ry, by) = (y / 100.0, (ry - 47.0) / 100.0, (by - 47.0) / 100.0);
+        let (r, b) = (y + scale_r * ry, y + scale_b * by);
+        let g = if g_from_differences {
+            y - 0.714 * ry - 0.344 * by
+        } else {
+            (y - 0.299 * r - 0.114 * b) / 0.587
+        };
+        [r, g, b]
+    }
+
+    /// The TMS9928A file: 15 colours in two reference sets (30 entries), two variants; the colours are the decode of the
+    /// data manual's levels written out here, hand-derived entries, and the scope readings agree with the data manual.
+    /// Medium green (Y 0.53, R-Y 0.07 - 0.47 = -0.40, B-Y 0.20 - 0.47 = -0.27): R' = 0.13, B' = 0.26, G' = (0.53 - 0.299 x 0.13
+    /// minus 0.114 x 0.26) / 0.587 = 0.78622. Light red (Y 0.67, R-Y 0.46, B-Y -0.20): R' = 1.13 (clamped to 1), B' = 0.47,
+    /// and G' = (0.67 - 0.299 x 1.13 - 0.114 x 0.47) / 0.587 = 0.47453, from the unclamped red.
+    #[test]
+    fn the_tms9928_file_and_its_decode() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928).expect("tms9928");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(ids, ["datasheet", "sc3000_scope"]);
+        for key in [
+            "colours",
+            "neutral",
+            "revisions",
+            "reference",
+            "threshold",
+            "black_index",
+            "white_index",
+        ] {
+            assert!(t.provenance.contains_key(key), "provenance.{key}");
+        }
+        assert_eq!(t.select(1), t.transform);
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        // 15 colours in two reference sets: the second set repeats the colours.
+        assert_eq!(s.count, 30);
+        assert_eq!(s.colours[..15], s.colours[15..30]);
+        for (i, (name, ..)) in TMS.iter().enumerate() {
+            let want = tms_decode(i, 1.0, 1.0, false).map(|c| c.clamp(0.0, 1.0));
+            assert!(dist(s.colours[i], want) < 1e-9, "{name}: {:?} {want:?}", s.colours[i]);
+        }
+        let [r, g, b] = s.colours[1];
+        assert!(
+            (r - 0.13).abs() < 1e-9 && (g - 0.78622).abs() < 1e-4 && (b - 0.26).abs() < 1e-9,
+            "{r} {g} {b}"
+        );
+        let [r, g, b] = s.colours[8];
+        assert!(
+            r == 1.0 && (g - 0.47453).abs() < 1e-4 && (b - 0.47).abs() < 1e-9,
+            "{r} {g} {b}"
+        );
+        assert_eq!(s.colours[0], [0.0; 3], "black");
+        assert_eq!(s.colours[14], [1.0; 3], "white");
+        assert!(
+            s.colours[13].iter().all(|c| (c - 0.8).abs() < 1e-12),
+            "grey is 80 percent"
+        );
+        // The two readings of the chip agree: the scope variant, divided by its white of 964 mV, is within 0.025 of the
+        // data manual's colours in every channel (the largest differences are in the magenta and the dark blue).
+        let Transform::Signal(scope) = t.transform_for(1) else {
+            panic!("signal")
+        };
+        let mut worst = (0.0f64, 0);
+        for i in 0..15 {
+            for c in 0..3 {
+                let d = (scope.colours[i][c] - s.colours[i][c]).abs();
+                if d > worst.0 {
+                    worst = (d, i);
+                }
+            }
+        }
+        println!(
+            "scope against the data manual: worst channel difference {:.4} ({})",
+            worst.0, TMS[worst.1].0
+        );
+        assert!(worst.0 < 0.025, "{worst:?}");
+        // Dark yellow is a yellow, from the scope as well: red above green above blue, green at 0.9 of the red or more.
+        for v in [&s, &scope] {
+            let [r, g, b] = v.colours[9];
+            assert!(r > g && g > b && g > 0.88 * r && b < 0.4, "{r} {g} {b}");
+        }
+        // Light blue on the scope reading is past the rail (B' 1.012) and clamps.
+        assert_eq!(scope.colours[4][2], 1.0);
+        // The decode that was ruled out: the differences as BT.601 Pb and Pr (1.402 and 1.772 times) put five channels above 1.1,
+        // the decode kept only one (the red of light red); no colour but black has a channel below 0.12 in the decode kept.
+        let above = |kr: f64, kb: f64, diff_g: bool| {
+            (0..15)
+                .flat_map(|i| tms_decode(i, kr, kb, diff_g))
+                .filter(|c| *c > 1.1)
+                .count()
+        };
+        assert_eq!(above(1.0, 1.0, false), 1);
+        assert!(above(1.402, 1.772, true) >= 5, "{}", above(1.402, 1.772, true));
+        assert!((1..15).all(|i| tms_decode(i, 1.0, 1.0, false).iter().all(|c| *c > 0.12)));
+        // The forum's scaling (B-Y x 0.564, R-Y x 0.713, then BT.601: x 1.402 and x 1.772) is the unit scale to 0.1 percent.
+        assert!((1.402_f64 * 0.713 - 1.0).abs() < 1e-3 && (1.772_f64 * 0.564 - 1.0).abs() < 1e-3);
+        // The luma weights of 1953 NTSC and BT.601 differ by at most 0.005 in any channel (the green of dark blue, 0.0040).
+        for (i, (name, y, ..)) in TMS.iter().enumerate() {
+            let [r, g, b] = tms_decode(i, 1.0, 1.0, false);
+            let g_1953 = (y / 100.0 - 0.30 * r - 0.11 * b) / 0.59;
+            assert!((g_1953 - g).abs() < 0.005, "{name}");
+        }
+    }
+
+    /// The Wikipedia 'TMS9918' article's palette (CC BY-SA): the decode of the data manual raised to 1.6, in hex, as an
+    /// emulator shows the colours; the 'colour code 1 to 15' order, black first.
+    const TMS_WIKIPEDIA: [&str; 15] = [
+        "000000", "0AAD1E", "34C84C", "2B2DE3", "514BFB", "BD2925", "1EE2EF", "FB2C2B", "FF5F4C", "BDA22B", "D7B454",
+        "0A8C18", "AF329A", "B2B2B2", "FFFFFF",
+    ];
+
+    /// Recognition: every reference entry is its own nearest (up to the entry of the same colour in the other set), the
+    /// Wikipedia palette is recognised in full, the decode raised to any exponent from 1.0 to 1.6 loses at most one colour
+    /// of 15 to a neighbour, the closest two colours are printed, and a pixel far from every colour passes through.
+    #[test]
+    fn the_tms9928_reference_recognises_the_published_palette_and_the_gamma_family() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928).expect("tms9928");
+        let Transform::Signal(s) = t.transform else {
+            panic!("signal")
+        };
+        let mut closest = (f64::MAX, 0, 0);
+        for i in 0..30 {
+            let got = s.classify(s.reference(i)).expect("a reference colour is recognised");
+            assert_eq!(got % 15, i % 15, "entry {i}");
+            for j in 0..30 {
+                if i % 15 != j % 15 {
+                    let d = dist(s.reference(i), s.reference(j));
+                    if d < closest.0 {
+                        closest = (d, i, j);
+                    }
+                }
+            }
+        }
+        println!(
+            "closest two reference entries of different colours: {} and {}, {:.4}; threshold {}",
+            TMS[closest.1 % 15].0,
+            TMS[closest.2 % 15].0,
+            closest.0,
+            s.threshold
+        );
+        assert!(closest.0 > 0.03, "{closest:?}");
+        // A recognised pixel is replaced by the chip's colour, whichever set it matched.
+        assert_eq!(s.apply(s.reference(2)), s.colours[2]);
+        assert_eq!(s.apply(s.reference(17)), s.colours[2]);
+        // The published palette: all 15 colours recognised as their own, within 0.07.
+        let mut worst = 0.0f64;
+        for (i, h) in TMS_WIKIPEDIA.iter().enumerate() {
+            let got = s
+                .classify(hex(h))
+                .unwrap_or_else(|| panic!("{} not recognised", TMS[i].0));
+            assert_eq!(got % 15, i, "{}", TMS[i].0);
+            worst = worst.max(dist(s.reference(got), hex(h)));
+        }
+        println!("Wikipedia palette: all 15 recognised, farthest {worst:.4} from its reference colour");
+        assert!(worst < 0.07, "{worst}");
+        // The decode at other display gammas (what an emulator may apply): at most one colour of 15 is mistaken.
+        for step in 0..=24 {
+            let gamma = 1.0 + 0.025 * f64::from(step);
+            let wrong = (0..15)
+                .filter(|&i| {
+                    let c = tms_decode(i, 1.0, 1.0, false).map(|v| v.clamp(0.0, 1.0).powf(gamma));
+                    s.classify(c).map(|j| j % 15) != Some(i)
+                })
+                .count();
+            assert!(wrong <= 1, "gamma {gamma}: {wrong} colours mistaken");
+        }
+        // Another colour, far from all 15, passes through.
+        let odd = [0.0, 1.0, 0.0];
+        assert_eq!(s.classify(odd), None);
+        assert_eq!(s.apply(odd), odd);
+        // The classification does not depend on the variant.
+        let Transform::Signal(scope) = t.transform_for(1) else {
+            panic!("signal")
+        };
+        assert_eq!(scope.references, s.references);
+    }
+
+    /// The colour-difference and reference-set validation: one difference without the other, a difference next to an angle,
+    /// a revision list of the wrong length, a zero exponent, more colours than the table holds, a neutral that is not finite.
+    #[test]
+    fn a_bad_tms9928_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "texas_instruments_tms9928.toml")
+            .expect("the tms file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let sets: Vec<String> = (0..17).map(|k| format!("{}", 1.1 + 0.01 * f64::from(k))).collect();
+        let cases = [
+            (ok.replacen("b_y = 200\n", "", 1), "r_y and b_y"),
+            (
+                ok.replacen(
+                    "name = \"medium green\"\n",
+                    "name = \"medium green\"\nangle = 10.0\n",
+                    1,
+                ),
+                "replace angle",
+            ),
+            (ok.replacen("r_y = [0, -384,", "r_y = [-384,", 1), "must hold 15"),
+            (
+                ok.replace("extra_gammas = [1.5]", "extra_gammas = [0.0]"),
+                "extra_gammas",
+            ),
+            (
+                ok.replace("extra_gammas = [1.5]", &format!("extra_gammas = [{}]", sets.join(", "))),
+                "reference sets",
+            ),
+            (ok.replacen("neutral = 470.0", "neutral = inf", 1), "neutral"),
+            (ok.replace("neutral = \"S:", "neutral = \"X:"), "provenance.neutral"),
         ];
         for (text, key) in cases {
             let err = Target::parse("t.toml", &text).expect_err(key);
