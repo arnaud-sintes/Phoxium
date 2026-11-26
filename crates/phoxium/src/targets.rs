@@ -159,6 +159,10 @@ const SHIPPED: &[(&str, &str)] = &[
         "apple_ii_lores.toml",
         include_str!("../../../presets/targets/apple_ii_lores.toml"),
     ),
+    (
+        "sinclair_zx_spectrum_rgb.toml",
+        include_str!("../../../presets/targets/sinclair_zx_spectrum_rgb.toml"),
+    ),
 ];
 
 /// A source colour target.
@@ -4100,6 +4104,137 @@ mod tests {
             (
                 ok.replacen("output_max = \"K:", "output_max = \"X:", 1),
                 "provenance.output_max",
+            ),
+        ];
+        for (text, key) in cases {
+            let err = Target::parse("t.toml", &text).expect_err(key);
+            assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
+        }
+    }
+
+    /// The ZX Spectrum RGB target: three codes a channel, black and bright kept, the normal level on the ratio of the
+    /// analogue levels (0.68 of the +2A and +3 computation, 0.63 of the 128K SCART cable: 173.4 and 160.65 of 255, D), the
+    /// same on the three channels, six variants (the emulator's normal level 205, 192 or 216 times the two ratios), the
+    /// default 205 at 0.68. No variant is an identity: no emulator's normal level is the output's, and the 48K's 0.85 is not
+    /// a variant (it is what the 216 emulator already shows, 216.75).
+    #[test]
+    fn the_zx_spectrum_rgb_file_moves_the_normal_level_to_the_ratio_of_the_analogue_levels() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB).expect("spectrum");
+        let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            [
+                "e205_r068",
+                "e205_r063",
+                "e192_r068",
+                "e192_r063",
+                "e216_r068",
+                "e216_r063"
+            ]
+        );
+        assert_eq!(t.transform, t.variants[0].transform, "the default is the first variant");
+        let want = [
+            (205u8, 0.68f64),
+            (205, 0.63),
+            (192, 0.68),
+            (192, 0.63),
+            (216, 0.68),
+            (216, 0.63),
+        ];
+        for (v, (normal, ratio)) in t.variants.iter().zip(want) {
+            let Transform::Dac(d) = v.transform else { panic!("dac") };
+            assert_eq!(d.len(), 3, "{}", v.id);
+            assert_eq!(d.input[..3], [0, normal, 255], "{}", v.id);
+            assert!(d.input[3..].iter().all(|&i| i == 255) && d.output[3..].iter().all(|&o| o == 255));
+            // The normal level is the ratio of bright: 0.68 x 255 = 173.4 and 0.63 x 255 = 160.65, rounded.
+            let code = (ratio * 255.0).round();
+            assert_eq!(f64::from(d.output[1]), code, "{}", v.id);
+            assert_eq!([d.output[0], d.output[2]], [0, 255], "{}", v.id);
+            assert_eq!(
+                (d.output_green, d.output_blue),
+                (None, None),
+                "one level for the three channels"
+            );
+            assert_eq!(d.output_max, 255.0);
+            // Not an identity: the normal level moves, and the 0.85 of the 48K is not any variant's ratio.
+            assert_ne!(d.output[1], normal, "the variant {} would be an identity", v.id);
+            assert!(
+                (f64::from(d.output[1]) / 255.0 - 0.85).abs() > 0.1,
+                "{}: the 48K ratio is not a variant",
+                v.id
+            );
+            // Black stays, bright stays, normal lands on the ratio of bright on every channel.
+            assert_eq!(v.transform.apply([0.0; 3]), [0.0; 3]);
+            assert_eq!(v.transform.apply([1.0; 3]), [1.0; 3]);
+            let got = v.transform.apply([f64::from(normal) / 255.0; 3]);
+            assert!(got.iter().all(|c| (c - code / 255.0).abs() < 1e-12), "{got:?}");
+        }
+        // The 27 colours of one variant: every level of every channel goes to its own level, whatever the others are.
+        let levels = [0.0, 205.0 / 255.0, 1.0];
+        let outs = [0.0, 173.0 / 255.0, 1.0];
+        for r in 0..3 {
+            for g in 0..3 {
+                for b in 0..3 {
+                    let got = t.select(1).apply([levels[r], levels[g], levels[b]]);
+                    for (c, (o, w)) in got.iter().zip([outs[r], outs[g], outs[b]]).enumerate() {
+                        assert!((o - w).abs() < 1e-12, "{r}{g}{b} channel {c}");
+                    }
+                }
+            }
+        }
+        // Between the points the map is the straight line: 215 on the 216 variant is 215 / 216 of 173 (172.2), one code
+        // under its own point; 100 on the 205 variant is 100 / 205 of 173.
+        assert!((t.select(5).apply([215.0 / 255.0; 3])[0] * 255.0 - 215.0 * 173.0 / 216.0).abs() < 1e-9);
+        assert!((t.select(1).apply([100.0 / 255.0; 3])[1] * 255.0 - 100.0 * 173.0 / 205.0).abs() < 1e-9);
+        assert_eq!(t.select(9), t.transform, "past the last: the first");
+        assert_eq!(t.provenance["output"].chars().next(), Some('D'));
+        assert_eq!(t.provenance["inputs"].chars().next(), Some('E'));
+        assert_eq!(t.provenance["variant_outputs"].chars().next(), Some('D'));
+        // The notes say the data are a choice and not a measurement, and that the 48K is not part of it.
+        assert!(t.notes.contains("not a measurement") && t.notes.contains("48K"));
+    }
+
+    /// The validation of the Spectrum colour file: a level list of the wrong length or not increasing, an output that
+    /// decreases or is out of range, a repeated id, a missing provenance entry.
+    #[test]
+    fn a_bad_zx_spectrum_rgb_file_is_refused() {
+        let ok = SHIPPED
+            .iter()
+            .find(|(f, _)| *f == "sinclair_zx_spectrum_rgb.toml")
+            .expect("the spectrum file")
+            .1
+            .to_string();
+        assert!(Target::parse("t.toml", &ok).is_ok());
+        let cases = [
+            (
+                ok.replacen("levels = [0, 205, 255]", "levels = [0, 205]", 1),
+                "must hold 3",
+            ),
+            (
+                ok.replacen("levels = [0, 205, 255]", "levels = [0, 255, 255]", 1),
+                "strictly increase",
+            ),
+            (
+                ok.replacen(
+                    "output = [0, 173, 255]\n\n[[dac.inputs]]",
+                    "output = [0, 255, 173]\n\n[[dac.inputs]]",
+                    1,
+                ),
+                "must not decrease",
+            ),
+            (
+                ok.replacen("output = [0, 161, 255]", "output = [0, 161, 256]", 1),
+                "0 to 255",
+            ),
+            (ok.replacen("id = \"e216_r063\"", "id = \"e216_r068\"", 1), "used twice"),
+            (ok.replacen("id = \"e216_r063\"", "id = \"E216\"", 1), "lower case"),
+            (
+                ok.replacen("output_max = \"K:", "output_max = \"X:", 1),
+                "provenance.output_max",
+            ),
+            (
+                ok.replace("variant_outputs = \"D:", "variant_outputs = \"X:"),
+                "provenance.variant_outputs",
             ),
         ];
         for (text, key) in cases {

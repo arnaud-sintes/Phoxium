@@ -19,7 +19,8 @@ use phoxium::params::{
     SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_MSX2_V9958,
     SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
     SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
-    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+    SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+    SOURCE_COLOUR_TARGET_SNK_NEO_GEO, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
     SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
 };
 
@@ -176,6 +177,22 @@ fn transform(target: u32, variant: i32) -> Transform {
             Transform::Dac(Dac {
                 input: pad([0, half, 255]),
                 output: pad([0, (0.40f64 * 255.0).round() as u8, 255]),
+                output_green: None,
+                output_blue: None,
+                output_max: 255.0,
+            })
+        }
+        // The ZX Spectrum RGB output, written here independently of the data file: three codes padded with the last point,
+        // the normal level an emulator shows (205, 192, 216) going to the ratio of bright (0.68 or 0.63, of 255, rounded),
+        // black and bright kept; the variants run over the normal level, the ratio inside it (0.68 then 0.63).
+        SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB => {
+            let v = usize::try_from(variant - 1).unwrap();
+            let normal = [205u8, 192, 216][v / 2];
+            let ratio = [0.68f64, 0.63][v % 2];
+            let pad = |a: [u8; 3]| std::array::from_fn(|i| a[i.min(2)]);
+            Transform::Dac(Dac {
+                input: pad([0, normal, 255]),
+                output: pad([0, (ratio * 255.0).round() as u8, 255]),
                 output_green: None,
                 output_blue: None,
                 output_max: 255.0,
@@ -575,6 +592,36 @@ fn target_slot_matches_the_oracle() {
         ("apple ii munafo burst gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 2),
         ("apple ii wave fixed gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 3),
         ("apple ii munafo fixed gain", SOURCE_COLOUR_TARGET_APPLE_II_LORES, 4),
+        (
+            "zx spectrum 205 r0.68",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            1,
+        ),
+        (
+            "zx spectrum 205 r0.63",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            2,
+        ),
+        (
+            "zx spectrum 192 r0.68",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            3,
+        ),
+        (
+            "zx spectrum 192 r0.63",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            4,
+        ),
+        (
+            "zx spectrum 216 r0.68",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            5,
+        ),
+        (
+            "zx spectrum 216 r0.63",
+            SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            6,
+        ),
     ] {
         let p = Params {
             source_colour_target: target,
@@ -783,6 +830,63 @@ fn cpc_colours_come_out_at_the_half_level_of_the_gate_array() {
         }
     }
     println!("cpc colours: green max {worst:.2e}");
+    common::assert_no_validation_messages(&counter);
+}
+
+/// The Spectrum's 27 level combinations (every channel 0, the emulator's normal level or 255) through the shader on each
+/// of the six variants: the normal level comes out at 0.68 or 0.63 of bright (173 or 161 of 255) on every channel, black
+/// and bright stay, whatever the other channels are.
+#[test]
+fn zx_spectrum_levels_come_out_at_the_ratio_of_bright() {
+    let Some(mut gpu) = common::gpu_or_skip("zx_spectrum_levels_come_out_at_the_ratio_of_bright") else {
+        return;
+    };
+    let counter = gpu.validation_counter();
+    gpu.enable_only(&["target"]).unwrap();
+    for (variant, normal, code) in [
+        (1, 205.0f64, 173.0f64),
+        (2, 205.0, 161.0),
+        (3, 192.0, 173.0),
+        (4, 192.0, 161.0),
+        (5, 216.0, 173.0),
+        (6, 216.0, 161.0),
+    ] {
+        let level = [0.0f64, normal / 255.0, 1.0];
+        let want = [0.0f64, code / 255.0, 1.0];
+        let mut rgba = Vec::new();
+        for r in 0..3 {
+            for g in 0..3 {
+                for b in 0..3 {
+                    rgba.extend_from_slice(&[level[r] as f32, level[g] as f32, level[b] as f32, 1.0]);
+                }
+            }
+        }
+        let img = ImageF32 {
+            width: 27,
+            height: 1,
+            rgba,
+        };
+        let p = Params {
+            source_colour_target: SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB,
+            source_colour_variant: variant,
+            ..Params::default()
+        };
+        let out = run(&mut gpu, &img, &p);
+        for r in 0..3usize {
+            for g in 0..3usize {
+                for b in 0..3usize {
+                    let px = out.pixel((9 * r + 3 * g + b) as u32, 0);
+                    for (c, w) in [want[r], want[g], want[b]].into_iter().enumerate() {
+                        assert!(
+                            (f64::from(px[c]) - w).abs() <= MAX_ERR,
+                            "spectrum variant {variant} {r}{g}{b} channel {c}: {} want {w}",
+                            px[c]
+                        );
+                    }
+                }
+            }
+        }
+    }
     common::assert_no_validation_messages(&counter);
 }
 
