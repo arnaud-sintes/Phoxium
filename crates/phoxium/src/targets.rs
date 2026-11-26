@@ -4092,7 +4092,7 @@ mod tests {
     fn the_amstrad_cpc_file_moves_the_half_level_to_forty_percent() {
         let t = for_value(crate::params::SOURCE_COLOUR_TARGET_AMSTRAD_CPC).expect("cpc");
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
-        assert_eq!(ids, ["emulator_128", "emulator_127", "mame_96"]);
+        assert_eq!(ids, ["emulator_128", "emulator_127", "mame_96", "network_6128_128"]);
         assert_eq!(t.transform, t.variants[0].transform);
         for (v, half) in t.variants.iter().zip([128u8, 127, 96]) {
             let Transform::Dac(d) = v.transform else { panic!("dac") };
@@ -4135,10 +4135,117 @@ mod tests {
         assert_eq!(t.select(9), t.transform, "past the last: the first");
         assert_eq!(t.provenance["output"].chars().next(), Some('S'));
         assert_eq!(t.provenance["inputs"].chars().next(), Some('E'));
-        assert!(
-            !t.provenance.contains_key("variant_outputs"),
-            "no variant has its own output"
-        );
+        // Only variant 4 has outputs of its own (the per-channel half levels of the output network).
+        assert_eq!(t.provenance["variant_outputs"].chars().next(), Some('D'));
+    }
+
+    /// The solved levels of the CPC6128's output network (CPC6128 service manual, CPU circuit diagram; CTM644 circuit
+    /// diagram): per channel, the fraction of full scale of the pin in its high-impedance state, the other two channels in
+    /// the state `others` (0 low, 1 high-impedance, 2 high), with ideal drivers (0 V and 5 V), the sync pin high and the
+    /// monitor input `rin`. A Gauss-Seidel solve of the linear network: the pin node has the 680 ohm pull-up, its luminance
+    /// resistor to the luminance node and the 270 ohm plus `rin` to ground; the luminance node has the 680 ohm of the sync
+    /// pin and the three luminance resistors.
+    fn cpc_half_level(channel: usize, others: [usize; 2], rin: f64) -> f64 {
+        const LUMA: [f64; 3] = [3300.0, 1000.0, 10000.0]; // R131 red, R132 green, R133 blue
+        const PULL_UP: f64 = 680.0; // R125, R127, R129 and the sync pin's R135
+        const SERIES: f64 = 270.0; // R126, R128, R130
+        const VCC: f64 = 5.0;
+        let mut state = [0usize; 3];
+        let mut o = others.iter();
+        for (i, s) in state.iter_mut().enumerate() {
+            *s = if i == channel {
+                1
+            } else {
+                *o.next().expect("two others")
+            };
+        }
+        let divide = |v: f64| v * rin / (SERIES + rin);
+        let (mut pin, mut x) = ([2.0f64; 3], 2.0f64);
+        for _ in 0..5000 {
+            for i in 0..3 {
+                pin[i] = match state[i] {
+                    0 => 0.0,
+                    2 => VCC,
+                    _ => {
+                        let g = 1.0 / PULL_UP + 1.0 / LUMA[i] + 1.0 / (SERIES + rin);
+                        (VCC / PULL_UP + x / LUMA[i]) / g
+                    }
+                };
+            }
+            let g = 1.0 / PULL_UP + LUMA.iter().map(|r| 1.0 / r).sum::<f64>();
+            x = (VCC / PULL_UP + pin.iter().zip(LUMA).map(|(p, r)| p / r).sum::<f64>()) / g;
+        }
+        divide(pin[channel]) / divide(VCC)
+    }
+
+    /// The per-channel variant of the CPC file (variant 4): its half levels are the resistor network's, recomputed here from
+    /// the values read on the service manuals: in the grey (the other two channels at half) red 0.3766, green 0.4217 and
+    /// blue 0.3608, the codes 96, 108 and 92 of 255. Green is higher than red and blue by more than the 2 percent of full
+    /// scale that decides whether a per-channel variant is worth having, over the load and the other channels' states; the
+    /// default variants keep one level for the three channels.
+    #[test]
+    fn the_amstrad_cpc_per_channel_variant_is_the_output_resistor_network() {
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_AMSTRAD_CPC).expect("cpc");
+        let Transform::Dac(d) = t.select(4) else { panic!("dac") };
+        assert_eq!(t.variants[3].id, "network_6128_128");
+        assert_eq!(d.input[..3], [0, 128, 255]);
+        // The half levels, recomputed from the resistors (CTM644's 100 ohm input), ideal drivers, grey state.
+        let grey = [0, 1, 2].map(|c| cpc_half_level(c, [1, 1], 100.0));
+        for (c, want) in grey.iter().zip([0.3766, 0.4217, 0.3608]) {
+            assert!((c - want).abs() < 5e-4, "{grey:?}");
+        }
+        // The mean is close to the sourced 0.40 (second-hand), none of the three is the literal 0.5.
+        assert!((grey.iter().sum::<f64>() / 3.0 - 0.40).abs() < 0.02, "{grey:?}");
+        let codes = grey.map(|c| (c * 255.0).round() as u8);
+        assert_eq!(codes, [96, 108, 92]);
+        assert_eq!(d.output[..3], [0, codes[0], 255], "red");
+        assert_eq!(d.output_green.expect("green")[..3], [0, codes[1], 255], "green");
+        assert_eq!(d.output_blue.expect("blue")[..3], [0, codes[2], 255], "blue");
+        // Green's half is above red's and blue's by more than 2 percent of full scale, on every load and in every state of the
+        // other channels (the gap is the 1k of green against the 3.3k and 10k to the luminance node, which the high sync pin
+        // pulls up), with the load between 75 and 150 ohm.
+        for rin in [75.0, 100.0, 150.0] {
+            for a in 0..3 {
+                for b in 0..3 {
+                    let (r, g, bl) = (
+                        cpc_half_level(0, [a, b], rin),
+                        cpc_half_level(1, [a, b], rin),
+                        cpc_half_level(2, [a, b], rin),
+                    );
+                    assert!(g - r > 0.02 && g - bl > 0.02, "rin {rin} others {a}{b}: {r} {g} {bl}");
+                }
+            }
+        }
+        // The cross-coupling a one-dimensional map cannot carry stays within 3 points of the grey: red 0.366 to 0.393, green
+        // 0.411 to 0.441, blue 0.356 to 0.368 (the other two channels low, half or full).
+        for (c, (lo, hi)) in [(0.366, 0.393), (0.411, 0.441), (0.356, 0.368)].into_iter().enumerate() {
+            let mut min = 1.0f64;
+            let mut max = 0.0f64;
+            for a in 0..3 {
+                for b in 0..3 {
+                    let v = cpc_half_level(c, [a, b], 100.0);
+                    min = min.min(v);
+                    max = max.max(v);
+                }
+            }
+            assert!(
+                (min - lo).abs() < 1.5e-3 && (max - hi).abs() < 1.5e-3,
+                "channel {c}: {min} {max}"
+            );
+        }
+        // Black and full stay on every channel, white stays neutral, and the half level (128) lands on the channel's level.
+        assert_eq!(t.select(4).apply([0.0; 3]), [0.0; 3]);
+        assert_eq!(t.select(4).apply([1.0; 3]), [1.0; 3]);
+        let got = t.select(4).apply([128.0 / 255.0; 3]);
+        for (g, want) in got.iter().zip(codes) {
+            assert!((g * 255.0 - f64::from(want)).abs() < 1e-9, "{got:?}");
+        }
+        // The default and the first three variants are unchanged: one level, no per-channel output.
+        for i in 1..=3 {
+            let Transform::Dac(v) = t.select(i) else { panic!("dac") };
+            assert_eq!((v.output_green, v.output_blue), (None, None));
+            assert_eq!(v.output[..3], [0, 102, 255]);
+        }
     }
 
     /// The validation of the CPC colour file: a level list of the wrong length or not increasing, an output that decreases or

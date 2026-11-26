@@ -836,6 +836,29 @@ fn cpc_colours_come_out_at_the_half_level_of_the_gate_array() {
             }
         }
     }
+    // Variant 4: each channel's half level from the output network (red 96, green 108, blue 92 of 255), black and full kept.
+    let network = Params {
+        source_colour_target: SOURCE_COLOUR_TARGET_AMSTRAD_CPC,
+        source_colour_variant: 4,
+        ..Params::default()
+    };
+    let out = run(&mut gpu, &img, &network);
+    let half = [96.0f64 / 255.0, 108.0 / 255.0, 92.0 / 255.0];
+    for r in 0..3usize {
+        for g in 0..3usize {
+            for b in 0..3usize {
+                let px = out.pixel((9 * r + 3 * g + b) as u32, 0);
+                for (c, (lvl, h)) in [(r, half[0]), (g, half[1]), (b, half[2])].into_iter().enumerate() {
+                    let w = [0.0, h, 1.0][lvl];
+                    assert!(
+                        (f64::from(px[c]) - w).abs() <= MAX_ERR,
+                        "cpc network {r}{g}{b} channel {c}: {} want {w}",
+                        px[c]
+                    );
+                }
+            }
+        }
+    }
     // The green monitor with the half level at 0.40: grey = (9 R + 3 G + B) / 13 of the levels 0, 0.40, 1, on all channels.
     let green = Params {
         source_colour_target: SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
