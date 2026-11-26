@@ -28,18 +28,12 @@ From the comparison of 2026-11-25 (`QUESTIONS.md`, "Comparison with ShaderGlass"
 
 The chain stays as it is; a step at its head (`source_colour_target`, the per-game profile fields `colour_target` and `colour_variant`, the data files of `presets/targets/` with a provenance tag on every value) turns the colours of the source into what the device it came from would have shown. 25 targets are shipped (the list and what each does: `REFERENCE.md`; what the sources disagree on, the closed platforms and the research passes: `QUESTIONS.md`). What is left is below; the open points of each shipped target are in the notes of its data file and in the "Built" notes of `QUESTIONS.md`.
 
-To read in a browser or measure (the research agents were blocked, or the documents are image-only; each would unlock a line above or a closed platform):
+To read (documents the research agents could not read: blocked pages and image-only scans; each would settle a point of a shipped or closed target):
 
 - [ ] **Scanned datasheets**: Yamaha V9938 and V9958 data books, the "R.G.B. Output Level" pages (saved in this session's tool-results folder; vgamuseum.info has them; the ZX agent could render image-only PDFs with a PDF library installed in the scratch folder only, which needs a Python package: ask the owner before doing it again); the Sony CXA1145 datasheet (burst and phase constants of the A600, A1200 and CD32); the Amiga Hardware Reference Manual video section.
 - [ ] **Blocked pages**: the CPCWiki main site (Gate Array, CPC Palette: Grim's per-channel half levels), the Atari 2600 Field Service Manual schematics (the LM0, LM1 and COL resistors), AtariAge threads on the 2600 and 7800 colours, Atari-Forum threads on the ST and STE DAC, the Wayback Machine copies of zxdesign.info, Chris Smith's book "The ZX Spectrum ULA", the rest of the Game Gear service manual.
 - [ ] **Image-only documents** (the ones that would settle the 48K Spectrum): the Ferranti Issue 2 schematic and the 128 analogue schematic (26 MB) and the 5C102 pages 6 to 17 (archive.org item `ferranti-sinclair-docs`), the drawings of Amstrad's ULA patent EP0107687B1 (figures 2 to 4, the Y, U, V resistor values).
-- [ ] **Check in the BGB window** that the DMG and MGB "reality" slots are LCD off, then shades 0 to 3 (supported by BGB's own images, not proven), and ask BGB's author for the numbers' licence.
-- [ ] **A colorimeter session of a real unit** (the method of the libretro "Real GBA and DS-Phat colors" thread: about 80 nits white, Calibrite Display Plus HL or ColorMunki Display): the only way to open the closed handhelds (Lynx, Neo Geo Pocket Color, Game Gear, WonderSwan) and to turn the Game Boy family's photographs into measurements.
-
-Across the targets:
-
-- [ ] **A live look at the target details in the menu** (built 2026-11-26, checked only in headless previews `target/ui-preview/menu-colour-target*.png` and a headless click test): choose a target in the Source and placement panel and look at the label and variant line, the collapsed Notes and Provenance headers, the legend, the wrapping of the long notes at the menu width and at a large UI scale, and `phoxium --source-colour super_game_boy:2-a` (and a mistyped target and variant: the error lists what is accepted).
-- [ ] **A live look on a real emulator window for every shipped target**, with the target on and off (stays for the owner). Covered headlessly on 2026-11-26 (QUESTIONS.md, "Headless look at every target"): the real `phoxium render` with the validation layer, for the 25 targets, variant 1 and one other, on and off, on a synthetic input made of each target's own reference colours, ramps, bars and non-palette colours (no validation message, nothing black, banded or NaN-like, pass-through pixels bit-identical). Not covered: a real emulator's output (its palette, scaling, filtering, the 8-bit quantisation of a real frame) and a live window.
+- [ ] **Ask BGB's author** (bgb.bircd.org, closed freeware, no licence stated) whether the numbers of the "reality" colour schemes may ship (the Game Boy LCD target uses them with attribution).
 
 ## Very low
 
