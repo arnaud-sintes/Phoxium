@@ -26,7 +26,7 @@ From the comparison of 2026-11-25 (`QUESTIONS.md`, "Comparison with ShaderGlass"
 
 ## Source colour targets
 
-The chain stays as it is; a step at its head (`source_colour_target`, the per-game profile fields `colour_target` and `colour_variant`, the data files of `presets/targets/` with a provenance tag on every value) turns the colours of the source into what the device it came from would have shown. 25 targets are shipped (the list and what each does: `REFERENCE.md`; what the sources disagree on, the closed platforms and the research passes: `QUESTIONS.md`). What is left is below; the open points of each shipped target are in the notes of its data file and in the "Built" notes of `QUESTIONS.md`.
+The chain stays as it is; a step at its head (`source_colour_target`, the per-game profile fields `colour_target` and `colour_variant`, the data files of `presets/targets/` with a provenance tag on every value) turns the colours of the source into what the device it came from would have shown. 26 targets are shipped (the list and what each does: `REFERENCE.md`; what the sources disagree on, the closed platforms and the research passes: `QUESTIONS.md`). What is left is below; the open points of each shipped target are in the notes of its data file and in the "Built" notes of `QUESTIONS.md`.
 
 To read (documents the research agents could not read: blocked pages and image-only scans; each would settle a point of a shipped or closed target):
 
