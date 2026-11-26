@@ -4,8 +4,8 @@
 # K standard knowledge, E estimate).
 schema = 1
 id = "atari_2600_tia"
-name = "Atari 2600 VCS (TIA, NTSC, computed from the signal, unverified)"
-label = "the 128 colours of the Atari 2600 as an NTSC television decodes the TIA's signal (Colour variant: the hue delay of the pot, the chroma level, or the luma ladder of the later 2600A boards); derived from a mailing-list analysis and emulator notes, not measured"
+name = "Atari 2600"
+label = "the 128 colours of the Atari 2600 (VCS) as an NTSC television decodes the TIA's signal (Colour variant: the hue delay of the pot, the chroma level, or the luma ladder of the later 2600A boards); derived from a mailing-list analysis and emulator notes, not measured"
 kind = "signal"
 notes = """
 UNVERIFIED: no instrument measurement of a 2600's video signal was found. The numbers below come from a schematic analysis posted to the Stella mailing list in December 2003 by Eric Ball (who called it 'still off'), from the notes of two emulator authors (Gopher2600, jigo2600) and from MAME's notes; the Atari documents (the TIA technical manual, the Field Service Manual) give the structure, not the voltages, and the Ball figures were read second hand from an earlier research pass of this project (the message itself could not be fetched again when this target was built).

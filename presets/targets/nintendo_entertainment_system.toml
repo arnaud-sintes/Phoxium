@@ -3,7 +3,7 @@
 # entry "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "nintendo_entertainment_system"
-name = "Nintendo Entertainment System / Famicom (computed from the signal)"
+name = "Nintendo NES / Famicom"
 label = "the NES's colours as a television decodes the 2C02's composite signal (Colour variant: the chip and the setup)"
 kind = "signal"
 notes = """

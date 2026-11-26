@@ -428,7 +428,10 @@ pub fn value_words(m: &ParamMeta, v: ParamValue) -> String {
         ParamValue::F32(x) => num(x),
         ParamValue::I32(x) => x.to_string(),
         ParamValue::Bool(b) => (if b { "on" } else { "off" }).to_string(),
-        ParamValue::Enum(i) => m.values.get(i as usize).map_or_else(|| i.to_string(), |s| words(s)),
+        ParamValue::Enum(i) => m
+            .values
+            .get(i as usize)
+            .map_or_else(|| i.to_string(), |s| enum_value_text(m, s)),
         ParamValue::Vec2(a) => a.map(num).join(", "),
         ParamValue::Vec3(a) => a.map(num).join(", "),
         ParamValue::Vec4(a) => a.map(num).join(", "),
@@ -632,15 +635,28 @@ fn number_slider(ui: &Frame, wid: &str, v: &mut f32, m: &ParamMeta, width: f32, 
     (changed, rect, hovered)
 }
 
+/// The text the enum value `name` of `m` shows in the combo and in the tooltips: the id in words ([`words`]),
+/// except for the colour target, whose devices show the `name` of their data file (`Nintendo Game Boy Color`, the
+/// provider first; `none` stays "None").
+pub fn enum_value_text(m: &ParamMeta, name: &str) -> String {
+    if m.id == "source_colour_target" {
+        if let Some(t) = crate::targets::by_id(name) {
+            return t.name.trim().to_string();
+        }
+    }
+    words(name)
+}
+
 /// The enum indices of `m` in the order its combo shows them. Most enums keep the order of `params/*.toml`
 /// (off first, increasing strength, the default first: the order means something). The device list of the colour
-/// target is a catalogue: `none` stays first, the devices follow sorted by the name the combo shows
-/// ([`crate::presets::name_order`], the index breaking a tie). Only the display is sorted: the stored value and
-/// the order of the enum and of `presets/targets/` do not change.
+/// target is a catalogue: `none` stays first, the devices follow sorted by the name the combo shows (the `name` of
+/// their data file, [`crate::presets::name_order`], the index breaking a tie). The enum and `presets/targets/` are
+/// in the alphabetical order of the ids, which groups the devices by provider as the names do; the stored value is
+/// the index in that order and the sort is display only.
 pub fn enum_display_order(m: &ParamMeta) -> Vec<usize> {
     let mut order: Vec<usize> = (0..m.values.len()).collect();
     if m.id == "source_colour_target" {
-        let shown: Vec<String> = m.values.iter().map(|s| words(s)).collect();
+        let shown: Vec<String> = m.values.iter().map(|s| enum_value_text(m, s)).collect();
         order.sort_by(|&a, &b| {
             // `none` (the untouched source colours) first, whatever the sort says.
             let none = |i: usize| m.values[i] != "none";
@@ -725,11 +741,19 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
         }
         ParamValue::Enum(v) => {
             ui.set_next_item_width(width);
-            let current = m.values.get(v as usize).map_or_else(|| "?".to_string(), |s| words(s));
+            let current = m
+                .values
+                .get(v as usize)
+                .map_or_else(|| "?".to_string(), |s| enum_value_text(m, s));
             if let Some(_combo) = ui.begin_combo(&wid, &current) {
                 for i in enum_display_order(m) {
                     let (name, selected) = (m.values[i], i == v as usize);
-                    if ui.selectable_config(words(name)).selected(selected).build() && !selected {
+                    if ui
+                        .selectable_config(enum_value_text(m, name))
+                        .selected(selected)
+                        .build()
+                        && !selected
+                    {
                         new = Some(ParamValue::Enum(i as u32));
                     }
                     if selected {
@@ -1305,14 +1329,31 @@ mod tests {
         once.sort();
         assert_eq!(once, (0..target.values.len()).collect::<Vec<_>>(), "every value once");
         assert_eq!(target.values[order[0]], "none");
-        let shown: Vec<String> = order[1..].iter().map(|&i| words(target.values[i])).collect();
+        // The combo text is the data file's name (provider first), not the id in words.
+        let shown: Vec<String> = order[1..]
+            .iter()
+            .map(|&i| enum_value_text(target, target.values[i]))
+            .collect();
         let mut sorted = shown.clone();
         sorted.sort_by(|a, b| crate::presets::name_order(a, b));
         assert_eq!(shown, sorted);
-        assert_eq!(shown[0], "Amstrad cpc", "{shown:?}");
-        assert_ne!(order, once, "the table is not in name order, so the display differs");
-        // The enum itself is untouched: the first value is still `none`, the second `game_boy_color`.
-        assert_eq!(&target.values[..2], ["none", "game_boy_color"]);
+        assert_eq!(shown[0], "Amstrad CPC", "{shown:?}");
+        assert!(shown.contains(&"Nintendo Game Boy Color".to_string()), "{shown:?}");
+        assert!(shown.contains(&"Yamaha MSX2+ (V9958)".to_string()), "{shown:?}");
+        assert_eq!(enum_value_text(target, "none"), "None");
+        for (&i, name) in order[1..].iter().zip(&shown) {
+            let t = crate::targets::by_id(target.values[i]).expect("a shipped target");
+            assert_eq!(name, &t.name, "the combo shows the name of the data file");
+        }
+        // The other enums show their id in words.
+        let mask = crate::params::meta("mask_type").unwrap();
+        assert_eq!(enum_value_text(mask, "aperture_grille"), "Aperture grille");
+        assert_ne!(
+            order, once,
+            "the table is in the order of the ids, so the display differs"
+        );
+        // The enum itself is in the alphabetical order of the ids after `none`.
+        assert_eq!(&target.values[..3], ["none", "amstrad_cpc", "amstrad_cpc_green_screen"]);
         // The other enums keep their table order (off, increasing strength, default first).
         let mask = crate::params::meta("mask_type").unwrap();
         assert_eq!(enum_display_order(mask), vec![0, 1, 2]);

@@ -2,8 +2,8 @@
 # crates/phoxium/src/targets.rs. Every key of [palette] has a [provenance] entry "<tag>: <source>" with the CRT.md
 # confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
-id = "super_game_boy"
-name = "Super Game Boy (the 32 built-in palettes)"
+id = "nintendo_super_game_boy"
+name = "Nintendo Super Game Boy"
 label = "a Game Boy picture in one of the Super Game Boy's 32 built-in palettes (Colour variant), from a grey source"
 kind = "palette"
 notes = """

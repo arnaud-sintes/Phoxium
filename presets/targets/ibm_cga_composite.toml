@@ -4,7 +4,7 @@
 # tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "ibm_cga_composite"
-name = "IBM CGA, the 16 colours on a composite NTSC monitor or television"
+name = "IBM CGA (composite)"
 label = "the 16 CGA colours as an NTSC television decodes the card's composite signal (Colour variant: old or new card, and the television's chroma gain)"
 kind = "signal"
 notes = """

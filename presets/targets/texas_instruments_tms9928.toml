@@ -4,8 +4,8 @@
 # standard knowledge, E estimate).
 schema = 1
 id = "texas_instruments_tms9928"
-name = "Texas Instruments TMS9928A / TMS9929A video chip (SG-1000, SC-3000, MSX1, ColecoVision, TI-99/4A, computed from the signal)"
-label = "the 15 colours of the TMS9918 family as the chip's luma and colour-difference outputs give them (Colour variant: the data manual, or a scope reading of a TMS9929A)"
+name = "Texas Instruments TMS9928A / TMS9929A"
+label = "the 15 colours of the TMS9918 family (SG-1000, SC-3000, MSX1, ColecoVision, TI-99/4A) as the chip's luma and colour-difference outputs give them (Colour variant: the data manual, or a scope reading of a TMS9929A)"
 kind = "signal"
 notes = """
 The TMS9918 family (TMS9918A, TMS9928A, TMS9929A, in the Sega SG-1000 and SC-3000, the MSX1 computers, the ColecoVision, the TI-99/4A, the Sord M5 and others) has a fixed palette of 15 colours and a transparent code that shows the backdrop (it is not a colour, so it is not in this file). The chip does not make RGB: the TMS9928A (NTSC) and TMS9929A (PAL) put out a luma Y and two colour differences, R-Y and B-Y, and the TMS9918A a composite signal. An emulator shows a PC palette computed from those levels with its own conventions. This target goes back to the signal: it recognises each pixel as the nearest of the 15 colours by comparison with a reference palette, and shows the colour a decoder drives the tube with, so the tube's own gamma, primaries and white take over (no conversion for a PC display). The index of a colour in this file is the colour code minus 1 (0 black, 1 medium green, ... 14 white).

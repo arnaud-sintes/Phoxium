@@ -2,7 +2,7 @@
 # colour targets"). Format: crates/phoxium/src/targets.rs. Every key of [matrix] has a [provenance] entry
 # "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
-id = "game_boy_advance"
+id = "nintendo_game_boy_advance"
 name = "Nintendo Game Boy Advance"
 label = "the byuu/ares colour correction of the Game Boy Advance LCD (Talarubi's formula, eye-tuned, not a measurement)"
 kind = "matrix"

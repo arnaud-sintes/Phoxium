@@ -3,7 +3,7 @@
 # confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "sega_master_system"
-name = "Sega Master System / Mark III (Mode 4 colour DAC)"
+name = "Sega Master System"
 label = "the Master System's and Mark III's 2-bit-per-channel VDP output at the levels measured on the console, behind a plain 2-bit emulator picture (Colour variant: first VDP, first VDP on a scope reading, second VDP)"
 kind = "dac"
 notes = """

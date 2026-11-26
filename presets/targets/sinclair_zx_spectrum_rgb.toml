@@ -3,7 +3,7 @@
 # "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "sinclair_zx_spectrum_rgb"
-name = "Sinclair ZX Spectrum 128K, +2, +2A and +3 (RGB output, normal and bright levels)"
+name = "Sinclair ZX Spectrum 128K/+2/+2A/+3 (RGB)"
 label = "the Spectrum's RGB output as two analogue levels per channel, normal at 0.68 (+2A, +3) or 0.63 (128K SCART cable) of bright, behind an emulator picture whose normal level is 205, 192 or 216 (Colour variant); a documented choice, not a measurement"
 kind = "dac"
 notes = """

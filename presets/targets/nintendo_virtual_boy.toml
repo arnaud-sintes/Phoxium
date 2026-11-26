@@ -3,7 +3,7 @@
 # confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "nintendo_virtual_boy"
-name = "Nintendo Virtual Boy: four levels of red LED light on black"
+name = "Nintendo Virtual Boy"
 label = "the Virtual Boy's display as the light it makes: red LEDs whose light is proportional to their on-time, on black (the LED model is documented, the colour is the sibling Private Eye's datasheet, nothing of the Virtual Boy is measured); Colour variant: what the emulator shows"
 kind = "matrix"
 notes = """

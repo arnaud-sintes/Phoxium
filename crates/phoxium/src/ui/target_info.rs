@@ -180,7 +180,7 @@ mod tests {
     /// The heading names the variant in force: the numbered one, and the first for a number past the last or below 1.
     #[test]
     fn the_heading_names_the_variant_in_force() {
-        let t = crate::targets::by_id("super_game_boy").unwrap();
+        let t = crate::targets::by_id("nintendo_super_game_boy").unwrap();
         assert!(t.variants.len() > 9);
         for (number, index) in [
             (1, 0),
@@ -202,7 +202,7 @@ mod tests {
     /// Paragraphs are the non-blank lines, trimmed; a made-up target shows the counting and the order of the tags.
     #[test]
     fn paragraphs_and_tag_counts() {
-        let mut t = crate::targets::by_id("game_boy_color").unwrap().clone();
+        let mut t = crate::targets::by_id("nintendo_game_boy_color").unwrap().clone();
         t.notes = "\n  First line\nsecond line.\n\n\n\nSecond paragraph.  \n".into();
         t.provenance.clear();
         for (k, v) in [("a", "E: x"), ("b", "S: y"), ("c", "E: z"), ("d", "D: w")] {

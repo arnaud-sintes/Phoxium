@@ -387,13 +387,13 @@ mod tests {
         assert!(parse(&s(&["--set", "novalue"])).is_err());
         // `--source-colour` is read and checked as on the live command line.
         assert_eq!(parse(&s(&["--out", "a.png"])).unwrap().colour, None);
-        let c = parse(&s(&["--source-colour", "super_game_boy:2-a"]))
+        let c = parse(&s(&["--source-colour", "nintendo_super_game_boy:2-a"]))
             .unwrap()
             .colour
             .unwrap();
         assert_eq!(
             (c.target, c.variant),
-            (crate::params::SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9)
+            (crate::params::SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY, 9)
         );
         assert!(parse(&s(&["--source-colour", "nope"])).is_err());
         assert!(parse(&s(&["--source-colour"])).is_err());

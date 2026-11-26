@@ -3,7 +3,7 @@
 # confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "ibm_cga_rgbi"
-name = "IBM CGA, RGBI colours on an IBM 5153 monitor"
+name = "IBM CGA (RGBI monitor)"
 label = "the 16 CGA colours as the IBM 5153 monitor drove its tube (measured), in place of the canonical palette"
 kind = "remap"
 notes = """

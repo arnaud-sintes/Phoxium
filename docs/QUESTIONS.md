@@ -2083,3 +2083,20 @@ R47 loads Y (pin 17), R56 and R63 load U (pin 15) and V (pin 16) (retrotechwiki;
 ### 5. Decision
 
 The rule asked for a variant per distinct issue and load combination if the loaded levels differ by more than 2 percent of the luma span or of the chroma amplitudes. The model gives 2.7 percent less relative chroma for the early boards (220 ohm everywhere) and 2.2 percent for the Issue 2 with the 6C001 (at beta 150), but the figure runs from 0.5 to 5.3 percent over beta 1000 to 70 and the data cannot fix beta; the unmodelled loads (the modulator and LM1889 inputs behind R47, R56, R63, the coupling networks R42, R49, TR1, the trimmers VR1 and VR2) lower the levels further by unknown amounts; the 6C001 chip is not the chip of these circuits; and the default's chroma gain is itself an estimate (E) of a gain set by trimmers, so a variant that rescales it by 0.97 would be a false precision. **No variant is added; the default is unchanged.** The early boards (220 ohm) would show about 3 percent less chroma than the default, an effect smaller than the choice between the two variants. If a measurement of a real machine or the 6C001 levels turn up, a variant for the early boards (220 / 220 / 220, scale about 0.97 on the chroma amplitudes) is the first one to add.
+
+## Colour target ids and names with the provider first, 2026-11-26
+
+Owner request: the colour targets (the "palette presets") are named with their provider first, in the ids and in the names the menu shows; no migration (an old id in a saved setting or profile is ignored with a warning and the target stays `none`). The dated notes above keep the ids that were current when they were written; the mapping of the eight ids that changed (the other 18 already started with their provider):
+
+| Id up to 0.11.0 | Id now |
+|---|---|
+| `game_boy_advance` | `nintendo_game_boy_advance` |
+| `game_boy_advance_sp_ags_101` | `nintendo_game_boy_advance_sp_ags_101` |
+| `game_boy_color` | `nintendo_game_boy_color` |
+| `game_boy_color_colorimetric` | `nintendo_game_boy_color_colorimetric` |
+| `game_boy_lcd` | `nintendo_game_boy_lcd` |
+| `super_game_boy` | `nintendo_super_game_boy` |
+| `super_nintendo_black_boost` | `nintendo_snes_black_boost` |
+| `msx2_v9958` | `yamaha_v9958_msx2` (Yamaha makes the V9958, the VDP of the MSX2+) |
+
+The values of `source_colour_target` and the shipped files are now in the alphabetical order of the ids after `none` (a test checks it and that every id and every `name` starts with its provider). The combo shows the `name` of the data file, sorted by it. The GPU code compares the value with `none` (0) only, so the reorder moves no behaviour.

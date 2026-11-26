@@ -13,16 +13,16 @@ use phoxium::gpu::{FrameConstants, Headless, ImageF32, Settings, StageInput, Sta
 use phoxium::params::{
     Params, SOURCE_COLOUR_TARGET_AMSTRAD_CPC, SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN,
     SOURCE_COLOUR_TARGET_APPLE_II_LORES, SOURCE_COLOUR_TARGET_ATARI_2600_TIA, SOURCE_COLOUR_TARGET_ATARI_7800_MARIA,
-    SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
-    SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-    SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_GAME_BOY_LCD,
-    SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE, SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_MSX2_V9958,
-    SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE, SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM,
+    SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, SOURCE_COLOUR_TARGET_COMMODORE_64, SOURCE_COLOUR_TARGET_IBM_CGA_COMPOSITE,
+    SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE,
+    SOURCE_COLOUR_TARGET_NINTENDO_ENTERTAINMENT_SYSTEM, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE,
+    SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE_SP_AGS_101, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR,
+    SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR_COLORIMETRIC, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD,
+    SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST, SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY,
     SOURCE_COLOUR_TARGET_NINTENDO_VIRTUAL_BOY, SOURCE_COLOUR_TARGET_SEGA_MASTER_SYSTEM,
     SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL,
     SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_RGB, SOURCE_COLOUR_TARGET_SNK_NEO_GEO,
-    SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
-    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928,
+    SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928, SOURCE_COLOUR_TARGET_YAMAHA_V9958_MSX2,
 };
 
 const MAX_ERR: f64 = 1e-3;
@@ -84,7 +84,7 @@ fn md_dac15() -> Transform {
 
 fn transform(target: u32, variant: i32) -> Transform {
     match target {
-        SOURCE_COLOUR_TARGET_GAME_BOY_COLOR => Transform::Matrix(Matrix {
+        SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR => Transform::Matrix(Matrix {
             rows: [[26.0, 4.0, 2.0], [0.0, 24.0, 8.0], [6.0, 4.0, 22.0]],
             input_bits: 5,
             input_range: 31.0,
@@ -94,7 +94,7 @@ fn transform(target: u32, variant: i32) -> Transform {
             output_gamma: 1.0,
             output_scale: 1.0,
         }),
-        SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE => Transform::Matrix(Matrix {
+        SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE => Transform::Matrix(Matrix {
             rows: [[255.0, 50.0, 0.0], [10.0, 230.0, 30.0], [50.0, 10.0, 220.0]],
             input_bits: 5,
             input_range: 1.0,
@@ -104,7 +104,7 @@ fn transform(target: u32, variant: i32) -> Transform {
             output_gamma: 2.2,
             output_scale: 255.0 / 280.0,
         }),
-        SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST => Transform::Curve(Curve {
+        SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST => Transform::Curve(Curve {
             table: [
                 0x00, 0x01, 0x03, 0x06, 0x0a, 0x0f, 0x15, 0x1c, 0x24, 0x2d, 0x37, 0x42, 0x4e, 0x5b, 0x69, 0x78, 0x88,
                 0x90, 0x98, 0xa0, 0xa8, 0xb0, 0xb8, 0xc0, 0xc8, 0xd0, 0xd8, 0xe0, 0xe8, 0xf0, 0xf8, 0xff,
@@ -129,14 +129,14 @@ fn transform(target: u32, variant: i32) -> Transform {
             })
         }
         // Variant 1 is 1-A (the power-on palette), variant 9 is 2-A, variant 32 is 4-H.
-        SOURCE_COLOUR_TARGET_SUPER_GAME_BOY => match variant {
+        SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY => match variant {
             1 => sgb_palette([0x67BF, 0x265B, 0x10B5, 0x2866]),
             9 => sgb_palette([0x533E, 0x2638, 0x01E5, 0x0000]),
             32 => sgb_palette([0x67FF, 0x2F17, 0x2230, 0x1548]),
             _ => unreachable!(),
         },
         // Variant 1 is BGB reality DMG, 2 BGB reality Pocket, 3 SameBoy DMG, 4 SameBoy Pocket, 5 SameBoy Light.
-        SOURCE_COLOUR_TARGET_GAME_BOY_LCD => match variant {
+        SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD => match variant {
             1 => gb_lcd_palette([0x759833, 0x588F51, 0x3B7560, 0x2E615A]),
             2 => gb_lcd_palette([0xADBF92, 0x96A67C, 0x727E64, 0x5A635C]),
             3 => gb_lcd_palette([0xC6DE8C, 0x84A563, 0x396139, 0x081810]),
@@ -202,7 +202,7 @@ fn transform(target: u32, variant: i32) -> Transform {
         // The V9958 palette, written here independently of the data file: the 3-bit level n as the 5-bit code
         // floor(4.5 n) shown at code x 255 / 31 (rounded), behind an emulator expansion of the 3 bits (variant 1 the bit
         // repetition, variant 2 the truncated 255 n / 7).
-        SOURCE_COLOUR_TARGET_MSX2_V9958 => {
+        SOURCE_COLOUR_TARGET_YAMAHA_V9958_MSX2 => {
             let level = |n: u32| {
                 let n = n as usize;
                 (
@@ -273,9 +273,9 @@ fn transform(target: u32, variant: i32) -> Transform {
         | SOURCE_COLOUR_TARGET_SINCLAIR_ZX_SPECTRUM_48K_PAL
         | SOURCE_COLOUR_TARGET_ATARI_2600_TIA
         | SOURCE_COLOUR_TARGET_NEC_PC_ENGINE_COMPOSITE
-        | SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC
+        | SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR_COLORIMETRIC
         | SOURCE_COLOUR_TARGET_TEXAS_INSTRUMENTS_TMS9928
-        | SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101 => phoxium::targets::for_value(target)
+        | SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE_SP_AGS_101 => phoxium::targets::for_value(target)
             .expect("signal target")
             .transform_for(usize::try_from(variant - 1).unwrap()),
         _ => unreachable!(),
@@ -521,16 +521,24 @@ fn target_slot_matches_the_oracle() {
     );
 
     for (name, target, variant) in [
-        ("gbc", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, 1),
-        ("gba", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, 1),
-        ("snes", SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST, 1),
-        ("sgb 1-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 1),
-        ("sgb 2-A", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9),
-        ("sgb 4-H", SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 32),
-        ("game boy lcd bgb dmg", SOURCE_COLOUR_TARGET_GAME_BOY_LCD, 1),
-        ("game boy lcd bgb pocket", SOURCE_COLOUR_TARGET_GAME_BOY_LCD, 2),
-        ("game boy lcd sameboy dmg", SOURCE_COLOUR_TARGET_GAME_BOY_LCD, 3),
-        ("game boy lcd sameboy light", SOURCE_COLOUR_TARGET_GAME_BOY_LCD, 5),
+        ("gbc", SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR, 1),
+        ("gba", SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE, 1),
+        ("snes", SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST, 1),
+        ("sgb 1-A", SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY, 1),
+        ("sgb 2-A", SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY, 9),
+        ("sgb 4-H", SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY, 32),
+        ("game boy lcd bgb dmg", SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD, 1),
+        ("game boy lcd bgb pocket", SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD, 2),
+        (
+            "game boy lcd sameboy dmg",
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD,
+            3,
+        ),
+        (
+            "game boy lcd sameboy light",
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD,
+            5,
+        ),
         ("md gpgx 15 levels", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 1),
         ("md kega", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 2),
         ("md regen", SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, 3),
@@ -543,17 +551,29 @@ fn target_slot_matches_the_oracle() {
         ("cga 5153", SOURCE_COLOUR_TARGET_IBM_CGA_RGBI, 1),
         (
             "gbc colorimetric above",
-            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR_COLORIMETRIC,
             1,
         ),
         (
             "gbc colorimetric central",
-            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC,
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR_COLORIMETRIC,
             2,
         ),
-        ("gbc mGBA sRGB", SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC, 4),
-        ("ags 2023 measured", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, 1),
-        ("ags 2026 D65", SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101, 4),
+        (
+            "gbc mGBA sRGB",
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR_COLORIMETRIC,
+            4,
+        ),
+        (
+            "ags 2023 measured",
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE_SP_AGS_101,
+            1,
+        ),
+        (
+            "ags 2026 D65",
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE_SP_AGS_101,
+            4,
+        ),
         ("atari 800XL", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 1),
         ("atari 800", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 3),
         ("atari 800XL delay 27.5", SOURCE_COLOUR_TARGET_ATARI_8BIT_GTIA, 6),
@@ -590,8 +610,8 @@ fn target_slot_matches_the_oracle() {
         ("cpc half 128", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 1),
         ("cpc half 127", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 2),
         ("cpc mame 96", SOURCE_COLOUR_TARGET_AMSTRAD_CPC, 3),
-        ("msx2 v9958 rounded", SOURCE_COLOUR_TARGET_MSX2_V9958, 1),
-        ("msx2 v9958 truncated", SOURCE_COLOUR_TARGET_MSX2_V9958, 2),
+        ("msx2 v9958 rounded", SOURCE_COLOUR_TARGET_YAMAHA_V9958_MSX2, 1),
+        ("msx2 v9958 truncated", SOURCE_COLOUR_TARGET_YAMAHA_V9958_MSX2, 2),
         ("cpc green linear", SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN, 1),
         ("cpc green half 0.40", SOURCE_COLOUR_TARGET_AMSTRAD_CPC_GREEN_SCREEN, 2),
         (
@@ -975,7 +995,7 @@ fn msx2_v9958_palette_comes_out_at_the_five_bit_dac_levels() {
             rgba,
         };
         let p = Params {
-            source_colour_target: SOURCE_COLOUR_TARGET_MSX2_V9958,
+            source_colour_target: SOURCE_COLOUR_TARGET_YAMAHA_V9958_MSX2,
             source_colour_variant: variant,
             ..Params::default()
         };

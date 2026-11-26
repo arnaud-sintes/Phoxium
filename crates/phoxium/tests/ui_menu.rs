@@ -1032,7 +1032,7 @@ fn the_colour_target_details_show_collapsed_and_open_on_a_click() {
         "details with no target"
     );
     // In the Source panel (below the visible part of the menu): drawn once a target is chosen.
-    rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_SUPER_GAME_BOY;
+    rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY;
     rig.state.params.source_colour_variant = 9;
     rig.frame(&[]);
     let (variant, notes) = (

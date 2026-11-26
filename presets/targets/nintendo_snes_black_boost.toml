@@ -2,8 +2,8 @@
 # colour targets"). Format: crates/phoxium/src/targets.rs. Every key of [curve] has a [provenance] entry
 # "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
-id = "super_nintendo_black_boost"
-name = "Super Nintendo: bsnes deep black boost (emulator look)"
+id = "nintendo_snes_black_boost"
+name = "Nintendo SNES (bsnes black boost)"
 label = "an emulator look that darkens the shadows, NOT the console's output; do not stack it on a CRT gun law"
 kind = "curve"
 notes = """

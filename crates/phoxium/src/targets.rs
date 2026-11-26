@@ -7,7 +7,7 @@
 //!
 //! ```toml
 //! schema = 1
-//! id = "game_boy_color"                  # the value name of `source_colour_target`
+//! id = "nintendo_game_boy_color"                  # the value name of `source_colour_target`
 //! name = "Nintendo Game Boy Color"
 //! label = "..."                         # one line for the menu
 //! kind = "matrix"                       # "matrix" or "curve"
@@ -61,80 +61,9 @@ pub const SCHEMA_VERSION: u32 = 1;
 /// Palettes a target may hold: the range of `source_colour_variant` (`params/source.toml`).
 pub const MAX_PALETTES: usize = 32;
 
-/// The shipped files, in the order of the enum values after `none` (a test checks the ids).
+/// The shipped files, in the order of the enum values after `none`, the alphabetical order of the ids, which groups
+/// the devices by provider (a test checks the ids and the order).
 const SHIPPED: &[(&str, &str)] = &[
-    (
-        "game_boy_color.toml",
-        include_str!("../../../presets/targets/game_boy_color.toml"),
-    ),
-    (
-        "game_boy_advance.toml",
-        include_str!("../../../presets/targets/game_boy_advance.toml"),
-    ),
-    (
-        "super_nintendo_black_boost.toml",
-        include_str!("../../../presets/targets/super_nintendo_black_boost.toml"),
-    ),
-    (
-        "super_game_boy.toml",
-        include_str!("../../../presets/targets/super_game_boy.toml"),
-    ),
-    (
-        "sega_mega_drive.toml",
-        include_str!("../../../presets/targets/sega_mega_drive.toml"),
-    ),
-    (
-        "commodore_64.toml",
-        include_str!("../../../presets/targets/commodore_64.toml"),
-    ),
-    (
-        "nintendo_entertainment_system.toml",
-        include_str!("../../../presets/targets/nintendo_entertainment_system.toml"),
-    ),
-    (
-        "ibm_cga_rgbi.toml",
-        include_str!("../../../presets/targets/ibm_cga_rgbi.toml"),
-    ),
-    (
-        "game_boy_color_colorimetric.toml",
-        include_str!("../../../presets/targets/game_boy_color_colorimetric.toml"),
-    ),
-    (
-        "game_boy_advance_sp_ags_101.toml",
-        include_str!("../../../presets/targets/game_boy_advance_sp_ags_101.toml"),
-    ),
-    (
-        "atari_8bit_gtia.toml",
-        include_str!("../../../presets/targets/atari_8bit_gtia.toml"),
-    ),
-    (
-        "texas_instruments_tms9928.toml",
-        include_str!("../../../presets/targets/texas_instruments_tms9928.toml"),
-    ),
-    (
-        "snk_neo_geo.toml",
-        include_str!("../../../presets/targets/snk_neo_geo.toml"),
-    ),
-    (
-        "sega_master_system.toml",
-        include_str!("../../../presets/targets/sega_master_system.toml"),
-    ),
-    (
-        "ibm_cga_composite.toml",
-        include_str!("../../../presets/targets/ibm_cga_composite.toml"),
-    ),
-    (
-        "atari_7800_maria.toml",
-        include_str!("../../../presets/targets/atari_7800_maria.toml"),
-    ),
-    (
-        "nec_pc_engine_composite.toml",
-        include_str!("../../../presets/targets/nec_pc_engine_composite.toml"),
-    ),
-    (
-        "atari_2600_tia.toml",
-        include_str!("../../../presets/targets/atari_2600_tia.toml"),
-    ),
     (
         "amstrad_cpc.toml",
         include_str!("../../../presets/targets/amstrad_cpc.toml"),
@@ -144,28 +73,100 @@ const SHIPPED: &[(&str, &str)] = &[
         include_str!("../../../presets/targets/amstrad_cpc_green_screen.toml"),
     ),
     (
-        "msx2_v9958.toml",
-        include_str!("../../../presets/targets/msx2_v9958.toml"),
+        "apple_ii_lores.toml",
+        include_str!("../../../presets/targets/apple_ii_lores.toml"),
     ),
     (
-        "game_boy_lcd.toml",
-        include_str!("../../../presets/targets/game_boy_lcd.toml"),
+        "atari_2600_tia.toml",
+        include_str!("../../../presets/targets/atari_2600_tia.toml"),
+    ),
+    (
+        "atari_7800_maria.toml",
+        include_str!("../../../presets/targets/atari_7800_maria.toml"),
+    ),
+    (
+        "atari_8bit_gtia.toml",
+        include_str!("../../../presets/targets/atari_8bit_gtia.toml"),
+    ),
+    (
+        "commodore_64.toml",
+        include_str!("../../../presets/targets/commodore_64.toml"),
+    ),
+    (
+        "ibm_cga_composite.toml",
+        include_str!("../../../presets/targets/ibm_cga_composite.toml"),
+    ),
+    (
+        "ibm_cga_rgbi.toml",
+        include_str!("../../../presets/targets/ibm_cga_rgbi.toml"),
+    ),
+    (
+        "nec_pc_engine_composite.toml",
+        include_str!("../../../presets/targets/nec_pc_engine_composite.toml"),
+    ),
+    (
+        "nintendo_entertainment_system.toml",
+        include_str!("../../../presets/targets/nintendo_entertainment_system.toml"),
+    ),
+    (
+        "nintendo_game_boy_advance.toml",
+        include_str!("../../../presets/targets/nintendo_game_boy_advance.toml"),
+    ),
+    (
+        "nintendo_game_boy_advance_sp_ags_101.toml",
+        include_str!("../../../presets/targets/nintendo_game_boy_advance_sp_ags_101.toml"),
+    ),
+    (
+        "nintendo_game_boy_color.toml",
+        include_str!("../../../presets/targets/nintendo_game_boy_color.toml"),
+    ),
+    (
+        "nintendo_game_boy_color_colorimetric.toml",
+        include_str!("../../../presets/targets/nintendo_game_boy_color_colorimetric.toml"),
+    ),
+    (
+        "nintendo_game_boy_lcd.toml",
+        include_str!("../../../presets/targets/nintendo_game_boy_lcd.toml"),
+    ),
+    (
+        "nintendo_snes_black_boost.toml",
+        include_str!("../../../presets/targets/nintendo_snes_black_boost.toml"),
+    ),
+    (
+        "nintendo_super_game_boy.toml",
+        include_str!("../../../presets/targets/nintendo_super_game_boy.toml"),
     ),
     (
         "nintendo_virtual_boy.toml",
         include_str!("../../../presets/targets/nintendo_virtual_boy.toml"),
     ),
     (
-        "apple_ii_lores.toml",
-        include_str!("../../../presets/targets/apple_ii_lores.toml"),
+        "sega_master_system.toml",
+        include_str!("../../../presets/targets/sega_master_system.toml"),
+    ),
+    (
+        "sega_mega_drive.toml",
+        include_str!("../../../presets/targets/sega_mega_drive.toml"),
+    ),
+    (
+        "sinclair_zx_spectrum_48k_pal.toml",
+        include_str!("../../../presets/targets/sinclair_zx_spectrum_48k_pal.toml"),
     ),
     (
         "sinclair_zx_spectrum_rgb.toml",
         include_str!("../../../presets/targets/sinclair_zx_spectrum_rgb.toml"),
     ),
     (
-        "sinclair_zx_spectrum_48k_pal.toml",
-        include_str!("../../../presets/targets/sinclair_zx_spectrum_48k_pal.toml"),
+        "snk_neo_geo.toml",
+        include_str!("../../../presets/targets/snk_neo_geo.toml"),
+    ),
+    (
+        "texas_instruments_tms9928.toml",
+        include_str!("../../../presets/targets/texas_instruments_tms9928.toml"),
+    ),
+    (
+        "yamaha_v9958_msx2.toml",
+        include_str!("../../../presets/targets/yamaha_v9958_msx2.toml"),
     ),
 ];
 
@@ -1557,9 +1558,9 @@ pub fn for_value(value: u32) -> Option<&'static Target> {
 mod tests {
     use super::*;
     use crate::params::{
-        meta, Params, SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-        SOURCE_COLOUR_TARGET_NONE, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-        SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+        meta, Params, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR,
+        SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST, SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY,
+        SOURCE_COLOUR_TARGET_NONE, SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE,
     };
 
     /// Every enum value after `none` has a file of that id, in order, and `none` has none: no value without data, no
@@ -1583,10 +1584,81 @@ mod tests {
         assert_eq!(Params::default().source_colour_target, SOURCE_COLOUR_TARGET_NONE);
     }
 
+    /// The text of the shipped file called `file` (a test that needs one file does not depend on the order).
+    fn shipped_text(file: &str) -> &'static str {
+        SHIPPED
+            .iter()
+            .find(|(f, _)| *f == file)
+            .unwrap_or_else(|| panic!("no shipped file {file}"))
+            .1
+    }
+
+    /// The ids are in alphabetical order after `none`, which groups the devices by provider, and the id is the file
+    /// name; the order of the values is the stored index, so a new target goes in its alphabetical place.
+    #[test]
+    fn the_ids_are_in_alphabetical_order_and_name_their_file() {
+        let values = meta("source_colour_target").unwrap().values;
+        assert_eq!(values[0], "none");
+        assert!(values[1..].windows(2).all(|w| w[0] < w[1]), "{values:?}");
+        for (file, _) in SHIPPED {
+            let id = file.strip_suffix(".toml").expect("a .toml file");
+            assert!(by_id(id).is_some(), "{file} has no target of that id");
+        }
+    }
+
+    /// The providers a target id and name start with, in the id form (`nintendo`) and the name form (`Nintendo`).
+    const PROVIDERS: [(&str, &str); 10] = [
+        ("amstrad", "Amstrad"),
+        ("apple", "Apple"),
+        ("atari", "Atari"),
+        ("commodore", "Commodore"),
+        ("ibm", "IBM"),
+        ("nec", "NEC"),
+        ("nintendo", "Nintendo"),
+        ("sega", "Sega"),
+        ("sinclair", "Sinclair"),
+        ("snk", "SNK"),
+    ];
+
+    /// Every id and every name starts with its provider (the ids of the other makers are `texas_instruments` and
+    /// `yamaha`), and a name is short: it is the text of the combo and the title of the menu's details.
+    #[test]
+    fn every_name_starts_with_its_provider_and_is_short() {
+        let mut providers: Vec<(&str, &str)> = PROVIDERS.to_vec();
+        providers.push(("texas_instruments", "Texas Instruments"));
+        providers.push(("yamaha", "Yamaha"));
+        for t in shipped() {
+            let (id_word, name_word) = providers
+                .iter()
+                .find(|(id, _)| t.id.starts_with(&format!("{id}_")))
+                .unwrap_or_else(|| panic!("the id {} starts with no known provider", t.id));
+            assert!(
+                t.name.starts_with(&format!("{name_word} ")),
+                "the name {:?} of {} should start with {name_word} (id word {id_word})",
+                t.name,
+                t.id
+            );
+            assert!(
+                t.name.chars().count() <= 45,
+                "{:?} is too long ({})",
+                t.name,
+                t.name.chars().count()
+            );
+            assert_eq!(t.name, t.name.trim(), "{}", t.id);
+        }
+        let mut names: Vec<&str> = shipped().iter().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), SHIPPED.len(), "two targets share a name");
+    }
+
     /// The Game Boy Color numbers are those of the file (and of the oracle's unit tests).
     #[test]
     fn the_gbc_file_holds_the_published_numbers() {
-        let Transform::Matrix(m) = for_value(SOURCE_COLOUR_TARGET_GAME_BOY_COLOR).expect("gbc").transform else {
+        let Transform::Matrix(m) = for_value(SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR)
+            .expect("gbc")
+            .transform
+        else {
             panic!("gbc is a matrix");
         };
         assert_eq!(m.rows, [[26.0, 4.0, 2.0], [0.0, 24.0, 8.0], [6.0, 4.0, 22.0]]);
@@ -1598,7 +1670,10 @@ mod tests {
     /// The Game Boy Advance numbers: the rows of the article are written on (b, g, r), the file on (R, G, B).
     #[test]
     fn the_gba_file_holds_the_published_numbers() {
-        let Transform::Matrix(m) = for_value(SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE).expect("gba").transform else {
+        let Transform::Matrix(m) = for_value(SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE)
+            .expect("gba")
+            .transform
+        else {
             panic!("gba is a matrix");
         };
         assert_eq!(m.rows, [[255.0, 50.0, 0.0], [10.0, 230.0, 30.0], [50.0, 10.0, 220.0]]);
@@ -1611,7 +1686,7 @@ mod tests {
     /// The SNES table: 32 entries, rising, from 0 to 255, as printed in the article.
     #[test]
     fn the_snes_file_holds_the_published_table() {
-        let Transform::Curve(c) = for_value(SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST)
+        let Transform::Curve(c) = for_value(SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST)
             .expect("snes")
             .transform
         else {
@@ -1638,8 +1713,8 @@ mod tests {
     /// a negative weight, a zero divisor, a wrong table.
     #[test]
     fn a_bad_file_is_refused_with_its_key() {
-        let ok = SHIPPED[0].1.to_string();
-        let snes = SHIPPED[2].1.to_string();
+        let ok = shipped_text("nintendo_game_boy_color.toml").to_string();
+        let snes = shipped_text("nintendo_snes_black_boost.toml").to_string();
         assert!(Target::parse("t.toml", &ok).is_ok());
         assert!(Target::parse("t.toml", &snes).is_ok());
         let cases = [
@@ -1669,7 +1744,7 @@ mod tests {
     /// 0b0_11001_11101_11111: red 31, green 29, blue 25), the last one 4-H, and the first palette is the target's own.
     #[test]
     fn the_sgb_file_holds_32_palettes_in_menu_order() {
-        let t = for_value(SOURCE_COLOUR_TARGET_SUPER_GAME_BOY).expect("sgb");
+        let t = for_value(SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY).expect("sgb");
         assert_eq!(t.variants.len(), MAX_PALETTES);
         for (i, v) in t.variants.iter().enumerate() {
             let name = format!("{}-{}", i / 8 + 1, char::from(b'A' + (i % 8) as u8));
@@ -1691,7 +1766,7 @@ mod tests {
         // A number past the last palette gives the first one.
         assert_eq!(t.transform_for(99), t.transform);
         // The other kinds have no palettes and ignore the number.
-        let gbc = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_COLOR).unwrap();
+        let gbc = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR).unwrap();
         assert!(gbc.variants.is_empty());
         assert_eq!(gbc.transform_for(5), gbc.transform);
     }
@@ -1699,7 +1774,7 @@ mod tests {
     /// The palette validation: a word of more than 15 bits, a repeated id, other than 5 bits per channel.
     #[test]
     fn a_bad_palette_file_is_refused() {
-        let ok = SHIPPED[3].1.to_string();
+        let ok = shipped_text("nintendo_super_game_boy.toml").to_string();
         assert!(Target::parse("t.toml", &ok).is_ok());
         let cases = [
             (ok.replace("0x67BF", "0x87BF"), "0x7FFF"),
@@ -1795,7 +1870,7 @@ mod tests {
     /// The dac validation: levels that do not increase, an output that decreases, a repeated id, no inputs.
     #[test]
     fn a_bad_dac_file_is_refused() {
-        let ok = SHIPPED[4].1.to_string();
+        let ok = shipped_text("sega_mega_drive.toml").to_string();
         assert!(Target::parse("t.toml", &ok).is_ok());
         let cases = [
             (
@@ -2191,7 +2266,8 @@ mod tests {
     /// code 16 with the central exponent 1.7: (16 / 31) ^ 1.7 = 0.32492, x 0.94 = 0.30543, ^ (1 / 2.2) = 0.58310.
     #[test]
     fn the_pokefan531_gbc_file_follows_the_libretro_shader() {
-        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_COLOR_COLORIMETRIC).expect("gbc colorimetric");
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR_COLORIMETRIC)
+            .expect("gbc colorimetric");
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -2297,7 +2373,7 @@ mod tests {
                 ],
             ),
         ];
-        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE_SP_AGS_101).expect("ags");
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE_SP_AGS_101).expect("ags");
         for (s, (xyz, ramp)) in sessions.iter().enumerate() {
             let chroma = |p: [f64; 3]| [p[0] / p[1], 1.0, p[2] / p[1]];
             let (cr, cg, cb, w) = (chroma(xyz[0]), chroma(xyz[1]), chroma(xyz[2]), chroma(xyz[3]));
@@ -3425,7 +3501,7 @@ mod tests {
             let err = Target::parse("t.toml", &text).expect_err(key);
             assert!(err.contains("t.toml") && err.contains(key), "{key}: {err}");
         }
-        let snes = for_value(crate::params::SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST).expect("snes");
+        let snes = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST).expect("snes");
         assert!(snes.variants.is_empty());
         assert_eq!(snes.select(3), snes.transform, "no variants: the target's own");
     }
@@ -3577,7 +3653,7 @@ mod tests {
         // outputs (and so without the provenance entry) parses, with the 15 levels on every variant of 15 levels.
         let md = for_value(SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE).expect("md");
         assert!(md.provenance.contains_key("variant_outputs"));
-        let md_text = SHIPPED[4].1.to_string();
+        let md_text = shipped_text("sega_mega_drive.toml").to_string();
         let without = md_text
             .replace("output = [0, 52, 87, 116, 144, 172, 206, 255]\n", "")
             .replace(
@@ -4555,7 +4631,7 @@ mod tests {
     /// be an identity); the floor(4.5 n) table is the same as round(31 n / 7).
     #[test]
     fn the_msx2_v9958_file_shows_the_palette_through_the_five_bit_dac() {
-        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_MSX2_V9958).expect("msx2");
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_YAMAHA_V9958_MSX2).expect("msx2");
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(ids, ["linear_rounded", "bluemsx_truncated"]);
         assert_eq!(t.transform, t.variants[0].transform);
@@ -4638,7 +4714,7 @@ mod tests {
     fn a_bad_msx2_v9958_file_is_refused() {
         let ok = SHIPPED
             .iter()
-            .find(|(f, _)| *f == "msx2_v9958.toml")
+            .find(|(f, _)| *f == "yamaha_v9958_msx2.toml")
             .expect("the msx2 file")
             .1
             .to_string();
@@ -4693,7 +4769,7 @@ mod tests {
     /// LCD-off colour in none of them, and a grey emulator picture landing on the four colours exactly.
     #[test]
     fn the_game_boy_lcd_file_holds_the_bgb_and_sameboy_colours() {
-        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_LCD).expect("game boy lcd");
+        let t = for_value(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD).expect("game boy lcd");
         let ids: Vec<&str> = t.variants.iter().map(|v| v.id.as_str()).collect();
         assert_eq!(
             ids,
@@ -4786,7 +4862,7 @@ mod tests {
     fn a_bad_game_boy_lcd_file_is_refused() {
         let ok = SHIPPED
             .iter()
-            .find(|(f, _)| *f == "game_boy_lcd.toml")
+            .find(|(f, _)| *f == "nintendo_game_boy_lcd.toml")
             .expect("the game boy lcd file")
             .1
             .to_string();
@@ -5599,16 +5675,16 @@ mod tests {
     /// that moves a white fails here and the table of REFERENCE.md, "White of each target", and the file's "White scale:"
     /// sentence are to be updated with it.
     const WHITES: &[(&str, [u8; 3])] = &[
-        ("game_boy_color", [240, 240, 240]),
-        ("game_boy_advance", [252, 238, 242]),
-        ("super_nintendo_black_boost", [255, 255, 255]),
-        ("super_game_boy", [255, 239, 206]),
+        ("nintendo_game_boy_color", [240, 240, 240]),
+        ("nintendo_game_boy_advance", [252, 238, 242]),
+        ("nintendo_snes_black_boost", [255, 255, 255]),
+        ("nintendo_super_game_boy", [255, 239, 206]),
         ("sega_mega_drive", [255, 255, 255]),
         ("commodore_64", [255, 255, 255]),
         ("nintendo_entertainment_system", [255, 255, 255]),
         ("ibm_cga_rgbi", [255, 255, 255]),
-        ("game_boy_color_colorimetric", [248, 248, 248]),
-        ("game_boy_advance_sp_ags_101", [243, 236, 255]),
+        ("nintendo_game_boy_color_colorimetric", [248, 248, 248]),
+        ("nintendo_game_boy_advance_sp_ags_101", [243, 236, 255]),
         ("atari_8bit_gtia", [255, 255, 255]),
         ("texas_instruments_tms9928", [255, 255, 255]),
         ("snk_neo_geo", [255, 255, 255]),
@@ -5619,8 +5695,8 @@ mod tests {
         ("atari_2600_tia", [255, 255, 255]),
         ("amstrad_cpc", [255, 255, 255]),
         ("amstrad_cpc_green_screen", [255, 255, 255]),
-        ("msx2_v9958", [255, 255, 255]),
-        ("game_boy_lcd", [117, 152, 51]),
+        ("yamaha_v9958_msx2", [255, 255, 255]),
+        ("nintendo_game_boy_lcd", [117, 152, 51]),
         ("nintendo_virtual_boy", [255, 0, 0]),
         ("apple_ii_lores", [255, 255, 255]),
         ("sinclair_zx_spectrum_rgb", [255, 255, 255]),

@@ -232,9 +232,9 @@ impl Stage for TargetStage {
 mod tests {
     use super::*;
     use crate::params::{
-        SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-        SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
-        SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+        SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR,
+        SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST, SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY,
+        SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE,
     };
 
     /// The push block is 100 bytes in the shader's order.
@@ -318,19 +318,19 @@ mod tests {
     fn the_slot_runs_only_with_a_target() {
         assert!(is_identity(&Params::default()));
         for t in [
-            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
-            SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE,
-            SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST,
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR,
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE,
+            SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST,
         ] {
             assert!(!is_identity(&with(t)));
         }
-        let gbc = plan(&with(SOURCE_COLOUR_TARGET_GAME_BOY_COLOR));
+        let gbc = plan(&with(SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR));
         assert_eq!(
             (gbc.kind, gbc.bits, gbc.input_range, gbc.clamp_sum, gbc.divisor),
             (0, 5, 31.0, 960.0, 1020.0)
         );
         assert_eq!((gbc.input_gamma, gbc.inv_out_gamma, gbc.out_scale), (1.0, 1.0, 1.0));
-        let gba = plan(&with(SOURCE_COLOUR_TARGET_GAME_BOY_ADVANCE));
+        let gba = plan(&with(SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_ADVANCE));
         assert_eq!((gba.input_gamma, gba.divisor, gba.clamp_sum), (4.0, 255.0, f32::MAX));
         assert!((f64::from(gba.inv_out_gamma) - 1.0 / 2.2).abs() < 1e-7);
         assert!((f64::from(gba.out_scale) - 255.0 / 280.0).abs() < 1e-7);
@@ -359,7 +359,7 @@ mod tests {
     /// The curve is packed four entries to a word, the first entry in the lowest byte.
     #[test]
     fn the_curve_is_packed_four_to_a_word() {
-        let snes = plan(&with(SOURCE_COLOUR_TARGET_SUPER_NINTENDO_BLACK_BOOST));
+        let snes = plan(&with(SOURCE_COLOUR_TARGET_NINTENDO_SNES_BLACK_BOOST));
         assert_eq!((snes.kind, snes.bits), (1, 5));
         // Entries 0 to 3 are 0x00, 0x01, 0x03, 0x06; the last word holds 0xe8, 0xf0, 0xf8, 0xff.
         assert_eq!(snes.table[0], 0x0603_0100);
@@ -394,7 +394,7 @@ mod tests {
     fn a_palette_is_packed_as_twelve_bytes_and_the_number_picks_it() {
         let with_variant = |n: i32| Params {
             source_colour_variant: n,
-            ..with(SOURCE_COLOUR_TARGET_SUPER_GAME_BOY)
+            ..with(SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY)
         };
         let a = plan(&with_variant(1));
         assert_eq!((a.kind, a.bits), (2, 0));
@@ -420,7 +420,7 @@ mod tests {
     fn an_eight_bit_palette_is_packed_and_scaled_by_255() {
         let p = Params {
             source_colour_variant: 1,
-            ..with(crate::params::SOURCE_COLOUR_TARGET_GAME_BOY_LCD)
+            ..with(crate::params::SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_LCD)
         };
         let a = plan(&p);
         assert_eq!((a.kind, a.bits), (2, 0));

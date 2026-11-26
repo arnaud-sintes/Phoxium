@@ -3,8 +3,8 @@
 # "<tag>: <source>" with the CRT.md confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "apple_ii_lores"
-name = "Apple II, II+ and IIe lo-res colours (NTSC composite, computed from the signal, unverified)"
-label = "the 16 lo-res colours of the Apple II as an NTSC television decodes the machine's composite signal (Colour variant: the dark and light chroma ratio and the decoder's chroma gain); derived from the circuit logic, only the level set measured"
+name = "Apple II (lo-res)"
+label = "the 16 lo-res colours of the Apple II, II+ and IIe as an NTSC television decodes the machine's composite signal (Colour variant: the dark and light chroma ratio and the decoder's chroma gain); derived from the circuit logic, only the level set measured"
 kind = "signal"
 notes = """
 DERIVED, NOT MEASURED. The colours below are computed from the logic of the machine's video circuit and from one measured level set; no vectorscope or colorimeter reading of any Apple II colour was found. Only Gayler's level set (sync, black, white and burst voltages, read on one machine with the level pot at its maximum) is a measurement, and the hue trimmer and the level pot of every machine, and the monitor or television in front of it, move the real colours.

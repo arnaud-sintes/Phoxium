@@ -3,8 +3,8 @@
 # (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "amstrad_cpc_green_screen"
-name = "Amstrad CPC green monitor (GT64, GT65): 27 grey steps"
-label = "the CPC's green-screen monitor, which sums the three colour outputs 9 : 3 : 1 into one grey (use a green phosphor type); Colour variant: linear steps or the 0.40 half level, behind an emulator whose half level is 128 or MAME's 96"
+name = "Amstrad CPC green screen"
+label = "the CPC's green-screen monitor (GT64, GT65: 27 grey steps), which sums the three colour outputs 9 : 3 : 1 into one grey (use a green phosphor type); Colour variant: linear steps or the 0.40 half level, behind an emulator whose half level is 128 or MAME's 96"
 kind = "matrix"
 notes = """
 The green monitors of the CPC (GT64, GT65) take the same three colour outputs as a colour monitor and mix them with a resistor network, weights 9 : 3 : 1 (10k, 3.3k and 1k for red, green and blue, as relayed from a forum snippet), into the one signal of a green tube: 27 greys, one for each of the 27 colours. This target does that mix on the picture: all three output channels become the grey (9 R + 3 G + B) / 13, so a pixel's grey is one of 27 values and every grey of the source is left where it is. It is not an identity: a colour is reduced to this grey (red weighs 0.692, green 0.231, blue 0.077), where the chain's own monochrome tube would use the BT.601 luma (0.299, 0.587, 0.114). Choose a monochrome phosphor type (P31 or P1, green) in the Phosphor section: the target makes the grey, the phosphor type makes the tube green. With a target on, the chain's decode stage leaves the colour alone and the target acts on the colour picture first; the monochrome phosphor then takes the BT.601 luma of the target's output, which is the grey itself (the three channels are equal and the weights add to 1), so nothing else changes the value.

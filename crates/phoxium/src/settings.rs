@@ -483,7 +483,7 @@ pub struct SourceProfile {
     pub flip: Option<String>,
     /// `source_prefilter` value name: `point`, `box`, `triangle`, `lanczos2`, `lanczos3` or `sinc`.
     pub prefilter: Option<String>,
-    /// `source_colour_target` value name: `none` or a target of `presets/targets/` (`game_boy_color`).
+    /// `source_colour_target` value name: `none` or a target of `presets/targets/` (`nintendo_game_boy_color`).
     pub colour_target: Option<String>,
     /// `source_colour_variant`: the variant number (1 to 32) of a colour target that has several (a Super Game Boy
     /// palette, the emulator of a Mega Drive picture).
@@ -1277,7 +1277,7 @@ mod tests {
             rotation: Some("clockwise".into()),
             flip: Some("horizontal".into()),
             prefilter: Some("lanczos2".into()),
-            colour_target: Some("game_boy_color".into()),
+            colour_target: Some("nintendo_game_boy_color".into()),
             colour_variant: Some(9),
             pixel_size: Some(2.5),
             picture_area: Some("manual".into()),
@@ -2046,7 +2046,7 @@ mod tests {
     #[test]
     fn the_default_profile_goes_to_programs_without_one() {
         use crate::params::{
-            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_FLIP_HORIZONTAL, SOURCE_PREFILTER_LANCZOS3,
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR, SOURCE_FLIP_HORIZONTAL, SOURCE_PREFILTER_LANCZOS3,
             SOURCE_SCALE_MODE_MANUAL,
         };
         let mut s = Settings::default();
@@ -2056,7 +2056,7 @@ mod tests {
             pixel_size: Some(2.5),
             flip: Some("horizontal".into()),
             prefilter: Some("lanczos3".into()),
-            colour_target: Some("game_boy_color".into()),
+            colour_target: Some("nintendo_game_boy_color".into()),
             colour_variant: Some(9),
             ..SourceProfile::default()
         });
@@ -2077,7 +2077,7 @@ mod tests {
         assert_eq!(p.source_pixel_size, 2.5);
         assert_eq!(p.source_flip, SOURCE_FLIP_HORIZONTAL);
         assert_eq!(p.source_prefilter, SOURCE_PREFILTER_LANCZOS3);
-        assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_GAME_BOY_COLOR);
+        assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR);
         assert_eq!(p.source_colour_variant, 9);
         // A bad value is skipped with a warning.
         let bad = SourceProfile {
@@ -2091,6 +2091,36 @@ mod tests {
         // The default round-trips in the file, as its own table.
         let text = s.to_toml().unwrap();
         assert!(text.contains("[default_source]"), "{text}");
+    }
+
+    /// The colour targets were renamed with their provider first (no migration): an id of an earlier build in the
+    /// settings or in a source profile is refused with a warning and the target stays `none`, with no panic.
+    #[test]
+    fn an_old_colour_target_id_falls_back_to_none() {
+        use crate::params::{SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_NONE};
+        let overrides = |v: &str| {
+            let mut q = Params::default();
+            let w = apply_overrides(
+                &mut q,
+                &BTreeMap::from([("source_colour_target".to_string(), toml::Value::String(v.into()))]),
+            );
+            (q.source_colour_target, w.len())
+        };
+        assert_eq!(
+            overrides("nintendo_game_boy_color"),
+            (SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR, 0)
+        );
+        for old in ["game_boy_color", "super_nintendo_black_boost", "msx2_v9958"] {
+            assert_eq!(overrides(old), (SOURCE_COLOUR_TARGET_NONE, 1), "{old}");
+        }
+        let profile = SourceProfile {
+            colour_target: Some("game_boy_color".into()),
+            colour_variant: Some(2),
+            ..SourceProfile::default()
+        };
+        let mut p = Params::default();
+        assert_eq!(profile.apply_to(&mut p).len(), 1);
+        assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_NONE);
     }
 
     /// Keep-awake (TODO Low): off by default and in a file of an earlier build (no key), round-trips, a wrong type

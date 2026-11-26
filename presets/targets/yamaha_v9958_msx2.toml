@@ -2,9 +2,9 @@
 # targets"). Format: crates/phoxium/src/targets.rs. Every key of [dac] has a [provenance] entry "<tag>: <source>" with the CRT.md
 # confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
-id = "msx2_v9958"
-name = "MSX2+ / turbo R (Yamaha V9958, palette colours)"
-label = "the V9958's 3-bit palette levels as its 5-bit DAC shows them (codes 0, 4, 9, 13, 18, 22, 27, 31), behind an emulator picture that expands the 3 bits straight to 8 (Emulator variant)"
+id = "yamaha_v9958_msx2"
+name = "Yamaha MSX2+ (V9958)"
+label = "the V9958's (MSX2+ and turbo R) 3-bit palette levels as its 5-bit DAC shows them (codes 0, 4, 9, 13, 18, 22, 27, 31), behind an emulator picture that expands the 3 bits straight to 8 (Emulator variant)"
 kind = "dac"
 notes = """
 The MSX2's V9938 and the MSX2+ and turbo R's V9958 take a palette of 3 bits a channel (512 colours, 16 of them in a palette). An emulator shows the eight levels of a channel as 0, 36, 73, 109, 146, 182, 219, 255 (steps of 255/7, the 3 bits expanded to 8). This target moves them to where the V9958's 5-bit DAC puts them: the 3-bit level n reaches the DAC as the 5-bit code floor(4.5 n) = 0, 4, 9, 13, 18, 22, 27, 31, and a 5-bit DAC that is linear (the V9958 booklet's block diagram labels it 'DAC (LINEAR)') shows code x 255 / 31 = 0, 33, 74, 107, 148, 181, 222, 255 (rounded to the 8-bit output). The map is a dac of eight points per channel with the straight line between them (a scaled picture): the same on red, green and blue.

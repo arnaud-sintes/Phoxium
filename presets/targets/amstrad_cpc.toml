@@ -3,8 +3,8 @@
 # confidence tag (S sourced, D derived, K standard knowledge, E estimate).
 schema = 1
 id = "amstrad_cpc"
-name = "Amstrad CPC 464 / 6128 (Gate Array, 27 colours)"
-label = "the CPC Gate Array's three levels per channel with the middle level at 0.40 of full scale (not 0.5), behind an emulator picture whose middle level is 128, 127 or MAME's 96, or with a per-channel middle level computed from the 6128's output resistors (variant 4: red 0.38, green 0.42, blue 0.36)"
+name = "Amstrad CPC"
+label = "the Amstrad CPC 464 / 6128 Gate Array's three levels (27 colours) per channel with the middle level at 0.40 of full scale (not 0.5), behind an emulator picture whose middle level is 128, 127 or MAME's 96, or with a per-channel middle level computed from the 6128's output resistors (variant 4: red 0.38, green 0.42, blue 0.36)"
 kind = "dac"
 notes = """
 The CPC's Gate Array makes each of the three colour channels from one of three levels, off, half and full: 27 colours. An emulator shows the three levels as 0, a middle value and 255; this target moves the middle level to where the hardware puts it, 0.40 of full scale (102 of 255), and leaves black and full alone. The map is a dac of three points per channel with the straight line between them (a scaled picture): the same on red, green and blue.

@@ -4,8 +4,8 @@
 # K standard knowledge, E estimate).
 schema = 1
 id = "atari_7800_maria"
-name = "Atari 7800 ProSystem (MARIA, NTSC, computed from the signal, unverified)"
-label = "the 256 colours of the Atari 7800 as an NTSC television decodes the MARIA's signal (Colour variant: the hue delay of the pot, or a resistor-ladder luma); schematic-computed, not measured"
+name = "Atari 7800"
+label = "the 256 colours of the Atari 7800 ProSystem as an NTSC television decodes the MARIA's signal (Colour variant: the hue delay of the pot, or a resistor-ladder luma); schematic-computed, not measured"
 kind = "signal"
 notes = """
 UNVERIFIED: no instrument measurement of a 7800's video signal was found. The numbers below come from an anonymous wiki page computed from a schematic and from the notes of an emulator author, who set them by eye on several machines and displays; the original Atari documents were not read and the resistor values were not checked against a schematic.

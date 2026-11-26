@@ -56,9 +56,9 @@ Usage: phoxium [options]
   --aspect <par|fill|W:H|number>  picture shape: from the PAR (default), the whole tube (fill), or a forced
                        display aspect such as 4:3
   --source-colour <target[:variant]>  colour target: the colours of the source as the device it came from would
-                       have shown them (`source_colour_target`), none or a target of the Source section (game_boy_color,
-                       super_game_boy, sega_mega_drive...); after a colon its variant (`source_colour_variant`): a
-                       number from 1, or the variant's id or name as the menu shows it (super_game_boy:2-a,
+                       have shown them (`source_colour_target`), none or a target of the Source section (nintendo_game_boy_color,
+                       nintendo_super_game_boy, sega_mega_drive...); after a colon its variant (`source_colour_variant`): a
+                       number from 1, or the variant's id or name as the menu shows it (nintendo_super_game_boy:2-a,
                        sega_mega_drive:regen). Without a variant, the first. Wins over the settings and the profile
   --pattern <name[:args]>  generated test pattern instead of a capture (no window needed): flat[:level],
                        ramp, vline[:N], hline[:N], grating[:N], checker[:N], crosshatch[:N], point,
@@ -629,29 +629,32 @@ mod tests {
     #[test]
     fn source_colour_flag() {
         use crate::params::{
-            SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_NONE, SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+            SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR, SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY,
+            SOURCE_COLOUR_TARGET_NONE,
         };
         assert_eq!(parse("").unwrap().colour, None);
         let gbc = ColourChoice {
-            target: SOURCE_COLOUR_TARGET_GAME_BOY_COLOR,
+            target: SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR,
             variant: 1,
         };
-        assert_eq!(colour("game_boy_color").unwrap(), gbc);
+        assert_eq!(colour("nintendo_game_boy_color").unwrap(), gbc);
         // Case, dashes and underscores do not matter, as for the other value names.
-        assert_eq!(colour("Game-Boy-Color").unwrap(), gbc);
+        assert_eq!(colour("Nintendo-Game-Boy-Color").unwrap(), gbc);
+        // The ids of the builds before the provider-first names are no longer accepted (no migration).
+        assert!(colour("game_boy_color").is_err());
         assert_eq!(colour("none").unwrap().target, SOURCE_COLOUR_TARGET_NONE);
         // Variants of the Super Game Boy: a number, an id, a name, any case, dash or underscore.
         let sgb = |variant| ColourChoice {
-            target: SOURCE_COLOUR_TARGET_SUPER_GAME_BOY,
+            target: SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY,
             variant,
         };
-        assert_eq!(colour("super_game_boy").unwrap(), sgb(1));
-        assert_eq!(colour("super_game_boy:1").unwrap(), sgb(1));
-        assert_eq!(colour("super_game_boy:9").unwrap(), sgb(9));
-        assert_eq!(colour("super_game_boy:32").unwrap(), sgb(32));
-        assert_eq!(colour("super_game_boy:2-a").unwrap(), sgb(9));
-        assert_eq!(colour("super_game_boy:2_A").unwrap(), sgb(9));
-        assert_eq!(colour("super-game-boy:4-h").unwrap(), sgb(32));
+        assert_eq!(colour("nintendo_super_game_boy").unwrap(), sgb(1));
+        assert_eq!(colour("nintendo_super_game_boy:1").unwrap(), sgb(1));
+        assert_eq!(colour("nintendo_super_game_boy:9").unwrap(), sgb(9));
+        assert_eq!(colour("nintendo_super_game_boy:32").unwrap(), sgb(32));
+        assert_eq!(colour("nintendo_super_game_boy:2-a").unwrap(), sgb(9));
+        assert_eq!(colour("nintendo_super_game_boy:2_A").unwrap(), sgb(9));
+        assert_eq!(colour("nintendo-super-game-boy:4-h").unwrap(), sgb(32));
         // A variant by the name the menu shows (spaces read as `_`).
         let md = colour("sega_mega_drive:Kega Fusion").unwrap();
         assert_eq!(md.variant, 2);
@@ -667,18 +670,21 @@ mod tests {
         let e = colour("gameboy").unwrap_err().to_string();
         assert!(
             e.starts_with("--source-colour expects <target>[:<variant>]")
-                && e.contains("game_boy_color, game_boy_advance"),
+                && e.contains("amstrad_cpc, amstrad_cpc_green_screen")
+                && e.contains(
+                    "nintendo_game_boy_advance, nintendo_game_boy_advance_sp_ags_101, nintendo_game_boy_color"
+                ),
             "{e}"
         );
         assert!(e.ends_with("got \"gameboy\""), "{e}");
         for (text, wanted) in [
-            ("super_game_boy:0", "a number from 1 to 32"),
-            ("super_game_boy:33", "1_a, 1_b"),
-            ("super_game_boy:9-z", "has no variant \"9-z\""),
-            ("super_game_boy:", "has no variant \"\""),
+            ("nintendo_super_game_boy:0", "a number from 1 to 32"),
+            ("nintendo_super_game_boy:33", "1_a, 1_b"),
+            ("nintendo_super_game_boy:9-z", "has no variant \"9-z\""),
+            ("nintendo_super_game_boy:", "has no variant \"\""),
             ("sega_mega_drive:snes", "genesis_plus_gx, kega_fusion, regen"),
             ("none:1", "\"none\" has no variants"),
-            ("game_boy_color:1", "has no variants"),
+            ("nintendo_game_boy_color:1", "has no variants"),
         ] {
             let e = colour(text).unwrap_err().to_string();
             assert!(e.starts_with("--source-colour: ") && e.contains(wanted), "{text}: {e}");
@@ -688,31 +694,31 @@ mod tests {
         // It sets both parameters as `--set` would, over what a profile put there.
         let mut p = Params::default();
         p.set("source_colour_variant", ParamValue::I32(17));
-        parse("--source-colour super_game_boy:2-a")
+        parse("--source-colour nintendo_super_game_boy:2-a")
             .unwrap()
             .apply_source(&mut p)
             .unwrap();
         assert_eq!(
             (p.source_colour_target, p.source_colour_variant),
-            (SOURCE_COLOUR_TARGET_SUPER_GAME_BOY, 9)
+            (SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY, 9)
         );
         // Without a variant the first is selected, whatever the variant was.
-        parse("--source-colour game_boy_color")
+        parse("--source-colour nintendo_game_boy_color")
             .unwrap()
             .apply_source(&mut p)
             .unwrap();
         assert_eq!(
             (p.source_colour_target, p.source_colour_variant),
-            (SOURCE_COLOUR_TARGET_GAME_BOY_COLOR, 1)
+            (SOURCE_COLOUR_TARGET_NINTENDO_GAME_BOY_COLOR, 1)
         );
         parse("--source-colour none").unwrap().apply_source(&mut p).unwrap();
         assert_eq!(p.source_colour_target, SOURCE_COLOUR_TARGET_NONE);
         // The same result as the generic path (`render --set`) with the same values.
         let mut q = Params::default();
-        crate::render_cmd::set_param(&mut q, "source_colour_target", "super_game_boy").unwrap();
+        crate::render_cmd::set_param(&mut q, "source_colour_target", "nintendo_super_game_boy").unwrap();
         crate::render_cmd::set_param(&mut q, "source_colour_variant", "9").unwrap();
         let mut p = Params::default();
-        parse("--source-colour super_game_boy:9")
+        parse("--source-colour nintendo_super_game_boy:9")
             .unwrap()
             .apply_source(&mut p)
             .unwrap();

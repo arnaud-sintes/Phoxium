@@ -4,7 +4,7 @@
 # estimate).
 schema = 1
 id = "atari_8bit_gtia"
-name = "Atari 8-bit computers and 5200 (GTIA, NTSC, computed from the signal)"
+name = "Atari 8-bit and 5200"
 label = "the 256 colours of the Atari 8-bit and 5200 as an NTSC television decodes the GTIA's signal (Colour variant: the machine, or the hue delay)"
 kind = "signal"
 notes = """

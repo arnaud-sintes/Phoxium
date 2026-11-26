@@ -10,7 +10,7 @@
 # MiSTer core's palette file (GPL).
 schema = 1
 id = "nec_pc_engine_composite"
-name = "NEC PC Engine / TurboGrafx-16 / SuperGrafx, composite output of the HuC6260"
+name = "NEC PC Engine / TurboGrafx-16"
 label = "a PC Engine picture in the colours of the console's composite output: 512 RGB codes through the HuC6260's Y, U, V table (Colour variant: the fitted decode)"
 kind = "lut"
 notes = """
