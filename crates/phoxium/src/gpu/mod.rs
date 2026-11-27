@@ -317,6 +317,12 @@ impl Renderer {
         self.quality_drop = drop;
     }
 
+    /// The refresh rate of the screen the output is on, Hz (a value that is not a positive finite number counts as 60):
+    /// the motion clarity sweep (`scan_mode`) spreads a source frame over this many refreshes per source rate.
+    pub fn set_refresh_hz(&mut self, hz: f64) {
+        self.settings.refresh_hz = if hz.is_finite() && hz > 0.0 { hz as f32 } else { 60.0 };
+    }
+
     /// Renders one frame. `frame` is a newly captured BGRA8 image, if any. `client` is the current
     /// client size of the output window.
     ///
@@ -694,6 +700,13 @@ impl Renderer {
     /// overlay call it once per second), then restarts the average.
     pub fn take_timing_average(&mut self) -> Option<FrameTimings> {
         self.pipeline.as_mut().and_then(Pipeline::take_timing_average)
+    }
+
+    /// The mean GPU ms, since the previous call, of the frames that ran the whole chain: the same as the mean of
+    /// [`Renderer::take_timing_average`] unless a motion clarity sweep holds the beam stages between its refreshes,
+    /// when it is the heavy refresh that has to fit the refresh period. `None` without such a frame.
+    pub fn take_heavy_ms(&mut self) -> Option<f64> {
+        self.pipeline.as_mut().and_then(Pipeline::take_heavy_ms)
     }
 
     /// Why GPU timestamps are off, `None` when they work.

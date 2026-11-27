@@ -1046,7 +1046,8 @@ fn the_colour_target_variant_name_shows_under_its_row() {
     // A target without variants: nothing to name.
     rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_COMMODORE_64;
     rig.frame(&[]);
-    let has_variants = phoxium::targets::for_value(rig.state.params.source_colour_target).is_some_and(|t| !t.variants.is_empty());
+    let has_variants =
+        phoxium::targets::for_value(rig.state.params.source_colour_target).is_some_and(|t| !t.variants.is_empty());
     assert_eq!(rig.ui.item_rect("colour_target:variant").is_some(), has_variants);
     // Back to none: the name goes.
     rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_NONE;

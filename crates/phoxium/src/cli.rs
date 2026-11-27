@@ -20,6 +20,10 @@ Usage: phoxium [options]
   --wait-window <secs> with --window or --process: wait this long for the window to appear (0 = no limit) instead
                        of failing at once, so a launcher can start Phoxium before the game window exists
   --list-windows       list capturable windows and monitors, then exit
+  --video <text>       use the video capture device (capture card, camera) whose name starts with <text>, else
+                       contains it, at once: no picker (an error listing the devices when there is none). Not with
+                       --window, --process, --pattern or --image
+  --list-video         list the video capture devices, then exit
   --list-gpus          list Vulkan devices, then exit
   --list-adapters      adapter topology (DXGI adapters and monitors, Vulkan devices, LUIDs, the chosen adapter,
                        capture adapter, verdict, warnings), then exit; opens no window
@@ -55,6 +59,8 @@ Usage: phoxium [options]
   --par <W:H|number>   pixel aspect ratio of a source pixel (1:1 default, 8:7 NES/SNES, 32:35 Genesis H40)
   --aspect <par|fill|W:H|number>  picture shape: from the PAR (default), the whole tube (fill), or a forced
                        display aspect such as 4:3
+  --scan <off|rolling|strobe>  motion clarity (`scan_mode`): spread each source frame over the screen refreshes, as a tube
+                       draws it (rolling band of lines) or as black frame insertion (strobe); needs 120 Hz or more
   --source-colour <target[:variant]>  colour target: the colours of the source as the device it came from would
                        have shown them (`source_colour_target`), none or a target of the Source section (nintendo_game_boy_color,
                        nintendo_super_game_boy, sega_mega_drive...); after a colon its variant (`source_colour_variant`): a
@@ -114,6 +120,9 @@ pub struct Args {
     /// `--wait-window <secs>`: how long to wait at start for the `--window`/`--process` window (0 = no limit).
     pub wait_window: Option<f64>,
     pub list_windows: bool,
+    /// `--video <text>`: the video capture device to open at start, by the rule of `--window` ([`crate::video::find_device`]).
+    pub video: Option<String>,
+    pub list_video: bool,
     pub list_gpus: bool,
     pub list_adapters: bool,
     pub gpu: Option<usize>,
@@ -159,6 +168,8 @@ pub struct Args {
     pub aspect: Option<Aspect>,
     /// `--source-colour <target[:variant]>`: the colour target and variant, checked against the data files at parse.
     pub colour: Option<ColourChoice>,
+    /// `--scan <off|rolling|strobe>`: the value of `scan_mode`, checked when applied.
+    pub scan: Option<String>,
 }
 
 /// The `--source-colour` choice: a value of `source_colour_target` and the number of `source_colour_variant`.
@@ -312,6 +323,7 @@ impl Args {
             ("--crop-mode", "source_crop_mode", &crop_mode),
             ("--divisor-mode", "source_divisor_mode", &divisor_mode),
             ("--scale-mode", "source_scale_mode", &self.scale_mode),
+            ("--scan", "scan_mode", &self.scan),
         ] {
             if let Some(v) = value {
                 if !set_enum_by_name(params, id, v) {
@@ -396,6 +408,8 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                 a.wait_window = Some(secs);
             }
             "--list-windows" => a.list_windows = true,
+            "--video" => a.video = Some(value("--video")?),
+            "--list-video" => a.list_video = true,
             "--list-gpus" => a.list_gpus = true,
             "--list-adapters" | "--adapters" => a.list_adapters = true,
             "--gpu" => a.gpu = Some(number("--gpu", &value("--gpu")?)?),
@@ -464,6 +478,7 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
                 }
             }
             "--source-colour" => a.colour = Some(parse_colour("--source-colour", &value("--source-colour")?)?),
+            "--scan" => a.scan = Some(value("--scan")?),
             "--par" => a.par = Some(parse_ratio("--par", &value("--par")?)?),
             "--aspect" => {
                 a.aspect = Some(match value("--aspect")?.as_str() {
@@ -483,6 +498,9 @@ pub fn parse_from(args: impl IntoIterator<Item = String>) -> Res<Args> {
             other => return Err(format!("unknown argument {other}").into()),
         }
     }
+    if a.video.is_some() && (a.targeted() || a.pattern.is_some() || a.image.is_some()) {
+        return Err("--video cannot be combined with --window, --process, --pattern or --image".into());
+    }
     Ok(a)
 }
 
@@ -496,6 +514,41 @@ mod tests {
 
     fn parse(s: &str) -> Res<Args> {
         parse_from(s.split_whitespace().map(String::from))
+    }
+
+    /// `--scan <mode>`: the value of `scan_mode` by name, an unknown name is an error when applied.
+    #[test]
+    fn scan_flag() {
+        let mut p = Params::default();
+        assert_eq!(p.scan_mode, crate::params::SCAN_MODE_OFF);
+        parse("").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p.scan_mode, crate::params::SCAN_MODE_OFF, "no option leaves it alone");
+        parse("--scan rolling").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p.scan_mode, crate::params::SCAN_MODE_ROLLING);
+        parse("--scan strobe").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p.scan_mode, crate::params::SCAN_MODE_STROBE);
+        parse("--scan off").unwrap().apply_source(&mut p).unwrap();
+        assert_eq!(p.scan_mode, crate::params::SCAN_MODE_OFF);
+        let e = parse("--scan sideways")
+            .unwrap()
+            .apply_source(&mut p)
+            .expect_err("refused");
+        assert!(e.to_string().contains("--scan"), "{e}");
+        assert!(parse("--scan").is_err());
+    }
+
+    /// `--video` and `--list-video`: parsed, and refused with any other way to name the source.
+    #[test]
+    fn video_flags() {
+        let a = parse("--video USB").unwrap();
+        assert_eq!(a.video.as_deref(), Some("USB"));
+        assert!(!a.targeted() && !a.list_video);
+        assert!(parse("--list-video").unwrap().list_video);
+        assert!(parse("--video").is_err());
+        for other in ["--window x", "--process p", "--pattern ramp", "--image a.png"] {
+            let e = parse(&format!("--video v {other}")).err().expect("refused").to_string();
+            assert!(e.contains("--video cannot be combined"), "{other}: {e}");
+        }
     }
 
     /// `--process` and `--wait-window` (launcher automation): parsed, `targeted` covers both ways to name a window.

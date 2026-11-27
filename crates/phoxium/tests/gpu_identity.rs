@@ -118,6 +118,7 @@ fn render_identity(gpu: &mut Headless, t: Transfer, format: TargetFormat) -> Ren
         source: Transfer::Identity,
         host: t,
         integer_scale: false,
+        refresh_hz: 60.0,
     };
     let bgra = ramp(W, H);
     gpu.render(
@@ -365,6 +366,7 @@ fn frames_in_flight_burst_with_silent_sync_validation() {
         source: Transfer::Identity,
         host: t,
         integer_scale: false,
+        refresh_hz: 60.0,
     };
     let r = gpu
         .render_burst(&frames, &settings, &params_for(t), (W, H), TargetFormat::Bgra8Unorm)
@@ -569,6 +571,7 @@ fn scaled_targets_resample_the_native_raster() {
 
     let integer = Settings {
         integer_scale: true,
+        refresh_hz: 60.0,
         ..Settings::identity()
     };
     let r = render_pix(&mut gpu, Some((4, 3)), view, &integer, (10, 8));
@@ -629,6 +632,7 @@ fn invalid_power_exponent_is_refused_and_keeps_the_staged_frame() {
                 source,
                 host,
                 integer_scale: false,
+                refresh_hz: 60.0,
             };
             assert!(s.validate().is_err(), "exponent {g} accepted");
             let bgra = pix_image(5, 4);

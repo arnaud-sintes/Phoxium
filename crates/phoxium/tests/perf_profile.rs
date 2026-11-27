@@ -10,7 +10,10 @@
 //! Filters (comma lists of prefixes): `PHOXIUM_PROFILE_SIZES` (e.g. `1920`), `PHOXIUM_PROFILE_CONFIGS`,
 //! `PHOXIUM_PROFILE_CONTENT`; `PHOXIUM_PROFILE_SOURCES` (comma list of `WxH` among `320x240` (the default), `640x480`, `1920x1080`, `2560x1440`, `3840x2160`,
 //! `1280x720`, e.g. `320x240,640x480`, or `all`); `PHOXIUM_PROFILE_ROUNDS` (default 9), `PHOXIUM_PROFILE_BURST` (frames per burst, default
-//! 6); `PHOXIUM_PROFILE_SET` (`id=value;id=value`, applied to every configuration).
+//! 6); `PHOXIUM_PROFILE_SET` (`id=value;id=value`, applied to every configuration); `PHOXIUM_PROFILE_REFRESH` (the screen
+//! refresh in Hz given to the pipeline, default 60; above 60 the total column is the mean GPU time per frame of the
+//! burst, not the sum of the stage means: with `scan_mode=rolling` at 300 a burst of 10 frames is two sweeps and the
+//! beam stages run in 2 of them).
 
 use phoxium::gpu::{Headless, SourceFrame, StageReadback, TargetFormat};
 use phoxium::params::Params;
@@ -20,7 +23,14 @@ use phoxium::scaling::View;
 
 /// The source sizes the profile can run: 320 x 240 (the default and the size of every measurement of the docs up
 /// to 2026-11-24), 640 x 480, 1280 x 720 and the full-screen captures 1920 x 1080, 2560 x 1440 and 3840 x 2160.
-const SOURCES: [(u32, u32); 6] = [(320, 240), (640, 480), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
+const SOURCES: [(u32, u32); 6] = [
+    (320, 240),
+    (640, 480),
+    (1280, 720),
+    (1920, 1080),
+    (2560, 1440),
+    (3840, 2160),
+];
 
 fn hash(a: u32, b: u32) -> u32 {
     let mut v = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_mul(0x85EB_CA77) ^ 0x1234_5678;
@@ -226,7 +236,11 @@ fn chain_profile() {
         gpu.context().gpu.name,
         runs.len()
     );
-    let settings = phoxium::gpu::Settings::default();
+    // `PHOXIUM_PROFILE_REFRESH`: the screen refresh the pipeline is told (default 60), for the motion clarity sweep.
+    let settings = phoxium::gpu::Settings {
+        refresh_hz: env("PHOXIUM_PROFILE_REFRESH").parse().unwrap_or(60.0),
+        ..phoxium::gpu::Settings::default()
+    };
     for round in 0..=rounds {
         for r in &mut runs {
             let (_, params) = &configs[r.cfg];
@@ -252,7 +266,13 @@ fn chain_profile() {
             if round == 0 {
                 continue; // warm-up: pipelines, allocations, history
             }
-            r.frame.push(t.sum_ms());
+            // With a motion clarity sweep (a refresh above 60 Hz) a stage runs in only some frames of the burst and its mean
+            // is over those: the per-frame mean of the whole command buffer is the total that matters then.
+            r.frame.push(if settings.refresh_hz > 60.0 {
+                t.frame_ms
+            } else {
+                t.sum_ms()
+            });
             for (k, n) in names.iter().enumerate() {
                 r.stages[k].push(t.stage_ms(n));
             }

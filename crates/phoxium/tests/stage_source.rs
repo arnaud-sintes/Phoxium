@@ -71,6 +71,7 @@ fn render(
         source: Transfer::Identity,
         host: t,
         integer_scale: false,
+        refresh_hz: 60.0,
     };
     gpu.render(
         Some(SourceFrame {

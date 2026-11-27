@@ -16,7 +16,7 @@
 //! Stages: `decode` (compute, captured frame -> native raster) and `encode` (fragment, linear light ->
 //! output target) are owned by the pipeline directly; between them runs the fixed ordered chain of
 //! slots [`CHAIN`] (T-20b, A11, TEC-6), in physical order: `target` (the source colour target), `signal`, `amp`, `impair`, `tape`, `tv`, `gun`, `abl`, `screen`,
-//! `wear` (ageing and burn-in, T-42, T-43), `phosphor`, `optics`.
+//! `wear` (ageing and burn-in, T-42, T-43), `scan` (motion clarity: the beam sweep over several refreshes), `phosphor`, `optics`.
 //!
 //! # Chain slots (T-20b)
 //!
@@ -58,6 +58,7 @@ pub(super) mod gun;
 pub(super) mod impair;
 pub(super) mod optics;
 pub(super) mod phosphor;
+pub(super) mod scan;
 pub(super) mod screen;
 pub(super) mod signal;
 pub(super) mod tape;
@@ -81,6 +82,7 @@ pub(super) const CHAIN: &[Registration] = &[
     abl::SLOT,
     screen::SLOT,
     wear::SLOT,
+    scan::SLOT,
     phosphor::SLOT,
     optics::SLOT,
 ];
@@ -100,6 +102,14 @@ pub enum Domain {
 
 /// Default horizontal supersampling factor K of the `amp` output (image contract, T-33).
 pub const AMP_K: u32 = 4;
+
+/// The beam sweep a frame belongs to (motion clarity, `scan`): the plan and the position of this refresh in it
+/// (0 for the first refresh of the sweep, `plan.subframes - 1` for the last).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(in crate::gpu) struct Sweep {
+    pub plan: crt_model::scan::Plan,
+    pub phase: u32,
+}
 
 /// A slot of the chain.
 pub(super) struct Registration {
@@ -203,6 +213,10 @@ pub(super) trait Stage {
     /// up to date for this frame), after every `prepare` (T-37 review: `screen` takes `raster_scale` 1 when
     /// it does not). Default: nothing.
     fn set_abl_runs(&self, _runs: bool) {}
+
+    /// Tells the stage the beam sweep of the frame about to be planned (`None`: no scan), before the routing is
+    /// decided, so that [`Stage::is_identity`] can answer for it (the `scan` slot). Default: nothing.
+    fn set_sweep(&mut self, _sweep: Option<Sweep>) {}
 
     /// The burn-in wear map of the `wear` slot (T-43), for the CPU operations on it (load, reset, save).
     /// Default: none.

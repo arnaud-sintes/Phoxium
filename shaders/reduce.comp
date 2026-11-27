@@ -50,7 +50,7 @@ void main() {
     }
     if (t == 0u) {
         float a = n == 0u ? 0.0 : partial[0] / (3.0 * float(n));
-        float dt = max(frame.frame_time_ms, 0.0) * 0.001;
+        float dt = max(upstream_dt_ms(), 0.0) * 0.001;
         float alpha = params.abl_tau_s <= 0.0 ? 1.0 : 1.0 - exp(-dt / params.abl_tau_s);
         abl_state_update(a, alpha); // with the non-finite guard
     }

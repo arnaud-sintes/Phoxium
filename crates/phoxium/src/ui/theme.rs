@@ -785,7 +785,10 @@ mod tests {
         let parts = paragraphs(long);
         assert!(parts.len() >= 2, "{parts:?}");
         assert!(parts[0].ends_with("0.5 mm."), "{parts:?}");
-        assert!(parts.iter().all(|p| p.chars().count() <= PARAGRAPH_CHARS + 60), "{parts:?}");
+        assert!(
+            parts.iter().all(|p| p.chars().count() <= PARAGRAPH_CHARS + 60),
+            "{parts:?}"
+        );
         let squeeze = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
         assert_eq!(squeeze(&parts.join(" ")), squeeze(long));
         // One sentence longer than the limit is kept whole.

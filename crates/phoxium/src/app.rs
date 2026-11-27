@@ -163,6 +163,16 @@ pub fn run() -> Res<()> {
         }
         return Ok(());
     }
+    if args.list_video {
+        let devices = video::list();
+        if devices.is_empty() {
+            println!("no video capture device");
+        }
+        for d in &devices {
+            println!("{}", d.name);
+        }
+        return Ok(());
+    }
     if args.list_windows {
         for w in sources::list_windows() {
             println!(
@@ -225,7 +235,18 @@ pub fn run() -> Res<()> {
     let mut start_message: Option<(bool, String)> = None;
     // The source at start: --window (developer path, an error when not found), else the last program when
     // `ask_at_start` is off and it runs, else none (the picker).
-    let initial: Option<sources::WindowEntry> = if synthetic {
+    // `--video`: the device is found now (an error listing the devices when there is none) and opened by the loop
+    // like a picker choice; no window, and the last window of the settings is not attached.
+    let mut cli_video: Option<video::Device> = match args.video.as_deref() {
+        Some(text) if !synthetic => {
+            let devices = video::list();
+            let i = video::find_device(&devices, text)?;
+            println!("source: video device \"{}\"", devices[i].name);
+            Some(devices[i].clone())
+        }
+        _ => None,
+    };
+    let initial: Option<sources::WindowEntry> = if synthetic || cli_video.is_some() {
         None
     } else if args.targeted() {
         // --window / --process: a launcher may start us before the window exists: --wait-window waits for it.
@@ -449,6 +470,8 @@ pub fn run() -> Res<()> {
         args.validation,
         args.integer,
     )?;
+    // The motion clarity sweep needs the refresh rate of the screen from the first frame (and again every second).
+    renderer.set_refresh_hz(output::refresh_hz(win.hwnd).unwrap_or(60.0));
     let got = &renderer.context().gpu;
     selection.note_renderer(adapters::VulkanDevice {
         index: got.index,
@@ -811,6 +834,11 @@ pub fn run() -> Res<()> {
             let mut still_switch: Option<(capture::Frame, String)> = None;
             let mut area_request: Option<SourceAction> = None;
             let mut multiplier_request: Option<scaling::Multiplier> = None;
+            // `--video`: the first pass opens the named device as if the picker had asked for it.
+            if let Some(device) = cli_video.take() {
+                video_list = vec![device];
+                source_request = Some(SourceAction::OpenVideo(0));
+            }
             match source_request.take() {
                 None => {}
                 Some(
@@ -2088,9 +2116,17 @@ pub fn run() -> Res<()> {
                 let gpu = renderer.take_timing_average();
                 // T-48, OUT-6: one step of the automatic quality drop on this second's mean GPU frame time against the
                 // refresh period of the output's monitor (60 Hz when unknown).
-                let period_ms = output::refresh_hz(win.hwnd).map_or(1000.0 / 60.0, |hz| 1000.0 / hz);
+                let refresh = output::refresh_hz(win.hwnd);
+                renderer.set_refresh_hz(refresh.unwrap_or(60.0));
+                let period_ms = refresh.map_or(1000.0 / 60.0, |hz| 1000.0 / hz);
                 let user_tier = crate::quality::tier(&params);
-                let gpu_ms = gpu.as_ref().map_or(f64::NAN, |g| g.frame_ms);
+                // With a motion clarity sweep the beam stages run once per sweep: the refresh that runs them has to fit
+                // the period, not the mean of the light ones among it.
+                let heavy_ms = renderer.take_heavy_ms();
+                let gpu_ms = match (params.scan_mode != crate::params::SCAN_MODE_OFF, heavy_ms) {
+                    (true, Some(h)) => h,
+                    _ => gpu.as_ref().map_or(f64::NAN, |g| g.frame_ms),
+                };
                 if let Some(change) = auto_quality.feed(params.quality_auto, user_tier, gpu_ms, period_ms) {
                     renderer.set_quality_drop(auto_quality.drop());
                     println!("notice: {}", change.notice());

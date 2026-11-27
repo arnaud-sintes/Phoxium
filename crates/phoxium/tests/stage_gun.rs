@@ -581,6 +581,7 @@ fn render_srgb_ramp(gpu: &mut Headless, p: &Params) -> Rendered {
             source: Transfer::Identity,
             host: Transfer::Srgb,
             integer_scale: false,
+            refresh_hz: 60.0,
         },
         p,
         (w, h),

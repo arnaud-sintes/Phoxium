@@ -33,6 +33,7 @@ pub mod output;
 pub mod phosphor;
 pub mod phosphor_types;
 pub mod prefilter;
+pub mod scan;
 pub mod tape;
 pub mod target;
 pub mod tube;

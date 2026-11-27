@@ -1,0 +1,79 @@
+# Motion clarity (QUESTIONS PHY-12, "Motion clarity"; CRT.md "Display rate"; crates/crt-model/src/scan.rs, shaders/scan.comp,
+# src/gpu/stages/scan.rs). Format: crates/paramgen/src/lib.rs. Each id is defined once in the whole params/ folder.
+# Off by default: the picture is then exactly the frame-integrated one (the `scan` slot is skipped). On, the beam's
+# sweep is spread over the output refreshes of one source frame (a 240 or 300 Hz panel for a 60 Hz source): a rolling
+# band of lines, or black frame insertion. The upstream chain (beam, mask, glow) is drawn once per sweep.
+
+[[param]]
+id = "scan_mode"
+stage = "scan"
+type = "enum"
+unit = "1"
+default = "off"
+values = ["off", "rolling", "strobe"]
+tag = "D"
+source = "QUESTIONS PHY-12 (rolling sub-frame scan, at 120/240 Hz and above); CRT.md Display rate: a tube lights the lines under the beam and lets the rest decay, a sample-and-hold panel smears a tracked moving object; crt_model::scan"
+description = "Spreads each source frame over several screen refreshes, as a tube does: less motion blur, less brightness, and it needs a high refresh rate (240 or 300 Hz for a 60 Hz game).\n\nRolling: each refresh lights only the band of lines the beam crosses, the phosphor afterglow fills in the rest (turn on Persistence for the real decay).\n\nStrobe: black frame insertion, the whole picture for some refreshes and black for the others.\n\nOff: the whole picture at every refresh."
+group = "Motion clarity"
+
+[[param]]
+id = "scan_source_rate_hz"
+stage = "scan"
+type = "f32"
+unit = "Hz"
+default = 60.0
+min = 24.0
+max = 120.0
+hard_min = 10.0
+hard_max = 480.0
+hard_why = "the rate of the source's frames (the field rate of the machine); the number of refreshes per sweep is the screen refresh over it, and outside 10 to 480 Hz no screen gives a whole count of at least 2"
+tag = "E"
+source = "QUESTIONS PHY-12: the sweep length is the source's frame period; 60 Hz is the default of most sources, 50 and 59.94 are the other common ones; crt_model::scan::subframes"
+description = "The frame rate of the source, 60 Hz for most games (50 for PAL, 59.94 for NTSC consoles). The sweep lasts one frame of it; the number of refreshes per frame is the screen refresh over this rate."
+group = "Motion clarity"
+
+[[param]]
+id = "scan_refreshes_per_frame"
+stage = "scan"
+type = "i32"
+unit = "1"
+default = 0
+min = 0
+max = 16
+hard_why = "the number of screen refreshes per source frame; 0 follows the screen refresh and the source rate, and 16 is the most the model plans for"
+tag = "E"
+source = "QUESTIONS PHY-12: the count is normally the refresh over the source rate (crt_model::scan::subframes); a manual count is for a refresh the system does not report"
+description = "Screen refreshes per source frame. 0 (default): the screen refresh divided by the source rate (5 at 300 Hz and 60 Hz). Set it by hand if your screen reports the wrong refresh or runs a different rate than Windows says."
+group = "Motion clarity"
+advanced = true
+
+[[param]]
+id = "scan_lit_refreshes"
+stage = "scan"
+type = "i32"
+unit = "1"
+default = 1
+min = 1
+max = 15
+hard_why = "the refreshes of the sweep that show the picture in strobe mode; at least 1, and always fewer than the whole sweep"
+tag = "E"
+source = "QUESTIONS PHY-12 (black frame insertion); crt_model::scan::plan clamps it to the sweep"
+description = "Strobe only: how many refreshes of each sweep show the picture, the rest are black. 1 is the sharpest and darkest."
+group = "Motion clarity"
+advanced = true
+
+[[param]]
+id = "scan_peak_boost"
+stage = "scan"
+type = "f32"
+unit = "1"
+default = 1.0
+min = 0.0
+max = 1.0
+hard_min = 0.0
+hard_max = 1.0
+hard_why = "the share of the lost light given back as peak brightness: 0 is none, 1 is all of it; beyond that the mean light would exceed the picture's"
+tag = "D"
+source = "QUESTIONS PHY-12: a line lit for a fraction d of the sweep needs 1 / d times the peak for the same mean light; the panel's peak white limits it; crt_model::scan::Plan::gain"
+description = "Brightness given back while a line is lit, to make up for the dark time. 1 (default): as much as the screen can show, so dim and mid tones keep their brightness and only the brightest highlights get dimmer. 0: none, nothing clips but the picture is darker (about 1 / 5 as bright at 300 Hz)."
+group = "Motion clarity"

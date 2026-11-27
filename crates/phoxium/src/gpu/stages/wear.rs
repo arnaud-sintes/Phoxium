@@ -543,7 +543,7 @@ impl Stage for Wear {
         if burn {
             self.extra_used = std::mem::take(&mut self.extra_hours);
             scale = charge_scale(
-                fc.frame_time_ms,
+                fc.upstream_ms(),
                 params.burnin_acceleration,
                 self.extra_used,
                 per_light_hour,

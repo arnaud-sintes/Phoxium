@@ -1,0 +1,42 @@
+#version 450
+#extension GL_GOOGLE_include_directive : require
+
+// Slot `scan` (motion clarity; tube domain -> tube domain, linear light). The beam's sweep over several output
+// refreshes (oracle `crates/crt-model/src/scan.rs`, QUESTIONS PHY-12): at this refresh only the rows [row_lo, row_hi)
+// of the tube image are lit, at `gain` times their light, the others are black. The CPU decides the rows (the band
+// the beam crosses in this refresh, or the whole image for a lit strobe refresh, or none for a dark one) and the
+// gain (1 / duty with the full boost, 1 with none) from the plan and the phase of the sweep (`stages/scan.rs`).
+//
+// The gain multiplies the light before the phosphor stage, so saturation and persistence see the boosted drive, as a
+// real phosphor sees the peak beam current: the afterglow of a line then carries the boosted energy, and the mean light
+// of a still picture over the sweep is its frame-integrated light. Skipped as an exact identity while there is no
+// sweep (`Stage::is_identity`). Alpha is copied.
+
+#include "params.glsl"
+#include "common.glsl"
+
+layout(local_size_x = 8, local_size_y = 8) in;
+
+layout(set = 0, binding = 2) uniform sampler2D light_in;
+layout(set = 0, binding = 3, rgba16f) uniform writeonly image2D light_out;
+
+// std430, 16 bytes, mirrored by `Push` in src/gpu/stages/scan.rs.
+layout(push_constant) uniform Push {
+    uint row_lo; // first lit row of the tube image
+    uint row_hi; // one past the last lit row
+    float gain;  // factor on the light of the lit rows
+    uint pad;
+} pc;
+
+const float LIGHT_MAX = 65504.0; // the largest finite FP16 value: a boosted highlight saturates there
+
+void main() {
+    ivec2 p = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(p, imageSize(light_out)))) {
+        return;
+    }
+    vec4 src = texelFetch(light_in, p, 0);
+    bool lit = uint(p.y) >= pc.row_lo && uint(p.y) < pc.row_hi;
+    vec3 c = lit ? min(src.rgb * pc.gain, vec3(LIGHT_MAX)) : vec3(0.0);
+    imageStore(light_out, p, round_f16(vec4(c, src.a)));
+}

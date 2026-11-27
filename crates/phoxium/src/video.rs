@@ -508,9 +508,59 @@ mod platform {
     }
 }
 
+/// The device the command line names (`--video <text>`), by the rule of `--window`: the first whose name starts with
+/// `text`, else the first whose name contains it, case free. An error that lists the devices when none matches (or
+/// when there is none), for a launcher to read.
+pub fn find_device(devices: &[Device], text: &str) -> Result<usize, String> {
+    let needle = text.trim().to_lowercase();
+    let name = |d: &Device| d.name.to_lowercase();
+    let found = devices
+        .iter()
+        .position(|d| name(d).starts_with(&needle))
+        .or_else(|| devices.iter().position(|d| name(d).contains(&needle)));
+    found.ok_or_else(|| {
+        if devices.is_empty() {
+            format!("cannot find a video device with \"{text}\" in its name: Windows lists no video capture device")
+        } else {
+            let names: Vec<String> = devices.iter().map(|d| format!("\"{}\"", d.name)).collect();
+            format!(
+                "cannot find a video device with \"{text}\" in its name (try --list-video; found {})",
+                names.join(", ")
+            )
+        }
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn device(name: &str) -> Device {
+        Device {
+            name: name.into(),
+            link: format!("link:{name}"),
+        }
+    }
+
+    /// The name starts with the text first, else contains it; case free; the first of equals; a miss lists the devices.
+    #[test]
+    fn a_device_is_found_by_the_rule_of_the_window_option() {
+        let list = [
+            device("Integrated Camera"),
+            device("USB Video"),
+            device("Elgato HD60 (USB)"),
+        ];
+        assert_eq!(find_device(&list, "usb"), Ok(1)); // starts with beats contains (index 2)
+        assert_eq!(find_device(&list, "  ELGATO "), Ok(2));
+        assert_eq!(find_device(&list, "hd60"), Ok(2)); // contains
+        assert_eq!(find_device(&list, "camera"), Ok(0));
+        assert_eq!(find_device(&list, "i"), Ok(0)); // the first of several
+        let miss = find_device(&list, "obs").unwrap_err();
+        assert!(miss.contains("\"obs\"") && miss.contains("--list-video") && miss.contains("\"USB Video\""));
+        assert!(find_device(&[], "x")
+            .unwrap_err()
+            .contains("lists no video capture device"));
+    }
 
     /// The attribute wins; without it the rows are bottom-up (Media Foundation's RGB convention) with the pitch of the
     /// sample when it holds whole padded rows, else the tight one.

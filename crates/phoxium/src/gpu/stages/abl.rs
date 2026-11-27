@@ -7,7 +7,7 @@
 //!    low-passed APL the reduce pass left at the end of the previous frame (one frame of latency);
 //!    `abl_enable` off copies the texel unchanged (exact identity);
 //! 2. reduce (`reduce.comp`, one workgroup of 256): the frame APL of the input (unlimited current) in FP32,
-//!    then the low-pass with the real frame time `FrameConstants::frame_time_ms`, into the state. In every
+//!    then the low-pass with the real time step `FrameConstants::upstream_ms()` (the frame time; the whole sweep with motion clarity, where this stage runs once per sweep), into the state. In every
 //!    quality tier but `exact` (T-48) the sum is parallel instead: `reduce_partial.comp` (one workgroup per
 //!    4096 texels, partial sums in the state buffer from byte [`PARTIALS_OFFSET`], set 1 binding 1) then
 //!    `reduce_final.comp` (adds the partials, same state update). One workgroup walking a 1.2 Mtexel amp image

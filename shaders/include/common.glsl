@@ -34,9 +34,12 @@ layout(std140, set = 0, binding = PHOXIUM_FRAME_BINDING) uniform FrameConstants 
     // White balance gains of the gun stage (T-34, src/white.rs): per-channel factors on the beam current,
     // (1, 1, 1) when `gun_white_balance` is off. vec3 alignment: bytes 60 to 63 are padding.
     layout(offset = 64) vec3 white_gain;
+    // Time since the stages before the `scan` slot last ran, in ms (motion clarity: they run once per sweep of
+    // several refreshes); 0 when there is no sweep, and then frame_time_ms is the step (`upstream_dt_ms()` below).
+    layout(offset = 76) float upstream_time_ms;
     // Margin (host px per side, x and y) of the tube image around the beam raster (T-37): the raster is
     // tube_size - 2 raster_margin, centred, and the margin holds the spot's skirt. 0: the tube image is the
-    // raster. Bytes 76 to 79 are padding.
+    // raster.
     layout(offset = 80) ivec2 raster_margin;
     // Mask footprint per axis (T-39c, mask.glsl), decided once on the CPU in f64 (src/placement.rs,
     // FrameConstants::with_mask_tiers): 0 = one whole period (prefiltered), 1 = the host pixel (area
@@ -48,6 +51,11 @@ layout(std140, set = 0, binding = PHOXIUM_FRAME_BINDING) uniform FrameConstants 
     // (the PC Engine's 512 colours, `target` kind 6) entry `G x 64 + R x 8 + B` is the drive voltage of that colour code.
     layout(offset = 96) vec4 target_table[512];
 } frame;
+
+// The time step of the stages before `scan`, ms: the sweep's when one set it, else the frame time.
+float upstream_dt_ms() {
+    return frame.upstream_time_ms > 0.0 ? frame.upstream_time_ms : frame.frame_time_ms;
+}
 
 // Size of the amp-domain images (amp and gun outputs).
 ivec2 amp_size() {

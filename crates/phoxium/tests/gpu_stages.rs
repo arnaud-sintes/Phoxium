@@ -23,13 +23,13 @@ use phoxium::gpu::{
 use phoxium::params::{ParamValue, Params, SOURCE_EOTF_SRGB};
 use phoxium::scaling::View;
 
-const SLOTS: [&str; 12] = [
-    "target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "phosphor", "optics",
+const SLOTS: [&str; 13] = [
+    "target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "scan", "phosphor", "optics",
 ];
 /// The slots that are still identity placeholders or copies. `screen` is excluded since T-36a: with the
 /// tube placed (T-30) it draws scanlines, so it is no longer an identity (its tests are `stage_beam_*`).
-const PASSTHROUGH: [&str; 11] = [
-    "target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "wear", "phosphor", "optics",
+const PASSTHROUGH: [&str; 12] = [
+    "target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "wear", "scan", "phosphor", "optics",
 ];
 const W: u32 = 256;
 const H: u32 = 4;
@@ -69,6 +69,7 @@ fn render(gpu: &mut Headless, bgra: &[u8], t: Transfer) -> Rendered {
         source: Transfer::Identity,
         host: t,
         integer_scale: false,
+        refresh_hz: 60.0,
     };
     gpu.render(
         Some(SourceFrame {
@@ -273,6 +274,7 @@ fn toggling_each_slot_keeps_the_identity() {
         source: Transfer::Identity,
         host: t,
         integer_scale: false,
+        refresh_hz: 60.0,
     };
     let frames = [
         (Some(f), View::full(W, H)),
@@ -341,7 +343,7 @@ fn injected_image_through_a_stage_subset() {
     };
     let r = gpu.render_stages(&run).expect("render_stages");
     let names: Vec<&str> = r.stages.iter().map(|(n, _)| *n).collect();
-    assert_eq!(names, ["abl", "screen", "wear", "phosphor", "optics"]);
+    assert_eq!(names, ["abl", "screen", "wear", "scan", "phosphor", "optics"]);
     assert_eq!(r.native.width, 0, "decode did not run");
     let screen = r.stage("screen").unwrap();
     assert_eq!((screen.width, screen.height), (16, 8));

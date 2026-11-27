@@ -86,16 +86,31 @@ pub fn effective(p: &Params, drop: u32) -> Params {
     }
 }
 
-/// The parameter ids of the machine settings: the quality ones and the host display's subpixel layout
-/// (`mask_host_subpixel`). [`keep`] copies them; "Reset look overrides" keeps them.
-pub const PARAM_IDS: [&str; 3] = ["quality_tier", "quality_auto", "mask_host_subpixel"];
+/// The parameter ids of the machine settings: the quality ones, the host display's subpixel layout
+/// (`mask_host_subpixel`) and the motion clarity ones (`scan_*`: they describe the screen's refresh and the viewer's
+/// choice, not the tube). [`keep`] copies them; "Reset look overrides" keeps them.
+pub const PARAM_IDS: [&str; 8] = [
+    "quality_tier",
+    "quality_auto",
+    "mask_host_subpixel",
+    "scan_mode",
+    "scan_source_rate_hz",
+    "scan_refreshes_per_frame",
+    "scan_lit_refreshes",
+    "scan_peak_boost",
+];
 
-/// Copies the machine settings of `old` into `new` (the quality settings and the host subpixel layout): a preset
-/// change (hotkey or menu) keeps them, as they describe the machine, not the tube.
+/// Copies the machine settings of `old` into `new` (the quality settings, the host subpixel layout and the motion clarity
+/// ones): a preset change (hotkey or menu) keeps them, as they describe the machine, not the tube.
 pub fn keep(new: &mut Params, old: &Params) {
     new.quality_tier = old.quality_tier;
     new.quality_auto = old.quality_auto;
     new.mask_host_subpixel = old.mask_host_subpixel;
+    new.scan_mode = old.scan_mode;
+    new.scan_source_rate_hz = old.scan_source_rate_hz;
+    new.scan_refreshes_per_frame = old.scan_refreshes_per_frame;
+    new.scan_lit_refreshes = old.scan_lit_refreshes;
+    new.scan_peak_boost = old.scan_peak_boost;
 }
 
 /// Amplifier sub-samples per source pixel (`FrameConstants::amp_k`) for the tier: `amp_samples` (at least 1) in
@@ -372,6 +387,39 @@ impl AutoQuality {
 
 #[cfg(test)]
 mod tests {
+    /// The motion clarity settings describe the screen and the viewer's choice, so a preset change keeps them, and every
+    /// `scan_*` parameter is one of the machine settings.
+    #[test]
+    fn a_preset_change_keeps_the_motion_clarity_settings() {
+        let old = Params {
+            scan_mode: crate::params::SCAN_MODE_ROLLING,
+            scan_source_rate_hz: 50.0,
+            scan_refreshes_per_frame: 6,
+            scan_lit_refreshes: 3,
+            scan_peak_boost: 0.25,
+            ..Params::default()
+        };
+        let mut new = Params::default();
+        keep(&mut new, &old);
+        assert_eq!(
+            (
+                new.scan_mode,
+                new.scan_source_rate_hz,
+                new.scan_refreshes_per_frame,
+                new.scan_lit_refreshes,
+                new.scan_peak_boost
+            ),
+            (crate::params::SCAN_MODE_ROLLING, 50.0, 6, 3, 0.25)
+        );
+        let scan_ids: Vec<&str> = crate::params::PARAMS_META
+            .iter()
+            .filter(|m| m.stage == "scan")
+            .map(|m| m.id)
+            .collect();
+        assert_eq!(scan_ids.len(), 5);
+        assert!(scan_ids.iter().all(|id| PARAM_IDS.contains(id)), "{scan_ids:?}");
+    }
+
     /// The host subpixel layout describes the monitor, so a preset change keeps it, like the quality settings.
     #[test]
     fn a_preset_change_keeps_the_host_subpixel_layout() {

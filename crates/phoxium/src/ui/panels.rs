@@ -136,6 +136,14 @@ pub const PANELS: &[PanelDef] = &[
         intro: Some(PHOSPHOR_INTRO),
     },
     PanelDef {
+        // Motion clarity: the beam sweep spread over several refreshes (params/scan.toml).
+        name: "Motion clarity",
+        stages: &["scan"],
+        first: &["scan_mode"],
+        empty_note: None,
+        intro: None,
+    },
+    PanelDef {
         name: AGEING,
         stages: &["ageing", "burnin"],
         first: &["ageing_enable", "ageing_hours", "burnin_enable", "burnin_acceleration"],

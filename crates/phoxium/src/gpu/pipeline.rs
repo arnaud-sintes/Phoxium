@@ -180,6 +180,9 @@ pub struct Settings {
     pub host: Transfer,
     /// Scale the tube rectangle by whole factors only (when at least 1).
     pub integer_scale: bool,
+    /// Refresh rate of the screen the output is on, Hz: the number of refreshes per source frame of the motion clarity
+    /// sweep (`scan_mode`). 60 until the window loop reports it ([`crate::gpu::Renderer::set_refresh_hz`]).
+    pub refresh_hz: f32,
 }
 
 impl Default for Settings {
@@ -190,6 +193,7 @@ impl Default for Settings {
             source: Transfer::Identity,
             host: Transfer::Power(2.2),
             integer_scale: false,
+            refresh_hz: 60.0,
         }
     }
 }
@@ -207,6 +211,7 @@ impl Settings {
             source: Transfer::Identity,
             host: Transfer::Identity,
             integer_scale: false,
+            refresh_hz: 60.0,
         }
     }
 }
@@ -253,8 +258,12 @@ pub struct FrameConstants {
     /// White balance gains of the `gun` stage (T-34): per-channel factors on the beam current. `new` gives
     /// (1, 1, 1); `placed` computes them from the parameter table (`src/white.rs`).
     pub white_gain: [f32; 3],
-    /// Padding to the 8-byte alignment of the std140 `ivec2` below (bytes 76 to 79).
-    pub(crate) pad1: i32,
+    /// Motion clarity (`scan`): the time since the stages before the `scan` slot last ran, in ms, set only while a
+    /// sweep spreads one source frame over several refreshes (they then run once per sweep, so the low-pass of `abl`
+    /// and the charge of `wear` must step by the whole sweep). 0 (the default, and every frame without a sweep)
+    /// means `frame_time_ms`: read it through [`FrameConstants::upstream_ms`] or `upstream_dt_ms()` of the shaders.
+    /// It sits in the 4 bytes of padding that keep the std140 `ivec2` below on an 8-byte boundary (bytes 76 to 79).
+    pub upstream_time_ms: f32,
     /// Margin (host px, per side, x and y) of the tube image around the raster (T-37): the tube image is
     /// the raster rectangle grown by this margin, so the spot's skirt past the raster's ends is drawn
     /// (`tube_size - 2 margin` is the raster). 0 in [`FrameConstants::new`]: the tube image is the raster.
@@ -267,6 +276,16 @@ pub struct FrameConstants {
 }
 
 impl FrameConstants {
+    /// The time step of the stages before `scan`: [`FrameConstants::upstream_time_ms`] when a sweep set it, else the
+    /// frame time.
+    pub fn upstream_ms(&self) -> f32 {
+        if self.upstream_time_ms > 0.0 {
+            self.upstream_time_ms
+        } else {
+            self.frame_time_ms
+        }
+    }
+
     /// The number of source frames that have passed at `rate_hz` frames per second of real time: the time base of
     /// the signal impairments, the tape and the TV flicker, so that their hum, crawl, roll and flicker run in real
     /// seconds on any display rate (a 144 Hz output redraws the same source frame for a while, as a real tube
@@ -619,6 +638,11 @@ pub struct Pipeline {
     timer: GpuTimer,
     /// Timings of the latest frame whose results were read.
     timings: Option<FrameTimings>,
+    /// Per frame slot: the frame recorded into it ran the whole chain (it was not a held refresh of a motion clarity
+    /// sweep), so its GPU time counts for [`Pipeline::take_heavy_ms`].
+    heavy: [bool; FRAMES_IN_FLIGHT],
+    /// Sum of the GPU ms and the number of the whole-chain frames read since [`Pipeline::take_heavy_ms`].
+    heavy_sum: (f64, u32),
     /// Mean of the timings read since [`Pipeline::take_timing_average`].
     average: TimingAverager,
     /// SDR headroom readout of the last recorded frame and the inputs it was computed from (T-84): computed
@@ -628,11 +652,78 @@ pub struct Pipeline {
     limits: ImageLimits,
     /// What the pipeline limited or left out (R-02, R-01).
     notices: Notices,
+    /// Motion clarity (`scan`): the beam sweep in progress and what is held between its refreshes.
+    sweep: SweepState,
     /// Set when a failed submission left a slot without a usable fence (R-28): every later frame fails with it.
     broken: Option<String>,
     /// Test fault: the staging buffer of this frame slot fails to allocate in `reallocate_src` (R-27).
     #[cfg(test)]
     pub(super) fail_staging_alloc: Option<usize>,
+}
+
+/// The motion clarity sweep (`scan`, `crt_model::scan`): a source frame is spread over `n` output refreshes, the
+/// beam's band of one refresh at a time. The stages before the `scan` slot (the beam, the mask, the glow: most of the
+/// cost) run once per sweep, at its first refresh, and their last image is held for the others; only `scan`,
+/// `phosphor`, `optics` and `encode` run at every refresh. A new source frame is decoded as it arrives but reaches the
+/// held stages at the next sweep, so a frame is never drawn half old and half new (no tear line).
+///
+/// The phase advances when a frame is submitted, not when it is recorded, so an abandoned frame is recorded again
+/// with the same phase.
+#[derive(Default)]
+struct SweepState {
+    /// Refreshes per sweep of the sweep in progress, 0 while there is none.
+    n: u32,
+    /// The position in the sweep of the next frame to submit (0 to `n - 1`).
+    phase: u32,
+    /// Sweeps started: the frame index the held stages see, so that an interlaced field alternates per sweep (a
+    /// source frame) and not per refresh.
+    count: u32,
+    /// The routing signature ([`Pipeline::upstream_signature`]) of the frame that made the held images; `None`
+    /// when they hold nothing usable (a new sweep, a resize, a change of routing).
+    latch: Option<u64>,
+    /// Time of the frames recorded since the held stages last ran, ms.
+    pending_ms: f32,
+    /// The signature of the frame being planned, set by `plan_frame` while a sweep is on.
+    signature: u64,
+    /// The sweep the frame being planned belongs to (`None`: no scan).
+    now: Option<stages::Sweep>,
+    /// The frame being planned holds the stages before `scan` (they do not run in it).
+    hold: bool,
+    /// The slots before this index are held in the frame being planned (0: none).
+    held_below: usize,
+    /// What `latch`, `source_dirty`, `pending_ms` and `count` were before the frame being recorded changed them (an
+    /// abandoned frame gives them back).
+    before: Option<(Option<u64>, bool, f32, u32)>,
+    /// A new source frame was staged since `decode` last ran: it must run (also in a held frame) so that the
+    /// next sweep draws the newest frame.
+    source_dirty: bool,
+    /// The frame being recorded advances the sweep when submitted.
+    advance: bool,
+}
+
+impl SweepState {
+    /// Forgets the sweep (the mode went off, or the refresh no longer gives one).
+    fn reset(&mut self) {
+        self.n = 0;
+        self.phase = 0;
+        self.latch = None;
+        self.pending_ms = 0.0;
+        self.now = None;
+        self.hold = false;
+    }
+}
+
+/// The routing signature of FNV-1a over a list of words: two frames with the same one routed the same slots over
+/// the same images of the same sizes.
+fn fnv(words: impl IntoIterator<Item = u64>) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for w in words {
+        for b in w.to_le_bytes() {
+            h ^= u64::from(b);
+            h = h.wrapping_mul(0x0100_0000_01b3);
+        }
+    }
+    h
 }
 
 /// The inputs of the headroom readout: parameters, px per mm, line pitch (bits) and whether `screen` runs.
@@ -715,6 +806,9 @@ impl Pipeline {
             inject: Img::default(),
             routed: Vec::with_capacity(chain.len() + 1),
             plan: Vec::with_capacity(chain.len()),
+            heavy: [true; FRAMES_IN_FLIGHT],
+            heavy_sum: (0.0, 0),
+            sweep: SweepState::default(),
             frame_index: 0,
             elapsed_ms: 0.0,
             last_frame: None,
@@ -1037,9 +1131,22 @@ impl Pipeline {
     /// That submission has completed (fence waited or device idle).
     unsafe fn collect(&mut self, ctx: &Context, slot: usize) {
         if let Some(t) = self.timer.harvest(&ctx.device, slot) {
+            if self.heavy[slot] {
+                self.heavy_sum.0 += t.frame_ms;
+                self.heavy_sum.1 += 1;
+            }
             self.average.push(&t);
             self.timings = Some(t);
         }
+    }
+
+    /// The mean GPU time, ms, of the frames read since the last call that ran the whole chain (every frame, unless a
+    /// motion clarity sweep holds the beam stages for all but its first refresh): the figure that has to fit the
+    /// refresh period, where the mean of [`Pipeline::take_timing_average`] hides a heavy refresh among light ones.
+    /// `None` without such a frame.
+    pub(super) fn take_heavy_ms(&mut self) -> Option<f64> {
+        let (sum, n) = std::mem::take(&mut self.heavy_sum);
+        (n > 0).then(|| sum / f64::from(n))
     }
 
     /// Reads the timestamps of every submitted frame not read yet, oldest first.
@@ -1109,6 +1216,7 @@ impl Pipeline {
         // Host writes before vkQueueSubmit are visible to the device (implicit host write ordering).
         std::ptr::copy_nonoverlapping(bgra.as_ptr(), s.staging.mapped, bytes);
         s.upload = true;
+        self.sweep.source_dirty = true;
         // The uploaded frame is the source from now on (not an imported image).
         self.ext_current = None;
         Ok(())
@@ -1167,6 +1275,7 @@ impl Pipeline {
             s.upload = false;
         }
         self.ext_current = Some(slot);
+        self.sweep.source_dirty = true;
         Ok(imported)
     }
 
@@ -1533,15 +1642,41 @@ impl Pipeline {
             last,
             ..
         } = planned?;
-        // Stage-owned resources (history images, T-41), once the routing of the frame is known.
+        // Motion clarity: what a held frame leaves alone, and the time and the frame index the stages that do run
+        // see (the sweep's: they run once per sweep).
+        self.sweep.before = Some((
+            self.sweep.latch,
+            self.sweep.source_dirty,
+            self.sweep.pending_ms,
+            self.sweep.count,
+        ));
+        let mut fc = fc;
+        if self.sweep.now.is_some() && have_source {
+            if self.sweep.hold {
+                self.sweep.pending_ms += fc.frame_time_ms;
+            } else {
+                fc.upstream_time_ms = self.sweep.pending_ms + fc.frame_time_ms;
+                self.sweep.pending_ms = 0.0;
+                if self.sweep.now.is_some_and(|s| s.phase == 0) {
+                    self.sweep.count = self.sweep.count.wrapping_add(1);
+                }
+                fc.frame_index = self.sweep.count;
+            }
+        }
+        let held_below = self.sweep.held_below;
+        // Stage-owned resources (history images, T-41), once the routing of the frame is known. A held stage does not
+        // run in this frame: it keeps its state and is not told anything.
         let mut abl_runs = false;
         for i in 0..self.chain.len() {
             let runs = have_source && self.plan.iter().any(|&(j, m, _)| j == i && m == Mode::Run);
             // `screen` decides its beam path in `prepare` (T-48: an unscaled raster when `abl` does not run),
             // so every stage learns whether an earlier `abl` runs before its own `prepare`.
             self.chain[i].stage.set_abl_runs(abl_runs);
-            self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
             abl_runs |= runs && self.chain[i].stage.abl_state().is_some();
+            if i < held_below {
+                continue;
+            }
+            self.chain[i].stage.prepare(ctx, &fc, params, runs)?;
             let (name, notice) = (self.chain[i].reg.name, self.chain[i].stage.notice());
             self.notices.set(name, notice);
         }
@@ -1583,6 +1718,11 @@ impl Pipeline {
         target_format: vk::Format,
     ) -> Res<Planned> {
         settings.validate()?;
+        // Motion clarity: the sweep of this frame, told to the stages before they answer `is_identity`.
+        let sweep = self.plan_sweep(params, settings);
+        for l in &mut self.chain {
+            l.stage.set_sweep(sweep);
+        }
         let cur = self.current;
         let inject_at = self.slots[cur].inject_at;
         let staged = self.slots[cur].upload;
@@ -1611,6 +1751,8 @@ impl Pipeline {
         // command buffer binds them).
         self.plan.clear();
         self.routed.clear();
+        self.sweep.hold = false;
+        self.sweep.held_below = 0;
         let mut input = ImgRef::Native;
         if have_source {
             let first = match inject_at {
@@ -1687,6 +1829,17 @@ impl Pipeline {
                     *bound = views;
                 }
             }
+            // Motion clarity: from the second refresh of a sweep on, the stages before `scan` are held while the
+            // images they made are still the ones this routing reads.
+            self.sweep.hold = false;
+            self.sweep.held_below = 0;
+            if let (Some(s), None) = (sweep, inject_at) {
+                if let Some(scan) = self.chain.iter().position(|l| l.reg.name == "scan") {
+                    self.sweep.signature = self.upstream_signature(scan);
+                    self.sweep.hold = s.phase != 0 && self.sweep.latch == Some(self.sweep.signature);
+                    self.sweep.held_below = if self.sweep.hold { scan } else { 0 };
+                }
+            }
             let last = self.img(input).gpu.view;
             let s = &mut self.slots[cur];
             if s.encode_bound != last {
@@ -1711,6 +1864,74 @@ impl Pipeline {
             encode_pipeline,
             last: input,
         })
+    }
+
+    /// The motion clarity sweep of the frame about to be planned, from the parameters and the screen's refresh
+    /// rate (`None`: no scan, [`crt_model::scan::plan`]); keeps the sweep state in step (a new count of refreshes
+    /// starts a new sweep, no scan forgets it) and reports a refresh that does not suit the source rate. Idempotent
+    /// for a given frame: `prepare` and `record` both plan it.
+    fn plan_sweep(&mut self, params: &Params, settings: &Settings) -> Option<stages::Sweep> {
+        use crt_model::scan;
+        let mode = match params.scan_mode {
+            crate::params::SCAN_MODE_ROLLING => scan::Mode::Rolling,
+            crate::params::SCAN_MODE_STROBE => scan::Mode::Strobe,
+            _ => scan::Mode::Off,
+        };
+        let (refresh, rate) = (f64::from(settings.refresh_hz), f64::from(params.scan_source_rate_hz));
+        let manual = params.scan_refreshes_per_frame.max(0) as u32;
+        let plan = scan::plan(
+            mode,
+            refresh,
+            rate,
+            manual,
+            params.scan_lit_refreshes.max(1) as u32,
+            f64::from(params.scan_peak_boost),
+        );
+        let notice = match plan {
+            None if mode != scan::Mode::Off => Some(format!(
+                "motion clarity: the screen refreshes at {refresh:.0} Hz, fewer than twice per frame of a {rate:.0} Hz \
+                 source: there is no sweep to spread, the picture is drawn normally"
+            )),
+            Some(p) if manual == 0 && scan::ratio_error(refresh, rate, p.subframes) > scan::RATIO_TOLERANCE => {
+                Some(format!(
+                    "motion clarity: {refresh:.0} Hz is not a whole multiple of the {rate:.0} Hz source rate, the sweep \
+                     will beat against the source (flicker): set the source rate to {:.1} Hz or change the screen's refresh",
+                    refresh / f64::from(p.subframes)
+                ))
+            }
+            _ => None,
+        };
+        self.notices.set("limit: scan", notice);
+        let Some(plan) = plan else {
+            self.sweep.reset();
+            return None;
+        };
+        if self.sweep.n != plan.subframes {
+            self.sweep.reset();
+            self.sweep.n = plan.subframes;
+        }
+        let sweep = stages::Sweep {
+            plan,
+            phase: self.sweep.phase,
+        };
+        self.sweep.now = Some(sweep);
+        Some(sweep)
+    }
+
+    /// The signature of what the stages before the slot `scan` of the frame just routed read and wrote: for each,
+    /// its mode, its input image and the size of its output, and the size of the native raster. Held images are
+    /// reused only while it is unchanged (a resize or a change of routing makes them stale).
+    fn upstream_signature(&self, scan: usize) -> u64 {
+        let parts = self.plan.iter().filter(|p| p.0 < scan).flat_map(|&(i, mode, input)| {
+            let r = match input {
+                ImgRef::Native => 1,
+                ImgRef::Inject => 2,
+                ImgRef::Link(k) => 3 + k as u64,
+            };
+            let (w, h) = self.chain[i].out.size;
+            [i as u64, mode as u64, r, u64::from(w), u64::from(h)]
+        });
+        fnv(parts.chain([u64::from(self.native.size.0), u64::from(self.native.size.1)]))
     }
 
     /// Why a frame with a source cannot run the chain, `None` when it can: an image it needs (the native
@@ -1864,8 +2085,16 @@ impl Pipeline {
             self.timer.mark(d, cb, cur, timing::UPLOAD, false);
         }
 
+        // Motion clarity: a held frame (the stages before `scan` keep the last sweep's images) decodes only when a new
+        // source frame arrived, so that the next sweep draws the newest one; the sweep moves on when the frame is
+        // submitted.
+        let held_below = self.sweep.held_below;
+        let run_decode = !self.sweep.hold || staged || self.sweep.source_dirty;
+        self.sweep.advance = self.sweep.now.is_some();
+        self.heavy[cur] = !self.sweep.hold;
         if have_source {
-            if inject_at.is_none() {
+            if inject_at.is_none() && run_decode {
+                self.sweep.source_dirty = false;
                 // Zero-copy (A29): the imported image is acquired from the external owner for `decode` and released
                 // after it; otherwise `src` is read.
                 let ext = self.ext_current.and_then(|i| {
@@ -1897,7 +2126,7 @@ impl Pipeline {
             }
             for k in 0..self.plan.len() {
                 let (i, mode, inp) = self.plan[k];
-                if mode == Mode::Skip {
+                if mode == Mode::Skip || i < held_below {
                     continue;
                 }
                 self.img(inp).use_for_shader_read(d, cb);
@@ -1912,6 +2141,10 @@ impl Pipeline {
                 self.timer.mark(d, cb, cur, timing::chain(i), mode == Mode::Resample);
             }
             self.img(input).use_for_shader_read(d, cb);
+            // The images the stages before `scan` just made are the ones the next refreshes of the sweep hold.
+            if self.sweep.now.is_some() && !self.sweep.hold && inject_at.is_none() {
+                self.sweep.latch = Some(self.sweep.signature);
+            }
         }
 
         barrier(
@@ -2119,6 +2352,11 @@ impl Pipeline {
         self.timer.submitted(cur);
         self.current = (self.current + 1) % FRAMES_IN_FLIGHT;
         self.frame_index = self.frame_index.wrapping_add(1);
+        // Motion clarity: the next frame is the next refresh of the sweep.
+        self.sweep.before = None;
+        if std::mem::take(&mut self.sweep.advance) && self.sweep.n > 0 {
+            self.sweep.phase = (self.sweep.phase + 1) % self.sweep.n;
+        }
         Ok(fence)
     }
 
@@ -2133,6 +2371,14 @@ impl Pipeline {
         }
         self.uploads = false;
         self.ext_recorded = None;
+        // Motion clarity: the held images, the pending source and the time are as they were, and the phase stays.
+        self.sweep.advance = false;
+        if let Some((latch, dirty, pending, count)) = self.sweep.before.take() {
+            self.sweep.latch = latch;
+            self.sweep.source_dirty = dirty;
+            self.sweep.pending_ms = pending;
+            self.sweep.count = count;
+        }
         // Stage-owned state the frame consumed (pending history clears and layout transitions).
         for l in &mut self.chain {
             l.stage.abandon();
@@ -2316,6 +2562,10 @@ mod tests {
             (std::mem::offset_of!(FrameConstants, tube_size), "tube_size"),
             (std::mem::offset_of!(FrameConstants, amp_k), "amp_k"),
             (std::mem::offset_of!(FrameConstants, white_gain), "white_gain"),
+            (
+                std::mem::offset_of!(FrameConstants, upstream_time_ms),
+                "upstream_time_ms",
+            ),
             (std::mem::offset_of!(FrameConstants, raster_margin), "raster_margin"),
             (std::mem::offset_of!(FrameConstants, mask_box_px), "mask_box_px"),
         ];
@@ -2420,7 +2670,10 @@ mod tests {
         let names: Vec<&str> = stages::CHAIN.iter().map(|r| r.name).collect();
         assert_eq!(
             names,
-            ["target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "phosphor", "optics"]
+            [
+                "target", "signal", "amp", "impair", "tape", "tv", "gun", "abl", "screen", "wear", "scan", "phosphor",
+                "optics"
+            ]
         );
         check_chain(stages::CHAIN).expect("valid chain");
         let domains: Vec<(Domain, Domain)> = stages::CHAIN.iter().map(|r| (r.input, r.output)).collect();
@@ -2437,6 +2690,7 @@ mod tests {
                 (Amp, Amp),
                 (Amp, Amp),
                 (Amp, Tube),
+                (Tube, Tube),
                 (Tube, Tube),
                 (Tube, Tube),
                 (Tube, Tube)
