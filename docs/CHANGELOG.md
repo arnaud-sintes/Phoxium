@@ -7,6 +7,10 @@ Every change goes under `## [Unreleased]` as it is made. Publishing renames that
 
 ## [Unreleased]
 
+### Added
+
+- **A showcase web page** (`showcase/index.html`, exposed at https://silentbreed.com/phoxium/): one self-contained file with the purpose and the capabilities of Phoxium, the latest release read live from the GitHub API (version, date, size, direct download, SHA-256), real renders made by the `render` command, and an explorer of the real menu snapshots. Night theme by default (a visitor can switch to the light one, the choice is saved).
+
 ## [0.12.0] - 2026-11-27
 
 ### Added

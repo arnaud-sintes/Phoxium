@@ -8,6 +8,8 @@ The model is physical, not a filter: each source pixel drives the three electron
 
 Phoxium is a personal project, below 1.0.0 (a minor version may still change behaviour). Bug reports and feedback are welcome in the [GitHub issues](https://github.com/arnaud-sintes/Phoxium/issues).
 
+A showcase page (what it does, the latest download, real renders and snapshots of the menu) is at [https://silentbreed.com/phoxium/](https://silentbreed.com/phoxium/); its source is [`showcase/index.html`](../showcase/index.html).
+
 ## Requirements
 
 - Windows 11 x64 (the tested system). Windows 10 version 2004 or later is expected to work (the capture API needs it) but has not been tested.
