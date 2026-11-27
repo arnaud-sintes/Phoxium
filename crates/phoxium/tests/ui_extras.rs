@@ -668,9 +668,9 @@ fn saved_profiles_are_listed_and_managed() {
 fn interface_size_resets_and_about() {
     let _g = lock();
     let dir = temp_settings("about");
-    let mut config = files_config(&dir, 1400.0);
+    let mut config = files_config(&dir, 1500.0);
     config.vulkan_device = Some("NVIDIA RTX A2000 Laptop GPU".into());
-    let Some(mut rig) = Rig::new("interface_size_resets_and_about", 1280, 1400, config) else {
+    let Some(mut rig) = Rig::new("interface_size_resets_and_about", 1280, 1500, config) else {
         return;
     };
     rig.open_menu();
