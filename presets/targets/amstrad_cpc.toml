@@ -36,7 +36,7 @@ levels = [0, 96, 255]
 
 [[dac.inputs]]
 id = "network_6128_128"
-name = "Per-channel half levels from the 6128's output resistors (CTM644 100 ohm load, ideal drivers), emulator half level 128"
+name = "Per-channel half levels from the 6128 output resistors, emulator half level 128"
 levels = [0, 128, 255]
 output = [0, 96, 255]
 output_green = [0, 108, 255]

@@ -108,7 +108,7 @@ phase_row_deg = -25.7
 
 [[signal.revisions]]
 id = "ladder_2600a_14"
-name = "Hue delay 25.7 degrees, luma from the 2600A (revisions 14 and up) resistor network, chroma 0.343"
+name = "Hue delay 25.7 degrees, 2600A resistor-network luma, chroma 0.343"
 luma_mv = [0.0, 0.9601, 2.15558, 3.130242, 3.741566, 4.73121, 5.994922, 7.0]
 amplitude = 0.3432
 phase_row_deg = -25.7

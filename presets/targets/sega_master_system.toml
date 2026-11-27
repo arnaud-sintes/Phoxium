@@ -29,7 +29,7 @@ output_blue = [0, 110, 173, 255]
 
 [[dac.inputs]]
 id = "sms1_scope"
-name = "First VDP, capture card and scope: linear red and green, blue first step 22 to 23 percent high"
+name = "First VDP, capture card and scope: linear, blue first step raised"
 levels = [0, 85, 170, 255]
 output = [0, 85, 170, 255]
 output_blue = [0, 104, 170, 255]

@@ -581,13 +581,89 @@ pub fn rule(ui: &Frame) {
     ui.dummy([w.max(1.0), 1.0]);
 }
 
-/// A tooltip with wrapped body text.
+/// A tooltip with wrapped body text; a blank line in `text` starts a new paragraph ([`paragraphs`]).
 pub fn tooltip(ui: &Frame, text: &str) {
+    tooltip_parts(ui, &[(PALETTE.text, text)]);
+}
+
+/// A tooltip of several parts, each in its own colour and set apart from the one before by a gap (the description,
+/// then the figures, then the hint). Inside a part, the paragraphs of [`paragraphs`] are set apart by a smaller gap.
+pub fn tooltip_parts(ui: &Frame, parts: &[(Rgba, &str)]) {
     ui.tooltip(|| {
+        let s = scale_of(ui);
         let wrap = ui.push_text_wrap_pos(ui.calc_text_size("M")[0] * 32.0);
-        ui.text_colored(PALETTE.text, text);
+        for (i, (colour, text)) in parts.iter().enumerate() {
+            if i > 0 {
+                ui.dummy([0.0, 7.0 * s]);
+            }
+            for (j, paragraph) in paragraphs(text).iter().enumerate() {
+                if j > 0 {
+                    ui.dummy([0.0, 5.0 * s]);
+                }
+                ui.text_colored(*colour, paragraph);
+            }
+        }
         drop(wrap);
     });
+}
+
+/// The longest paragraph [`paragraphs`] leaves as one block, in characters (about five lines of a tooltip).
+const PARAGRAPH_CHARS: usize = 150;
+
+/// Words that end in a full stop without ending a sentence.
+const ABBREVIATIONS: [&str; 7] = ["e.g", "i.e", "vs", "etc", "approx", "cf", "no"];
+
+/// The sentences of `text`: cut after a full stop, question or exclamation mark followed by a space and a letter or
+/// digit, except after an abbreviation. Line breaks stay inside a sentence.
+fn sentences(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0;
+    for i in 0..bytes.len().saturating_sub(2) {
+        if !matches!(bytes[i], b'.' | b'?' | b'!') || bytes[i + 1] != b' ' || !bytes[i + 2].is_ascii_alphanumeric() {
+            continue;
+        }
+        let word = text[start..i]
+            .rsplit(|c: char| c.is_whitespace() || c == '(')
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        if bytes[i] == b'.' && ABBREVIATIONS.contains(&word.as_str()) {
+            continue;
+        }
+        out.push(text[start..=i].trim());
+        start = i + 2;
+    }
+    out.push(text[start..].trim());
+    out.retain(|s| !s.is_empty());
+    out
+}
+
+/// The paragraphs a tooltip text is laid out in: the blocks the text separates with a blank line, and a block longer
+/// than [`PARAGRAPH_CHARS`] cut between its sentences into paragraphs of about that length (a wall of text is hard to
+/// read; a short block is kept whole). Blank blocks go.
+pub fn paragraphs(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    for block in text.split("\n\n").map(str::trim).filter(|b| !b.is_empty()) {
+        if block.chars().count() <= PARAGRAPH_CHARS {
+            out.push(block.to_string());
+            continue;
+        }
+        let mut current = String::new();
+        for sentence in sentences(block) {
+            if !current.is_empty() && current.chars().count() + 1 + sentence.chars().count() > PARAGRAPH_CHARS {
+                out.push(std::mem::take(&mut current));
+            }
+            if !current.is_empty() {
+                current.push(' ');
+            }
+            current.push_str(sentence);
+        }
+        if !current.is_empty() {
+            out.push(current);
+        }
+    }
+    out
 }
 
 /// A row with a label, a thin bar showing `share` (0..1) and a value on the right (per-stage timings).
@@ -696,6 +772,27 @@ mod tests {
     use super::*;
 
     const P: Palette = PALETTE;
+
+    /// A short block stays whole, a blank line starts a paragraph, a long block is cut between sentences (never inside
+    /// a number or after an abbreviation), and no text is lost.
+    #[test]
+    fn tooltip_paragraphs() {
+        assert_eq!(paragraphs("One. Two."), ["One. Two."]);
+        assert_eq!(paragraphs("A.\n\n  \n\nB.\nC."), ["A.", "B.\nC."]);
+        let long = "First sentence of the description with some words in it, e.g. a unit and a value of 0.5 mm. \
+                    Second sentence that goes on for a while to make the block longer than the limit allows. \
+                    Third one is short. Fourth one closes the text, etc. and more.";
+        let parts = paragraphs(long);
+        assert!(parts.len() >= 2, "{parts:?}");
+        assert!(parts[0].ends_with("0.5 mm."), "{parts:?}");
+        assert!(parts.iter().all(|p| p.chars().count() <= PARAGRAPH_CHARS + 60), "{parts:?}");
+        let squeeze = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        assert_eq!(squeeze(&parts.join(" ")), squeeze(long));
+        // One sentence longer than the limit is kept whole.
+        let one = "word ".repeat(60);
+        assert_eq!(paragraphs(&one).len(), 1);
+        assert!(paragraphs("").is_empty());
+    }
 
     #[test]
     fn contrast_ratio_matches_known_values() {

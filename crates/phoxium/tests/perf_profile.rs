@@ -8,7 +8,7 @@
 //! scenarios alike. Printed, not asserted. Run with
 //! `cargo test --release -p phoxium --test perf_profile -- --ignored --nocapture`.
 //! Filters (comma lists of prefixes): `PHOXIUM_PROFILE_SIZES` (e.g. `1920`), `PHOXIUM_PROFILE_CONFIGS`,
-//! `PHOXIUM_PROFILE_CONTENT`; `PHOXIUM_PROFILE_SOURCES` (comma list of `WxH` among `320x240` (the default), `640x480`,
+//! `PHOXIUM_PROFILE_CONTENT`; `PHOXIUM_PROFILE_SOURCES` (comma list of `WxH` among `320x240` (the default), `640x480`, `1920x1080`, `2560x1440`, `3840x2160`,
 //! `1280x720`, e.g. `320x240,640x480`, or `all`); `PHOXIUM_PROFILE_ROUNDS` (default 9), `PHOXIUM_PROFILE_BURST` (frames per burst, default
 //! 6); `PHOXIUM_PROFILE_SET` (`id=value;id=value`, applied to every configuration).
 
@@ -19,8 +19,8 @@ use phoxium::render_cmd::{resolve_preset_in, set_param};
 use phoxium::scaling::View;
 
 /// The source sizes the profile can run: 320 x 240 (the default and the size of every measurement of the docs up
-/// to 2026-11-24), 640 x 480 and 1280 x 720.
-const SOURCES: [(u32, u32); 3] = [(320, 240), (640, 480), (1280, 720)];
+/// to 2026-11-24), 640 x 480, 1280 x 720 and the full-screen captures 1920 x 1080, 2560 x 1440 and 3840 x 2160.
+const SOURCES: [(u32, u32); 6] = [(320, 240), (640, 480), (1280, 720), (1920, 1080), (2560, 1440), (3840, 2160)];
 
 fn hash(a: u32, b: u32) -> u32 {
     let mut v = a.wrapping_mul(0x9E37_79B1) ^ b.wrapping_mul(0x85EB_CA77) ^ 0x1234_5678;

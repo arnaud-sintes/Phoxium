@@ -24,7 +24,7 @@ output_max = 255.0
 
 [[dac.inputs]]
 id = "linear_rounded"
-name = "Emulator with the plain 3-bit expansion, steps of 255/7 (MAME pal3bit, Grauw's FAQ)"
+name = "Emulator with the plain 3-bit expansion, steps of 255/7 (MAME pal3bit)"
 levels = [0, 36, 73, 109, 146, 182, 219, 255]
 
 [[dac.inputs]]

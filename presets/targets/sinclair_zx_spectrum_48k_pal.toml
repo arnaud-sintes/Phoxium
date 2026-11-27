@@ -218,7 +218,7 @@ level_mv = 1400.0
 
 [[signal.revisions]]
 id = "fixed_gain"
-name = "Fixed chroma gain (standard PAL weights over the normal white), the 5C102 levels (default)"
+name = "Fixed chroma gain (standard PAL weights), the 5C102 levels (default)"
 amplitudes = [0.0, 0.3397, 0.4837, 0.4483, 0.4483, 0.4837, 0.3397, 0.0, 0.3397, 0.4837, 0.4483, 0.4483, 0.4837, 0.3397, 0.0]
 
 [[signal.revisions]]

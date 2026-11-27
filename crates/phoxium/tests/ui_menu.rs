@@ -1009,13 +1009,13 @@ fn the_decay_scale_takes_a_typed_value() {
     rig.finish();
 }
 
-/// The colour target's details sit under its variant row: nothing for `none`, else the two collapsed headers (notes,
-/// provenance) that open on a click and push what follows them down, and a variant change keeps them drawn.
+/// The colour target's variant name sits under its variant row: nothing for `none`, nothing for a target without
+/// variants, else one line that follows the variant number. No notes or provenance in the menu.
 #[test]
-fn the_colour_target_details_show_collapsed_and_open_on_a_click() {
+fn the_colour_target_variant_name_shows_under_its_row() {
     let _g = lock();
     let Some(mut rig) = Rig::with_config(
-        "the_colour_target_details_show_collapsed_and_open_on_a_click",
+        "the_colour_target_variant_name_shows_under_its_row",
         1280,
         1080,
         tall_config(),
@@ -1028,37 +1028,30 @@ fn the_colour_target_details_show_collapsed_and_open_on_a_click() {
     rig.click_item(&format!("header:{}", phoxium::ui::panels::SOURCE));
     assert!(rig.ui.item_rect("widget:source_colour_variant").is_some());
     assert!(
-        rig.ui.item_rect("colour_target:notes").is_none(),
-        "details with no target"
+        rig.ui.item_rect("colour_target:variant").is_none(),
+        "no name with no target"
     );
-    // In the Source panel (below the visible part of the menu): drawn once a target is chosen.
     rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_NINTENDO_SUPER_GAME_BOY;
     rig.state.params.source_colour_variant = 9;
     rig.frame(&[]);
-    let (variant, notes) = (
+    let (row, name) = (
         rig.ui.item_rect("widget:source_colour_variant").unwrap(),
-        rig.ui.item_rect("colour_target:notes").expect("the notes header"),
+        rig.ui.item_rect("colour_target:variant").expect("the variant name"),
     );
-    assert!(notes[0][1] > variant[1][1], "the details sit under the variant row");
-    assert!(rig.ui.item_rect("colour_target:provenance").is_some());
-    // In the search results, at the top of the menu: collapsed by default, open on a click.
-    rig.click_item("search");
-    rig.type_text("colour variant");
-    let (notes, provenance) = (rig.item("colour_target:notes"), rig.item("colour_target:provenance"));
-    assert!(provenance[0][1] > notes[1][1], "the provenance follows the notes");
-    let gap = provenance[0][1] - notes[1][1];
-    assert!(gap < 24.0, "the notes are open by default: gap {gap}");
-    rig.click_item("colour_target:notes");
-    let opened = rig.item("colour_target:provenance");
-    assert!(opened[0][1] > provenance[0][1] + 40.0, "the notes did not open");
-    rig.click_item("colour_target:provenance");
-    let (open_notes, open_prov) = (rig.item("colour_target:notes"), rig.item("colour_target:provenance"));
-    assert_eq!(open_notes, notes, "opening a header moves the one above it");
-    assert!(open_prov[0][1] > provenance[0][1] + 40.0);
-    // Back to none: the details go.
+    assert!(name[0][1] > row[1][1], "the name sits under the variant row");
+    assert!(
+        rig.ui.item_rect("colour_target:notes").is_none() && rig.ui.item_rect("colour_target:provenance").is_none(),
+        "no notes or provenance in the menu"
+    );
+    // A target without variants: nothing to name.
+    rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_COMMODORE_64;
+    rig.frame(&[]);
+    let has_variants = phoxium::targets::for_value(rig.state.params.source_colour_target).is_some_and(|t| !t.variants.is_empty());
+    assert_eq!(rig.ui.item_rect("colour_target:variant").is_some(), has_variants);
+    // Back to none: the name goes.
     rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_NONE;
     rig.frame(&[]);
-    assert!(rig.ui.item_rect("colour_target:notes").is_none());
+    assert!(rig.ui.item_rect("colour_target:variant").is_none());
     rig.finish();
 }
 
@@ -1534,22 +1527,11 @@ fn panel_preview_images() {
         rig.click_item("search");
         rig.type_text("white");
     });
-    // The details of a colour target (Mega Drive, Regen), the notes and the provenance open, found by a search.
+    // A colour target with variants: the variant name under its row (Mega Drive, Regen), found by a search.
     panel_preview("menu-colour-target", menu_at(20.0), |rig| {
         rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE;
         rig.state.params.source_colour_variant = 3;
         rig.click_item("search");
         rig.type_text("colour variant");
-        // The lower header first: opening the notes would push it down under the footer.
-        rig.click_item("colour_target:provenance");
-        rig.click_item("colour_target:notes");
-    });
-    // The same with only the provenance open: the legend and the tag, key and source of every value.
-    panel_preview("menu-colour-target-provenance", menu_at(20.0), |rig| {
-        rig.state.params.source_colour_target = phoxium::params::SOURCE_COLOUR_TARGET_SEGA_MEGA_DRIVE;
-        rig.state.params.source_colour_variant = 3;
-        rig.click_item("search");
-        rig.type_text("colour variant");
-        rig.click_item("colour_target:provenance");
     });
 }

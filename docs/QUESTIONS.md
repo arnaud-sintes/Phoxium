@@ -2100,3 +2100,28 @@ Owner request: the colour targets (the "palette presets") are named with their p
 | `msx2_v9958` | `yamaha_v9958_msx2` (Yamaha makes the V9958, the VDP of the MSX2+) |
 
 The values of `source_colour_target` and the shipped files are now in the alphabetical order of the ids after `none` (a test checks it and that every id and every `name` starts with its provider). The combo shows the `name` of the data file, sorted by it. The GPU code compares the value with `none` (0) only, so the reorder moves no behaviour.
+
+## `screen` on big sources (2026-11-27): the full-screen capture costs 16 to 100 ms, expected with today's algorithm
+
+Owner report after 0.11.0: capturing a big source or a whole screen makes Phoxium very slow, the `screen` line of the performance section is over 200 ms. Question: expected?
+
+**Measured** (`tests/perf_profile.rs`, release, RTX A2000 Laptop GPU, headless, the whole chain into a BGRA8 target, a game-like frame, 4 rounds of 6-frame bursts; the profile test now accepts 1920x1080, 2560x1440 and 3840x2160 sources). GPU ms, `screen` stage (total in brackets):
+
+| Source -> output | defaults (standard) | preset 01 flat | preset 01 (cylindrical) | preset 05 (spherical) |
+|---|---|---|---|---|
+| 320x240 -> 1920x1080 (2026-11-20 table) | 0.75 to 1.09 | 1.22 to 2.29 | 1.2 to 3.6 | about 3.7 total |
+| 1920x1080 -> 1920x1080, standard | 7.0 (8.9) | 34.0 (47.9) | 35.2 (49.6) | 60.9 (77.5) |
+| 1920x1080 -> 1920x1080, fast | 7.0 (8.9) | 9.8 (14.4) | 10.8 (15.4) | 18.4 (23.8) |
+| 1920x1080 -> 1920x1080, low | 5.5 (7.4) | 8.0 (12.7) | 9.0 (13.8) | 14.9 (20.4) |
+| 3840x2160 -> 1920x1080, standard | 30.6 (37.7) | 37.9 (53.8) | 40.2 (56.4) | 66.0 (84.7) |
+| 2560x1440 -> 2560x1440, standard | 16.2 (19.4) | not run | not run | 81.8 (99.4) |
+| 2560x1440 -> 2560x1440, low | 13.0 (16.3) | not run | not run | 34.8 (44.3) |
+
+Reading:
+
+- **The cost follows the source resolution, not the output.** At the same output (1920x1080), `screen` on the default look goes from about 1 ms (320x240 source) to 7 ms (1080p) to 30.6 ms (4K, downscaled by the tube). On a tube preset at standard quality it is 34 to 61 ms at 1080p and 66 ms with a 4K source. At 2560x1440 the slot TV preset is 82 ms, and a 4K output with a 4K source was not run (extrapolating from 1080p to 1440p, about twice the 1440p figure or more): the 200 ms of the report is what this model gives, so **yes, it is expected, and it is a real limit of the design**: the beam integration sums the amplifier samples and the scanlines in reach of the spot, and a source that has as many lines as the output puts many more source lines under every spot than a 240p game does (the cause is the reading of the algorithm, not isolated by a test).
+- **The amplifier samples are capped too** (notice: "amplifier samples limited to 4 (asked 16): a 3840 px wide source would exceed this GPU's image limit", to 9 at 2560 px): the amp-domain image is native width x K, so a wide source already loses the bandwidth model's accuracy to fit memory (the limit is 256 MiB per image).
+- **The automatic quality drop cannot save it.** It goes down to `low`, which is still 13 to 35 ms in `screen` at 1440p and 8 to 15 at 1080p (total 12.7 to 20.4 ms on the presets, over a 16.7 ms refresh for the slot TV preset), and it never drops below `low`.
+- The tube presets are the expensive ones (probably because the spot is wide and the mask resolved, not isolated); the default look is 7 ms at 1080p, 16 ms at 1440p, still over the 4.2 ms goal.
+
+**What would fix it (not done, a design task):** the model is built for low-resolution sources. When the source has at least as many lines as the tube raster (the captured desktop, a 1080p game), the scanline structure cannot be seen and the beam does not need a per-line sum: a path that resamples the source to the tube raster first (the area average of the source under each tube pixel) and applies the spot as a separable blur, with the mask on the result, should cost about what the `fast` flat tube costs at the output size (a few ms) whatever the source size (to be measured). Open questions for it: where the switch sits (a tier `resample`, or automatic when source lines per tube line exceed about 1), whether the amplifier bandwidth model keeps its place (it needs the horizontal samples) or is replaced by a horizontal filter of the same cut-off on the resampled row, and how the result compares to the full sum on a resolved case (a test against the standard tier on a 540p source). Cheaper levers: let the quality drop go below `low` (a `minimal` tier: no halation ring, K = 2, a capped reach), tell the user in the menu when the source is large ("Phoxium models a CRT for low-resolution sources; use Source scaling to capture at the native size"), and an option to cap the source at a given height by area-averaging it at upload (the `source_divisor` machinery already exists for integer factors).

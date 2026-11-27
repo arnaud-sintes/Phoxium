@@ -168,13 +168,13 @@ amplitude = 0.1846
 
 [[signal.revisions]]
 id = "old_card_burst_gain"
-name = "Old card, chroma gain following the burst (television with automatic chroma control)"
+name = "Old card, chroma gain following the burst"
 luma_mv = [416, 788, 788, 788, 788, 788, 788, 1160, 709, 1084.5, 1084.5, 1084.5, 1084.5, 1084.5, 1084.5, 1460]
 amplitude = 0.2
 
 [[signal.revisions]]
 id = "new_card_burst_gain"
-name = "New card, chroma gain following the burst (television with automatic chroma control)"
+name = "New card, chroma gain following the burst"
 luma_mv = [0, 215, 365, 435, 245, 315, 465, 680, 320, 535, 685, 755, 565, 635, 785, 1000]
 amplitude = 0.2
 

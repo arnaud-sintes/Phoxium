@@ -586,7 +586,8 @@ pub(super) fn label_cell(ui: &Frame, text: &str, modified: bool) -> (f32, bool) 
 /// The tooltip of a parameter: its description, its range and unit, the reference and default values, and the
 /// reset hints.
 fn row_tooltip(ui: &Frame, m: &ParamMeta, reference: &Params) {
-    let mut text = m.description.to_string();
+    // Three parts, set apart: what the parameter does, its figures (range, default), how to use the row.
+    let mut figures = String::new();
     if let Some((lo, hi)) = m.soft_range {
         let unit = if m.unit == "1" {
             String::new()
@@ -594,29 +595,37 @@ fn row_tooltip(ui: &Frame, m: &ParamMeta, reference: &Params) {
             format!(" {}", m.unit)
         };
         let scale = if is_log(m) { ", logarithmic" } else { "" };
-        text.push_str(&format!("\n\nRange {lo} to {hi}{unit}{scale}."));
+        figures.push_str(&format!("Range {lo} to {hi}{unit}{scale}."));
         if let Some((hlo, hhi)) = m.hard_range.filter(|h| *h != (lo, hi)) {
-            text.push_str(&format!(" Files may go from {hlo} to {hhi}{unit}."));
+            figures.push_str(&format!(" Files may go from {hlo} to {hhi}{unit}."));
         }
+        figures.push('\n');
     } else if m.unit != "1" {
-        text.push_str(&format!("\n\nUnit: {}.", m.unit));
+        figures.push_str(&format!("Unit: {}.\n", m.unit));
     }
     let def = value_words(m, m.default);
     match reference.get(m.id) {
         Some(r) if r != m.default => {
-            text.push_str(&format!("\nPreset value {}, table default {def}.", value_words(m, r)));
+            figures.push_str(&format!("Preset value {}, table default {def}.", value_words(m, r)));
         }
-        _ => text.push_str(&format!("\nDefault {def}.")),
+        _ => figures.push_str(&format!("Default {def}.")),
     }
-    text.push_str("\nDouble-click the label to reset; right-click for more.");
+    let mut hint = String::from("Double-click the label to reset; right-click for more.");
     if matches!(
         m.ty,
         ParamType::F32 | ParamType::I32 | ParamType::Vec2 | ParamType::Vec3 | ParamType::Vec4
     ) && m.widget != ParamWidget::Color
     {
-        text.push_str(" Ctrl+click the slider to type a value.");
+        hint.push_str("\nCtrl+click the slider to type a value.");
     }
-    theme::tooltip(ui, &text);
+    theme::tooltip_parts(
+        ui,
+        &[
+            (PALETTE.text, m.description),
+            (PALETTE.text_muted, &figures),
+            (PALETTE.text_faint, &hint),
+        ],
+    );
 }
 
 /// One numeric slider in the value column with the value text on the right. Returns whether it changed, the
@@ -848,9 +857,8 @@ pub fn param_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &'static ParamMeta) -> boo
     }
 }
 
-/// What follows the row of `m`: under the colour target's variant row, the details of the chosen target (its label,
-/// notes and provenance, [`super::target_info`]), whose two collapsible headers are recorded as
-/// `colour_target:notes` and `colour_target:provenance`. Nothing for any other parameter.
+/// What follows the row of `m`: under the colour target's variant row, the name of the variant in force
+/// ([`super::target_info`]), recorded as `colour_target:variant`. Nothing for any other parameter.
 pub fn after_row(ui: &Frame, ctx: &mut RowCtx<'_>, m: &ParamMeta) {
     if m.id == "source_colour_variant" {
         for (key, rect) in super::target_info::draw(ui, ctx.params) {
